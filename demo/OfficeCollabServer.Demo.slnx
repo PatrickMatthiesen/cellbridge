@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="OfficeCollabServer.Demo/OfficeCollabServer.Demo.csproj" />
+  <Folder Name="/tests/">
+    <Project Path="OfficeCollabServer.Demo.Tests/OfficeCollabServer.Demo.Tests.csproj" />
+  </Folder>
+</Solution>

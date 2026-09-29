@@ -1,0 +1,2 @@
+# Transport engine. Update deliberately and rerun the process-level tests.
+mitmproxy==12.2.3

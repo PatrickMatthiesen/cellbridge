@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OfficeCollabServer.FssHttp/OfficeCollabServer.FssHttp.csproj" />
+    <Project Path="src/OfficeCollabServer.FssHttpB/OfficeCollabServer.FssHttpB.csproj" />
+    <Project Path="src/OfficeCollabServer.ServiceDefaults/OfficeCollabServer.ServiceDefaults.csproj" />
+    <Project Path="src/OfficeCollabServer.Storage/OfficeCollabServer.Storage.csproj" />
+    <Project Path="src/OfficeCollabServer.Web/OfficeCollabServer.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OfficeCollabServer.FssHttp.Tests/OfficeCollabServer.FssHttp.Tests.csproj" />
+    <Project Path="tests/OfficeCollabServer.FssHttpB.Tests/OfficeCollabServer.FssHttpB.Tests.csproj" />
+    <Project Path="tests/OfficeCollabServer.Interop.Tests/OfficeCollabServer.Interop.Tests.csproj" />
+    <Project Path="tests/OfficeInspectors.Adapter/OfficeInspectors.Adapter.csproj" />
+  </Folder>
+</Solution>
