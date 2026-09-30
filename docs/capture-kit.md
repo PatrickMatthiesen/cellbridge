@@ -6,13 +6,33 @@ The proxy preserves application body bytes while streaming them onward. It does 
 
 ## Setup
 
-Use Python 3.12 or newer on Windows. From the repository root:
+Use Python 3.12 or newer on Windows. Aspire's Python integration creates the
+capture virtual environment and installs `requirements.txt` during startup.
+There is no separate setup step for `aspire start`.
+
+For standalone capture, run from the repository root:
 
 ```powershell
 ./tools/capture/setup.ps1
 ```
 
 The setup creates a private virtual environment. It does not configure a Windows proxy, change certificate trust, or require a SharePoint farm. For standalone use on the work laptop, copy the `tools/capture` source directory and run its setup there. Do not copy `.venv`, `captures`, or a generated certificate authority between machines.
+
+The AppHost supplies values through the string overload of `AddParameter`.
+`capture-upstream-ca` defaults to the local preflight certificate when present,
+otherwise to an empty string, which leaves `CAPTURE_UPSTREAM_CA` unset.
+In the installed Aspire version, this overload supplies the value directly;
+`aspire secret set Parameters:<name> <value>` is read by the configuration-based
+`AddParameter("<name>")` overload instead.
+
+Validation on 2026-09-30 with Aspire 17.0.0-preview.1.26479.11: startup succeeds
+with no preflight certificate, and `aspire wait` reports web, demo and sharepoint
+healthy.
+
+The AppHost registers web and demo through `AddCSharpApp` with paths to their
+`.csproj` files. It has no `#:project` directives or generated `Projects.*`
+references. Paths resolve relative to the `aspire` directory. The Python capture
+resource uses `AddPythonApp(...).WithPip()`.
 
 ## Run standalone
 
@@ -52,7 +72,7 @@ aspire wait sharepoint --apphost aspire/apphost.cs --non-interactive
 
 The upstream default is a placeholder and will not reach a server. Configure your own test farm before capturing traffic. The addresses and portal names in the examples below are anonymized.
 
-Set values in the AppHost's `Parameters` configuration section, for example `Parameters:capture-upstream`. They appear as Aspire parameter resources and are passed to the executable. Restart the AppHost after changing configuration. The AppHost always creates the reverse HTTPS proxy; it has no separate enable flag or forward-mode switch.
+The current AppHost supplies literal parameter values, as described above. They appear as Aspire parameter resources and are passed to the Python application. The AppHost always creates the reverse HTTPS proxy; it has no separate enable flag or forward-mode switch.
 
 The default upstream certificate file is local to the reviewed laptop. On another machine, set `capture-upstream-ca` to the verified upstream certificate or CA PEM file. This configures trust inside the proxy process, not the Windows certificate store.
 

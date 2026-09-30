@@ -3,7 +3,7 @@
     "path": "apphost.cs"
   },
   "sdk": {
-    "version": "13.6.0-preview.1.26427.6"
+    "version": "17.0.0-preview.1.26479.11"
   },
   "channel": "daily"
 }
