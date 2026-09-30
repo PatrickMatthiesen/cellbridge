@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
+    <ProjectReference Include="..\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
+    <ProjectReference Include="..\CellBridge.Storage\CellBridge.Storage.csproj" />
+    <ProjectReference Include="..\CellBridge.ServiceDefaults\CellBridge.ServiceDefaults.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>

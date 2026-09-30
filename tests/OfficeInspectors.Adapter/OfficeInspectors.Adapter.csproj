@@ -16,7 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\OfficeCollabServer.FssHttpB\OfficeCollabServer.FssHttpB.csproj" />
+    <ProjectReference Include="..\..\src\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
   </ItemGroup>
 
   <ItemGroup>

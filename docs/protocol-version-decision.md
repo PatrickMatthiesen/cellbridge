@@ -5,7 +5,7 @@
 
 ## The Problem
 
-While implementing the `OfficeCollabServer.FssHttpB` binary serialization
+While implementing the `CellBridge.FssHttpB` binary serialization
 library, a subagent flagged that the 2024 MS-FSSHTTPB spec appeared to be a
 different protocol than expected. This was verified against the spec text and
 the Interop-TestSuites reference implementation.
@@ -65,9 +65,9 @@ found the SOAP structures:
 ## Decision
 
 **Build BOTH layers:**
-- `OfficeCollabServer.FssHttp` — the SOAP layer (CellStorageRequest SOAP
+- `CellBridge.FssHttp` — the SOAP layer (CellStorageRequest SOAP
   message, cellstorage.svc endpoint, OPTIONS capability discovery).
-- `OfficeCollabServer.FssHttpB` — the binary serialization library
+- `CellBridge.FssHttpB` — the binary serialization library
   (QueryAccess/QueryChanges/PutChanges with Stream Object Headers), used as
   the payload of the SOAP Cell subrequest.
 

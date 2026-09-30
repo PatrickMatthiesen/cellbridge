@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and inspect an OfficeCollabServer capture run (stdlib only)."""
+"""Validate and inspect an CellBridge capture run (stdlib only)."""
 from __future__ import annotations
 
 import argparse

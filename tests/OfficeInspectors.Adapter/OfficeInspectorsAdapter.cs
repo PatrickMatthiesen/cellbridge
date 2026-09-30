@@ -1,4 +1,4 @@
-using OfficeCollabServer.FssHttpB;
+using CellBridge.FssHttpB;
 
 namespace OfficeInspectors.Adapter;
 

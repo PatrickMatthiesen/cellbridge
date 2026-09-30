@@ -15,21 +15,21 @@ protocol stack so that Word desktop can open, edit, save, and coauthor a
 └──────────────┬─────────────────────────────────────────────┘
                │ HTTPS (SOAP + base64 binary payloads)
 ┌──────────────▼─────────────────────────────────────────────┐
-│ OfficeCollabServer.Web                                     │
+│ CellBridge.Web                                     │
 │  GET  /shared/test.docx        → file download             │
 │  OPTIONS /_vti_bin/cellstorage.svc → capability discovery   │
 │  POST  /_vti_bin/cellstorage.svc   → ExecuteCellStorage…   │
 └──────────────┬─────────────────────────────────────────────┘
                │
    ┌───────────▼────────────┐   ┌──────────────────────────┐
-   │ OfficeCollabServer.    │   │ OfficeCollabServer.      │
+   │ CellBridge.    │   │ CellBridge.      │
    │ FssHttp (SOAP layer)   │──▶│ FssHttpB (binary layer)  │
    │ CellStorageRequest/    │   │ QueryAccess/QueryChanges/│
    │ Response, SubRequests  │   │ PutChanges, Stream Object│
    └───────────┬────────────┘   │ Headers, DataElements    │
                │                └──────────────────────────┘
    ┌───────────▼────────────┐
-   │ OfficeCollabServer.    │
+   │ CellBridge.    │
    │ Storage                │
    │ DocumentStore, coauth  │
    │ sessions               │
@@ -53,12 +53,12 @@ analysis. In short:
 
 | Project | Purpose |
 |---|---|
-| `src/OfficeCollabServer.Web` | ASP.NET Core host: file download, OPTIONS, cellstorage.svc, request logging |
-| `src/OfficeCollabServer.FssHttp` | SOAP layer: request parser, response serializer, subrequest model |
-| `src/OfficeCollabServer.FssHttpB` | Binary layer: Stream Object Headers, Compact64bitInt, ExGuid, SerialNumber, DataElementPackage, request/response structures |
-| `src/OfficeCollabServer.Storage` | In-memory document store with content versioning and coauthoring sessions |
-| `tests/OfficeCollabServer.FssHttpB.Tests` | Tests for the binary library, editors partition, FSSHTTPD graph, and response inspector |
-| `tests/OfficeCollabServer.FssHttp.Tests` | Tests for SOAP/MTOM, editors state, and binary operation dispatch |
+| `src/CellBridge.Web` | ASP.NET Core host: file download, OPTIONS, cellstorage.svc, request logging |
+| `src/CellBridge.FssHttp` | SOAP layer: request parser, response serializer, subrequest model |
+| `src/CellBridge.FssHttpB` | Binary layer: Stream Object Headers, Compact64bitInt, ExGuid, SerialNumber, DataElementPackage, request/response structures |
+| `src/CellBridge.Storage` | In-memory document store with content versioning and coauthoring sessions |
+| `tests/CellBridge.FssHttpB.Tests` | Tests for the binary library, editors partition, FSSHTTPD graph, and response inspector |
+| `tests/CellBridge.FssHttp.Tests` | Tests for SOAP/MTOM, editors state, and binary operation dispatch |
 | `aspire/` | Aspire AppHost wiring the Web project |
 
 ## Key wire facts

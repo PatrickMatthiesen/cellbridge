@@ -5,7 +5,7 @@
 var builder = DistributedApplication.CreateBuilder(args);
 
 #pragma warning disable ASPIRECSHARPAPPS001
-var web = builder.AddCSharpApp("web", "../src/OfficeCollabServer.Web/OfficeCollabServer.Web.csproj")
+var web = builder.AddCSharpApp("web", "../src/CellBridge.Web/CellBridge.Web.csproj")
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
 
@@ -14,7 +14,7 @@ var web = builder.AddCSharpApp("web", "../src/OfficeCollabServer.Web/OfficeColla
 var collabPublicUrl = builder.AddParameter("collab-public-url", "https://localhost:7292")
     .WithDescription("Collaboration server HTTPS origin reachable by browsers and desktop Office.");
 
-builder.AddCSharpApp("demo", "../demo/OfficeCollabServer.Demo/OfficeCollabServer.Demo.csproj")
+builder.AddCSharpApp("demo", "../demo/CellBridge.Demo/CellBridge.Demo.csproj")
     .WithEnvironment("CollabServer__BaseUrl", web.GetEndpoint("https"))
     .WithEnvironment("CollabServer__PublicBaseUrl", collabPublicUrl)
     .WithHttpHealthCheck("/health")

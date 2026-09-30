@@ -23,7 +23,7 @@ Local smoke evidence is in the ignored directory `tools/capture/captures/2026092
 
 ## First desktop test
 
-1. Choose the machine and exact document URL. Use SharePoint for the known-good open/save reference, then repeat against OfficeCollabServer. The server currently rejects binary saves, so successful saving there is not a capture-kit acceptance requirement.
+1. Choose the machine and exact document URL. Use SharePoint for the known-good open/save reference, then repeat against CellBridge. The server currently rejects binary saves, so successful saving there is not a capture-kit acceptance requirement.
 2. Record Word build, server build, authentication scheme, original proxy settings, and direct-open behavior. Use a separate fresh synthetic document for the captured SharePoint run to avoid a warmed Office cache.
 3. Start the kit with the exact destination hosts. For HTTPS, arrange client trust of the capture CA and upstream trust of the farm CA separately, following the main guide.
 4. Route Word through `127.0.0.1:8877`. Verify that the document URL and discovery requests appear before editing. A curl smoke test alone does not establish Word routing.
@@ -123,7 +123,7 @@ The user subsequently confirmed that Word now works after correcting the AAM por
 
 ## Save and reopen confirmed
 
-The user then confirmed saving, closing, reopening and making further changes. In run `20260925T084814Z-session-f088f59e`, flows 46 and 59 carry `AutoSaveFile_Save` and receive HTTP 200 with SOAP `Success`; flow 71 carries `OpenFile_Open` and also receives SOAP `Success`. These request and response bodies individually pass completeness, byte-length and SHA-256 checks. Save responses occur at 09:07:51 and 09:09:34 UTC; reopen at 09:09:59 UTC. This establishes a user-confirmed single-user save/reopen baseline against the real SharePoint farm, not against OfficeCollabServer's implementation.
+The user then confirmed saving, closing, reopening and making further changes. In run `20260925T084814Z-session-f088f59e`, flows 46 and 59 carry `AutoSaveFile_Save` and receive HTTP 200 with SOAP `Success`; flow 71 carries `OpenFile_Open` and also receives SOAP `Success`. These request and response bodies individually pass completeness, byte-length and SHA-256 checks. Save responses occur at 09:07:51 and 09:09:34 UTC; reopen at 09:09:59 UTC. This establishes a user-confirmed single-user save/reopen baseline against the real SharePoint farm, not against CellBridge's implementation.
 
 The run remains active and marked unhealthy with `PermissionError`. Flow 37 fails the individual body-integrity check, so the entire run must not be promoted to a validated fixture. Coauthoring and a clean completed capture remain outstanding.
 

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="DocumentFormat.OpenXml" Version="3.1.1" />
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <None Include="../../testdata/api/excel-save-20260928.bin" Link="Fixtures/excel-save-20260928.bin" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../testdata/api/word-save-current.bin" Link="Fixtures/word-save-current.bin" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../testdata/api/word-save-fresh*.bin" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../testdata/sharepoint/fixtures/save_reopen/*.json" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
+    <ProjectReference Include="..\..\src\CellBridge.Storage\CellBridge.Storage.csproj" />
+    <ProjectReference Include="..\..\src\CellBridge.Web\CellBridge.Web.csproj" />
+  </ItemGroup>
+
+</Project>

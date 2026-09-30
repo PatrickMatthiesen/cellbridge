@@ -26,38 +26,23 @@ Partial and unsupported uploads return protocol errors.
 - Python 3.12 or newer for the bundled SharePoint capture proxy.
 - Desktop Office on Windows for manual interoperability testing.
 
-C# projects and namespaces retain the `OfficeCollabServer` prefix. The
-repository and application name is CellBridge.
-
 ## Build and test
 
 ```sh
-dotnet build OfficeCollabServer.slnx
-dotnet test OfficeCollabServer.slnx
-dotnet test demo/OfficeCollabServer.Demo.slnx
+dotnet build CellBridge.slnx
+dotnet test CellBridge.slnx
+dotnet test demo/CellBridge.Demo.slnx
 ```
 
 The Office Inspectors adapter requires Windows. Three existing URL/path tests
 also fail on Linux; see the [validation notes](docs/publication-audit.md).
 Live interoperability tests are opt-in. See the
-[interop test instructions](tests/OfficeCollabServer.Interop.Tests/README.md).
+[interop test instructions](tests/CellBridge.Interop.Tests/README.md).
 
 ## Run locally
 
-Prepare the capture proxy environment first. On Windows:
-
-```powershell
-./tools/capture/setup.ps1
-```
-
-On Linux or macOS:
-
-```sh
-python3 -m venv tools/capture/.venv
-tools/capture/.venv/bin/python -m pip install -r tools/capture/requirements.txt
-```
-
-Start the app from the repository root:
+Start the app from the repository root. Aspire's Python integration prepares
+the capture proxy environment and installs its dependencies:
 
 ```sh
 aspire start --apphost aspire/apphost.cs
@@ -76,10 +61,10 @@ See the [capture guide](docs/capture-kit.md) for configuration and certificates.
 
 ## Protocol and implementation
 
-- `OfficeCollabServer.FssHttp` parses SOAP and MTOM requests and serializes responses.
-- `OfficeCollabServer.FssHttpB` contains binary framing, object graphs, and synchronization messages.
-- `OfficeCollabServer.Web` serves documents, capability discovery, and `/_vti_bin/cellstorage.svc`.
-- `OfficeCollabServer.Storage` tracks documents, versions, locks, and sessions in memory.
+- `CellBridge.FssHttp` parses SOAP and MTOM requests and serializes responses.
+- `CellBridge.FssHttpB` contains binary framing, object graphs, and synchronization messages.
+- `CellBridge.Web` serves documents, capability discovery, and `/_vti_bin/cellstorage.svc`.
+- `CellBridge.Storage` tracks documents, versions, locks, and sessions in memory.
 
 The protocol references are MS-OCPROTO, MS-FSSHTTP, and MS-FSSHTTPB. SOAP and
 binary structures work together; see the [protocol notes](docs/protocol-version-decision.md).
@@ -100,5 +85,5 @@ Keep raw traffic, private keys, and local configuration outside Git.
 ## License
 
 [MIT](LICENSE). Vendored Microsoft protocol test code retains its
-[notice](tests/OfficeCollabServer.Interop.Tests/MicrosoftProtocol/FssHttpB/NOTICE.md)
-and [license](tests/OfficeCollabServer.Interop.Tests/MicrosoftProtocol/FssHttpB/LICENSE-MIT.txt).
+[notice](tests/CellBridge.Interop.Tests/MicrosoftProtocol/FssHttpB/NOTICE.md)
+and [license](tests/CellBridge.Interop.Tests/MicrosoftProtocol/FssHttpB/LICENSE-MIT.txt).

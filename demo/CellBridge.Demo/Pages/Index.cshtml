@@ -1,0 +1,134 @@
+@page
+@model CellBridge.Demo.Pages.IndexModel
+@{
+    ViewData["Title"] = "Document library";
+}
+
+<main class="shell">
+    <header class="masthead">
+        <div class="eyebrow"><span class="pulse"></span> CellBridge</div>
+        <div class="masthead-row">
+            <div>
+                <h1>One place for<br /><em>shared files.</em></h1>
+                <p class="lede">Browse files on the collaboration server and open them in your desktop Office app.</p>
+            </div>
+            <div class="catalog-mark" aria-hidden="true"><span>CB</span><small>LIBRARY<br />/ 01</small></div>
+        </div>
+    </header>
+
+    <section class="create-toolbar" aria-label="Create a document">
+        <details class="create-document" open="@(Model.CreateError is not null)">
+            <summary class="button button-primary">New document <span aria-hidden="true">+</span></summary>
+            <form method="post" asp-page-handler="Create" class="create-form">
+                <h2>Create a test file</h2>
+                <label asp-for="NewType">File type</label>
+                <select asp-for="NewType">
+                    <option value="docx">Word document (.docx)</option>
+                    <option value="xlsx">Excel workbook (.xlsx)</option>
+                    <option value="pptx">PowerPoint presentation (.pptx)</option>
+                </select>
+                <label asp-for="NewName">Name</label>
+                <input asp-for="NewName" placeholder="My test document" maxlength="120" required aria-describedby="name-help" />
+                <p id="name-help">The file extension is added automatically. Files stay in memory until the server restarts.</p>
+                @if (Model.CreateError is not null)
+                {
+                    <p class="create-error" role="alert">@Model.CreateError</p>
+                }
+                <button class="button button-primary" type="submit">Create document</button>
+            </form>
+        </details>
+        @if (Model.CreatedMessage is not null)
+        {
+            <p class="create-success" role="status">@Model.CreatedMessage</p>
+        }
+    </section>
+
+    @if (Model.IsUnavailable)
+    {
+        <section class="state-card state-error" aria-live="polite">
+            <div class="state-symbol">!</div>
+            <div><h2>Server unavailable.</h2><p>@Model.ErrorMessage</p><a class="text-link" href=".">Try again <span>↗</span></a></div>
+        </section>
+    }
+    else if (Model.Documents.Count == 0)
+    {
+        <section class="state-card" aria-live="polite">
+            <div class="state-symbol">∅</div>
+            <div><h2>No files on the shelf yet.</h2><p>Use New document to create your first test file.</p></div>
+        </section>
+    }
+    else
+    {
+        <section class="toolbar" aria-label="Library controls">
+            <div><span class="count">@Model.Documents.Count.ToString("00")</span><span class="count-label">available files</span></div>
+            <label class="search"><span aria-hidden="true">⌕</span><input id="file-search" type="search" aria-label="Search files" placeholder="Search files" autocomplete="off" /><kbd aria-hidden="true">/</kbd></label>
+        </section>
+
+        <section class="file-grid" id="file-grid" aria-label="Available files">
+            @foreach (var document in Model.Documents)
+            {
+                var extension = System.IO.Path.GetExtension(document.Name).TrimStart('.').ToUpperInvariant();
+                <article class="file-card" data-file-name="@document.Name.ToLowerInvariant()">
+                    <div class="file-card-top"><span class="file-type type-@extension.ToLowerInvariant()">@(string.IsNullOrEmpty(extension) ? "FILE" : extension)</span><span class="version">v@(document.Version)</span></div>
+                    <div class="file-card-body">
+                        <h2 title="@document.Name">@document.Name</h2>
+                        <p class="file-path">@document.Path</p>
+                        <div class="file-meta"><span>@document.SizeLabel</span><span>@document.ModifiedLabel</span></div>
+                        @if (document.ActiveEditors > 0)
+                        {
+                            <div class="presence"><span class="presence-dot"></span>@document.ActiveEditors active session@(document.ActiveEditors == 1 ? "" : "s")</div>
+                        }
+                        else
+                        {
+                            <div class="presence quiet"><span class="presence-dot"></span>Ready to open</div>
+                        }
+                    </div>
+                    <div class="file-actions">
+                        @if (document.OfficeLaunchUrl is not null)
+                        {
+                            <a class="button button-primary" href="@document.OfficeLaunchUrl" title="Open @document.Name in @document.ApplicationLabel">Open in @document.ApplicationLabel <span>↗</span></a>
+                        }
+                        else
+                        {
+                            <span class="unsupported">Office launch unavailable</span>
+                        }
+                        @if (document.DownloadUri is not null)
+                        {
+                            <a class="button button-quiet" href="@document.DownloadUri" download="@document.Name">Download</a>
+                        }
+                    </div>
+                </article>
+            }
+        </section>
+        <p class="no-results" id="no-results" hidden>No files match that search.</p>
+        <footer class="page-note">Word open and save have been tested. Excel and PowerPoint editing and live coauthoring are not yet verified.</footer>
+    }
+</main>
+
+@section Scripts {
+<script>
+(() => {
+    document.querySelector('.create-form')?.addEventListener('submit', event => {
+        const button = event.currentTarget.querySelector('button[type="submit"]');
+        button.disabled = true;
+        button.textContent = 'Creating…';
+    });
+    const search = document.querySelector('#file-search');
+    const cards = [...document.querySelectorAll('.file-card')];
+    const empty = document.querySelector('#no-results');
+    document.addEventListener('keydown', event => {
+        if (event.key === '/' && search && !event.target.closest('input, select, textarea, [contenteditable]')) { event.preventDefault(); search.focus(); }
+    });
+    search?.addEventListener('input', () => {
+        const query = search.value.trim().toLowerCase();
+        let visible = 0;
+        cards.forEach(card => {
+            const show = card.dataset.fileName.includes(query);
+            card.hidden = !show;
+            if (show) visible++;
+        });
+        if (empty) empty.hidden = visible !== 0;
+    });
+})();
+</script>
+}

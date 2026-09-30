@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="CellBridge.Demo/CellBridge.Demo.csproj" />
+  <Folder Name="/tests/">
+    <Project Path="CellBridge.Demo.Tests/CellBridge.Demo.Tests.csproj" />
+  </Folder>
+</Solution>

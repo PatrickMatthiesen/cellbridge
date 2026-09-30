@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CellBridge.FssHttp/CellBridge.FssHttp.csproj" />
+    <Project Path="src/CellBridge.FssHttpB/CellBridge.FssHttpB.csproj" />
+    <Project Path="src/CellBridge.ServiceDefaults/CellBridge.ServiceDefaults.csproj" />
+    <Project Path="src/CellBridge.Storage/CellBridge.Storage.csproj" />
+    <Project Path="src/CellBridge.Web/CellBridge.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CellBridge.FssHttp.Tests/CellBridge.FssHttp.Tests.csproj" />
+    <Project Path="tests/CellBridge.FssHttpB.Tests/CellBridge.FssHttpB.Tests.csproj" />
+    <Project Path="tests/CellBridge.Interop.Tests/CellBridge.Interop.Tests.csproj" />
+    <Project Path="tests/OfficeInspectors.Adapter/OfficeInspectors.Adapter.csproj" />
+  </Folder>
+</Solution>

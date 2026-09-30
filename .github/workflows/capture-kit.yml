@@ -6,7 +6,7 @@ on:
       - 'aspire/apphost.cs'
       - 'src/**'
       - 'tests/**'
-      - 'OfficeCollabServer.slnx'
+      - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
   push:
     branches: [main]
@@ -15,7 +15,7 @@ on:
       - 'aspire/apphost.cs'
       - 'src/**'
       - 'tests/**'
-      - 'OfficeCollabServer.slnx'
+      - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
 permissions:
   contents: read
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet test OfficeCollabServer.slnx --nologo --verbosity minimal
+      - run: dotnet test CellBridge.slnx --nologo --verbosity minimal
   capture:
     runs-on: windows-latest
     steps:

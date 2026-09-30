@@ -1,7 +1,7 @@
 #if OFFICE_INSPECTORS
 using FSSHTTPandWOPIInspector;
 using FSSHTTPandWOPIInspector.Parsers;
-using ServerFss = OfficeCollabServer.FssHttpB;
+using ServerFss = CellBridge.FssHttpB;
 using Xunit.Abstractions;
 
 namespace OfficeInspectors.Adapter;

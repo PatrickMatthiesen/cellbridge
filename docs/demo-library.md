@@ -1,6 +1,6 @@
 # Demo document library
 
-The standalone solution is `demo/OfficeCollabServer.Demo.slnx`. It contains an
+The standalone solution is `demo/CellBridge.Demo.slnx`. It contains an
 ASP.NET Core Razor Pages site and its tests. It reads the collaboration server's
 `GET /api/documents` endpoint over HTTP and has no reference to the protocol or
 storage projects. The catalog is a demo API, not an implementation of a SharePoint
@@ -103,9 +103,9 @@ Stop Aspire before building the main solution. Stop and validate any active
 capture first, following `capture-kit.md`.
 
 ```powershell
-dotnet test tests/OfficeCollabServer.FssHttp.Tests/OfficeCollabServer.FssHttp.Tests.csproj
-dotnet test tests/OfficeCollabServer.FssHttpB.Tests/OfficeCollabServer.FssHttpB.Tests.csproj
-dotnet test demo/OfficeCollabServer.Demo.slnx
+dotnet test tests/CellBridge.FssHttp.Tests/CellBridge.FssHttp.Tests.csproj
+dotnet test tests/CellBridge.FssHttpB.Tests/CellBridge.FssHttpB.Tests.csproj
+dotnet test demo/CellBridge.Demo.slnx
 ```
 
 The live catalog test downloads all listed files, checks GET/HEAD headers and
@@ -115,7 +115,7 @@ Run against a fresh server with the examples enabled:
 
 ```powershell
 $env:OFFICECOLLABSERVER_INTEROP_ENDPOINT = 'https://localhost:7292/_vti_bin/cellstorage.svc'
-dotnet test tests/OfficeCollabServer.Interop.Tests/OfficeCollabServer.Interop.Tests.csproj --no-build --filter FullyQualifiedName~DocumentLibraryTests
+dotnet test tests/CellBridge.Interop.Tests/CellBridge.Interop.Tests.csproj --no-build --filter FullyQualifiedName~DocumentLibraryTests
 ```
 
 This is a server protocol test, not a substitute for a two-desktop Word test.

@@ -1,6 +1,6 @@
 # API comparison with captured Word requests
 
-Replayed the four `save_reopen` fixtures against the running OfficeCollabServer
+Replayed the four `save_reopen` fixtures against the running CellBridge
 HTTP endpoint on localhost:5181. Only the SOAP document URL was retargeted to
 `/shared/test.docx`; the captured binary requests were preserved. This is an API
 probe using reference traffic, not a fresh desktop Word acceptance test or a
@@ -8,7 +8,7 @@ stateful replay of the SharePoint document graph.
 
 ## Observed results before the partition fix
 
-| Request | SharePoint | OfficeCollabServer |
+| Request | SharePoint | CellBridge |
 | --- | --- | --- |
 | Open/reopen Cell tokens 1, 2, 3 | SOAP Success | SOAP Success |
 | Open/reopen Cell token 6, inline QueryAccess without PartitionID | Success | InvalidArgument |
@@ -316,7 +316,7 @@ Desktop confirmation of the successful response remains pending.
 The user confirmed that Word saved `save-check.docx` after `f08a0bc`. API logs
 show `Cell save completed: version=2 bytes=12214 errors=0`. A separate HTTP GET
 downloaded the DOCX and its `word/document.xml` contained both the seed text
-`Save check for OfficeCollabServer` and the added text `asd`. This confirms
+`Save check for CellBridge` and the added text `asd`. This confirms
 desktop save acceptance and server-side content update. Word close/reopen has
 not yet been independently confirmed; neither has two-client coauthoring.
 The server remains running because its document store is still in-memory.

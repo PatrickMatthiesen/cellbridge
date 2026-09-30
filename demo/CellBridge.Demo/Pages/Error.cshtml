@@ -1,0 +1,11 @@
+@page
+@model CellBridge.Demo.Pages.ErrorModel
+@{
+    ViewData["Title"] = "Error";
+}
+<main class="shell">
+    <section class="state-card state-error" aria-live="polite">
+        <div class="state-symbol">!</div>
+        <div><h1>Something went wrong.</h1><p>The demo could not render this page. Return to the document library and try again.</p><a class="text-link" asp-page="/Index">Back to the library <span>↗</span></a></div>
+    </section>
+</main>
