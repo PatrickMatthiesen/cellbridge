@@ -8,30 +8,61 @@ namespace CellBridge.FssHttpB;
 public sealed class PartitionGraphSnapshot
 {
     private readonly Dictionary<ExGuid, DataElement> _elements;
+    private readonly ExGuid _storageIndex;
+    private readonly ExGuid? _rootObject;
+    private readonly ExGuid? _revision;
+    private readonly ExGuid[] _objectGroups;
 
     private PartitionGraphSnapshot(
         Dictionary<ExGuid, DataElement> elements,
         ExGuid storageIndex,
         ExGuid? rootObject,
-        ExGuid? revision)
+        ExGuid? revision, IEnumerable<ExGuid> objectGroups)
     {
         _elements = elements;
-        StorageIndex = Clone(storageIndex);
-        RootObject = rootObject is null ? null : Clone(rootObject);
-        Revision = revision is null ? null : Clone(revision);
+        _storageIndex = Clone(storageIndex);
+        _rootObject = rootObject is null ? null : Clone(rootObject);
+        _revision = revision is null ? null : Clone(revision);
+        _objectGroups = objectGroups.Select(Clone).ToArray();
     }
 
     /// <summary>The storage-index data-element identifier selected by this snapshot.</summary>
-    public ExGuid StorageIndex { get; }
+    public ExGuid StorageIndex => Clone(_storageIndex);
 
     /// <summary>The retained data elements, keyed by extended GUID.</summary>
-    public IReadOnlyCollection<DataElement> Elements => _elements.Values.ToArray();
+    public IReadOnlyCollection<DataElement> Elements => _elements.Values.Select(Clone).ToArray();
+
+    /// <summary>Detached identifiers and serials, without copying retained payload bytes.</summary>
+    public IReadOnlyCollection<DataElement> ElementMetadata => _elements.Values.Select(e =>
+        new DataElement(e.DataElementType, Clone(e.DataElementExtendedGuid),
+            new SerialNumber(e.SerialNumber.Guid, e.SerialNumber.Value))).ToArray();
+
+    /// <summary>Detached storage indexes used for coherency checks.</summary>
+    public IReadOnlyCollection<DataElement> StorageIndexes => _elements.Values
+        .Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData).Select(Clone).ToArray();
+
+    /// <summary>Compares an existing immutable payload without exposing or copying it.</summary>
+    public bool ConflictsWith(DataElement element) => _elements.TryGetValue(element.DataElementExtendedGuid, out var prior) &&
+        (prior.DataElementType != element.DataElementType || !(prior.Data ?? []).SequenceEqual(element.Data ?? []));
+
+    /// <summary>Stages retained immutable payloads directly, with detached identifiers.</summary>
+    public async ValueTask VisitElementsAsync(Func<DataElement, Stream, ValueTask> visit)
+    {
+        foreach (var element in _elements.Values)
+        {
+            var metadata = new DataElement(element.DataElementType, Clone(element.DataElementExtendedGuid),
+                new SerialNumber(element.SerialNumber.Guid, element.SerialNumber.Value));
+            // MemoryStream does not expose this private buffer, and is read-only.
+            using var payload = new MemoryStream(element.Data ?? [], writable: false);
+            await visit(metadata, payload);
+        }
+    }
 
     /// <summary>The object selected by the revision manifest root declare.</summary>
-    public ExGuid? RootObject { get; }
+    public ExGuid? RootObject => _rootObject is null ? null : Clone(_rootObject);
 
     /// <summary>The revision selected by the cell manifest.</summary>
-    public ExGuid? Revision { get; }
+    public ExGuid? Revision => _revision is null ? null : Clone(_revision);
 
     /// <summary>
     /// Creates and validates a snapshot from a complete data-element graph.
@@ -56,11 +87,13 @@ public sealed class PartitionGraphSnapshot
     {
         ArgumentNullException.ThrowIfNull(delta);
         ArgumentNullException.ThrowIfNull(storageIndex);
-        var merged = CloneElements(_elements.Values);
-        foreach (var element in delta)
+        // These elements belong to immutable snapshots; share their private
+        // buffers between revisions and clone only incoming mutable elements.
+        var merged = new Dictionary<ExGuid, DataElement>(_elements);
+        foreach (var element in CloneElements(delta).Values)
         {
             ArgumentNullException.ThrowIfNull(element);
-            merged[element.DataElementExtendedGuid] = Clone(element);
+            AddElement(merged, element, copyPayload: false);
         }
 
         return Build(merged, storageIndex);
@@ -72,7 +105,10 @@ public sealed class PartitionGraphSnapshot
         if (RootObject is null)
             throw new InvalidDataException("The partition has no revision-manifest root object.");
 
-        var objectGraph = ObjectGroupGraph.FromDataElements(_elements.Values);
+        // Historical groups remain available for delta saves, but only the
+        // selected revision's groups define the objects of this revision.
+        var objectGraph = ObjectGroupGraph.FromDataElements(
+            _objectGroups.Select(id => _elements[id]));
         return objectGraph.Materialize(RootObject);
     }
 
@@ -80,7 +116,7 @@ public sealed class PartitionGraphSnapshot
     public bool MatchesPutChanges(IEnumerable<DataElement> elements, ExGuid proposedIndex,
         ExGuid expectedIndex, bool implyNullExpected)
     {
-        var candidates = CloneElements(elements);
+        var candidates = CloneElements(elements.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData));
         var proposed = ParseStorageIndex(RequireElement(candidates, proposedIndex,
             DataElementType.StorageIndexDataElementData, "proposed storage index"));
         var expected = expectedIndex.IsNull ? new StorageIndexInfo(null, [], []) :
@@ -158,7 +194,7 @@ public sealed class PartitionGraphSnapshot
         }
 
         return new PartitionGraphSnapshot(elements, storageIndex,
-            revision.ObjectGuid, currentRevision);
+            revision.ObjectGuid, currentRevision, revision.ObjectGroups);
     }
 
     private static DataElement RequireElement(
@@ -331,9 +367,24 @@ public sealed class PartitionGraphSnapshot
         foreach (var element in elements)
         {
             ArgumentNullException.ThrowIfNull(element);
-            result[element.DataElementExtendedGuid] = Clone(element);
+            AddElement(result, element);
         }
         return result;
+    }
+
+    private static void AddElement(Dictionary<ExGuid, DataElement> elements, DataElement element, bool copyPayload = true)
+    {
+        if (elements.TryGetValue(element.DataElementExtendedGuid, out var previous))
+        {
+            if (previous.DataElementType != element.DataElementType ||
+                !(previous.Data ?? []).SequenceEqual(element.Data ?? []) ||
+                (!previous.SerialNumber.IsNull && !element.SerialNumber.IsNull &&
+                 !previous.SerialNumber.Equals(element.SerialNumber)))
+                throw new InvalidDataException("A data element identifier was reused for different content or serial numbers.");
+            if (!previous.SerialNumber.IsNull || element.SerialNumber.IsNull) return;
+        }
+        var copy = copyPayload ? Clone(element) : element;
+        elements[copy.DataElementExtendedGuid] = copy;
     }
 
     private static DataElement Clone(DataElement element) =>

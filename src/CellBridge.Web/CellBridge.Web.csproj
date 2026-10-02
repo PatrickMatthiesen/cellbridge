@@ -1,6 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
+    <ProjectReference Include="../CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
+    <ProjectReference Include="../CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
+    <ProjectReference Include="../CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
+    <ProjectReference Include="../CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
     <ProjectReference Include="..\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
     <ProjectReference Include="..\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
     <ProjectReference Include="..\CellBridge.Storage\CellBridge.Storage.csproj" />
@@ -9,6 +13,7 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>

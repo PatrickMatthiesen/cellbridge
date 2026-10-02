@@ -17,10 +17,12 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 
 ## Repository map
 
-- `src/CellBridge.Web`: HTTP host, discovery and cellstorage endpoint.
+- `src/CellBridge.Web`: sample HTTP host, imports and document catalog.
+- `src/CellBridge.AspNetCore`: reusable discovery, download and cellstorage endpoints.
 - `src/CellBridge.FssHttp`: SOAP and MTOM handling.
 - `src/CellBridge.FssHttpB`: binary serialization and object graphs.
-- `src/CellBridge.Storage`: documents, versions, locks and sessions.
+- `src/CellBridge.Storage`: protocol document state and persistence codecs.
+- `src/CellBridge.Storage.*`: provider contracts, backends and conformance checks.
 - `demo/`: separate Razor Pages solution, Aspire resource `demo`.
 - `aspire/apphost.cs`: file-based AppHost for `web`, `demo` and `sharepoint`.
 - `tests/`: protocol, storage and interoperability tests.
@@ -50,9 +52,10 @@ aspire stop --non-interactive
 
 ## Implementation constraints
 
-- Storage is in memory. Restarting loses content, resource IDs, versions and
-  sessions. Saves do not write back to the import directory. Use fresh demo
-  documents after restarting for desktop retries.
+- Aspire uses PostgreSQL storage. Explicit in-memory storage loses content,
+  identities, versions and sessions on restart. Imports create only missing
+  documents; saves do not write back to the import directory. See
+  [storage setup and provider contracts](docs/storage-providers.md).
 - Resolve supplied resource IDs correctly. Do not create documents on SOAP lookup
   misses or hide unknown IDs with a URL fallback. See
   [document identity and save evidence](docs/demo-library.md).
@@ -66,11 +69,14 @@ aspire stop --non-interactive
 
 ## Documentation
 
-Keep task findings and dated validation in `docs/`, not in this file. Keep
-AGENTS.md limited to current instructions and links.
+Keep maintained user and contributor guides in `docs/`. Keep raw captures,
+benchmark JSON, run reports and task journals in ignored `artifacts/` or local
+capture output. Keep AGENTS.md limited to current instructions and links. Retain
+only reviewed fixtures required by automated tests under `testdata/`.
 
 - [Architecture](docs/architecture.md)
 - [Demo library and desktop validation](docs/demo-library.md)
 - [Capture setup and SharePoint mapping](docs/capture-kit.md)
-- [Protocol replay comparison](docs/api-comparison-2026-09-25.md)
-- [Historical development evidence](docs/development-history.md)
+- [Storage and reusable hosting](docs/storage-providers.md)
+- [Automated testing](docs/automated-testing.md)
+- [Interoperability coverage](docs/interoperability.md)

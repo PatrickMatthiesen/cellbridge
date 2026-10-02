@@ -316,7 +316,7 @@ public sealed class ObjectGroupGraph
         foreach (var element in elements.Where(x => x.DataElementType == DataElementType.ObjectGroupDataElementData))
         {
             foreach (var obj in ObjectGroupDataElement.Parse(element).Objects)
-                graph._objects[obj.ObjectGuid] = obj;
+                graph.AddObject(obj);
         }
         return graph;
     }
@@ -325,7 +325,18 @@ public sealed class ObjectGroupGraph
     {
         ArgumentNullException.ThrowIfNull(element);
         foreach (var obj in element.Objects)
-            _objects[obj.ObjectGuid] = obj;
+            AddObject(obj);
+    }
+
+    private void AddObject(ObjectGroupObject obj)
+    {
+        if (_objects.TryGetValue(obj.ObjectGuid, out var previous) &&
+            (previous.Declaration != obj.Declaration ||
+             !previous.ObjectReferences.SequenceEqual(obj.ObjectReferences) ||
+             !previous.CellReferences.SequenceEqual(obj.CellReferences) ||
+             !previous.Content.SequenceEqual(obj.Content)))
+            throw new InvalidDataException("The selected revision declares an object identifier with conflicting contents.");
+        _objects[obj.ObjectGuid] = obj;
     }
 
     public byte[] Materialize(ExGuid rootObjectGuid)

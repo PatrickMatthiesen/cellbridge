@@ -25,10 +25,6 @@ In the installed Aspire version, this overload supplies the value directly;
 `aspire secret set Parameters:<name> <value>` is read by the configuration-based
 `AddParameter("<name>")` overload instead.
 
-Validation on 2026-09-30 with Aspire 17.0.0-preview.1.26479.11: startup succeeds
-with no preflight certificate, and `aspire wait` reports web, demo and sharepoint
-healthy.
-
 The AppHost registers web and demo through `AddCSharpApp` with paths to their
 `.csproj` files. It has no `#:project` directives or generated `Projects.*`
 references. Paths resolve relative to the `aspire` directory. The Python capture
@@ -54,9 +50,9 @@ Windows authentication, TLS channel binding, and enterprise proxy policy can pre
 
 ## Reverse capture with the existing Aspire certificate
 
-Use this mode to open a local document URL without changing Windows proxy settings or installing a capture CA. Aspire supplies its existing development certificate and key to mitmproxy. The certificate must already be trusted and cover the local hostname. The current laptop's certificate covers `localhost` and `*.dev.localhost`.
+Use this mode to open a local document URL without changing Windows proxy settings or installing a capture CA. Aspire supplies its existing development certificate and key to mitmproxy. The certificate must already be trusted and cover the local hostname. Check that the certificate covers the hostname used by the client.
 
-Normal startup from the repository root creates `web`, `sharepoint`, and four capture parameter resources:
+Normal startup includes the reverse capture proxy and four capture parameters:
 
 ```powershell
 aspire start --apphost aspire/apphost.cs --non-interactive
@@ -72,30 +68,35 @@ aspire wait sharepoint --apphost aspire/apphost.cs --non-interactive
 
 The upstream default is a placeholder and will not reach a server. Configure your own test farm before capturing traffic. The addresses and portal names in the examples below are anonymized.
 
-The current AppHost supplies literal parameter values, as described above. They appear as Aspire parameter resources and are passed to the Python application. The AppHost always creates the reverse HTTPS proxy; it has no separate enable flag or forward-mode switch.
+The current AppHost supplies literal parameter values, as described above. They appear as Aspire parameter resources and are passed to the Python application. Set `CELLBRIDGE_SKIP_SHAREPOINT_CAPTURE=1` to omit the reverse proxy. Isolated
+test runs also omit it. Forward-mode capture uses the standalone launcher.
 
-The default upstream certificate file is local to the reviewed laptop. On another machine, set `capture-upstream-ca` to the verified upstream certificate or CA PEM file. This configures trust inside the proxy process, not the Windows certificate store.
+The optional preflight certificate file is local to the machine running Aspire. On another machine, set `capture-upstream-ca` to the verified upstream certificate or CA PEM file. This configures trust inside the proxy process, not the Windows certificate store.
 
 Open `https://sharepoint.dev.localhost:8443/Shared%20Documents/Document.docx` in Word. The listener binds IPv4 loopback. The AppHost explicitly sets this endpoint hostname, so Aspire does not append its dashboard name. Some desktop clients do not resolve `*.dev.localhost` automatically. If Word cannot resolve it, diagnose name resolution before testing; substituting `localhost` also changes the Host header and will not match the working SharePoint mappings below.
 
-The current connection is Word → mitmproxy HTTPS listener → SharePoint HTTP on port 42292. HTTPS upstreams remain supported. `capture-upstream-ca` is ignored for HTTP upstreams. The Aspire endpoint is unproxied; there is no additional Aspire HTTP proxy hop. No Windows proxy or certificate installation commands are run by the kit. Mitmproxy uses the supplied server certificate rather than its generated interception CA for this listener. Its combined server PEM is temporary and removed on normal shutdown; a forced process termination may leave a private-key file in the user's temporary directory. Do not share certificate keys or capture directories.
+With the example HTTP upstream, the connection is Word → mitmproxy HTTPS
+listener → SharePoint HTTP on port 42292. HTTPS upstreams remain supported. `capture-upstream-ca` is ignored for HTTP upstreams. The Aspire endpoint is unproxied; there is no additional Aspire HTTP proxy hop. No Windows proxy or certificate installation commands are run by the kit. Mitmproxy uses the supplied server certificate rather than its generated interception CA for this listener. Its combined server PEM is temporary and removed on normal shutdown; a forced process termination may leave a private-key file in the user's temporary directory. Do not share certificate keys or capture directories.
 
 Reverse mode fixes the upstream connection and, for HTTPS, the TLS server name, but preserves the incoming hostname and replaces the Host header port with the upstream port for SharePoint alternate access mappings. The current forwarded header is `Host: sharepoint.dev.localhost:42292`; `original_host_header` in each flow records the client value on port 8443. SOAP bodies and binary payloads are unchanged. Absolute document URLs in SOAP, cookies, and redirects are not rewritten. Word may follow an upstream URL directly and bypass capture, or SharePoint may reject the local document URL. Therefore a valid reverse capture proves recorded-file integrity, not complete observation of a Word session. Check discovery, Cell requests, authentication and save behavior before treating it as a protocol baseline. Authentication protections remain enabled.
 
-### Working SharePoint mapping, confirmed by the user on 2026-09-25
+### Configure SharePoint alternate access mappings
 
-The `Example portal` web application is extended into the **Extranet** zone with an HTTP IIS listener on port **42292**. The proxy connects to `http://192.0.2.24:42292`, while the client opens `https://sharepoint.dev.localhost:8443`. The ports do not need to match.
-
-The working Alternate Access Mappings include both rows:
+Reverse mode preserves the client hostname and changes its Host header port to
+the upstream port. SharePoint must recognize both the public proxy origin and
+that internal upstream origin in the same zone. For a web application extended
+into an HTTP zone on port 42292, a configuration can look like this:
 
 | Internal URL | Zone | Public URL for zone |
 | --- | --- | --- |
 | `https://sharepoint.dev.localhost:8443` | Extranet | `https://sharepoint.dev.localhost:8443` |
 | `http://sharepoint.dev.localhost:42292` | Extranet | `https://sharepoint.dev.localhost:8443` |
 
-Initially only the HTTPS row existed. After authentication, SharePoint redirected GET `/` to `http://sharepoint.dev.localhost:42292/SitePages/Home.aspx`, taking the browser away from the local HTTPS endpoint. Adding the HTTP internal URL to **Example portal → Extranet** through **Add Internal URLs** resolved the reported redirect problem. The user confirmed that it worked. No matching-port change or IIS Host Header change was needed for this fix; the existing Default zone URL was retained.
-
-This confirms the reported browser routing fix, not Word desktop open/save or coauthoring. Those still need acceptance testing. No farm settings were changed by the agent. Host-named site collections require their own site URL configuration instead of this web-application AAM setup.
+If the upstream internal URL is absent or in the wrong zone, redirects can send
+the client directly to the HTTP upstream and bypass capture. Diagnose the actual
+redirect and incoming port before changing farm settings. Matching client and
+upstream ports is not required. Host-named site collections require their own
+site URL configuration instead of web-application alternate access mappings.
 
 References: [SharePoint alternate access mappings](https://learn.microsoft.com/en-us/sharepoint/administration/plan-alternate-access-mappings), [IIS bindings and web application URLs](https://learn.microsoft.com/en-us/sharepoint/administration/update-a-web-application-url-and-iis-bindings).
 
@@ -136,7 +137,7 @@ Authentication and cookie header values are redacted from metadata without modif
 
 The default capture directory and virtual environment are ignored by Git. If selecting another directory, keep it outside version control. Deleting old runs is manual; the recorder does not silently discard evidence. Do not upload captures as CI artifacts.
 
-## First work-laptop experiment
+## Capture a desktop scenario
 
 1. Record SharePoint build, Word build, authentication scheme, document URL, and whether the document was previously opened by this Windows user.
 2. Create a new synthetic document in a test library and retain the original file.
@@ -145,11 +146,12 @@ The default capture directory and virtual environment are ignored by Git. If sel
 5. Insert a distinctive test sentence, save, close, and reopen. Retain the resulting file and note whether Word was editable and whether the sentence persisted.
 6. Stop and validate the capture. Extract locally, review authentication and document content, then prepare sanitized fixtures separately.
 
-Only after that succeeds should a second user be introduced. Use separate Windows sessions or machines with independent Office caches, and verify both users appear separately upstream. On 2026-09-25 the user confirmed Word could open through the reverse proxy after correcting the Extranet HTTP incoming AAM port from `4229` to `42292`. The public URL remains `https://sharepoint.dev.localhost:8443`. The user subsequently confirmed saving, closing, reopening and further editing; captured save and reopen SOAP responses report success. Coauthoring and clean whole-run capture validation remain outstanding. See the readiness review for the recorder error affecting this run.
+Before adding a second user, establish a complete single-client capture. Use
+separate Windows sessions or machines with independent Office caches, and verify
+both identities appear separately upstream. A valid capture confirms the recorded
+exchange integrity; the observed desktop outcome qualifies client behavior.
 
 ## Tests
-
-See [the 2026-09-25 readiness review](capture-kit-review-2026-09-25.md) for verified local behavior and the remaining desktop acceptance steps.
 
 ```powershell
 ./tools/capture/.venv/Scripts/python.exe -m pip install -r tools/capture/requirements-dev.txt

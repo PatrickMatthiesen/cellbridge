@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>CellBridge contributors</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/PatrickMatthiesen/cellbridge</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <Description>Experimental Office document synchronization through MS-FSSHTTP and MS-FSSHTTPB.</Description>
+  </PropertyGroup>
+</Project>

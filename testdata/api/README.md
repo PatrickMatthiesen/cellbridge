@@ -18,12 +18,10 @@ replays this request against the API and checks the join response and binary
 file graph using the independent Microsoft parser. A passing replay does not
 prove that desktop Word accepts the document application data or can save.
 
-`word-save-rejected.soap.xml` and `word-save-rejected.response.base64` preserve
-the SOAP request and binary response from the first editable API session's save.
-Correlation ID: `4891CEFC-8180-4181-BD9F-BDB913210696`, 2026-09-25.
-The request's 16,960-byte binary attachment was not retained by API logging;
-the SOAP file alone is not a replayable save fixture. The exact response covers
-the inspector's error path and confirms Protocol RequestNotSupported, code 4.
+`word-save-rejected.response.base64` preserves the binary rejection response
+from an early editable API session. `ResponseInspectorTests` uses it to check
+the inspector's error path and Protocol RequestNotSupported, code 4. The missing
+request attachment prevents this response from serving as a save replay.
 
 `word-save-current.bin` is the complete 16,898-byte binary attachment from the
 desktop retry after the save implementation, correlation

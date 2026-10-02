@@ -16,6 +16,12 @@ public sealed class DocumentStore
     private readonly Dictionary<string, StoredDocument> _documents =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Attaches a detached document to a compatibility request context without changing it.</summary>
+    public void Attach(StoredDocument document)
+    {
+        lock (_documents) _documents[document.Url] = document;
+    }
+
     /// <summary>Adds or replaces a document.</summary>
     public StoredDocument Put(string url, byte[] content)
     {
@@ -119,7 +125,8 @@ public sealed class DocumentStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(url);
 
-        string path = Uri.TryCreate(url, UriKind.Absolute, out var absolute)
+        string path = Uri.TryCreate(url, UriKind.Absolute, out var absolute) &&
+            (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps)
             ? absolute.AbsolutePath
             : url.Split('?', 2)[0];
 
@@ -131,7 +138,7 @@ public sealed class DocumentStore
 /// <summary>
 /// A stored document with versioned content and coauthoring state.
 /// </summary>
-public sealed class StoredDocument
+public sealed partial class StoredDocument
 {
     private byte[] _content = Array.Empty<byte>();
     private readonly List<CoauthSession> _sessions = new();
@@ -151,7 +158,7 @@ public sealed class StoredDocument
         MetadataPartition = new DocumentPartition(DocumentPartitionKind.Metadata);
         EditorsTablePartition = new DocumentPartition(DocumentPartitionKind.EditorsTable);
         TransitionId = Guid.NewGuid();
-        CreatedUtc = DateTime.UtcNow;
+        CreatedUtc = UtcNow;
         _lastModifiedUtc = CreatedUtc;
         UpdateMetadataPartition();
         UpdateEditorsTablePartition();
@@ -184,7 +191,7 @@ public sealed class StoredDocument
     public DocumentPartition EditorsTablePartition { get; }
 
     /// <summary>Stable JoinCoauthoring transition identifier.</summary>
-    public Guid TransitionId { get; }
+    public Guid TransitionId { get; private set; }
 
     /// <summary>
     /// Stable HTTP/FSSHTTP entity tag. SharePoint uses the document resource
@@ -202,7 +209,7 @@ public sealed class StoredDocument
     }
 
     /// <summary>The document creation time used by FSSHTTP file properties.</summary>
-    public DateTime CreatedUtc { get; }
+    public DateTime CreatedUtc { get; private set; }
 
     /// <summary>The last content update time used by FSSHTTP file properties.</summary>
     public DateTime LastModifiedUtc
@@ -237,7 +244,7 @@ public sealed class StoredDocument
         {
             lock (this)
             {
-                return _content.LongLength;
+                return _metadataContentLength ?? _content.LongLength;
             }
         }
     }
@@ -271,8 +278,8 @@ public sealed class StoredDocument
         lock (this)
         {
             _content = content.ToArray();
-            _contentVersion++;
-            _lastModifiedUtc = DateTime.UtcNow;
+            _contentVersion = checked(_contentVersion + 1);
+            _lastModifiedUtc = UtcNow;
             FilePartition.SetContent(_content);
             UpdateMetadataPartition();
         }
@@ -301,13 +308,13 @@ public sealed class StoredDocument
             {
                 existing.AsEditor = asEditor;
                 existing.TimeoutSeconds = timeoutSeconds;
-                existing.Refresh(timeoutSeconds);
+                existing.Refresh(timeoutSeconds, UtcNow);
                 if (!string.IsNullOrWhiteSpace(userName))
                 {
                     existing.UserName = userName;
                 }
                 UpdateEditorsTablePartition();
-                existing.LastSeenUtc = DateTime.UtcNow;
+                existing.LastSeenUtc = UtcNow;
                 return existing.Snapshot();
             }
 
@@ -315,9 +322,9 @@ public sealed class StoredDocument
             {
                 AsEditor = asEditor,
                 TimeoutSeconds = timeoutSeconds,
-                LastSeenUtc = DateTime.UtcNow,
+                LastSeenUtc = UtcNow,
             };
-            session.Refresh(timeoutSeconds);
+            session.Refresh(timeoutSeconds, UtcNow);
             _sessions.Add(session);
             UpdateEditorsTablePartition();
             return session.Snapshot();
@@ -360,8 +367,8 @@ public sealed class StoredDocument
         lock (this)
         {
             _content = content.ToArray();
-            _contentVersion++;
-            _lastModifiedUtc = DateTime.UtcNow;
+            _contentVersion = checked(_contentVersion + 1);
+            _lastModifiedUtc = UtcNow;
             FilePartition.CommitGraph(graph, _content, knowledgeSequence);
             UpdateMetadataPartition();
         }
@@ -381,7 +388,7 @@ public sealed class StoredDocument
 
             session.AsEditor = asEditor;
             session.TimeoutSeconds = timeoutSeconds;
-            session.Refresh(timeoutSeconds);
+            session.Refresh(timeoutSeconds, UtcNow);
             UpdateEditorsTablePartition();
             return true;
         }
@@ -429,7 +436,7 @@ public sealed class StoredDocument
 
     private bool RemoveExpiredSessionsLocked()
     {
-        var now = DateTime.UtcNow;
+        var now = UtcNow;
         int removed = _sessions.RemoveAll(s => s.ExpiresUtc <= now);
         if (removed > 0)
         {
@@ -535,7 +542,7 @@ public enum DocumentPartitionKind
 }
 
 /// <summary>Independent FSSHTTPB state for one document partition.</summary>
-public sealed class DocumentPartition
+public sealed partial class DocumentPartition
 {
     private readonly object _gate = new();
     private PartitionGraphSnapshot? _graph;
@@ -546,7 +553,7 @@ public sealed class DocumentPartition
     }
 
     public DocumentPartitionKind Kind { get; }
-    public DocumentStorageIdentity ProtocolIdentity { get; }
+    public DocumentStorageIdentity ProtocolIdentity { get; private set; }
     public ulong KnowledgeSequence
     {
         get
@@ -633,7 +640,7 @@ public sealed class DocumentPartition
 /// <summary>
 /// A coauthoring session: one Word instance editing the document.
 /// </summary>
-public sealed class CoauthSession
+public sealed partial class CoauthSession
 {
     public const int DefaultTimeoutSeconds = 3600;
 
@@ -689,10 +696,10 @@ public sealed class CoauthSession
     /// <summary>The editor table entry number (1-based) for this session.</summary>
     public int EditorNumber { get; set; }
 
-    internal void Refresh(int timeoutSeconds)
+    internal void Refresh(int timeoutSeconds, DateTime? now = null)
     {
         TimeoutSeconds = timeoutSeconds;
-        LastSeenUtc = DateTime.UtcNow;
+        LastSeenUtc = now ?? DateTime.UtcNow;
         ExpiresUtc = LastSeenUtc.AddSeconds(timeoutSeconds);
     }
 
@@ -701,7 +708,7 @@ public sealed class CoauthSession
 }
 
 /// <summary>Stable protocol identifiers for one stored document.</summary>
-public sealed class DocumentStorageIdentity
+public sealed partial class DocumentStorageIdentity
 {
     private DocumentStorageIdentity(
         ExGuid storageManifestGuid,
