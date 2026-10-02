@@ -37,7 +37,7 @@ public static class MetadataVersioningResponseBuilder
 
         string user = string.IsNullOrWhiteSpace(userName) ? DefaultUser : userName;
         var properties = new XElement("DocProps",
-            Property("vti_filesize", document.Content.Length.ToString(CultureInfo.InvariantCulture)),
+            Property("vti_filesize", document.ContentLength.ToString(CultureInfo.InvariantCulture)),
             Property("vti_contentversion", document.ContentVersion.ToString(CultureInfo.InvariantCulture)),
             Property("vti_docstoreversion", document.ContentVersion.ToString(CultureInfo.InvariantCulture)),
             Property("vti_modifiedby", user),
@@ -89,7 +89,7 @@ public static class MetadataVersioningResponseBuilder
                         new XAttribute("createdRaw", createdRaw),
                         new XAttribute("createdBy", user),
                         new XAttribute("createdByName", user),
-                        new XAttribute("size", document.Content.Length.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("size", document.ContentLength.ToString(CultureInfo.InvariantCulture)),
                         new XAttribute("comments", string.Empty)))));
 
         return new FssHttpSubResponse

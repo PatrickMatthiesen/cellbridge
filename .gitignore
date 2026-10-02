@@ -425,3 +425,6 @@ FodyWeavers.xsd
 *.mitm
 appsettings.Local.json
 apphost.settings.json
+
+# Local durable content.
+.cellbridge/

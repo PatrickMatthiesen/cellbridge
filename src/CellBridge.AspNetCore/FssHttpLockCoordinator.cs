@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Collections.Immutable;
+using CellBridge.Storage.Abstractions;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
 
@@ -13,6 +15,31 @@ public sealed class FssHttpLockCoordinator
     private string? _schemaLockId;
     private readonly Dictionary<string, Lease> _schemaOwners = new(StringComparer.OrdinalIgnoreCase);
     private Lease? _exclusive;
+    private long _generation;
+    private DateTime? _authoritativeNow;
+
+    public static FssHttpLockCoordinator Restore(StoredDocument document, CoordinationState state, DateTime? now = null)
+    {
+        var coordinator = For(document);
+        coordinator._schemaLockId = state.SchemaId;
+        coordinator._generation = state.Generation;
+        coordinator._authoritativeNow = now;
+        coordinator._schemaOwners.Clear();
+        foreach (var owner in state.SchemaOwners)
+        {
+            var lease = RestoreLease(owner);
+            coordinator._schemaOwners.Add(lease.Client!, lease);
+        }
+        coordinator._exclusive = state.Exclusive is null ? null : RestoreLease(state.Exclusive);
+        return coordinator;
+    }
+
+    public CoordinationState Capture() => new(_schemaLockId,
+        _schemaOwners.Values.Select(CaptureLease).ToImmutableArray(),
+        _exclusive is null ? null : CaptureLease(_exclusive), _generation);
+
+    private static Lease RestoreLease(LeaseState state) => new(state.Id, state.Client, state.ExpiresUtc, (LockKind)state.Kind, state.SchemaId);
+    private static LeaseState CaptureLease(Lease state) => new(state.Id, state.Client, state.ExpiresUtc, (int)state.Kind, state.SchemaId);
 
     public static FssHttpLockCoordinator For(StoredDocument document) =>
         States.GetValue(document, static _ => new FssHttpLockCoordinator());
@@ -26,7 +53,7 @@ public sealed class FssHttpLockCoordinator
         if (!TryRead(attrs, "SchemaLockID", out var schemaId))
             return Fail(response, LockOperationResult.InvalidArgument, "SchemaLockID is required");
 
-        var instant = now ?? DateTime.UtcNow;
+        var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
             ExpireLocked(instant);
@@ -88,7 +115,7 @@ public sealed class FssHttpLockCoordinator
         if (!TryRead(attrs, "ExclusiveLockID", out var lockId))
             return Fail(response, LockOperationResult.InvalidArgument, "ExclusiveLockID is required");
 
-        var instant = now ?? DateTime.UtcNow;
+        var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
             ExpireLocked(instant);
@@ -143,7 +170,7 @@ public sealed class FssHttpLockCoordinator
     {
         lock (_gate)
         {
-            ExpireLocked(now ?? DateTime.UtcNow);
+            ExpireLocked(now ?? _authoritativeNow ?? DateTime.UtcNow);
             if (_exclusive is not null)
             {
                 response.SubResponseDataAttributes["LockType"] = "2";
@@ -201,7 +228,7 @@ public sealed class FssHttpLockCoordinator
             return Fail(response, LockOperationResult.InvalidArgument,
                 "CoauthRequestType, ClientID, and SchemaLockID are required");
 
-        var instant = now ?? DateTime.UtcNow;
+        var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
         switch (operation)
@@ -274,7 +301,7 @@ public sealed class FssHttpLockCoordinator
 
         lock (_gate)
         {
-            ExpireLocked(now ?? DateTime.UtcNow);
+            ExpireLocked(now ?? _authoritativeNow ?? DateTime.UtcNow);
             if (_exclusive is not null)
             {
                 if (!HasMatchingLockId(attrs, _exclusive.Id, "ExclusiveLockID"))

@@ -28,15 +28,13 @@ public static class FilePartitionSaveHandler
                 var current = partition.FileGraph;
                 bool repeat = put.StorageIndex.Equals(current.StorageIndex);
                 if (!repeat && !current.MatchesPutChanges(
-                    current.Elements.Concat(package.DataElements), put.StorageIndex, put.ExpectedStorageIndex,
+                    current.StorageIndexes.Concat(package.DataElements), put.StorageIndex, put.ExpectedStorageIndex,
                     (put.Flags & 1) != 0))
                     return Failure(subRequest.RequestId, CellErrorCode.CoherencyFailure,
                         "The expected storage index is no longer current.");
-                var existing = current.Elements.ToDictionary(x => x.DataElementExtendedGuid);
+                var existing = current.ElementMetadata.ToDictionary(x => x.DataElementExtendedGuid);
                 foreach (var element in package.DataElements)
-                    if (existing.TryGetValue(element.DataElementExtendedGuid, out var prior) &&
-                        (prior.DataElementType != element.DataElementType ||
-                         !(prior.Data ?? []).SequenceEqual(element.Data ?? [])))
+                    if (current.ConflictsWith(element))
                         return Failure(subRequest.RequestId, CellErrorCode.InvalidObject,
                             "A data element identifier was reused for different content.");
                 ulong sequence = partition.KnowledgeSequence;
@@ -47,11 +45,11 @@ public static class FilePartitionSaveHandler
                         ? stored.SerialNumber
                         : element.SerialNumber.IsNull
                             ? serialHints.GetValueOrDefault(element.DataElementExtendedGuid)
-                              ?? new SerialNumber(partition.ProtocolIdentity.SerialGuid, ++sequence)
+                              ?? new SerialNumber(partition.ProtocolIdentity.SerialGuid, checked(++sequence))
                             : element.SerialNumber;
                     return new DataElement(element.DataElementType, element.DataElementExtendedGuid, serial) { Data = element.Data };
                 }).ToArray();
-                if (!repeat && sequence == partition.KnowledgeSequence) sequence++;
+                if (!repeat && sequence == partition.KnowledgeSequence) sequence = checked(sequence + 1);
                 var next = current.Merge(accepted, put.StorageIndex);
                 var bytes = next.Materialize();
                 ValidateDocument(bytes, document.Url);
@@ -93,7 +91,7 @@ public static class FilePartitionSaveHandler
         CellKnowledgeTo = sequence,
         WaterlineCellStorageExtendedGuid = partition.ProtocolIdentity.CellId.ShortId,
         Waterline = sequence,
-        KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(graph.Elements,
+        KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(graph.ElementMetadata,
             partition.ProtocolIdentity.CellId.ShortId, sequence),
     };
 

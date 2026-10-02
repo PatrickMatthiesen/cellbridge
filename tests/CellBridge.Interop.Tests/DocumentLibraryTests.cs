@@ -32,6 +32,13 @@ public sealed class DocumentLibraryTests
             Assert.Equal("attachment", download.Content.Headers.ContentDisposition?.DispositionType);
         }));
 
+        // Give this test its own document. Captured-open checks may join the
+        // seeded document concurrently, and durable sessions survive restarts.
+        var sessionName = "Session test " + Guid.NewGuid().ToString("N");
+        using var created = await http.PostAsJsonAsync("/api/documents", new { name = sessionName, type = "docx" });
+        created.EnsureSuccessStatusCode();
+        first = (await http.GetFromJsonAsync<List<Listing>>("/api/documents"))!
+            .Single(item => item.Path == "/shared/" + sessionName + ".docx");
         var clients = new[] { Guid.NewGuid(), Guid.NewGuid() };
         // The schema identifier used by the captured Word request.
         const string schema = "29358EC1-E813-4793-8E70-ED0344E7B73C";

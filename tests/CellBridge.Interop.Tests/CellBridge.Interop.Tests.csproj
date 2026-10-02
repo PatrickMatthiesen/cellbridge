@@ -24,6 +24,9 @@
     <Compile Include="CapturedSaveTests.cs" />
     <Compile Include="DocumentLibraryTests.cs" />
     <Compile Include="IdentityRoutingTests.cs" />
+    <Compile Include="MultiInstanceTests.cs" />
+    <Compile Include="ProxyOriginTests.cs" />
+    <Compile Include="DependencyTests.cs" />
     <None Include="../../testdata/api/word-enable-editing.xml" Link="Fixtures/word-enable-editing.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../testdata/sharepoint/fixtures/save_reopen/*.json" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="QueryAccessTests.cs" />

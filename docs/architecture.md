@@ -1,123 +1,79 @@
 # Architecture
 
-These notes include historical implementation status. See the root [README](../README.md)
-for the current capabilities and known limitations.
+CellBridge implements the Office file synchronization protocols in reusable
+.NET libraries. The sample host and demo provide a development environment;
+[interoperability coverage](interoperability.md) describes the tested client
+behavior and unsupported operations.
 
-## Overview
+## Request flow
 
-CellBridge implements the two layers of the Office file collaboration
-protocol stack so that Word desktop can open, edit, save, and coauthor a
-`test.docx` against this server instead of SharePoint:
-
-```
-┌────────────────────────────────────────────────────────────┐
-│ Word desktop                                               │
-└──────────────┬─────────────────────────────────────────────┘
-               │ HTTPS (SOAP + base64 binary payloads)
-┌──────────────▼─────────────────────────────────────────────┐
-│ CellBridge.Web                                     │
-│  GET  /shared/test.docx        → file download             │
-│  OPTIONS /_vti_bin/cellstorage.svc → capability discovery   │
-│  POST  /_vti_bin/cellstorage.svc   → ExecuteCellStorage…   │
-└──────────────┬─────────────────────────────────────────────┘
-               │
-   ┌───────────▼────────────┐   ┌──────────────────────────┐
-   │ CellBridge.    │   │ CellBridge.      │
-   │ FssHttp (SOAP layer)   │──▶│ FssHttpB (binary layer)  │
-   │ CellStorageRequest/    │   │ QueryAccess/QueryChanges/│
-   │ Response, SubRequests  │   │ PutChanges, Stream Object│
-   └───────────┬────────────┘   │ Headers, DataElements    │
-               │                └──────────────────────────┘
-   ┌───────────▼────────────┐
-   │ CellBridge.    │
-   │ Storage                │
-   │ DocumentStore, coauth  │
-   │ sessions               │
-   └────────────────────────┘
+```mermaid
+flowchart TD
+    Office[Desktop Office] -->|HTTPS discovery and download| Host[CellBridge.AspNetCore endpoints]
+    Office -->|SOAP or MTOM| Host
+    Host --> Soap[CellBridge.FssHttp]
+    Soap --> Binary[CellBridge.FssHttpB]
+    Host --> Service[CellBridgeDocumentService]
+    Service --> State[IDocumentStateStore]
+    Service --> Content[IContentStore]
+    State --> PostgreSQL[PostgreSQL document state]
+    Content --> Blobs[PostgreSQL chunks or filesystem objects]
 ```
 
-## The two protocol layers
+`/_vti_bin/cellstorage.svc` handles the outer MS-FSSHTTP envelope. Cell
+subrequests carry MS-FSSHTTPB requests inline as base64 or in MTOM attachments.
+The endpoint resolves document identity before dispatch and serializes each
+operation's protocol response. HTTP 200 alone does not indicate save success.
+See [protocol scope](protocol-version-decision.md).
 
-See [protocol-version-decision.md](protocol-version-decision.md) for the full
-analysis. In short:
+## Libraries and executables
 
-1. **MS-FSSHTTP (SOAP)** — the outer envelope. `CellStorageRequest` /
-   `CellStorageResponse` with `SubRequest` elements typed `Cell`, `Coauth`,
-   `ExclusiveLock`, `SchemaLock`, `WhoAmI`, `ServerTime`, etc. Endpoint:
-   `/_vti_bin/cellstorage.svc`.
-2. **MS-FSSHTTPB (binary)** — the base64 payload inside the `Cell`
-   subrequest's `SubRequestData`/`SubResponseData`. Uses `Query Access` /
-   `Query Changes` / `Put Changes` framed with Stream Object Headers.
+| Project | Responsibility |
+| --- | --- |
+| `CellBridge.FssHttp` | SOAP/MTOM parsing, response serialization and subrequest models |
+| `CellBridge.FssHttpB` | Binary framing, manifests, graph data and synchronization messages |
+| `CellBridge.Storage.Abstractions` | Immutable document records, state transitions and content handles |
+| `CellBridge.Storage` | Detached protocol documents and persistence codecs |
+| `CellBridge.Storage.PostgreSql` | Durable state, per-document coordination and chunked binary content |
+| `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory durability operations |
+| `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
+| `CellBridge.Storage.Conformance` | Provider contract checks for consumers |
+| `CellBridge.AspNetCore` | Save orchestration, discovery, download and cellstorage endpoints |
+| `CellBridge.Web` | Sample host, document imports, package generation and catalog APIs |
+| `demo/CellBridge.Demo` | Razor Pages client of the sample HTTP catalog |
+| `aspire/apphost.cs` | PostgreSQL, schema migration, sample host, demo and optional capture proxy |
 
-## Project layout
+The binary library has no ASP.NET Core or database dependency. Provider
+contracts have no protocol dependency. The hosting library contains neither
+sample package creation nor Aspire orchestration.
 
-| Project | Purpose |
-|---|---|
-| `src/CellBridge.Web` | ASP.NET Core host: file download, OPTIONS, cellstorage.svc, request logging |
-| `src/CellBridge.FssHttp` | SOAP layer: request parser, response serializer, subrequest model |
-| `src/CellBridge.FssHttpB` | Binary layer: Stream Object Headers, Compact64bitInt, ExGuid, SerialNumber, DataElementPackage, request/response structures |
-| `src/CellBridge.Storage` | In-memory document store with content versioning and coauthoring sessions |
-| `tests/CellBridge.FssHttpB.Tests` | Tests for the binary library, editors partition, FSSHTTPD graph, and response inspector |
-| `tests/CellBridge.FssHttp.Tests` | Tests for SOAP/MTOM, editors state, and binary operation dispatch |
-| `aspire/` | Aspire AppHost wiring the Web project |
+## Document identity and partitions
 
-## Key wire facts
+A document has a stable resource ID and a normalized path key. A supplied
+resource ID takes precedence over a URL; an unknown ID returns an explicit
+lookup failure. Lookup does not create a document or redirect to a matching path.
 
-- SOAP action: `http://schemas.microsoft.com/sharepoint/soap/ICellStorages/ExecuteCellStorageRequest`
-- FSSHTTPB request signature: `0x9B069439F329CF9C`; response: `0x9B069439F329CF9D`
-- FSSHTTPB protocol version: 12 (minimum 11)
-- Stream Object Header Start: 2-bit type (0=16-bit, 2=32-bit), 1-bit compound,
-  6-bit or 14-bit object type, 7-bit or 15-bit length
-- Compact64bitInt: k zero bits + a 1 bit prefix, then 7·(k+1) value bits
-- ExGuid: 2/5/6/7 zero bits + a 1 bit, then 5/10/17/32-bit index value, then a 16-byte GUID
-- In FSSHTTP 2.0, SOAP selects the Cell partition. The default Cell partition
-   contains the document bytes; `383ADC0B-E66E-4438-95E6-E39EF9720122` is the
-   metadata partition; `7808F4DD-2385-49D6-B7CE-37ACA5E43602` is the editors
-   table partition. Each partition must retain separate FSSHTTPB identity and
-   synchronization knowledge.
-- `ServerTime` is a positive integer containing UTC ticks since year 1. File
-   property `CreateTime` and `LastModifiedTime` use Windows FILETIME values.
+File contents, application metadata and the editors table have independent
+partition identities, serials and synchronization knowledge. File saves merge
+against the retained graph and materialize the Office package through
+`PartitionGraphSnapshot`. Selecting the largest binary object cannot recover a
+valid file partition.
 
-## Current status vs success criteria
+## Save publication
 
-| # | Criterion | Status |
-|---|---|---|
-| 1 | Serve test.docx at stable HTTPS URL | ✅ HTTP + HTTPS (trusted dev cert) |
-| 2 | Respond to Office OPTIONS discovery | ✅ |
-| 3 | Cause Word to select MS-FSSHTTP | ✅ Word sends `ExecuteCellStorageRequest` |
-| 4 | Implement cellstorage.svc | ✅ (Cell, Coauth, EditorsTable, SchemaLock, WhoAmI, ServerTime) |
-| 5 | Parse and log every FSSHTTP request | ⏳ QueryChanges arguments/knowledge parsing is incomplete |
-| 6 | Return valid protocol responses | ⏳ File and editors partition graphs exist; metadata still needs its captured application-specific graph |
-| 7 | Word opens test.docx | ⏳ Word falls back to direct GET and opens read-only |
-| 8 | Word saves a modification | ⏳ PutChanges is rejected until graph-aware updates are implemented; no successful save claim |
-| 9 | Two Word instances coauthor | ⏳ Session state exists, but Word has not completed an editable coauthoring session |
-| 10 | Change by A visible to B | ⏳ Requires successful editable coauthoring |
+Content preparation and immutable-object writes occur before the document
+transaction. Publication takes the document's row lock, reads the current state
+and authoritative database time, rechecks graph coherency and leases, and commits
+one state snapshot with the accepted response receipt. Different documents can
+progress independently. Session and lease changes use the same coordination.
 
-## Next steps
+Readers acquire one state snapshot for both content and headers. A concurrent
+save cannot mix one revision's length or ETag with another revision's bytes.
+Published objects remain retained, allowing readers and later graph updates to
+reference prior data. A retry resolves through the stored receipt rather than
+publishing a second version.
 
-The optional [capture kit](capture-kit.md) records application-level HTTP/HTTPS
-exchanges under Aspire or standalone. Its local integration tests do not establish
-Word/SharePoint authentication compatibility. Capture a successful reference
-open/save session before relying on those recordings as protocol fixtures.
-
-Binary Cell dispatch now preserves request IDs across supported operations.
-It supports one QueryChanges per Cell payload and rejects additional queries
-explicitly until independent filters and snapshots are implemented.
-The unsafe largest-BLOB save heuristic has been removed. MTOM parsing checks
-delimiter lines and rejects duplicate content IDs, and the HTTP host parses MIME
-only once. Full knowledge-based synchronization, atomic document snapshots, SOAP
-dependency execution, and lock/coauthoring transitions remain unfinished.
-
-1. Capture the corresponding three Cell responses from the known-good
-   SharePoint farm, then compare them with the canonical response-inspector
-   dump now logged for every generated Cell response.
-2. Validate the dedicated editors partition against SharePoint. It now emits
-   schema-ordered editor XML, the zip-stream header, DEFLATE data, and a
-   reconstructable FSSHTTPD root, leaf, and raw-data graph.
-3. Capture the application-specific metadata partition payload from SharePoint
-   and add a dedicated metadata serializer.
-4. Finish QueryChanges parsing, especially Knowledge, versioning, filters, and
-   the maximum data-element constraint; then return incremental state.
-5. Live test Word against `https://web-aspire.dev.localhost:7292/shared/test.docx`
-   after each change. A direct GET immediately after the CellStorage POST means
-   Word has rejected the FSSHTTP response.
+[Storage providers](storage-providers.md) documents the contracts, failure
+behavior, migration, backup and retention requirements. Parsing and graph
+materialization still buffer data and can allocate several copies of large files.
+Streaming content storage alone does not establish large-file performance.

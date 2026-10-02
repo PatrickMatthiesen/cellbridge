@@ -7,6 +7,63 @@ namespace CellBridge.FssHttpB.Tests;
 public sealed class PartitionGraphSnapshotTests
 {
     [Fact]
+    public void RetainedHistoricalObjectsCannotOverrideTheSelectedRevision()
+    {
+        var identity = CreateIdentity();
+        var current = FileContentPartitionBuilder.BuildQueryChangesResponse(1, [1, 2, 3], identity, 73507);
+        var historical = FileContentPartitionBuilder.BuildQueryChangesResponse(1, [9, 8, 7],
+            identity with { ObjectGroupGuid = new ExGuid(4, Guid.NewGuid()) }, 73506);
+        var oldGroup = historical.DataElementPackage!.DataElements.Single(e => e.DataElementType == DataElementType.ObjectGroupDataElementData);
+        var elements = current.DataElementPackage!.DataElements.Append(oldGroup).ToArray();
+        Assert.Equal(new byte[] { 1, 2, 3 }, PartitionGraphSnapshot.Create(elements, identity.ObjectDataBlobGuid).Materialize());
+        Assert.Equal(new byte[] { 1, 2, 3 }, PartitionGraphSnapshot.Create(elements.Reverse(), identity.ObjectDataBlobGuid).Materialize());
+    }
+
+    [Fact]
+    public void SnapshotPropertiesCannotMutateItsGraphOrIdentifiers()
+    {
+        var identity = CreateIdentity();
+        var response = FileContentPartitionBuilder.BuildQueryChangesResponse(1, [1, 2, 3], identity, 73507);
+        var graph = PartitionGraphSnapshot.Create(response.DataElementPackage!.DataElements, identity.ObjectDataBlobGuid);
+        foreach (var element in graph.Elements)
+        {
+            element.DataElementExtendedGuid.Guid = Guid.Empty;
+            element.SerialNumber.Value = 0;
+            if (element.Data is { Length: > 0 }) element.Data[0] ^= 0xff;
+        }
+        graph.StorageIndex.Guid = Guid.Empty;
+        graph.RootObject!.Guid = Guid.Empty;
+        graph.Revision!.Guid = Guid.Empty;
+        Assert.Equal(identity.ObjectDataBlobGuid, graph.StorageIndex);
+        Assert.Equal(new byte[] { 1, 2, 3 }, graph.Materialize());
+    }
+
+    [Fact]
+    public void ConflictingDuplicateNewElementIsRejected()
+    {
+        var identity = CreateIdentity();
+        var response = FileContentPartitionBuilder.BuildQueryChangesResponse(1, [1, 2, 3], identity, 73507);
+        var elements = response.DataElementPackage!.DataElements;
+        var original = elements[0];
+        var duplicate = new DataElement(original.DataElementType, original.DataElementExtendedGuid, original.SerialNumber) { Data = [255] };
+        Assert.Throws<InvalidDataException>(() => PartitionGraphSnapshot.Create(elements.Append(duplicate), identity.ObjectDataBlobGuid));
+        var graph = PartitionGraphSnapshot.Create(elements, identity.ObjectDataBlobGuid);
+        var newId = new ExGuid(1, Guid.NewGuid());
+        var first = new DataElement(DataElementType.ObjectDataBLOBDataElementData, newId, SerialNumber.Null) { Data = [1] };
+        var second = new DataElement(DataElementType.ObjectDataBLOBDataElementData, newId, SerialNumber.Null) { Data = [2] };
+        Assert.Throws<InvalidDataException>(() => graph.Merge([first, second], graph.StorageIndex));
+    }
+
+    [Fact]
+    public void CapturedDeltaGraphRestorationIsIndependentOfRowOrder()
+    {
+        var first = PartitionGraphSnapshot.Create(ReadFixture("save-first"), new ExGuid(1, Guid.Parse("d4b03a71-d96a-49c0-914f-0894afd37295")));
+        var merged = first.Merge(ReadFixture("save-second"), new ExGuid(1, Guid.Parse("6fba7790-4e0a-4e18-a34e-f7716c3c0680")));
+        var random = new Random(42);
+        Assert.Equal(merged.Materialize(), PartitionGraphSnapshot.Create(merged.Elements.OrderBy(_ => random.Next()), merged.StorageIndex).Materialize());
+    }
+
+    [Fact]
     public void GeneratedFilePartition_ResolvesIndexManifestChainAndMaterializes()
     {
         var guid = Guid.Parse("15c7b2a2-822a-4a04-8bb0-46c7de4bc901");

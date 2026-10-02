@@ -14,15 +14,20 @@ local development. Blank Word, Excel, and PowerPoint packages can be created.
 PowerPoint package open/save/reopen was tested locally; remote PowerPoint saves
 and two-desktop live coauthoring remain unverified.
 
-This is a protocol experiment, not a production document service. Documents,
-versions, resource IDs, and sessions live in memory and reset on restart.
-Distinct authenticated user identities and durable storage are not implemented.
+Aspire uses PostgreSQL to persist documents, resource IDs, retained graphs,
+versions, save receipts and unexpired sessions. Binary content can use PostgreSQL
+or a filesystem provider. Distinct authenticated user identities remain
+unimplemented. On 2026-10-02, desktop Word completed two remote saves and
+a fresh-process reopen against the PostgreSQL-backed host through Tailscale.
+Both binary file saves and the final server bytes were verified. See the
+[interoperability coverage](docs/interoperability.md).
 Partial and unsupported uploads return protocol errors.
 
 ## Requirements
 
 - .NET 10 SDK.
 - Aspire CLI compatible with the preview SDK pinned in `aspire/apphost.cs`.
+- Docker for Aspire's PostgreSQL container and persistent volume.
 - Python 3.12 or newer for the bundled SharePoint capture proxy.
 - Desktop Office on Windows for manual interoperability testing.
 
@@ -34,15 +39,21 @@ dotnet test CellBridge.slnx
 dotnet test demo/CellBridge.Demo.slnx
 ```
 
-The Office Inspectors adapter requires Windows. Three existing URL/path tests
-also fail on Linux; see the [validation notes](docs/publication-audit.md).
+The Office Inspectors adapter requires Windows. Protocol and provider tests run
+on Linux.
 Live interoperability tests are opt-in. See the
 [interop test instructions](tests/CellBridge.Interop.Tests/README.md).
 
+For a disposable PostgreSQL database and two live hosts, run
+`python3 tools/testing/run.py`. Add `--performance` for provider measurements.
+The [automation guide](docs/automated-testing.md) covers prerequisites, the
+Windows desktop Word check and connecting the laptop through Tailscale Serve.
+
 ## Run locally
 
-Start the app from the repository root. Aspire's Python integration prepares
-the capture proxy environment and installs its dependencies:
+Start the app from the repository root. Aspire starts PostgreSQL with a persistent
+volume, runs the schema migration, then starts the web host. Its Python integration
+prepares the capture proxy environment and installs its dependencies:
 
 ```sh
 aspire start --apphost aspire/apphost.cs
@@ -63,8 +74,11 @@ See the [capture guide](docs/capture-kit.md) for configuration and certificates.
 
 - `CellBridge.FssHttp` parses SOAP and MTOM requests and serializes responses.
 - `CellBridge.FssHttpB` contains binary framing, object graphs, and synchronization messages.
-- `CellBridge.Web` serves documents, capability discovery, and `/_vti_bin/cellstorage.svc`.
-- `CellBridge.Storage` tracks documents, versions, locks, and sessions in memory.
+- `CellBridge.AspNetCore` provides document execution and reusable HTTP endpoint registration.
+- `CellBridge.Storage.Abstractions` defines immutable state and streaming content contracts.
+- `CellBridge.Storage` restores and prepares protocol document state.
+- `CellBridge.Storage.PostgreSql`, `.FileSystem` and `.InMemory` implement storage providers.
+- `CellBridge.Web` is the sample host, with imports and demo JSON APIs.
 
 The protocol references are MS-OCPROTO, MS-FSSHTTP, and MS-FSSHTTPB. SOAP and
 binary structures work together; see the [protocol notes](docs/protocol-version-decision.md).
@@ -74,9 +88,11 @@ provide an independent reference implementation.
 ## Documentation
 
 - [Demo and document library](docs/demo-library.md)
-- [Architecture and historical development notes](docs/architecture.md)
+- [Storage setup, NuGet consumption and provider authoring](docs/storage-providers.md)
+- [Automated checks, performance and desktop Word over Tailscale](docs/automated-testing.md)
+- [Architecture](docs/architecture.md)
+- [Interoperability and test coverage](docs/interoperability.md)
 - [Capture tooling](docs/capture-kit.md)
-- [Publication and fixture validation](docs/publication-audit.md)
 
 Recorded fixtures are sanitized regression inputs. Their READMEs explain which
 properties they test and how their bytes differ from the original captures.

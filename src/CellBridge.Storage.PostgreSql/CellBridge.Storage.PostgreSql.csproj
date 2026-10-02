@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CellBridge.Storage.Abstractions/CellBridge.Storage.Abstractions.csproj" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <EmbeddedResource Include="Schema.sql" />
+  </ItemGroup>
+</Project>

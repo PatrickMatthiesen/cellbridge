@@ -3,18 +3,32 @@ on:
   pull_request:
     paths:
       - 'tools/capture/**'
+      - 'tools/testing/**'
       - 'aspire/apphost.cs'
       - 'src/**'
       - 'tests/**'
+      - 'demo/**'
+      - 'testdata/**'
+      - 'Directory.*'
+      - 'tools/CellBridge.Storage.*/**'
+      - 'tools/verify_packages.py'
+      - 'examples/**'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
   push:
     branches: [main]
     paths:
       - 'tools/capture/**'
+      - 'tools/testing/**'
       - 'aspire/apphost.cs'
       - 'src/**'
       - 'tests/**'
+      - 'demo/**'
+      - 'testdata/**'
+      - 'Directory.*'
+      - 'tools/CellBridge.Storage.*/**'
+      - 'tools/verify_packages.py'
+      - 'examples/**'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
 permissions:
@@ -28,6 +42,40 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: dotnet test CellBridge.slnx --nologo --verbosity minimal
+      - run: dotnet test demo/CellBridge.Demo.slnx --nologo --verbosity minimal
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/verify_packages.py
+  storage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: cellbridge
+          POSTGRES_USER: cellbridge
+          POSTGRES_PASSWORD: cellbridge-tests
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ConnectionStrings__cellbridge: Host=localhost;Port=5432;Database=cellbridge;Username=cellbridge;Password=cellbridge-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build tools/CellBridge.Storage.Migrate --nologo
+      - run: dotnet tools/CellBridge.Storage.Migrate/bin/Debug/net10.0/CellBridge.Storage.Migrate.dll
+      - run: dotnet test tests/CellBridge.Storage.Tests --nologo --verbosity minimal
+      - run: dotnet test tests/CellBridge.FssHttpB.Tests --nologo --verbosity minimal
+      - run: dotnet test tests/CellBridge.FssHttp.Tests --nologo --verbosity minimal
+      - run: dotnet test demo/CellBridge.Demo.slnx --nologo --verbosity minimal
   capture:
     runs-on: windows-latest
     steps:
@@ -39,3 +87,24 @@ jobs:
           cache-dependency-path: 'tools/capture/requirements*.txt'
       - run: python -m pip install -r tools/capture/requirements-dev.txt
       - run: python -m pytest tools/capture -q
+      - run: python -m pytest tools/testing -q
+      - name: Parse the desktop Word scripts
+        shell: pwsh
+        run: |
+          $errors = $null
+          $tokens = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'tools/testing/word-smoke.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors) { $errors | Format-List; exit 1 }
+      - name: Exercise the desktop Word wrapper failure paths
+        shell: pwsh
+        run: ./tools/testing/test-word-wrapper.ps1
+      - name: Exercise Word startup and cleanup without desktop Office
+        shell: pwsh
+        run: ./tools/testing/test-word-startup.ps1
+      - name: Exercise script logic without Office in Windows PowerShell
+        shell: powershell
+        run: ./tools/testing/test-word-compatibility.ps1
+      - name: Exercise script logic without Office in PowerShell Core
+        shell: pwsh
+        run: ./tools/testing/test-word-compatibility.ps1

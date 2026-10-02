@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="../CellBridge.Storage.Abstractions/CellBridge.Storage.Abstractions.csproj" />
     <ProjectReference Include="..\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
   </ItemGroup>
 
