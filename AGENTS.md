@@ -52,9 +52,9 @@ aspire stop --non-interactive
 
 ## Implementation constraints
 
-- Aspire uses PostgreSQL storage. Explicit in-memory storage loses content,
-  identities, versions and sessions on restart. Imports create only missing
-  documents; saves do not write back to the import directory. See
+- Aspire defaults to durable PostgreSQL state and content storage. The optional
+  in-memory provider is volatile. Imports create only missing documents; saves
+  do not write back to the import directory. See
   [storage setup and provider contracts](docs/storage-providers.md).
 - Resolve supplied resource IDs correctly. Do not create documents on SOAP lookup
   misses or hide unknown IDs with a URL fallback. See

@@ -35,6 +35,12 @@ developer's `cellbridge-storage-data` volume. The Windows-only Office Inspectors
 adapter runs when this command runs on Windows, and in Windows CI.
 All local raw capture artifacts stay outside Git.
 
+To verify the packed libraries, run `python3 tools/verify_packages.py` with
+Aspire stopped. It builds the minimal NuGet consumer example and runs the
+[package consumption tests](../tests/CellBridge.Packages.Tests/README.md) against
+a fresh local package feed/cache. The example contains application setup;
+test-server, SOAP probes and provider conformance checks live in the test project.
+
 ## Performance measurements
 
 ```sh

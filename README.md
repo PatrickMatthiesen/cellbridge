@@ -14,11 +14,10 @@ local development. Blank Word, Excel, and PowerPoint packages can be created.
 PowerPoint package open/save/reopen was tested locally; remote PowerPoint saves
 and two-desktop live coauthoring remain unverified.
 
-This is a protocol experiment. Aspire now uses PostgreSQL to persist documents,
-resource IDs, retained graphs, versions, save receipts and unexpired sessions.
-Binary content can use PostgreSQL or a filesystem provider. The explicit
-in-memory provider loses state on restart. Distinct authenticated user identities
-remain unimplemented. On 2026-10-02, desktop Word completed two remote saves and
+Aspire uses PostgreSQL to persist documents, resource IDs, retained graphs,
+versions, save receipts and unexpired sessions. Binary content can use PostgreSQL
+or a filesystem provider. Distinct authenticated user identities remain
+unimplemented. On 2026-10-02, desktop Word completed two remote saves and
 a fresh-process reopen against the PostgreSQL-backed host through Tailscale.
 Both binary file saves and the final server bytes were verified. See the
 [interoperability coverage](docs/interoperability.md).

@@ -101,11 +101,17 @@ release still returns the shared `officelab` identity and grants protocol access
 without distinct-user authorization. Provider selection does not add those
 features.
 
+The [NuGet consumer example](../examples/NuGetConsumer/README.md) is a minimal
+HTTP application using only package references. It registers in-memory storage,
+maps the endpoints and creates one downloadable text file. Its storage is
+deliberately volatile; the PostgreSQL composition above provides persistence.
+
 Run `python tools/verify_packages.py` with Aspire stopped to pack the nine
-libraries and build `examples/NuGetConsumer` using only package references.
-That consumer exercises a custom state-provider wrapper, concurrent transitions,
-lease persistence, discovery, download, HEAD and Cell QueryAccess. Packages and
-the isolated consumer cache are under ignored `artifacts/packages`.
+libraries, build the example and run `tests/CellBridge.Packages.Tests`. The
+package tests exercise a custom state-provider wrapper, concurrent transitions,
+lease persistence, discovery, download, HEAD and Cell QueryAccess. Test-server
+and conformance dependencies stay in the test project. Packages and the isolated
+package cache are under ignored `artifacts/packages`.
 
 ## Commit and retry behavior
 
