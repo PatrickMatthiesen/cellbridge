@@ -12,6 +12,21 @@ Its parsing code has no dependency on `CellBridge.FssHttpB`, so the tests compar
 server-generated responses against a separately maintained parser. The existing
 Interop-TestSuites checks provide another independent comparison.
 
+## Source layout
+
+Each top-level parser type has its own file under
+`src/CellBridge.OfficeInspectors/Parsers`:
+
+| Directory | Contents |
+| --- | --- |
+| `Common` | Base reader, bit attributes, string encoding, stream context and utilities |
+| `FssHttpB` | Basic types, framing, data elements, knowledge, requests, responses, errors and editors-table models in separate subdirectories |
+| `FssHttpD` | Node objects and ZIP records in `Nodes` and `Zip` |
+| `OneStore` | Basic types, property values and object streams in separate subdirectories |
+
+All types retain the `CellBridge.OfficeInspectors.Parsers` namespace and their
+upstream names. The directories organize the source without changing the API.
+
 ## Run the checks
 
 ```sh
