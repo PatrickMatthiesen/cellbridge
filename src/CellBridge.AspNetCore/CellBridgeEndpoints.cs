@@ -21,6 +21,11 @@ public static class CellBridgeEndpoints
         var options = new CellBridgeOptions();
         configure?.Invoke(options);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxRequestBytes);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequests);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomParts);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomHeaderBytes);
+        if (options.MaxRequestBytes > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(options.MaxRequestBytes));
+        services.AddSingleton(new RequestAdmission(options.MaxConcurrentRequests));
         services.AddSingleton(options);
         services.AddSingleton(provider);
         services.AddSingleton<CellBridgeDocumentService>();
@@ -72,6 +77,28 @@ public static class CellBridgeEndpoints
 
 static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
 {
+    var admission = ctx.RequestServices.GetRequiredService<RequestAdmission>();
+    if (!await admission.Gate.WaitAsync(0, ctx.RequestAborted)) return Results.StatusCode(503);
+    try { return new AdmittedResult(await HandleAdmittedCellStoragePost(ctx, service), admission.Gate); }
+    catch { admission.Gate.Release(); throw; }
+}
+
+private sealed class AdmittedResult(IResult result, SemaphoreSlim gate) : IResult
+{
+    public async Task ExecuteAsync(HttpContext context)
+    {
+        try { await result.ExecuteAsync(context); }
+        finally { gate.Release(); }
+    }
+}
+
+private sealed class RequestAdmission(int maximum)
+{
+    public SemaphoreSlim Gate { get; } = new(maximum);
+}
+
+static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
+{
     var log = ctx.RequestServices.GetRequiredService<ILogger<CellBridgeDocumentService>>();
     var options = ctx.RequestServices.GetRequiredService<CellBridgeOptions>();
     if (ctx.Request.ContentLength > options.MaxRequestBytes) return Results.StatusCode(413);
@@ -83,7 +110,7 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
         if (body.Length + read > options.MaxRequestBytes) return Results.StatusCode(413);
         await body.WriteAsync(buffer.AsMemory(0, read), ctx.RequestAborted);
     }
-    var rawBody = body.ToArray();
+    var rawBody = body.GetBuffer().AsMemory(0, checked((int)body.Length));
     var captureId = Guid.NewGuid().ToString("N");
     if (options.CaptureDirectory is { } captureDirectory)
     {
@@ -98,7 +125,7 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
     {
         if (ctx.Request.ContentType?.StartsWith("multipart/", StringComparison.OrdinalIgnoreCase) == true)
         {
-            parts = MtomMessageParser.Parse(rawBody, ctx.Request.ContentType);
+            parts = MtomMessageParser.ParseViews(rawBody, ctx.Request.ContentType, options.MaxMtomParts, options.MaxMtomHeaderBytes);
             var start = ctx.Request.ContentType.Split(';', StringSplitOptions.RemoveEmptyEntries)
                 .FirstOrDefault(p => p.TrimStart().StartsWith("start=", StringComparison.OrdinalIgnoreCase))?
                 .Split('=', 2)[1].Trim().Trim('"', '<', '>');
@@ -107,11 +134,11 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
                 : null;
             soapPart ??= parts.FirstOrDefault(p => p.ContentType.Contains("xop+xml", StringComparison.OrdinalIgnoreCase))
                 ?? parts[0];
-            soapXml = Encoding.UTF8.GetString(soapPart.Content);
+            soapXml = Encoding.UTF8.GetString(soapPart.ContentMemory.Span);
         }
         else
         {
-            soapXml = Encoding.UTF8.GetString(rawBody);
+            soapXml = Encoding.UTF8.GetString(rawBody.Span);
         }
     }
     catch (Exception ex) when (ex is InvalidDataException or FormatException)
@@ -137,7 +164,7 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
     if (parts is not null)
     {
         log.LogInformation("MTOM parts: {Parts}", string.Join("; ", parts.Select(p =>
-            $"id={p.ContentId ?? "<none>"}, type={p.ContentType}, bytes={p.Content.Length}")));
+            $"id={p.ContentId ?? "<none>"}, type={p.ContentType}, bytes={p.ContentMemory.Length}")));
         foreach (var subRequest in request.Requests.SelectMany(r => r.SubRequests))
         {
             if (subRequest.SubRequestDataAttributes.TryGetValue("IncludeHref", out var href))
@@ -148,11 +175,11 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
                     contentId = Uri.UnescapeDataString(contentId[4..]).Trim('<', '>');
                 }
 
-                subRequest.SubRequestDataBinary = parts
-                    .FirstOrDefault(p => string.Equals(p.ContentId, contentId, StringComparison.OrdinalIgnoreCase))?.Content;
+                subRequest.SubRequestDataBinaryMemory = parts
+                    .FirstOrDefault(p => string.Equals(p.ContentId, contentId, StringComparison.OrdinalIgnoreCase))?.ContentMemory;
                 log.LogInformation("MTOM reference {Href} resolved={Resolved} bytes={Bytes}",
-                    href, subRequest.SubRequestDataBinary is not null,
-                    subRequest.SubRequestDataBinary?.Length ?? 0);
+                    href, subRequest.SubRequestDataBinaryMemory is not null,
+                    subRequest.SubRequestDataBinaryMemory?.Length ?? 0);
             }
         }
     }
@@ -327,9 +354,9 @@ static async Task HandleCellSubRequest(
         // For non-MTOM requests the payload is inline base64 in SubRequestData.
     }
 
-    if (subRequest.SubRequestDataBinary is not null)
+    if (subRequest.SubRequestDataBinaryMemory is not null)
     {
-        fsshttpbRequest = TryDecodeFsshttpbBinary(subRequest.SubRequestDataBinary, log);
+        fsshttpbRequest = TryDecodeFsshttpbBinary(subRequest.SubRequestDataBinaryMemory.Value, log);
     }
 
     if (fsshttpbRequest is null && subRequest.SubRequestDataXml is not null)
@@ -680,7 +707,7 @@ static FsshttpbCellRequest? TryDecodeFsshttpbPayload(string subRequestDataXml, I
     }
 }
 
-static FsshttpbCellRequest? TryDecodeFsshttpbBinary(byte[] payload, ILogger log)
+static FsshttpbCellRequest? TryDecodeFsshttpbBinary(ReadOnlyMemory<byte> payload, ILogger log)
 {
     try
     {

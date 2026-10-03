@@ -48,16 +48,19 @@ public sealed class ObjectGroupDataElement
     private ObjectGroupDataElement(
         ExGuid dataElementGuid,
         SerialNumber serialNumber,
-        IReadOnlyList<ObjectGroupObject> objects)
+        IReadOnlyList<ObjectGroupObject> objects, IEnumerable<ulong> changeFrequencies)
     {
         DataElementGuid = dataElementGuid;
         SerialNumber = serialNumber;
         Objects = objects;
+        ChangeFrequencies = Array.AsReadOnly(changeFrequencies.ToArray());
     }
 
     public ExGuid DataElementGuid { get; }
     public SerialNumber SerialNumber { get; }
     public IReadOnlyList<ObjectGroupObject> Objects { get; }
+    /// <summary>Optional metadata in wire order. Values at least 4 are custom frequencies.</summary>
+    public IReadOnlyList<ulong> ChangeFrequencies { get; }
 
     /// <summary>
     /// Parses the object-group payload retained by <see cref="DataElement"/>.
@@ -100,11 +103,10 @@ public sealed class ObjectGroupDataElement
 
         RequireEnd(reader, StreamObjectTypeHeaderEnd.ObjectGroupDeclarations);
 
-        // SharePoint includes a compact metadata-declarations compound block
-        // in the captured save graphs. Its records are orthogonal to content;
-        // consume their framed bodies so the following data block is aligned.
+        // MS-FSSHTTPB 2.2.1.12.6.3.1 defines a change-frequency integer, with no references.
+        IReadOnlyList<ulong> frequencies = [];
         if (IsStart(reader) && PeekStartType(reader) == StreamObjectTypeHeaderStart.ObjectGroupMetadataDeclarations)
-            SkipMetadataDeclarations(reader);
+            frequencies = ReadMetadataDeclarations(reader);
 
         RequireStart(reader, StreamObjectTypeHeaderStart.ObjectGroupData);
         var objects = new List<ObjectGroupObject>(declarations.Count);
@@ -144,26 +146,33 @@ public sealed class ObjectGroupDataElement
         if (objects.Count != declarations.Count)
             throw new InvalidDataException($"Object group declares {declarations.Count} objects but contains {objects.Count} data records.");
 
-        return new ObjectGroupDataElement(element.DataElementExtendedGuid, element.SerialNumber, objects);
+        return new ObjectGroupDataElement(element.DataElementExtendedGuid, element.SerialNumber, objects, frequencies);
     }
 
-    private static void SkipMetadataDeclarations(BinaryReaderEx reader)
+    private static IReadOnlyList<ulong> ReadMetadataDeclarations(BinaryReaderEx reader)
     {
-        RequireStart(reader, StreamObjectTypeHeaderStart.ObjectGroupMetadataDeclarations);
+        var start = StreamObjectHeaderStart.Parse(reader);
+        if (start.Type != StreamObjectTypeHeaderStart.ObjectGroupMetadataDeclarations || start.Compound != 1 || start.Length != 0)
+            throw new InvalidDataException("Invalid object metadata declarations header.");
+        var frequencies = new List<ulong>();
         while (IsStart(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
-            if (header.Type != (StreamObjectTypeHeaderStart)0x78)
+            if (header.Type != (StreamObjectTypeHeaderStart)0x78 || header.Compound != 0)
                 throw new InvalidDataException($"Unexpected {header.Type} in object-group metadata declarations.");
-            _ = ReadBody(reader, header, "object metadata");
+            if (frequencies.Count >= 100_000) throw new InvalidDataException("Object metadata count limit exceeded.");
+            var body = new BinaryReaderEx(reader.ReadMemory(header.Length));
+            frequencies.Add(Compact64bitInt.Deserialize(body).Value);
+            RequireEmpty(body, "object metadata");
         }
         RequireEnd(reader, StreamObjectTypeHeaderEnd.ObjectGroupMetadataDeclarations);
+        return frequencies;
     }
 
     private static IReadOnlyList<ExGuid> ReadExtendedGuids(BinaryReaderEx reader, string field)
     {
         var count = Compact64bitInt.Deserialize(reader).Value;
-        if (count > int.MaxValue)
+        if (count > 100_000 || count > (ulong)reader.Remaining)
             throw new InvalidDataException($"{field} count {count} exceeds the supported buffer size.");
         var result = new List<ExGuid>((int)count);
         for (var i = 0; i < (int)count; i++)
@@ -174,7 +183,7 @@ public sealed class ObjectGroupDataElement
     private static IReadOnlyList<CellId> ReadCellIds(BinaryReaderEx reader)
     {
         var count = Compact64bitInt.Deserialize(reader).Value;
-        if (count > int.MaxValue)
+        if (count > 100_000 || count > (ulong)reader.Remaining)
             throw new InvalidDataException($"Cell reference count {count} exceeds the supported buffer size.");
         var result = new List<CellId>((int)count);
         for (var i = 0; i < (int)count; i++)
@@ -339,30 +348,36 @@ public sealed class ObjectGroupGraph
         _objects[obj.ObjectGuid] = obj;
     }
 
-    public byte[] Materialize(ExGuid rootObjectGuid)
+    public byte[] Materialize(ExGuid rootObjectGuid, long maxBytes = int.MaxValue)
     {
-        var output = new MemoryStream();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBytes);
+        using var output = new MemoryStream();
         var active = new HashSet<ExGuid>();
-        Visit(rootObjectGuid, output, active);
+        Visit(rootObjectGuid, output, active, maxBytes);
         return output.ToArray();
     }
 
-    private void Visit(ExGuid objectGuid, MemoryStream output, HashSet<ExGuid> active)
+    private void Visit(ExGuid objectGuid, MemoryStream output, HashSet<ExGuid> active, long maxBytes)
     {
         if (!_objects.TryGetValue(objectGuid, out var obj))
             throw new InvalidDataException($"Object reference {objectGuid} is unresolved.");
         if (!active.Add(objectGuid))
             throw new InvalidDataException($"Object graph contains a cycle at {objectGuid}.");
+        if (active.Count > 256) throw new InvalidDataException("Object graph nesting limit exceeded.");
+        if (obj.Node is not null && obj.Node.RepresentedDataSize > (ulong)maxBytes)
+            throw new GraphMaterializationLimitException(maxBytes);
 
         var before = output.Length;
         if (obj.ObjectReferences.Count == 0)
         {
+            if (obj.Content.LongLength > maxBytes - output.Length)
+                throw new GraphMaterializationLimitException(maxBytes);
             output.Write(obj.Content);
         }
         else
         {
             foreach (var reference in obj.ObjectReferences)
-                Visit(reference, output, active);
+                Visit(reference, output, active, maxBytes);
         }
 
         var materialized = checked((ulong)(output.Length - before));
@@ -375,3 +390,6 @@ public sealed class ObjectGroupGraph
         active.Remove(objectGuid);
     }
 }
+
+public sealed class GraphMaterializationLimitException(long limit)
+    : IOException($"Materialized graph exceeds the {limit}-byte limit.");

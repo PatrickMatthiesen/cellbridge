@@ -5,7 +5,7 @@ namespace CellBridge.FssHttpB;
 /// It follows the manifest and storage-index mappings before materializing the
 /// object graph selected by the revision manifest.
 /// </summary>
-public sealed class PartitionGraphSnapshot
+public sealed partial class PartitionGraphSnapshot
 {
     private readonly Dictionary<ExGuid, DataElement> _elements;
     private readonly ExGuid _storageIndex;
@@ -31,6 +31,35 @@ public sealed class PartitionGraphSnapshot
 
     /// <summary>The retained data elements, keyed by extended GUID.</summary>
     public IReadOnlyCollection<DataElement> Elements => _elements.Values.Select(Clone).ToArray();
+
+    public int ElementCount => _elements.Count;
+    public long PayloadBytes => _elements.Values.Sum(e => (long)(e.Data?.Length ?? 0));
+    public IReadOnlyDictionary<ExGuid, IReadOnlyList<SerialNumber>> MappingSerials => _elements.Values
+        .Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData)
+        .ToDictionary(e => Clone(e.DataElementExtendedGuid), e => StorageIndexMappingSerials.Read(e.Data ?? []));
+
+    /// <summary>Rejects serial reuse for a different mapping while permitting exact mapping repetition.</summary>
+    public void ValidateMappingSerials(IEnumerable<StorageIndexMapping> incoming)
+    {
+        var meanings = new Dictionary<SerialNumber, StorageIndexMapping>();
+        foreach (var mapping in incoming.Where(m => !m.Serial.IsNull))
+        {
+            if (meanings.TryGetValue(mapping.Serial, out var prior) && !prior.Equals(mapping))
+                throw new InvalidDataException("A storage-index mapping serial was reused for a different mapping.");
+            meanings[mapping.Serial] = mapping;
+        }
+        // Inspect private immutable buffers directly, without copying index history.
+        foreach (var element in _elements.Values.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData))
+            foreach (var mapping in StorageIndexMappingSerials.ReadMappings(element.Data ?? []))
+                if (!mapping.Serial.IsNull && meanings.TryGetValue(mapping.Serial, out var proposed) && !proposed.Equals(mapping))
+                    throw new InvalidDataException("A storage-index mapping serial was reused for a different mapping.");
+    }
+
+    /// <summary>Copies only selected payloads, leaving retained history untouched.</summary>
+    public IReadOnlyCollection<DataElement> SelectElements(Func<DataElement, bool> select) =>
+        _elements.Values.Where(e => select(new DataElement(e.DataElementType,
+            Clone(e.DataElementExtendedGuid), new SerialNumber(e.SerialNumber.Guid, e.SerialNumber.Value))))
+        .Select(Clone).ToArray();
 
     /// <summary>Detached identifiers and serials, without copying retained payload bytes.</summary>
     public IReadOnlyCollection<DataElement> ElementMetadata => _elements.Values.Select(e =>
@@ -100,7 +129,7 @@ public sealed class PartitionGraphSnapshot
     }
 
     /// <summary>Materializes the object graph selected by the manifest chain.</summary>
-    public byte[] Materialize()
+    public byte[] Materialize(long maxBytes = int.MaxValue)
     {
         if (RootObject is null)
             throw new InvalidDataException("The partition has no revision-manifest root object.");
@@ -109,7 +138,7 @@ public sealed class PartitionGraphSnapshot
         // selected revision's groups define the objects of this revision.
         var objectGraph = ObjectGroupGraph.FromDataElements(
             _objectGroups.Select(id => _elements[id]));
-        return objectGraph.Materialize(RootObject);
+        return objectGraph.Materialize(RootObject, maxBytes);
     }
 
     /// <summary>Checks the expected values for the keys updated by a Put Changes request.</summary>
@@ -165,7 +194,6 @@ public sealed class PartitionGraphSnapshot
 
         var manifestElement = RequireElement(elements, index.ManifestMapping.Guid,
             DataElementType.StorageManifestDataElementData, "storage manifest");
-        ValidateMappingSerial(index.ManifestMapping.SerialNumber, manifestElement, "storage manifest");
         var manifest = ParseStorageManifest(manifestElement);
         var cellMapping = index.CellMappings.SingleOrDefault(x => x.CellId.Equals(manifest.CellId));
         if (cellMapping is null)
@@ -173,7 +201,6 @@ public sealed class PartitionGraphSnapshot
 
         var cellElement = RequireElement(elements, cellMapping.Mapping.Guid,
             DataElementType.CellManifestDataElementData, "cell manifest");
-        ValidateMappingSerial(cellMapping.Mapping.SerialNumber, cellElement, "cell manifest");
         var currentRevision = ParseCellManifest(cellElement);
         var revisionMapping = index.RevisionMappings.SingleOrDefault(
             x => x.Revision.Equals(currentRevision));
@@ -182,7 +209,6 @@ public sealed class PartitionGraphSnapshot
 
         var revisionElement = RequireElement(elements, revisionMapping.Mapping.Guid,
             DataElementType.RevisionManifestDataElementData, "revision manifest");
-        ValidateMappingSerial(revisionMapping.Mapping.SerialNumber, revisionElement, "revision manifest");
         var revision = ParseRevisionManifest(revisionElement);
 
         if (!revision.RootExtendedGuid.Equals(manifest.RootExtendedGuid))
@@ -208,21 +234,6 @@ public sealed class PartitionGraphSnapshot
         if (element.DataElementType != type)
             throw new InvalidDataException($"Data element {id} is {element.DataElementType}, expected {type} for {description}.");
         return element;
-    }
-
-    private static void ValidateMappingSerial(
-        SerialNumber mappingSerial,
-        DataElement element,
-        string description)
-    {
-        // Captured SharePoint save requests have null outer DataElement serial
-        // numbers while their index mappings retain serial values. Generated
-        // responses carry both. Validate when both sides are available.
-        if (!mappingSerial.IsNull && !element.SerialNumber.IsNull &&
-            !mappingSerial.Equals(element.SerialNumber))
-        {
-            throw new InvalidDataException($"The {description} serial number does not match its storage-index mapping.");
-        }
     }
 
     private static StorageIndexInfo ParseStorageIndex(DataElement element)
@@ -263,6 +274,9 @@ public sealed class PartitionGraphSnapshot
             }
         }
 
+        if (cells.Select(c => c.CellId).Distinct().Count() != cells.Count ||
+            revisions.Select(r => r.Revision).Distinct().Count() != revisions.Count)
+            throw new InvalidDataException("A storage index contains duplicate cell or revision mappings.");
         return new StorageIndexInfo(manifest, cells, revisions);
     }
 

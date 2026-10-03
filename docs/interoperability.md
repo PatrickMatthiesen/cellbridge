@@ -9,6 +9,7 @@ page to choose the validation needed for a change.
 | Scenario | Coverage |
 | --- | --- |
 | Word remote open, two saves and fresh-process reopen | Verified on Windows with Word `16.0.20430`, using Tailscale HTTPS and PostgreSQL state/content on 2026-10-02. Both file-partition PutChanges responses and final downloaded content were verified. |
+| Word remote open, ten saves and fresh-process reopen | Verified on 2026-10-03 with Word `16.0.20430`, Tailscale HTTPS and PostgreSQL state/content. Ten accepted file-partition PutChanges responses matched the client's per-edit ETags. All 17 captured binary responses passed the independent Office Inspectors parser. Final server download matched the client's SHA-256 and contained all ten edit markers. |
 | Word and Excel captured save sequences | Automated HTTP replay, graph materialization, retry and download checks |
 | Excel remote saving | Demonstrated before the storage-provider migration; repeat desktop validation for the durable host before claiming current client coverage |
 | PowerPoint package creation and local open/save/reopen | Package validation; remote saving remains unverified |
@@ -48,7 +49,17 @@ lock waiting, and process termination before and after publication. Tests also
 check immutable content reads, quota and corruption failures. These process tests
 do not simulate hardware power loss or asynchronous PostgreSQL failover.
 
-On Windows, CI also runs the Office Inspectors adapter. PowerShell tests with
+Budget tests also cover cross-provider admission races, deduplicated charging,
+bounded metadata history and quiescent orphan collection. Query tests reconstruct
+a saved file from prior knowledge plus returned elements, check filtered knowledge
+and whole-cell rounding, and round-trip server knowledge through the independent
+Microsoft client over HTTP. These checks do not establish Office recovery after
+graph eviction; the host does not evict protocol graph or receipt identities.
+
+CI runs the in-repo Office Inspectors parser on Linux and Windows. Its grammar is
+separate from the server serializer, and the suite checks reviewed SharePoint
+fixtures and generated responses without an external checkout. See
+[the parser guide](office-inspectors.md). PowerShell tests with
 managed Word stand-ins check wrapper behavior, ownership and cleanup logic only.
 Actual Word COM calls require the interactive Windows desktop test.
 

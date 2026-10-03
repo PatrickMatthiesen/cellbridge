@@ -4,12 +4,22 @@ using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
 
-/// <summary>Immutable, deduplicated content in bounded database chunks. No content reclamation.</summary>
-public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long maxObjectBytes = 512L * 1024 * 1024) : IContentStore
+/// <summary>Immutable, deduplicated content in bounded database chunks; reclamation is quiescent.</summary>
+public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long maxObjectBytes = 512L * 1024 * 1024) : IContentStore, IStorageBudgetParticipant
 {
+    public object BudgetScope => dataSource;
+    private readonly SemaphoreSlim _writers = new(4);
     public bool Durable => true;
     public bool Shared => true;
     public async ValueTask<ContentHandle> WriteAsync(Stream source, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxObjectBytes);
+        await _writers.WaitAsync(cancellationToken);
+        try { return await WriteCoreAsync(source, cancellationToken); }
+        finally { _writers.Release(); }
+    }
+
+    private async ValueTask<ContentHandle> WriteCoreAsync(Stream source, CancellationToken cancellationToken)
     {
         var temporary = Path.Combine(Path.GetTempPath(), "cellbridge-" + Guid.NewGuid().ToString("N"));
         await using var spool = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
@@ -21,7 +31,7 @@ public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long max
         while ((read = await source.ReadAsync(buffer, cancellationToken)) != 0)
         {
             length = checked(length + read);
-            if (length > maxObjectBytes) throw new InvalidDataException("Content exceeds the configured storage object limit.");
+            StorageLimits.Check("object bytes", length, maxObjectBytes);
             hash.AppendData(buffer.AsSpan(0, read));
             await spool.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
         }
@@ -35,6 +45,7 @@ public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long max
         insert.Parameters.Add(new NpgsqlParameter { Value = length });
         if (await insert.ExecuteNonQueryAsync(cancellationToken) != 0)
         {
+            await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, length, 0, cancellationToken);
             spool.Position = 0;
             int ordinal = 0;
             while ((read = await spool.ReadAsync(buffer, cancellationToken)) != 0)

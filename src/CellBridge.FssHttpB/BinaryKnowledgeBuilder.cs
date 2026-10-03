@@ -12,17 +12,20 @@ public static class BinaryKnowledgeBuilder
     /// Null serials are omitted; ranges contain serial values, not element counts.
     /// </summary>
     public static byte[] FromElements(IEnumerable<DataElement> elements, ExGuid cellStorageId,
-        ulong waterline, byte[]? versionToken = null)
+        ulong waterline, byte[]? versionToken = null, IEnumerable<SerialNumber>? mappingSerials = null)
     {
         ArgumentNullException.ThrowIfNull(elements);
         ArgumentNullException.ThrowIfNull(cellStorageId);
 
-        var ranges = elements
-            .Where(element => element is not null && !element.SerialNumber.IsNull)
-            .GroupBy(element => element.SerialNumber.Guid)
+        var metadata = elements.ToArray();
+        var serials = metadata.Select(e => e.SerialNumber).Concat(mappingSerials ??
+            metadata.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData && e.Data is not null)
+                .SelectMany(e => StorageIndexMappingSerials.Read(e.Data!)));
+        var ranges = serials.Where(serial => !serial.IsNull)
+            .GroupBy(serial => serial.Guid)
             .Select(group =>
             {
-                var values = group.Select(element => element.SerialNumber.Value).Distinct().OrderBy(value => value).ToArray();
+                var values = group.Select(serial => serial.Value).Distinct().OrderBy(value => value).ToArray();
                 var runs = new List<(Guid Guid, ulong From, ulong To)>();
                 ulong from = values[0];
                 ulong previous = from;

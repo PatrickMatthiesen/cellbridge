@@ -3,10 +3,16 @@
 #:sdk Aspire.AppHost.Sdk@17.0.0-preview.1.26479.11
 #:property AspireUseCliBundle=true
 
+using Microsoft.Extensions.Configuration;
+
 var builder = DistributedApplication.CreateBuilder(args);
 
 // Automated runs get a disposable database, never the developer's document volume.
 var testRun = Environment.GetEnvironmentVariable("CELLBRIDGE_TEST_RUN") == "1";
+// Keep desktop capture configuration across shell exits and machine restarts.
+// Disposable automated runs must not inherit the developer's capture directory.
+if (!testRun)
+    builder.Configuration.AddJsonFile(Path.Combine(builder.AppHostDirectory, "apphost.settings.json"), optional: true);
 var postgres = builder.AddPostgres("storage");
 if (!testRun) postgres.WithDataVolume("cellbridge-storage-data");
 var database = postgres.AddDatabase("cellbridge");
@@ -25,7 +31,8 @@ var web = builder.AddCSharpApp("web", "../src/CellBridge.Web/CellBridge.Web.cspr
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
 
-var wireCapture = Environment.GetEnvironmentVariable("CELLBRIDGE_WIRE_CAPTURE");
+var wireCapture = Environment.GetEnvironmentVariable("CELLBRIDGE_WIRE_CAPTURE")
+    ?? builder.Configuration["Protocol:CaptureDirectory"];
 if (!string.IsNullOrWhiteSpace(wireCapture))
     web.WithEnvironment("Protocol__CaptureDirectory", Path.GetFullPath(wireCapture));
 

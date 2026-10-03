@@ -33,6 +33,28 @@ public sealed class QueryChangesTests
 public sealed class LiveQueryChangesTests
 {
     [LiveInteropFact]
+    public async Task FileKnowledgeProducedAndConsumedByMicrosoftClientReturnsNoKnownPayloads()
+    {
+        var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
+        using var http = new HttpClient();
+        var client = new CellStorageClient(http, endpoint);
+        var first = await client.SendCellAsync("/shared/test.docx", InteropRequestFactory.QueryChanges(1),
+            partitionId: null, getFileProps: true);
+        Assert.Equal(System.Net.HttpStatusCode.OK, first.StatusCode);
+        var response = first.ParseBinaryResponse();
+        Assert.NotEmpty(response.DataElementPackage.DataElements);
+        var data = Assert.IsType<QueryChangesSubResponseData>(response.CellSubResponses[0].SubResponseData);
+        var request = InteropRequestFactory.QueryChanges(2);
+        Assert.IsType<QueryChangesCellSubRequest>(request.SubRequests[0]).Knowledge = data.Knowledge;
+        var known = await client.SendCellAsync("/shared/test.docx", request, partitionId: null, getFileProps: true);
+        Assert.Equal(System.Net.HttpStatusCode.OK, known.StatusCode);
+        var parsed = known.ParseBinaryResponse();
+        Assert.False(parsed.Status);
+        Assert.Single(parsed.CellSubResponses);
+        Assert.Empty(parsed.DataElementPackage.DataElements);
+    }
+
+    [LiveInteropFact]
     public async Task QueryAccessAndQueryChanges_UseIndependentSoapMtomClient()
     {
         var endpointText = Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT");

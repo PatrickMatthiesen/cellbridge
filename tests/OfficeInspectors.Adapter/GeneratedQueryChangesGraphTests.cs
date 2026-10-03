@@ -1,11 +1,10 @@
-#if OFFICE_INSPECTORS
 using CellBridge.FssHttpB;
 
 namespace OfficeInspectors.Adapter;
 
 public sealed class GeneratedQueryChangesGraphTests
 {
-    [OfficeInspectorsFact]
+    [Fact]
     public void GeneratedFileGraphIsConsumedByOfficeInspectorsParser()
     {
         var response = StorageManifestBuilder.BuildQueryChangesResponse(
@@ -15,7 +14,6 @@ public sealed class GeneratedQueryChangesGraphTests
         var result = OfficeInspectorsAdapter.ParseResponse(
             response.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11));
 
-        Assert.True(result.Available);
         Assert.True(result.Parsed, result.Error ?? result.Summary);
         Assert.Contains("StorageManifestDataElement", result.Summary);
         Assert.Contains("CellManifestDataElement", result.Summary);
@@ -24,4 +22,3 @@ public sealed class GeneratedQueryChangesGraphTests
         Assert.Contains("StorageIndexDataElement", result.Summary);
     }
 }
-#endif

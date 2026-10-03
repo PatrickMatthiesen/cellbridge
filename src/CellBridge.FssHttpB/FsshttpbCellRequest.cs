@@ -109,8 +109,9 @@ public sealed class FsshttpbCellRequest
     /// object's declared length is its fixed preamble; child stream objects
     /// follow the preamble and terminate with the matching end header.
     /// </summary>
-    private static void SkipObject(BinaryReaderEx reader, StreamObjectHeaderStart start)
+    private static void SkipObject(BinaryReaderEx reader, StreamObjectHeaderStart start, int depth = 0)
     {
+        if (depth > 32) throw new InvalidDataException("Binary object nesting limit exceeded.");
         reader.Skip(start.Length);
         if (start.Compound != 1)
         {
@@ -120,7 +121,7 @@ public sealed class FsshttpbCellRequest
         StreamObjectTypeHeaderEnd expectedEnd = (StreamObjectTypeHeaderEnd)(int)start.Type;
         while (!IsHeaderEnd(reader))
         {
-            SkipObject(reader, StreamObjectHeaderStart.Parse(reader));
+            SkipObject(reader, StreamObjectHeaderStart.Parse(reader), depth + 1);
         }
 
         var end = StreamObjectHeaderEnd.Parse(reader);
@@ -229,6 +230,7 @@ public sealed class FsshttpbCellRequest
             var header = StreamObjectHeaderStart.Parse(reader);
             if (header.Type == StreamObjectTypeHeaderStart.SubRequest)
             {
+                if (request.SubRequests.Count >= 1024) throw new InvalidDataException("Binary subrequest limit exceeded.");
                 request.SubRequests.Add(FsshttpbCellSubRequest.Deserialize(reader, header));
             }
             else if (header.Type == StreamObjectTypeHeaderStart.DataElementPackage)
@@ -394,8 +396,9 @@ public sealed class FsshttpbCellSubRequest
         return discriminator is 0x1 or 0x3;
     }
 
-    private static void SkipObject(BinaryReaderEx reader, StreamObjectHeaderStart start)
+    private static void SkipObject(BinaryReaderEx reader, StreamObjectHeaderStart start, int depth = 0)
     {
+        if (depth > 32) throw new InvalidDataException("Binary object nesting limit exceeded.");
         reader.Skip(start.Length);
         if (start.Compound != 1)
         {
@@ -405,7 +408,7 @@ public sealed class FsshttpbCellSubRequest
         StreamObjectTypeHeaderEnd expectedEnd = (StreamObjectTypeHeaderEnd)(int)start.Type;
         while (!IsHeaderEnd(reader))
         {
-            SkipObject(reader, StreamObjectHeaderStart.Parse(reader));
+            SkipObject(reader, StreamObjectHeaderStart.Parse(reader), depth + 1);
         }
 
         var end = StreamObjectHeaderEnd.Parse(reader);
@@ -444,6 +447,10 @@ public sealed class QueryAccessSubRequestData : ISubRequestData
 /// </summary>
 public sealed class QueryChangesSubRequestData : ISubRequestData
 {
+    public ClientKnowledge? Knowledge { get; set; }
+    public bool IncludeFilteredOutDataElementsInKnowledge { get; set; }
+    public bool RoundKnowledgeToWholeCellChanges { get; set; }
+    public bool HasUnsupportedQueryControls { get; private set; }
     /// <summary>Whether the response should include the storage manifest.</summary>
     public bool IncludeStorageManifest { get; set; }
 
@@ -465,14 +472,18 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
     /// <summary>Optional maximum serialized data-element size in bytes.</summary>
     public ulong? MaxDataElements { get; set; }
 
-    /// <summary>Optional versioning header + waterline.</summary>
+    /// <summary>Legacy field. Query versioning and waterline-only queries are not supported.</summary>
     public ulong? Waterline { get; set; }
 
     /// <summary>Serializes the payload to the writer.</summary>
     public void Serialize(BinaryWriterEx writer)
     {
+        if (Waterline is not null)
+            throw new NotSupportedException("A waterline is knowledge, not a Query Changes version token.");
         // Flags are payload bytes, not the stream object's declared length.
-        int requestFlags = (AllowFragments ? 0x02 : 0) | (ReturnFileHash ? 0x40 : 0);
+        int requestFlags = (AllowFragments ? 0x02 : 0) | (ReturnFileHash ? 0x40 : 0)
+            | (IncludeFilteredOutDataElementsInKnowledge ? 0x08 : 0)
+            | (RoundKnowledgeToWholeCellChanges ? 0x20 : 0);
         new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.QueryChangesRequest, 1).Serialize(writer);
         writer.WriteByte((byte)requestFlags);
 
@@ -487,13 +498,6 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
             writer.WriteBytes(payload.ToArray());
         }
 
-        if (CellId is not null)
-        {
-            var cellIdHeader = new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.QueryChangesFilterCellID, 0);
-            cellIdHeader.Serialize(writer);
-            CellId.Serialize(writer);
-        }
-
         if (MaxDataElements is not null)
         {
             var constraint = new BinaryWriterEx();
@@ -503,13 +507,7 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
             writer.WriteBytes(constraint.ToArray());
         }
 
-        if (Waterline is not null)
-        {
-            var versioningHeader = new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.QueryChangesVersioning, 0);
-            versioningHeader.Serialize(writer);
-            new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.WaterlineKnowledge, 0).Serialize(writer);
-            new Compact64bitInt(Waterline.Value).Serialize(writer);
-        }
+        Knowledge?.Serialize(writer);
     }
 
     /// <summary>Deserializes the QueryChanges header and its optional request objects.</summary>
@@ -527,12 +525,30 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
         int requestFlags = requestPayload.Length > 0 ? requestPayload[0] : 0;
         data.AllowFragments = (requestFlags & 0x02) != 0 || (requestFlags & 0x10) != 0;
         data.ReturnFileHash = (requestFlags & 0x40) != 0;
+        data.IncludeFilteredOutDataElementsInKnowledge = (requestFlags & 0x08) != 0;
+        data.RoundKnowledgeToWholeCellChanges = (requestFlags & 0x20) != 0;
 
+        bool precedingUnsupportedFilter = false;
         while (!IsHeaderEnd(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
+            if (header.Type != StreamObjectTypeHeaderStart.QueryChangesFilterFlags)
+                precedingUnsupportedFilter = false;
             switch (header.Type)
             {
+                case StreamObjectTypeHeaderStart.QueryChangesFilter:
+                    // Returning the full set is the required fallback for unsupported
+                    // filters unless the following flags request failure.
+                    SkipObject(reader, header);
+                    precedingUnsupportedFilter = true;
+                    break;
+
+                case StreamObjectTypeHeaderStart.QueryChangesFilterFlags:
+                    if (!precedingUnsupportedFilter || header.Length != 1)
+                        throw new InvalidDataException("Invalid Query Changes filter flags.");
+                    if ((reader.ReadByte() & 1) != 0) data.HasUnsupportedQueryControls = true;
+                    precedingUnsupportedFilter = false;
+                    break;
                 case StreamObjectTypeHeaderStart.QueryChangesRequestArguments:
                 {
                     byte[] argumentsPayload = reader.ReadBytes(header.Length);
@@ -562,14 +578,18 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
                 }
 
                 case StreamObjectTypeHeaderStart.QueryChangesVersioning:
+                    data.HasUnsupportedQueryControls = true;
                     SkipObject(reader, header);
                     break;
 
                 case StreamObjectTypeHeaderStart.Knowledge:
-                    SkipObject(reader, header);
+                    if (data.Knowledge is not null) throw new InvalidDataException("Duplicate client knowledge.");
+                    reader.Position -= header.HeaderSize;
+                    data.Knowledge = ClientKnowledge.Deserialize(reader);
                     break;
 
                 default:
+                    data.HasUnsupportedQueryControls = true;
                     SkipObject(reader, header);
                     break;
             }
@@ -586,8 +606,9 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
         return discriminator is 0x1 or 0x3;
     }
 
-    private static void SkipObject(BinaryReaderEx reader, StreamObjectHeaderStart start)
+    private static void SkipObject(BinaryReaderEx reader, StreamObjectHeaderStart start, int depth = 0)
     {
+        if (depth > 32) throw new InvalidDataException("Binary object nesting limit exceeded.");
         reader.Skip(start.Length);
         if (start.Compound != 1)
         {
@@ -597,7 +618,7 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
         StreamObjectTypeHeaderEnd expectedEnd = (StreamObjectTypeHeaderEnd)(int)start.Type;
         while (!IsHeaderEnd(reader))
         {
-            SkipObject(reader, StreamObjectHeaderStart.Parse(reader));
+            SkipObject(reader, StreamObjectHeaderStart.Parse(reader), depth + 1);
         }
 
         var end = StreamObjectHeaderEnd.Parse(reader);

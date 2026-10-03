@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
+using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Web;
 
@@ -8,7 +9,7 @@ namespace CellBridge.Web;
 public static class FilePartitionSaveHandler
 {
     public static FsshttpbSubResponse Apply(StoredDocument document, DocumentPartition partition,
-        FsshttpbCellSubRequest subRequest, DataElementPackage? package)
+        FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null)
     {
         if (partition.Kind != DocumentPartitionKind.FileContents ||
             subRequest.Data is not PutChangesSubRequestData put || package is null)
@@ -33,26 +34,47 @@ public static class FilePartitionSaveHandler
                     return Failure(subRequest.RequestId, CellErrorCode.CoherencyFailure,
                         "The expected storage index is no longer current.");
                 var existing = current.ElementMetadata.ToDictionary(x => x.DataElementExtendedGuid);
+                limits ??= new StorageLimits();
+                var additions = package.DataElements.Where(e => !existing.ContainsKey(e.DataElementExtendedGuid))
+                    .DistinctBy(e => e.DataElementExtendedGuid).ToArray();
+                StorageLimits.Check("graph elements", existing.Count + (long)additions.Length, limits.MaxGraphElements);
+                StorageLimits.Check("graph bytes", current.PayloadBytes + additions.Sum(e => (long)(e.Data?.Length ?? 0)), limits.MaxGraphBytes);
                 foreach (var element in package.DataElements)
                     if (current.ConflictsWith(element))
                         return Failure(subRequest.RequestId, CellErrorCode.InvalidObject,
                             "A data element identifier was reused for different content.");
                 ulong sequence = partition.KnowledgeSequence;
-                var serialHints = ReadMappingSerials(package.DataElements);
+                var serialGuid = partition.ProtocolIdentity.SerialGuid;
+                var incomingMappings = package.DataElements.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData)
+                    .SelectMany(e => StorageIndexMappingSerials.ReadMappings(e.Data ?? [])).ToArray();
+                current.ValidateMappingSerials(incomingMappings);
+                // Mapping serials identify mappings, independently of target DE serials.
+                // Never recycle a server serial after a restore or a client upload.
+                foreach (var serial in current.ElementMetadata.Select(e => e.SerialNumber)
+                    .Concat(package.DataElements.Select(e => e.SerialNumber))
+                    .Concat(current.MappingSerials.Values.SelectMany(s => s))
+                    .Concat(incomingMappings.Select(m => m.Serial)))
+                    if (serial.Guid == serialGuid) sequence = Math.Max(sequence, serial.Value);
+                var assigned = new Dictionary<ExGuid, SerialNumber>();
                 var accepted = package.DataElements.Select(element =>
                 {
-                    var serial = existing.TryGetValue(element.DataElementExtendedGuid, out var stored)
-                        ? stored.SerialNumber
-                        : element.SerialNumber.IsNull
-                            ? serialHints.GetValueOrDefault(element.DataElementExtendedGuid)
-                              ?? new SerialNumber(partition.ProtocolIdentity.SerialGuid, checked(++sequence))
-                            : element.SerialNumber;
+                    if (!assigned.TryGetValue(element.DataElementExtendedGuid, out var serial))
+                    {
+                        serial = existing.TryGetValue(element.DataElementExtendedGuid, out var stored)
+                            ? stored.SerialNumber : new SerialNumber(serialGuid, checked(++sequence));
+                        assigned.Add(element.DataElementExtendedGuid, serial);
+                    }
                     return new DataElement(element.DataElementType, element.DataElementExtendedGuid, serial) { Data = element.Data };
                 }).ToArray();
                 if (!repeat && sequence == partition.KnowledgeSequence) sequence = checked(sequence + 1);
                 var next = current.Merge(accepted, put.StorageIndex);
-                var bytes = next.Materialize();
-                ValidateDocument(bytes, document.Url);
+                StorageLimits.Check("graph elements", next.ElementCount, limits.MaxGraphElements);
+                StorageLimits.Check("graph bytes", next.PayloadBytes, limits.MaxGraphBytes);
+                byte[] bytes;
+                try { bytes = next.Materialize(limits.MaxDocumentBytes); }
+                catch (GraphMaterializationLimitException)
+                { throw new StorageQuotaExceededException("document bytes", limits.MaxDocumentBytes + 1, limits.MaxDocumentBytes); }
+                ValidateDocument(bytes, document.Url, limits.MaxDocumentBytes);
 
                 // Prepare the response before changing visible document state.
                 var knowledge = CreateQueryData(partition, next, sequence);
@@ -92,10 +114,11 @@ public static class FilePartitionSaveHandler
         WaterlineCellStorageExtendedGuid = partition.ProtocolIdentity.CellId.ShortId,
         Waterline = sequence,
         KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(graph.ElementMetadata,
-            partition.ProtocolIdentity.CellId.ShortId, sequence),
+            partition.ProtocolIdentity.CellId.ShortId, sequence,
+            mappingSerials: graph.MappingSerials.Values.SelectMany(s => s)),
     };
 
-    private static void ValidateDocument(byte[] content, string documentUrl)
+    private static void ValidateDocument(byte[] content, string documentUrl, long maxExpandedBytes)
     {
         using var archive = new ZipArchive(new MemoryStream(content), ZipArchiveMode.Read);
         var mainPart = Path.GetExtension(documentUrl).ToLowerInvariant() switch
@@ -108,38 +131,20 @@ public static class FilePartitionSaveHandler
         if (archive.GetEntry("[Content_Types].xml") is null || archive.GetEntry(mainPart) is null)
             throw new InvalidDataException("The proposed package does not match the document's file type.");
         // Read all parts before committing so truncated ZIP members cannot become stored content.
+        long expanded = 0;
+        var buffer = new byte[65536];
         foreach (var entry in archive.Entries)
         {
+            if (entry.Length > maxExpandedBytes - expanded)
+                throw new StorageQuotaExceededException("expanded package bytes", checked(expanded + entry.Length), maxExpandedBytes);
             using var stream = entry.Open();
-            stream.CopyTo(Stream.Null);
-        }
-    }
-
-    private static Dictionary<ExGuid, SerialNumber> ReadMappingSerials(IEnumerable<DataElement> elements)
-    {
-        var result = new Dictionary<ExGuid, SerialNumber>();
-        foreach (var element in elements.Where(x => x.DataElementType == DataElementType.StorageIndexDataElementData))
-        {
-            var reader = new BinaryReaderEx(element.Data ?? []);
-            while (reader.Remaining > 0)
+            int read;
+            while ((read = stream.Read(buffer)) != 0)
             {
-                var header = StreamObjectHeaderStart.Parse(reader);
-                var payload = new BinaryReaderEx(reader.ReadBytes(header.Length));
-                if (header.Type == StreamObjectTypeHeaderStart.StorageIndexCellMapping) CellId.Deserialize(payload);
-                else if (header.Type == StreamObjectTypeHeaderStart.StorageIndexRevisionMapping) ExGuid.Deserialize(payload);
-                else if (header.Type != StreamObjectTypeHeaderStart.StorageIndexManifestMapping) continue;
-                if (payload.Remaining == 0) continue;
-                var id = ExGuid.Deserialize(payload);
-                var serial = SerialNumber.Deserialize(payload);
-                if (!id.IsNull && !serial.IsNull)
-                {
-                    if (result.TryGetValue(id, out var previous) && !previous.Equals(serial))
-                        throw new InvalidDataException("Storage indices disagree on a referenced data element's serial number.");
-                    result[id] = serial;
-                }
+                expanded = checked(expanded + read);
+                StorageLimits.Check("expanded package bytes", expanded, maxExpandedBytes);
             }
         }
-        return result;
     }
 
     private static byte[] SerialReassignments(IEnumerable<DataElement> elements)

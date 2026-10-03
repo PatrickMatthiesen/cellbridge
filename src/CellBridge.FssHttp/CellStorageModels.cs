@@ -103,7 +103,18 @@ public sealed class FssHttpSubRequest
     public string? SubRequestDataXml { get; set; }
 
     /// <summary>Binary content referenced by an xop:Include element.</summary>
-    public byte[]? SubRequestDataBinary { get; set; }
+    private ReadOnlyMemory<byte>? _binary;
+    private byte[]? _binaryArray;
+    public ReadOnlyMemory<byte>? SubRequestDataBinaryMemory
+    {
+        get => _binaryArray is null ? _binary : _binaryArray.AsMemory();
+        set { _binary = value; _binaryArray = null; }
+    }
+    public byte[]? SubRequestDataBinary
+    {
+        get => _binaryArray ??= _binary?.ToArray();
+        set { _binaryArray = value; _binary = value; }
+    }
 
     /// <summary>SubRequestData attributes (e.g. CoauthID, ExclusiveLockID, BinaryDataSize).</summary>
     public Dictionary<string, string> SubRequestDataAttributes { get; } = new(StringComparer.Ordinal);
