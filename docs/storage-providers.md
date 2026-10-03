@@ -56,8 +56,10 @@ when it already exceeds a limit. Older binaries cannot write a version 3 databas
 
 Environment variables use double underscores, for example
 `Storage__ContentProvider=FileSystem`. To exercise two independent hosts, start
-Aspire with `CELLBRIDGE_RUN_TWO_INSTANCES=1`. The peer uses ports 5182 and 7293;
-the usual host uses 5181 and 7292. Both use the same migrated database.
+Aspire with `AppHost__PeerEnabled=true`, then explicitly start the peer with
+`aspire resource web-peer start --apphost aspire/apphost.cs --non-interactive`.
+Both hosts use the same migrated database. Aspire assigns peer ports; discover
+current endpoints with `aspire describe` rather than assuming fixed ports.
 
 Local directories on different machines cannot provide shared content. Do not
 set `SharedContent` to bypass that restriction. PostgreSQL state with filesystem

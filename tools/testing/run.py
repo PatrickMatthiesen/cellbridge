@@ -76,14 +76,14 @@ def main():
         parser.error("Choose a new output directory; this one already contains a run.")
     env = os.environ.copy()
     # Do not inherit external storage or live-test endpoints into an isolated run.
-    for key in ("ConnectionStrings__cellbridge", "OFFICECOLLABSERVER_INTEROP_ENDPOINT", "OFFICECOLLABSERVER_INTEROP_PEER",
-                "CELLBRIDGE_RUN_STORAGE_TESTS", "CELLBRIDGE_WIRE_CAPTURE", "CELLBRIDGE_PUBLIC_ORIGIN",
-                "CELLBRIDGE_STORAGE_VOLUME", "CELLBRIDGE_IMPORT_OWNER", "CELLBRIDGE_LEGACY_OWNER",
-                "CELLBRIDGE_INTEROP_COOKIE", "CELLBRIDGE_INTEROP_CSRF"):
+    for key in list(env):
+        if key.lower().startswith(("parameters__", "apphost__", "testing__", "cellbridge_")):
+            env.pop(key)
+    for key in ("ConnectionStrings__cellbridge", "OFFICECOLLABSERVER_INTEROP_ENDPOINT", "OFFICECOLLABSERVER_INTEROP_PEER"):
         env.pop(key, None)
-    env.update(CELLBRIDGE_TEST_RUN="1", CELLBRIDGE_RUN_TWO_INSTANCES="1",
-               CELLBRIDGE_TEST_PASSWORD=secrets.token_urlsafe(24) + "Aa1!",
-               CELLBRIDGE_WIRE_CAPTURE=str(output / "wire"))
+    password = secrets.token_urlsafe(24) + "Aa1!"
+    env.update(Testing__Enabled="true", Parameters__TestPassword=password,
+               Parameters__WireCaptureDirectory=str(output / "wire"))
     summary = {"startedUtc": stamp, "platform": platform.platform(), "processors": os.cpu_count(),
                "scope": "Protocol replay and synthetic HTTP/storage checks, not desktop Office", "checks": [], "passed": False}
     start_attempted = False
@@ -104,6 +104,9 @@ def main():
         run("demo-build", ["dotnet", "build", "demo/CellBridge.Demo.slnx", "-c", "Release", "--nologo", "-v", "minimal"])
         start_attempted = True
         run("aspire-start", ["aspire", "start", "--apphost", str(APPHOST), "--isolated", "--non-interactive"], 600)
+        for resource in ("test-account", "web-peer"):
+            run(f"start-{resource}", ["aspire", "resource", resource, "start", "--apphost", str(APPHOST),
+                "--non-interactive"], 180)
         for resource in ("web", "web-peer", "demo"):
             run(f"ready-{resource}", ["aspire", "wait", resource, "--apphost", str(APPHOST), "--non-interactive"], 180)
         description = cli_json(["aspire", "describe", "--apphost", str(APPHOST), "--non-interactive", "--format", "Json"])
@@ -115,7 +118,7 @@ def main():
         env["OFFICECOLLABSERVER_INTEROP_ENDPOINT"] = web_origin.rstrip("/") + "/_vti_bin/cellstorage.svc"
         env["OFFICECOLLABSERVER_INTEROP_PEER"] = peer_origin.rstrip("/") + "/_vti_bin/cellstorage.svc"
         env["CELLBRIDGE_INTEROP_COOKIE"], env["CELLBRIDGE_INTEROP_CSRF"] = login(
-            web_origin, "integration-writer", env["CELLBRIDGE_TEST_PASSWORD"])
+            web_origin, "integration-writer", password)
         projects = ["CellBridge.FssHttpB.Tests", "CellBridge.FssHttp.Tests", "CellBridge.Storage.Tests",
                     "CellBridge.Interop.Tests", "OfficeInspectors.Adapter"]
         for project in projects:

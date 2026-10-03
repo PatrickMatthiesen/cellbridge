@@ -20,7 +20,8 @@ stop and validate it as described in [the capture guide](capture-kit.md) first.
 The runner refuses to interrupt an already running app.
 
 The runner builds Release binaries, starts Aspire with a disposable PostgreSQL
-container, waits for `web`, `web-peer` and `demo`, and runs:
+container, explicitly starts the .NET test-account seed job and peer host, waits
+for `web`, `web-peer` and `demo`, and runs:
 
 - Binary and SOAP unit tests.
 - Provider tests against real PostgreSQL, including process termination before
@@ -41,6 +42,37 @@ Aspire stopped. It builds the minimal NuGet consumer example and runs the
 [package consumption tests](../tests/CellBridge.Packages.Tests/README.md) against
 a fresh local package feed/cache. The example contains application setup;
 test-server, SOAP probes and provider conformance checks live in the test project.
+
+## AppHost configuration
+
+AppHost inputs use standard configuration. Values under `Parameters` appear as
+Aspire parameter resources; environment overrides use names such as
+`Parameters__PublicOrigin`. An ignored `aspire/apphost.settings.json` can keep
+non-secret local values between runs. Environment values override that file.
+Store secrets through Aspire's secret configuration rather than in the file.
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `StorageVolume` | `cellbridge-storage-data` | Durable development database volume; omitted in disposable test mode |
+| `PublicOrigin` | `https://localhost:7292` | HTTPS origin reachable by Office and browsers |
+| `WireCaptureDirectory` | Empty | Optional absolute server capture directory |
+| `LegacyOwner` | Empty | One-time ownership assignment when migrating anonymous documents |
+| `ImportOwner` | Empty | Owner of sample startup imports; authenticated creation needs no configured owner |
+| `TestPassword` | Required in test mode | Secret password supplied to the explicitly started .NET seed resource |
+
+`Testing__Enabled=true` selects the disposable test model: no durable volume or
+SharePoint capture resource, and imports belong to the seeded integration user.
+The runner supplies a temporary secret and starts its required resources.
+`AppHost__PeerEnabled=true` adds an explicitly started second host in ordinary
+development. `Testing__RunStorageTests=true` adds an explicitly started storage
+test command. These model choices use configuration rather than parameter
+resources because they determine which resources exist. The SharePoint capture
+proxy is declared in ordinary development and starts only when requested; see
+[capture instructions](capture-kit.md).
+
+Earlier `CELLBRIDGE_*` AppHost switches and parameter names are replaced by the
+configuration above. Update local launch scripts before restarting. Disposable
+runs clear inherited AppHost settings and ignore the local settings file.
 
 ## Performance measurements
 
@@ -148,15 +180,14 @@ Use the machine's full `*.ts.net` DNS name, for example
 `dev-machine.example.ts.net`. Choose a free HTTPS port. Start Aspire with that
 public origin and server wire capture enabled. A separate persistent volume
 keeps this authentication trial independent of other checkouts. Do not set
-`CELLBRIDGE_TEST_RUN=1` for a laptop session.
+`Testing__Enabled=true` for a laptop session.
 Choose a different volume name for each concurrent trial. Aspire's `--isolated`
 randomizes ports but does not separate explicitly named Docker volumes.
 
 ```sh
-export CELLBRIDGE_PUBLIC_ORIGIN='https://dev-machine.example.ts.net:8444'
-export CELLBRIDGE_STORAGE_VOLUME=cellbridge-ofba-storage-data
-export CELLBRIDGE_WIRE_CAPTURE="$PWD/artifacts/office-wire"
-export CELLBRIDGE_SKIP_SHAREPOINT_CAPTURE=1
+export Parameters__PublicOrigin='https://dev-machine.example.ts.net:8444'
+export Parameters__StorageVolume=cellbridge-ofba-storage-data
+export Parameters__WireCaptureDirectory="$PWD/artifacts/office-wire"
 aspire start --isolated --apphost aspire/apphost.cs --non-interactive
 python3 tools/testing/tailscale.py --https-port 8444
 tailscale serve status
@@ -168,13 +199,13 @@ absolute directory on the dev machine:
 
 ```json
 {
-  "Protocol": {
-    "CaptureDirectory": "/absolute/path/to/CellBridge/artifacts/office-wire"
+  "Parameters": {
+    "WireCaptureDirectory": "/absolute/path/to/CellBridge/artifacts/office-wire"
   }
 }
 ```
 
-`CELLBRIDGE_WIRE_CAPTURE` overrides this setting. Disposable automated runs ignore
+`Parameters__WireCaptureDirectory` overrides this setting. Disposable automated runs ignore
 the local file. Restart Aspire after changing capture configuration, then check
 that a SOAP request produces request, response and summary files before starting
 the desktop test. Remove the setting when the capture session is finished.

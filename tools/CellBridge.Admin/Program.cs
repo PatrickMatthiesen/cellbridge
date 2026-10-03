@@ -9,7 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
 using Npgsql;
 
-if (args.Length == 0) throw new ArgumentException("Commands: create-user, set-user, grant, set-owner. Pass options as --name value. Passwords are read from stdin.");
+if (args.Length == 0) throw new ArgumentException("Commands: create-user, set-user, grant, set-owner, seed-test-user. Pass options as --name value. Operator passwords are read from stdin.");
 var commandName = args[0];
 var values = new Dictionary<string, string>(StringComparer.Ordinal);
 for (int i = 1; i < args.Length; i += 2)
@@ -19,6 +19,8 @@ for (int i = 1; i < args.Length; i += 2)
 }
 string Required(string key) => values.GetValueOrDefault(key) ?? throw new ArgumentException("Missing --" + key);
 var builder = Host.CreateApplicationBuilder();
+if (commandName == "seed-test-user" && !builder.Environment.IsEnvironment("Testing"))
+    throw new InvalidOperationException("Test account seeding requires the Testing environment.");
 var connectionString = builder.Configuration.GetConnectionString("cellbridge")
     ?? throw new InvalidOperationException("Set ConnectionStrings__cellbridge using operator database credentials.");
 await AuthenticationDatabase.CheckSchemaAsync(connectionString);
@@ -33,7 +35,25 @@ void Check(IdentityResult result)
     if (!result.Succeeded) throw new InvalidOperationException(string.Join("; ", result.Errors.Select(e => e.Description)));
 }
 
-if (commandName == "create-user")
+if (commandName == "seed-test-user")
+{
+    // Aspire supplies a secret parameter to this explicitly started test resource.
+    // Operator create-user continues to accept its password only through stdin.
+    var password = builder.Configuration["Seed:Password"]
+        ?? throw new InvalidOperationException("Test account seeding requires Seed:Password.");
+    var user = await users.FindByIdAsync("integration-writer");
+    if (user is null)
+    {
+        user = new() { Id = "integration-writer", UserName = "integration-writer",
+            DisplayName = "Integration writer", CanCreate = true };
+        Check(await users.CreateAsync(user, password));
+    }
+    else if (!user.Enabled || !user.CanCreate || user.UserName != "integration-writer" ||
+        !await users.CheckPasswordAsync(user, password))
+        throw new InvalidOperationException("The existing test account does not match this run. Use a disposable database.");
+    Console.WriteLine($"Test subject {user.Subject} is ready.");
+}
+else if (commandName == "create-user")
 {
     var user = new CellBridgeUser
     {

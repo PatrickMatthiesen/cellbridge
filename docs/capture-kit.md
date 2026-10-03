@@ -18,12 +18,10 @@ For standalone capture, run from the repository root:
 
 The setup creates a private virtual environment. It does not configure a Windows proxy, change certificate trust, or require a SharePoint farm. For standalone use on the work laptop, copy the `tools/capture` source directory and run its setup there. Do not copy `.venv`, `captures`, or a generated certificate authority between machines.
 
-The AppHost supplies values through the string overload of `AddParameter`.
-`capture-upstream-ca` defaults to the local preflight certificate when present,
+The AppHost declares parameter resources with local defaults and reads overrides
+from `Parameters:<name>` in its configuration, including user secrets.
+`CaptureUpstreamCa` defaults to the local preflight certificate when present,
 otherwise to an empty string, which leaves `CAPTURE_UPSTREAM_CA` unset.
-In the installed Aspire version, this overload supplies the value directly;
-`aspire secret set Parameters:<name> <value>` is read by the configuration-based
-`AddParameter("<name>")` overload instead.
 
 The AppHost registers web and demo through `AddCSharpApp` with paths to their
 `.csproj` files. It has no `#:project` directives or generated `Projects.*`
@@ -52,31 +50,31 @@ Windows authentication, TLS channel binding, and enterprise proxy policy can pre
 
 Use this mode to open a local document URL without changing Windows proxy settings or installing a capture CA. Aspire supplies its existing development certificate and key to mitmproxy. The certificate must already be trusted and cover the local hostname. Check that the certificate covers the hostname used by the client.
 
-Normal startup includes the reverse capture proxy and four capture parameters:
+Normal startup declares the reverse capture proxy and four capture parameters. Start it explicitly when capturing:
 
 ```powershell
 aspire start --apphost aspire/apphost.cs --non-interactive
+aspire resource sharepoint start --apphost aspire/apphost.cs --non-interactive
 aspire wait sharepoint --apphost aspire/apphost.cs --non-interactive
 ```
 
 | Aspire parameter | Default | Purpose |
 | --- | --- | --- |
-| `capture-upstream` | `http://sharepoint.example.test:42292` | Fixed HTTP or HTTPS upstream origin |
-| `capture-port` | `8443` | Local HTTPS listener port |
-| `capture-upstream-ca` | Local preflight PEM if present, otherwise empty | Upstream trust inside the proxy process |
-| `capture-output` | `tools/capture/captures` as an absolute path | Raw evidence directory |
+| `CaptureUpstream` | `http://sharepoint.example.test:42292` | Fixed HTTP or HTTPS upstream origin |
+| `CapturePort` | `8443` | Local HTTPS listener port |
+| `CaptureUpstreamCa` | Local preflight PEM if present, otherwise empty | Upstream trust inside the proxy process |
+| `CaptureOutput` | `tools/capture/captures` as an absolute path | Raw evidence directory |
 
 The upstream default is a placeholder and will not reach a server. Configure your own test farm before capturing traffic. The addresses and portal names in the examples below are anonymized.
 
-The current AppHost supplies literal parameter values, as described above. They appear as Aspire parameter resources and are passed to the Python application. Set `CELLBRIDGE_SKIP_SHAREPOINT_CAPTURE=1` to omit the reverse proxy. Isolated
-test runs also omit it. Forward-mode capture uses the standalone launcher.
+Configure the parameters through the AppHost `Parameters` section, user secrets, or environment variables such as `Parameters__CaptureUpstream`. Defaults are listed above. The proxy uses `WithExplicitStart`, so ordinary startup does not begin a capture. Disposable test runs omit it. Forward-mode capture uses the standalone launcher.
 
-The optional preflight certificate file is local to the machine running Aspire. On another machine, set `capture-upstream-ca` to the verified upstream certificate or CA PEM file. This configures trust inside the proxy process, not the Windows certificate store.
+The optional preflight certificate file is local to the machine running Aspire. On another machine, set `CaptureUpstreamCa` to the verified upstream certificate or CA PEM file. This configures trust inside the proxy process, not the Windows certificate store.
 
 Open `https://sharepoint.dev.localhost:8443/Shared%20Documents/Document.docx` in Word. The listener binds IPv4 loopback. The AppHost explicitly sets this endpoint hostname, so Aspire does not append its dashboard name. Some desktop clients do not resolve `*.dev.localhost` automatically. If Word cannot resolve it, diagnose name resolution before testing; substituting `localhost` also changes the Host header and will not match the working SharePoint mappings below.
 
 With the example HTTP upstream, the connection is Word → mitmproxy HTTPS
-listener → SharePoint HTTP on port 42292. HTTPS upstreams remain supported. `capture-upstream-ca` is ignored for HTTP upstreams. The Aspire endpoint is unproxied; there is no additional Aspire HTTP proxy hop. No Windows proxy or certificate installation commands are run by the kit. Mitmproxy uses the supplied server certificate rather than its generated interception CA for this listener. Its combined server PEM is temporary and removed on normal shutdown; a forced process termination may leave a private-key file in the user's temporary directory. Do not share certificate keys or capture directories.
+listener → SharePoint HTTP on port 42292. HTTPS upstreams remain supported. `CaptureUpstreamCa` is ignored for HTTP upstreams. The Aspire endpoint is unproxied; there is no additional Aspire HTTP proxy hop. No Windows proxy or certificate installation commands are run by the kit. Mitmproxy uses the supplied server certificate rather than its generated interception CA for this listener. Its combined server PEM is temporary and removed on normal shutdown; a forced process termination may leave a private-key file in the user's temporary directory. Do not share certificate keys or capture directories.
 
 Reverse mode fixes the upstream connection and, for HTTPS, the TLS server name, but preserves the incoming hostname and replaces the Host header port with the upstream port for SharePoint alternate access mappings. The current forwarded header is `Host: sharepoint.dev.localhost:42292`; `original_host_header` in each flow records the client value on port 8443. SOAP bodies and binary payloads are unchanged. Absolute document URLs in SOAP, cookies, and redirects are not rewritten. Word may follow an upstream URL directly and bypass capture, or SharePoint may reject the local document URL. Therefore a valid reverse capture proves recorded-file integrity, not complete observation of a Word session. Check discovery, Cell requests, authentication and save behavior before treating it as a protocol baseline. Authentication protections remain enabled.
 

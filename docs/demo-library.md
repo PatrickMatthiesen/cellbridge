@@ -32,9 +32,9 @@ rejected. This uses `POST /api/documents` with JSON `{ "name": "My test", "type"
 the other supported types are `xlsx` and `pptx`. It returns 201 on creation,
 400 for an invalid name/type and 409 for a duplicate name.
 
-Aspire's `collab-public-url` parameter supplies the browser/Office origin,
+Aspire's `PublicOrigin` parameter supplies the browser/Office origin,
 defaulting to `https://localhost:7292`. Desktop Office must resolve the public hostname through the client's operating
-system. Set `CELLBRIDGE_PUBLIC_ORIGIN` before starting Aspire when testing from
+system. Set `Parameters__PublicOrigin` before starting Aspire when testing from
 other computers. See [remote desktop testing](automated-testing.md).
 
 Each Office link opens the original collaboration-server URL in Word, Excel or

@@ -27,7 +27,7 @@ def main():
         "--format", "Json", "--non-interactive"])
     web = next(r for r in description["resources"] if r["displayName"] == "web")
     if web["environment"].get("Authentication__PublicOrigin", "").rstrip("/") != origin:
-        parser.error(f"Start this AppHost with CELLBRIDGE_PUBLIC_ORIGIN={origin} first.")
+        parser.error(f"Start this AppHost with Parameters__PublicOrigin={origin} first.")
     endpoint = next(u["url"] for u in web["urls"] if u["name"] == "http" and u.get("isInternal"))
     port = urllib.parse.urlsplit(endpoint).port
     target = f"http://127.0.0.1:{port}"
