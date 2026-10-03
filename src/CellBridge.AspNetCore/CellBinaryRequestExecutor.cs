@@ -90,7 +90,7 @@ public static class CellBinaryRequestExecutor
         // Metadata has a different application stream shape, so retain its
         // validated StorageIndex response until that stream is modelled.
         FsshttpbResponse response = partition.Kind == DocumentPartitionKind.FileContents
-            ? FileQuery(document, partition, requestId)
+            ? FileQuery(document, partition, requestId, subRequest.Data as QueryChangesSubRequestData)
             : StorageManifestBuilder.BuildStorageIndexOnlyQueryChangesResponse(
                 requestId,
                 partition.FssHttpBIdentity.CellId.LongId,
@@ -99,27 +99,23 @@ public static class CellBinaryRequestExecutor
                 includeCellKnowledge: true,
                 waterlineCellStorage: partition.FssHttpBIdentity.CellId.ShortId);
 
-        QueryChangesResponseShaper.Apply(response, subRequest.Data as QueryChangesSubRequestData);
+        if (partition.Kind != DocumentPartitionKind.FileContents)
+            QueryChangesResponseShaper.Apply(response, subRequest.Data as QueryChangesSubRequestData);
         return response;
     }
 
-    private static FsshttpbResponse FileQuery(StoredDocument document, DocumentPartition partition, ulong requestId)
+    private static FsshttpbResponse FileQuery(StoredDocument document, DocumentPartition partition, ulong requestId,
+        QueryChangesSubRequestData? request)
     {
         lock (document)
         {
             var graph = partition.FileGraph;
-            var package = new DataElementPackage();
-            package.DataElements.AddRange(graph.Elements);
-            return new FsshttpbResponse
-            {
-                DataElementPackage = package,
-                SubResponses = { new FsshttpbSubResponse
-                {
-                    RequestId = requestId,
-                    RequestType = RequestTypes.QueryChanges,
-                    Data = FilePartitionSaveHandler.CreateQueryData(partition, graph, partition.KnowledgeSequence),
-                } },
-            };
+            if (!FileQueryResponseBuilder.Supports(request, partition.ProtocolIdentity.CellId))
+                return FileQueryResponseBuilder.Unsupported(requestId);
+            var selected = FileQueryResponseBuilder.Select(graph.ElementMetadata, graph.StorageIndex,
+                partition.ProtocolIdentity.CellId, partition.KnowledgeSequence, request, graph.MappingSerials);
+            return FileQueryResponseBuilder.Build(requestId, selected,
+                graph.SelectElements(e => selected.PayloadIds.Contains(e.DataElementExtendedGuid)), request);
         }
     }
 

@@ -27,9 +27,13 @@ public sealed class CellBridgeDocumentService(StorageProvider provider)
 
     public async ValueTask<DocumentState?> CreateAsync(string escapedPath, byte[] bytes, CancellationToken cancellationToken = default)
     {
+        StorageLimits.Check("document bytes", bytes.LongLength, provider.Limits.MaxDocumentBytes);
+        if (await provider.State.FindByPathKeyAsync(StorageIds.PathKey(DocumentStore.NormalizeUrl(escapedPath)), cancellationToken) is not null)
+            return null;
         var documents = new DocumentStore();
         var document = documents.Put(escapedPath, bytes);
         var state = await document.CaptureAsync(provider.Content, cancellationToken: cancellationToken);
+        provider.Limits.CheckDocument(state);
         return await provider.State.TryCreateAsync(state, cancellationToken) ? state : null;
     }
 
@@ -59,7 +63,16 @@ public sealed class CellBridgeDocumentService(StorageProvider provider)
             cancellationToken.ThrowIfCancellationRequested();
             if (operation.RequestType == RequestTypes.PutChanges)
             {
-                var saved = await SaveAsync(id, kind, operation, request.DataElementPackage, attributes, cancellationToken);
+                CellExecution saved;
+                try { saved = await SaveAsync(id, kind, operation, request.DataElementPackage, attributes, cancellationToken); }
+                catch (StorageQuotaExceededException ex)
+                {
+                    var rejected = new FsshttpbResponse();
+                    rejected.SubResponses.Add(new FsshttpbSubResponse { RequestId = operation.RequestId,
+                        RequestType = RequestTypes.PutChanges, Status = true,
+                        Error = new ResponseError(ErrorType.Win32, 112, ex.Message) }); // ERROR_DISK_FULL.
+                    saved = new(rejected, await CurrentAsync(id, cancellationToken));
+                }
                 response.SubResponses.AddRange(saved.Response.SubResponses);
                 state = saved.State;
                 if (saved.LockError is not null) return new(response, state, saved.LockError);
@@ -69,6 +82,14 @@ public sealed class CellBridgeDocumentService(StorageProvider provider)
             if (operation.RequestType == RequestTypes.QueryChanges && queried)
             {
                 response.SubResponses.Add(Failure(operation.RequestId, CellErrorCode.RequestNotSupported, "Repeated queries are not supported.", operation.RequestType));
+                continue;
+            }
+            if (kind == DocumentPartitionKind.FileContents && operation.RequestType == RequestTypes.QueryChanges)
+            {
+                var query = await FileQueryAsync(state, operation, cancellationToken);
+                response.SubResponses.AddRange(query.SubResponses);
+                response.DataElementPackage = query.DataElementPackage;
+                queried = true;
                 continue;
             }
             var observedNow = DateTime.UtcNow;
@@ -91,6 +112,47 @@ public sealed class CellBridgeDocumentService(StorageProvider provider)
         return new(response, state);
     }
 
+    private async ValueTask<FsshttpbResponse> FileQueryAsync(DocumentState state,
+        FsshttpbCellSubRequest operation, CancellationToken cancellationToken)
+    {
+        var partition = state.Partitions.Single(p => p.Kind == 0);
+        var cell = new CellId(StorageIds.Restore(partition.Identity.CellLong), StorageIds.Restore(partition.Identity.CellShort));
+        var request = operation.Data as QueryChangesSubRequestData;
+        if (!FileQueryResponseBuilder.Supports(request, cell)) return FileQueryResponseBuilder.Unsupported(operation.RequestId);
+        var metadata = partition.Elements.Select(e => new DataElement((DataElementType)e.Type,
+            StorageIds.Restore(e.Id), new SerialNumber(e.Serial.Guid, e.Serial.Value))).ToArray();
+        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var mappingSerials = new Dictionary<ExGuid, IReadOnlyList<SerialNumber>>();
+        foreach (var stored in partition.Elements.Where(e => e.Type == (uint)DataElementType.StorageIndexDataElementData))
+            mappingSerials.Add(StorageIds.Restore(stored.Id), stored.MappingSerials is { } serials
+                ? serials.Select(s => new SerialNumber(s.Guid, s.Value)).ToArray()
+                : StorageIndexMappingSerials.Read(await ReadPayloadAsync(stored.Payload)));
+        var selection = FileQueryResponseBuilder.Select(metadata,
+            StorageIds.Restore(partition.StorageIndex ?? throw new StorageCorruptionException("Missing file storage index.")),
+            cell, partition.Knowledge, request, mappingSerials);
+        var elements = new List<DataElement>();
+        foreach (var stored in partition.Elements.Where(e => selection.PayloadIds.Contains(StorageIds.Restore(e.Id))))
+        {
+            var bytes = await ReadPayloadAsync(stored.Payload);
+            elements.Add(new DataElement((DataElementType)stored.Type, StorageIds.Restore(stored.Id),
+                new SerialNumber(stored.Serial.Guid, stored.Serial.Value)) { Data = bytes });
+        }
+        return FileQueryResponseBuilder.Build(operation.RequestId, selection, elements, request);
+
+        async ValueTask<byte[]> ReadPayloadAsync(ContentHandle handle)
+        {
+            if (payloads.TryGetValue(handle.Key, out var bytes)) return bytes;
+            await using var source = await provider.Content.OpenReadAsync(handle, cancellationToken);
+            using var output = new MemoryStream();
+            await source.CopyToAsync(output, cancellationToken);
+            bytes = output.ToArray();
+            if (bytes.LongLength != handle.Length || Convert.ToHexStringLower(SHA256.HashData(bytes)) != handle.Sha256)
+                throw new StorageCorruptionException("Query payload failed integrity verification.");
+            payloads.Add(handle.Key, bytes);
+            return bytes;
+        }
+    }
+
     private async ValueTask<CellExecution> SaveAsync(Guid id, DocumentPartitionKind kind,
         FsshttpbCellSubRequest operation, DataElementPackage? package, IReadOnlyDictionary<string, string> attributes,
         CancellationToken cancellationToken)
@@ -109,7 +171,8 @@ public sealed class CellBridgeDocumentService(StorageProvider provider)
             if (before.Receipts.FirstOrDefault(r => r.OperationKey == key) is { } prior)
                 return await RepeatAsync(before, prior, digest, operation.RequestId, cancellationToken);
             var document = await StoredDocument.RestoreAsync(before, provider.Content, cancellationToken);
-            var result = FilePartitionSaveHandler.Apply(document, document.FilePartition, operation, package);
+            StorageLimits.Check("save receipts", before.Receipts.Length + 1L, provider.Limits.MaxSaveReceipts);
+            var result = FilePartitionSaveHandler.Apply(document, document.FilePartition, operation, package, provider.Limits);
             if (result.Status) return Wrap(result, before);
             var candidate = await document.CaptureAsync(provider.Content, before.Coordination, before.Receipts, cancellationToken);
             var receiptResponse = new FsshttpbResponse();
@@ -147,8 +210,11 @@ public sealed class CellBridgeDocumentService(StorageProvider provider)
                                 $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{now.Ticks}\" />").ToImmutableArray() }
                             : p).ToImmutableArray(),
                         Coordination = coordinator.Capture() with { Generation = checked(current.Coordination.Generation + 1) },
-                        Receipts = current.Receipts.Add(receipt),
+                        // Superseded retries need their digest/version, never their response bytes.
+                        Receipts = current.Receipts.Select(r => r.ContentVersion == candidate.ContentVersion
+                            ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
+                    provider.Limits.CheckDocument(state);
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
                 }, cancellationToken);
             }
@@ -176,7 +242,8 @@ public sealed class CellBridgeDocumentService(StorageProvider provider)
             return Wrap(Failure(requestId, CellErrorCode.InvalidObject, "An accepted storage index was reused for a different operation."), state);
         if (state.ContentVersion != receipt.ContentVersion)
             return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted operation has been superseded by a later revision."), state);
-        await using var stream = await provider.Content.OpenReadAsync(receipt.Response, cancellationToken);
+        await using var stream = await provider.Content.OpenReadAsync(receipt.Response ??
+            throw new StorageCorruptionException("The current save receipt has no response."), cancellationToken);
         using var buffer = new MemoryStream();
         await stream.CopyToAsync(buffer, cancellationToken);
         var response = FsshttpbResponse.Deserialize(new BinaryReaderEx(buffer.ToArray()));

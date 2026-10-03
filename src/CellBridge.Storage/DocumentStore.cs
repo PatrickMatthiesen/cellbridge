@@ -598,6 +598,10 @@ public sealed partial class DocumentPartition
         var response = FileContentPartitionBuilder.BuildQueryChangesResponse(
             1, _content, FssHttpBIdentity, _knowledgeSequence);
         var data = (QueryChangesSubResponseData)response.SubResponses[0].Data!;
+        // The seed builder uses low mapping serials. Allocate independent server
+        // DE serials above the persisted high-water mark before exposing the graph.
+        foreach (var element in response.DataElementPackage!.DataElements)
+            element.SerialNumber = new SerialNumber(ProtocolIdentity.SerialGuid, checked(++_knowledgeSequence));
         return PartitionGraphSnapshot.Create(response.DataElementPackage!.DataElements, data.StorageIndexExtendedGuid);
     }
 

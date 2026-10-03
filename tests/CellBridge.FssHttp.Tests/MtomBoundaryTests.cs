@@ -6,6 +6,18 @@ namespace CellBridge.FssHttp.Tests;
 public sealed class MtomBoundaryTests
 {
     [Fact]
+    public void BorrowedPartsShareTheOwnedBufferWhileCompatibilityPartsAreDetached()
+    {
+        var message = Encoding.ASCII.GetBytes("--b\r\nContent-ID: <part>\r\n\r\nABC\r\n--b--\r\n");
+        var detached = Assert.Single(MtomMessageParser.Parse(message, "multipart/related; boundary=b"));
+        var borrowed = Assert.Single(MtomMessageParser.ParseViews(message, "multipart/related; boundary=b"));
+        message[Array.IndexOf(message, (byte)'A')] = (byte)'Z';
+        Assert.Equal("ABC", Encoding.ASCII.GetString(detached.ContentMemory.Span));
+        Assert.Equal("ZBC", Encoding.ASCII.GetString(borrowed.ContentMemory.Span));
+        Assert.Throws<InvalidDataException>(() => MtomMessageParser.ParseViews(message,
+            "multipart/related; boundary=b", maxHeaderBytes: 2));
+    }
+    [Fact]
     public void BoundaryLikeBytesInsideBinaryAttachmentArePreserved()
     {
         byte[] payload = [0, 255, ..Encoding.ASCII.GetBytes("inline--capture\r\n--capture-not-a-delimiter\r\n"), 128];

@@ -31,8 +31,9 @@ container, waits for `web`, `web-peer` and `demo`, and runs:
 
 It writes TRX files, a `summary.json`, and opt-in wire evidence beneath
 `artifacts/testing/<timestamp>`, then stops its AppHost. It never mounts the
-developer's `cellbridge-storage-data` volume. The Windows-only Office Inspectors
-adapter runs when this command runs on Windows, and in Windows CI.
+developer's `cellbridge-storage-data` volume. The in-repo .NET 10 Office Inspectors
+parser checks run on Linux and Windows, including both CI jobs. They require no
+external checkout or desktop runtime. See [the parser guide](office-inspectors.md).
 All local raw capture artifacts stay outside Git.
 
 To verify the packed libraries, run `python3 tools/verify_packages.py` with
@@ -52,6 +53,10 @@ PostgreSQL document state. Each client edits its own document. Reports include
 save/download p50, p95 and p99, throughput, allocation counts, retained graph
 counts and process peak memory. Accepted uploads and downloads must succeed.
 The temporary filesystem content directory is removed after each run.
+Each durable benchmark creates and drops its own database. The supplied PostgreSQL
+role needs `CREATE DATABASE`; benchmark documents and content backends never mix
+with host data. Usage totals are cumulative across size/concurrency scenarios in
+one benchmark invocation.
 
 These measurements use synthetic complete DOCX graphs in the document service.
 They do not include HTTP, desktop rendering, small Office deltas or network
@@ -60,6 +65,62 @@ Iterations reuse the same package bytes with fresh protocol graphs, so content
 deduplication is part of the measured path. These results do not measure a stream
 of unique file-content writes. Peak memory is cumulative within each benchmark
 process. Small samples cannot establish reliable p99 latency.
+
+The benchmark also supports `changed-full`, `delta`, `delta-chain` and `captured`
+workloads. `delta` reuses file objects; `delta-chain` additionally links every
+previous revision through the immutable current index. `captured` replays the two
+reviewed save fixtures and requires exactly two iterations. `--seed` controls
+synthetic file bytes and save identities, `--retry` checks accepted retries, and
+`--query-every` samples empty/prior/current client knowledge. `--sizes 0` uses a
+small deterministic DOCX. Example service-level runs after a Release build:
+
+```sh
+dotnet tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll --content memory --sizes 0 --clients 1 --iterations 1000 --workload full --retry --output artifacts/full.json
+dotnet tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll --content memory --sizes 0 --clients 1 --iterations 1000 --workload delta-chain --retry --output artifacts/delta-chain.json
+dotnet tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll --content memory --sizes 0 --clients 1 --iterations 2 --workload captured --retry --output artifacts/captured.json
+Storage__MaxGraphElements=30 dotnet tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll --content memory --sizes 0 --clients 1 --iterations 100 --allow-quota --output artifacts/quota.json
+```
+
+Budget settings use `Storage__...` environment variables, matching the sample.
+Quota runs verify that the rejected save preserves content and both versions.
+Ordinary runs fail on any rejection. Reports separate retained history from
+required closure, include analysis blockers, and sample live managed memory.
+Allocation totals include workload setup, queries and retention diagnostics;
+forced collections affect throughput. These are diagnostic growth measurements,
+not isolated save allocations or proof that memory reaches a plateau.
+
+On 2026-10-03, Linux/.NET 10.0.12 with four logical processors completed these
+offline workloads with a constant 2,197-byte file and identical retries:
+
+| Workload | Saves | Retained elements, first → last | Required elements, first → last |
+| --- | --- | --- | --- |
+| Complete graphs | 1,000 | 10 → 5,005 | 5 → 5 |
+| Linked delta revisions | 1,000 | 9 → 4,005 | 6 → 1,005 |
+
+The linked chain's required bytes grew from 2,911 to 154,759; retained payloads
+reached 30,897,259 bytes. Automatic compaction therefore cannot guarantee ongoing
+bounded editing for every supported graph. After typed change-frequency parsing
+and scoped reference validation, both captured save graphs pass retention
+analysis and require 20 elements each. A regression test compacts both graphs,
+checks exact file bytes, and protects the previous index explicitly. The host
+still keeps graph history until base-admission and receipt-retention policies are
+qualified with live Office.
+
+After separate mapping knowledge and server serial allocation, the second
+captured save's empty/prior/current-knowledge binary queries were
+33,502 / 12,391 / 237 bytes. The updated 128-save linked-chain check still grew
+its required closure from 6 to 133 elements. These offline checks validate
+query reduction while the
+[retention gates](storage-providers.md#limits-and-qualification) remain open.
+
+The two-host runner covers captured HTTP/MTOM saves, independent Microsoft
+knowledge queries, atomic quota races, metadata retention and quiescent cleanup.
+Packed-consumer tests cover known-length and streaming request rejection. On
+2026-10-03, desktop Word completed ten saves and a fresh-process reopen against
+the changed knowledge behavior. Each captured file save matched the client's
+ETag; all 17 binary responses passed the independent Office Inspectors parser,
+and final server bytes matched the client's SHA-256. Graph pruning and receipt
+eviction remained disabled during this check.
 
 The `Storage performance report` GitHub workflow supports manual runs and a
 weekly schedule after merging. Each provider job gets a fresh PostgreSQL service
@@ -100,6 +161,23 @@ tailscale serve --bg --https=8443 http://127.0.0.1:5281
 tailscale serve status
 ```
 
+The exported capture setting lasts only for that shell session. To keep capture
+enabled after a restart, create the ignored `aspire/apphost.settings.json` with an
+absolute directory on the dev machine:
+
+```json
+{
+  "Protocol": {
+    "CaptureDirectory": "/absolute/path/to/CellBridge/artifacts/office-wire"
+  }
+}
+```
+
+`CELLBRIDGE_WIRE_CAPTURE` overrides this setting. Disposable automated runs ignore
+the local file. Restart Aspire after changing capture configuration, then check
+that a SOAP request produces request, response and summary files before starting
+the desktop test. Remove the setting when the capture session is finished.
+
 The collaboration server is `https://dev-machine.example.ts.net`. The optional
 demo is `https://dev-machine.example.ts.net:8443`. Keep document and SOAP paths
 at their original roots. The demo sends Office to the collaboration origin on
@@ -137,11 +215,12 @@ tests with managed Word stand-ins check script logic only; they cannot validate
 native COM calls.
 
 The script creates a fresh blank DOCX through the demo API and downloads an
-initial snapshot. Desktop Word opens the remote URL and performs two separate
-edits and saves in the same session. After each save, the script independently
+initial snapshot. Desktop Word opens the remote URL and performs the requested
+number of edits and saves in the same session, defaulting to two. After each save,
+the script independently
 downloads the server's DOCX and requires all markers in `word/document.xml` and
-a changed ETag. It retains both saved snapshots with SHA-256 hashes. A fresh Word
-process then reopens the document and checks both edits. The report records Word
+a changed ETag. It retains each saved snapshot with a SHA-256 hash. A fresh Word
+process then reopens the document and checks all edits. The report records Word
 version/build and open, save, verification and reopen timings. Use `-Edits` to
 choose between one and ten edits.
 
@@ -179,7 +258,7 @@ The Word script uses `Documents.Open` on the HTTPS URL. Office may choose a
 different transport than the demo's `ms-word:ofe|u|` link. The capture requirement
 detects that difference; if the script fails while a manual demo open works,
 capture both flows before changing the protocol. The current script has passed
-a two-edit, fresh-process reopen test with Word `16.0.20430` and PostgreSQL. See
+a ten-edit, fresh-process reopen test with Word `16.0.20430` and PostgreSQL. See
 [interoperability coverage](interoperability.md).
 
 For cleanup, disable only the two Serve listeners added for this session:

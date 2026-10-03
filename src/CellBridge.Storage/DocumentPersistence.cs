@@ -142,6 +142,7 @@ public sealed partial class DocumentPartition
         var elements = ImmutableArray.CreateBuilder<GraphElementState>();
         var previous = _sourceState?.Elements.ToDictionary(e => e.Id);
         var graph = Kind == DocumentPartitionKind.FileContents ? FileGraph : null;
+        var mappingSerials = graph?.MappingSerials;
         if (graph is not null)
             await graph.VisitElementsAsync(async (element, stream) =>
             {
@@ -159,7 +160,11 @@ public sealed partial class DocumentPartition
                     handle = await content.WriteAsync(stream, cancellationToken);
                 }
                 elements.Add(new GraphElementState(id, (uint)element.DataElementType,
-                    new(element.SerialNumber.Guid, element.SerialNumber.Value), handle));
+                    new(element.SerialNumber.Guid, element.SerialNumber.Value), handle)
+                {
+                    MappingSerials = mappingSerials?.TryGetValue(element.DataElementExtendedGuid, out var serials) == true
+                        ? serials.Select(s => new SerialId(s.Guid, s.Value)).ToImmutableArray() : [],
+                });
             });
         return new((int)Kind, ProtocolIdentity.Capture(), KnowledgeSequence, payload,
             graph is null ? null : StorageIds.Capture(graph.StorageIndex), elements.ToImmutable(),

@@ -66,6 +66,7 @@ public sealed class DataElementPackage
 
             if (header.Type == StreamObjectTypeHeaderStart.DataElement)
             {
+                if (package.DataElements.Count >= 100_000) throw new InvalidDataException("Data element count limit exceeded.");
                 package.DataElements.Add(DataElement.Deserialize(reader));
             }
             else

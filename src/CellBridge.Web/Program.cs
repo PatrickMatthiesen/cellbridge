@@ -12,6 +12,8 @@ using Microsoft.AspNetCore.HttpOverrides;
 var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
 var storageKind = builder.Configuration["Storage:Provider"] ?? "InMemory";
+var limits = builder.Configuration.GetSection("Storage").Get<StorageLimits>() ?? new StorageLimits();
+limits.Validate();
 StorageProvider provider;
 if (storageKind.Equals("PostgreSql", StringComparison.OrdinalIgnoreCase))
 {
@@ -19,32 +21,38 @@ if (storageKind.Equals("PostgreSql", StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException("PostgreSql storage requires ConnectionStrings:cellbridge.");
     var dataSource = NpgsqlDataSource.Create(connectionString);
     builder.Services.AddSingleton(dataSource);
-    var state = new PostgreSqlStateStore(dataSource);
+    var state = new PostgreSqlStateStore(dataSource, limits);
     if (args.Contains("--migrate-storage", StringComparer.Ordinal))
     {
         await state.InitializeAsync();
+        if (builder.Configuration["Storage:ContentProvider"]?.Equals("FileSystem", StringComparison.OrdinalIgnoreCase) == true)
+            await new StorageMaintenance(dataSource).RegisterExistingFileSystemAsync(
+                builder.Configuration["Storage:ContentRoot"] ?? throw new InvalidOperationException("Filesystem migration requires Storage:ContentRoot."));
         await dataSource.DisposeAsync();
         return;
     }
-    var maxBytes = builder.Configuration.GetValue("Storage:MaxObjectBytes", 512L * 1024 * 1024);
+    var maxBytes = limits.MaxObjectBytes;
     IContentStore content = builder.Configuration["Storage:ContentProvider"]?.ToLowerInvariant() switch
     {
         null or "postgresql" => new PostgreSqlContentStore(dataSource, maxBytes),
-        "filesystem" => new FileSystemContentStore(builder.Configuration["Storage:ContentRoot"]
+        "filesystem" => new PostgreSqlFileSystemContentStore(dataSource, builder.Configuration["Storage:ContentRoot"]
             ?? throw new InvalidOperationException("Filesystem content requires Storage:ContentRoot."), maxBytes,
             builder.Configuration.GetValue("Storage:SharedContent", false)),
         _ => throw new InvalidOperationException("Unknown binary content provider."),
     };
-    provider = new StorageProvider(state, content);
+    provider = new StorageProvider(state, content, limits);
 }
 else if (storageKind.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
-    provider = new(new InMemoryStateStore(), new InMemoryContentStore());
+    provider = new(new InMemoryStateStore(), new InMemoryContentStore(), limits);
 else throw new InvalidOperationException("Unknown document storage provider.");
 
 builder.Services.AddCellBridge(provider, requireDurability: storageKind.Equals("PostgreSql", StringComparison.OrdinalIgnoreCase),
     multipleInstances: builder.Configuration.GetValue("Storage:MultipleInstances", false), configure: options =>
     {
         options.MaxRequestBytes = builder.Configuration.GetValue("Protocol:MaxRequestBytes", options.MaxRequestBytes);
+        options.MaxConcurrentRequests = builder.Configuration.GetValue("Protocol:MaxConcurrentRequests", options.MaxConcurrentRequests);
+        options.MaxMtomParts = builder.Configuration.GetValue("Protocol:MaxMtomParts", options.MaxMtomParts);
+        options.MaxMtomHeaderBytes = builder.Configuration.GetValue("Protocol:MaxMtomHeaderBytes", options.MaxMtomHeaderBytes);
         options.CaptureDirectory = builder.Configuration["Protocol:CaptureDirectory"];
     });
 var app = builder.Build();
@@ -88,7 +96,9 @@ app.MapPost("/api/documents", async (CreateDocumentRequest request, HttpContext 
     if (!result.Created) return Results.BadRequest(new { error = result.Error });
     var document = detached.List().Single();
     var escaped = string.Join('/', document.Url.Split('/').Select(Uri.EscapeDataString));
-    var created = await service.CreateAsync(escaped, document.Content, context.RequestAborted);
+    CellBridge.Storage.Abstractions.DocumentState? created;
+    try { created = await service.CreateAsync(escaped, document.Content, context.RequestAborted); }
+    catch (StorageQuotaExceededException ex) { return Results.Json(new { error = ex.Message, budget = ex.Budget }, statusCode: 507); }
     return created is null ? Results.Conflict(new { error = "A document with that name already exists." })
         : Results.Created(escaped, result.Document);
 });

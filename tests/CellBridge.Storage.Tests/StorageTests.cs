@@ -133,7 +133,7 @@ public class StorageTests
                 Assert.Equal(new byte[] { 1, 2, 3 }, memory.ToArray());
             }
             using var large = new MemoryStream(new byte[101]);
-            await Assert.ThrowsAsync<InvalidDataException>(() => content.WriteAsync(large).AsTask());
+            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => content.WriteAsync(large).AsTask());
             Assert.Empty(Directory.GetFiles(root, "*.tmp"));
             await File.WriteAllBytesAsync(Path.Combine(root, handle.Key + ".blob"), new byte[] { 3, 2, 1 });
             await Assert.ThrowsAsync<StorageCorruptionException>(() => content.OpenReadAsync(handle).AsTask());

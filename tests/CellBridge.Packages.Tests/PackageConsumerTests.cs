@@ -14,6 +14,32 @@ namespace CellBridge.Packages.Tests;
 
 public sealed class PackageConsumerTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RequestByteLimitRejectsKnownAndStreamingBodiesBeforeProtocolParsing(bool unknownLength)
+    {
+        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddCellBridge(provider, requireDurability: false, configure: o => o.MaxRequestBytes = 32);
+        await using var app = builder.Build();
+        app.MapCellBridge();
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+        using HttpContent content = unknownLength
+            ? new StreamContent(new NonSeekableReadStream(new byte[33])) : new ByteArrayContent(new byte[33]);
+        using var response = await client.PostAsync("/_vti_bin/cellstorage.svc", content);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Empty(await provider.State.ListAsync(0, 10));
+        await app.StopAsync();
+    }
+
+    private sealed class NonSeekableReadStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override bool CanSeek => false;
+    }
+
     [Fact]
     public async Task CustomProviderPassesConformance()
     {

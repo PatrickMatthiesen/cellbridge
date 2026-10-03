@@ -69,9 +69,17 @@ progress independently. Session and lease changes use the same coordination.
 
 Readers acquire one state snapshot for both content and headers. A concurrent
 save cannot mix one revision's length or ETag with another revision's bytes.
-Published objects remain retained, allowing readers and later graph updates to
-reference prior data. A retry resolves through the stored receipt rather than
-publishing a second version.
+Published objects remain available until quiescent collection over every retained
+snapshot, allowing detached readers and later graph updates to reference prior
+data. PostgreSQL bounds JSON history independently of content versions. A retry
+resolves through its stored identity and digest rather than publishing a second
+version. Shared accounting admits object bytes and metadata atomically; a quota
+failure preserves the current revision.
+
+File queries select unknown GUID/serial ranges from persisted metadata before
+reading payloads. Foreign scopes and historical versions remain unsupported.
+Automatic graph pruning is disabled until references and stale-client recovery
+are qualified.
 
 [Storage providers](storage-providers.md) documents the contracts, failure
 behavior, migration, backup and retention requirements. Parsing and graph

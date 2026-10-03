@@ -49,7 +49,7 @@ public sealed class FileSystemContentStore : IContentStore
                 while ((read = await source.ReadAsync(buffer, cancellationToken)) != 0)
                 {
                     length = checked(length + read);
-                    if (length > _maxObjectBytes) throw new InvalidDataException("Content exceeds the configured storage object limit.");
+                    StorageLimits.Check("object bytes", length, _maxObjectBytes);
                     hash.AppendData(buffer.AsSpan(0, read));
                     await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                 }
@@ -97,6 +97,15 @@ public sealed class FileSystemContentStore : IContentStore
         if (key.Length != 64 || key.Any(c => !char.IsAsciiHexDigit(c)) || key != key.ToLowerInvariant())
             throw new StorageCorruptionException("Invalid content key.");
         return Path.Combine(_root, key + ".blob");
+    }
+    /// <summary>Only for maintenance with every reader and writer stopped.</summary>
+    public static void DeleteQuiescentObject(string root, string key)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Durable reclamation is currently qualified on Linux only.");
+        if (key.Length != 64 || key.Any(c => !char.IsAsciiHexDigit(c)) || key != key.ToLowerInvariant())
+            throw new StorageCorruptionException("Invalid content key.");
+        File.Delete(Path.Combine(root, key + ".blob"));
+        FlushDirectory(Path.GetFullPath(root));
     }
     private static void FlushDirectory(string path)
     {

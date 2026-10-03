@@ -8,14 +8,29 @@ public sealed class MtomPart
 {
     public string ContentType { get; init; } = string.Empty;
     public string? ContentId { get; init; }
-    public byte[] Content { get; init; } = Array.Empty<byte>();
+    private ReadOnlyMemory<byte> _content;
+    private byte[]? _array;
+    public ReadOnlyMemory<byte> ContentMemory { get => _array is null ? _content : _array; init => _content = value; }
+    /// <summary>Compatibility copy. Use ContentMemory while the request owner remains alive.</summary>
+    public byte[] Content { get => _array ??= _content.ToArray(); init { _array = value; _content = value; } }
 }
 
 /// <summary>Extracts SOAP and binary parts from an MTOM/XOP message.</summary>
 public static class MtomMessageParser
 {
     public static IReadOnlyList<MtomPart> Parse(ReadOnlyMemory<byte> message, string contentType)
+        => ParseCore(message, contentType, copyParts: true, 128, 16 * 1024);
+
+    /// <summary>Parts borrow the supplied buffer; its owner must keep it alive and unmodified.</summary>
+    public static IReadOnlyList<MtomPart> ParseViews(ReadOnlyMemory<byte> message, string contentType,
+        int maxParts = 128, int maxHeaderBytes = 16 * 1024)
+        => ParseCore(message, contentType, copyParts: false, maxParts, maxHeaderBytes);
+
+    private static IReadOnlyList<MtomPart> ParseCore(ReadOnlyMemory<byte> message, string contentType,
+        bool copyParts, int maxParts, int maxHeaderBytes)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxParts);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxHeaderBytes);
         var mediaType = MediaTypeHeaderValue.Parse(contentType);
         var boundary = mediaType.Parameters
             .FirstOrDefault(p => string.Equals(p.Name, "boundary", StringComparison.OrdinalIgnoreCase))?.Value
@@ -26,8 +41,9 @@ public static class MtomMessageParser
             throw new InvalidDataException("MTOM Content-Type is missing a boundary.");
         }
 
+        if (boundary.Length > 70) throw new InvalidDataException("MTOM boundary exceeds 70 characters.");
         var delimiter = Encoding.ASCII.GetBytes("--" + boundary);
-        var bytes = message.ToArray();
+        var bytes = message.Span;
         var parts = new List<MtomPart>();
         var position = 0;
 
@@ -65,21 +81,22 @@ public static class MtomMessageParser
                 partEnd -= 2;
             }
 
-            var separator = IndexOf(bytes, new byte[] { 13, 10, 13, 10 }, contentStart, partEnd);
+            var separator = IndexOf(bytes, new byte[] { 13, 10, 13, 10 }, contentStart, Math.Min(partEnd, contentStart + maxHeaderBytes + 4));
             if (separator < 0)
             {
                 throw new InvalidDataException("MTOM part is missing its header separator.");
             }
 
-            var headers = Encoding.ASCII.GetString(bytes, contentStart, separator - contentStart);
+            var headers = Encoding.ASCII.GetString(bytes.Slice(contentStart, separator - contentStart));
             var bodyStart = separator + 4;
             var headersByName = ParseHeaders(headers);
 
+            if (parts.Count >= maxParts) throw new InvalidDataException("MTOM part limit exceeded.");
             parts.Add(new MtomPart
             {
                 ContentType = headersByName.GetValueOrDefault("content-type") ?? string.Empty,
                 ContentId = headersByName.GetValueOrDefault("content-id")?.Trim('<', '>'),
-                Content = bytes[bodyStart..partEnd],
+                ContentMemory = copyParts ? message[bodyStart..partEnd].ToArray() : message[bodyStart..partEnd],
             });
 
             position = nextDelimiter;
@@ -100,13 +117,13 @@ public static class MtomMessageParser
         return parts;
     }
 
-    private static int FindBoundary(byte[] source, byte[] delimiter, int start)
+    private static int FindBoundary(ReadOnlySpan<byte> source, byte[] delimiter, int start)
     {
         for (var i = start; i <= source.Length - delimiter.Length; i++)
         {
             if (i != 0 && (i < 2 || source[i - 2] != '\r' || source[i - 1] != '\n'))
                 continue;
-            if (!source.AsSpan(i, delimiter.Length).SequenceEqual(delimiter))
+            if (!source.Slice(i, delimiter.Length).SequenceEqual(delimiter))
                 continue;
             var after = i + delimiter.Length;
             if (after + 1 < source.Length && source[after] == '-' && source[after + 1] == '-')
@@ -136,12 +153,12 @@ public static class MtomMessageParser
         return result;
     }
 
-    private static int IndexOf(byte[] source, byte[] value, int start, int? end = null)
+    private static int IndexOf(ReadOnlySpan<byte> source, byte[] value, int start, int? end = null)
     {
         var limit = end ?? source.Length;
         for (var i = start; i <= limit - value.Length; i++)
         {
-            if (source.AsSpan(i, value.Length).SequenceEqual(value))
+            if (source.Slice(i, value.Length).SequenceEqual(value))
             {
                 return i;
             }

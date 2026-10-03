@@ -2,14 +2,21 @@ using System.Collections.Immutable;
 
 namespace CellBridge.Storage.Abstractions;
 
-public sealed record StorageCapabilities(bool Durable, bool SharedState, bool SharedContent);
+public sealed record StorageCapabilities(bool Durable, bool SharedState, bool SharedContent)
+{
+    public bool AtomicBudgets { get; init; }
+}
 public sealed record ContentHandle(string Key, long Length, string Sha256);
 public sealed record ExtendedId(uint Value, Guid Guid);
 public sealed record SerialId(Guid Guid, ulong Value);
 public sealed record PartitionIdentity(ExtendedId StorageManifest, ExtendedId CellManifest,
     ExtendedId RevisionManifest, ExtendedId ObjectGroup, ExtendedId ObjectDataBlob,
     ExtendedId Object, ExtendedId Revision, ExtendedId CellLong, ExtendedId CellShort, Guid SerialGuid);
-public sealed record GraphElementState(ExtendedId Id, uint Type, SerialId Serial, ContentHandle Payload);
+public sealed record GraphElementState(ExtendedId Id, uint Type, SerialId Serial, ContentHandle Payload)
+{
+    // Null denotes legacy state that needs its index payload decoded before a query.
+    public ImmutableArray<SerialId>? MappingSerials { get; init; }
+}
 public sealed record PartitionState(int Kind, PartitionIdentity Identity, ulong Knowledge,
     ContentHandle Content, ExtendedId? StorageIndex, ImmutableArray<GraphElementState> Elements,
     ImmutableArray<byte> InlineContent = default);
@@ -23,9 +30,9 @@ public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseSta
     public static CoordinationState Empty { get; } = new(null, [], null, 0);
 }
 public sealed record SaveReceipt(string OperationKey, string Digest, uint ContentVersion,
-    ContentHandle Response);
+    ContentHandle? Response);
 
-/// <summary>One detached state version. All referenced content is immutable and permanently retained.</summary>
+/// <summary>One detached state version. Referenced content is immutable; reclamation requires quiescent maintenance.</summary>
 public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Path, string PathKey,
     DateTime CreatedUtc, DateTime ModifiedUtc, uint ContentVersion, long StateVersion,
     ContentHandle Content, ImmutableArray<PartitionState> Partitions,
@@ -75,15 +82,34 @@ public sealed class StorageUnavailableException(string message, Exception? inner
 public sealed class StorageCorruptionException(string message, Exception? inner = null) : IOException(message, inner);
 
 /// <summary>The selected state and binary stores, with guarantees for their complete configuration.</summary>
-public sealed class StorageProvider(IDocumentStateStore state, IContentStore content)
+public sealed class StorageProvider(IDocumentStateStore state, IContentStore content, StorageLimits? limits = null)
 {
+    public StorageLimits Limits { get; } = limits ?? (state as ILocalStorageBudgetParticipant)?.Budget.Limits ?? new StorageLimits();
     public IDocumentStateStore State { get; } = state;
-    public IContentStore Content { get; } = content;
+    public IContentStore Content { get; } = Compose(state, content, limits);
     public StorageCapabilities Capabilities { get; } = new(state.Durable && content.Durable,
-        state.Shared, content.Shared);
+        state.Shared, content.Shared)
+    {
+        AtomicBudgets = state is IStorageBudgetParticipant s && content is IStorageBudgetParticipant c &&
+            ReferenceEquals(s.BudgetScope, c.BudgetScope),
+    };
+
+    private static IContentStore Compose(IDocumentStateStore state, IContentStore content, StorageLimits? limits)
+    {
+        if (state is ILocalStorageBudgetParticipant s && content is ILocalStorageBudgetParticipant c)
+        {
+            var budget = limits is null ? s.Budget : new StorageBudget(limits);
+            s.UseBudget(budget);
+            c.UseBudget(budget);
+        }
+        return content;
+    }
 
     public void Require(bool durable, bool multipleInstances)
     {
+        Limits.Validate();
+        if (limits is not null && !Capabilities.AtomicBudgets)
+            throw new InvalidOperationException("Explicit storage limits require state and content stores with shared atomic accounting.");
         if (durable && !Capabilities.Durable)
             throw new InvalidOperationException("This storage configuration does not provide durable saves.");
         if (multipleInstances && (!Capabilities.SharedState || !Capabilities.SharedContent))

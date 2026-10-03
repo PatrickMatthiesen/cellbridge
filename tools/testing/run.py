@@ -38,8 +38,9 @@ def main():
     args = parser.parse_args()
     if not shutil.which("aspire") or not shutil.which("dotnet"):
         parser.error("Install Aspire CLI and .NET 10 first.")
-    if cli_json(["aspire", "ps", "--format", "Json", "--non-interactive"]):
-        parser.error("Stop running Aspire apps before building. Stop and validate any active capture first.")
+    hosts = cli_json(["aspire", "ps", "--format", "Json", "--non-interactive"])
+    if any(Path(host["appHostPath"]).resolve() == APPHOST.resolve() for host in hosts):
+        parser.error("Stop this workspace's Aspire app before building. Stop and validate any active capture first.")
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = (args.output or ROOT / "artifacts/testing" / stamp).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -73,17 +74,14 @@ def main():
         start_attempted = True
         run("aspire-start", ["aspire", "start", "--apphost", str(APPHOST), "--non-interactive"], 600)
         for resource in ("web", "web-peer", "demo"):
-            run(f"ready-{resource}", ["aspire", "wait", resource, "--non-interactive"], 180)
-        description = cli_json(["aspire", "describe", "--non-interactive", "--format", "Json"])
+            run(f"ready-{resource}", ["aspire", "wait", resource, "--apphost", str(APPHOST), "--non-interactive"], 180)
+        description = cli_json(["aspire", "describe", "--apphost", str(APPHOST), "--non-interactive", "--format", "Json"])
         web = next(r for r in description["resources"] if r.get("displayName") == "web")
         env["ConnectionStrings__cellbridge"] = web["environment"]["ConnectionStrings__cellbridge"]
         env["OFFICECOLLABSERVER_INTEROP_ENDPOINT"] = "http://localhost:5181/_vti_bin/cellstorage.svc"
         env["OFFICECOLLABSERVER_INTEROP_PEER"] = "http://localhost:5182/_vti_bin/cellstorage.svc"
-        projects = ["CellBridge.FssHttpB.Tests", "CellBridge.FssHttp.Tests", "CellBridge.Storage.Tests", "CellBridge.Interop.Tests"]
-        if os.name == "nt":
-            projects.append("OfficeInspectors.Adapter")
-        else:
-            summary["windowsOnlyChecks"] = "OfficeInspectors.Adapter requires WindowsDesktop; covered by Windows CI."
+        projects = ["CellBridge.FssHttpB.Tests", "CellBridge.FssHttp.Tests", "CellBridge.Storage.Tests",
+                    "CellBridge.Interop.Tests", "OfficeInspectors.Adapter"]
         for project in projects:
             run(project, ["dotnet", "test", f"tests/{project}", "-c", "Release", "--no-build",
                 "--nologo", "-v", "minimal", "--logger", "trx", "--results-directory", str(output / "tests" / project)])

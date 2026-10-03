@@ -17,11 +17,18 @@ and two-desktop live coauthoring remain unverified.
 Aspire uses PostgreSQL to persist documents, resource IDs, retained graphs,
 versions, save receipts and unexpired sessions. Binary content can use PostgreSQL
 or a filesystem provider. Distinct authenticated user identities remain
-unimplemented. On 2026-10-02, desktop Word completed two remote saves and
+unimplemented. On 2026-10-03, desktop Word completed ten remote saves and
 a fresh-process reopen against the PostgreSQL-backed host through Tailscale.
-Both binary file saves and the final server bytes were verified. See the
+Each binary file save was matched to the client's ETag, all 17 captured binary
+responses passed the independent Office Inspectors parser, and the final server
+bytes matched the client's SHA-256. See the
 [interoperability coverage](docs/interoperability.md).
 Partial and unsupported uploads return protocol errors.
+
+Storage and request budgets reject growth before publishing a new revision.
+Knowledge-aware file queries avoid reading payloads the client already knows.
+Automatic graph pruning remains disabled pending reference and recovery coverage;
+see [limits and retention](docs/storage-providers.md#limits-and-qualification).
 
 ## Requirements
 
@@ -39,8 +46,8 @@ dotnet test CellBridge.slnx
 dotnet test demo/CellBridge.Demo.slnx
 ```
 
-The Office Inspectors adapter requires Windows. Protocol and provider tests run
-on Linux.
+Protocol, provider and the in-repo Office Inspectors parser tests run on Linux
+and Windows. Desktop Office checks require Windows.
 Live interoperability tests are opt-in. See the
 [interop test instructions](tests/CellBridge.Interop.Tests/README.md).
 

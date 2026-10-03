@@ -7,13 +7,17 @@ namespace CellBridge.FssHttpB;
 /// </summary>
 public sealed class BinaryReaderEx
 {
-    private readonly byte[] _buffer;
+    private readonly ReadOnlyMemory<byte> _buffer;
+    private readonly int _start;
     private int _position;
     private int _end;
 
     public BinaryReaderEx(byte[] buffer)
+        : this((ReadOnlyMemory<byte>)(buffer ?? throw new ArgumentNullException(nameof(buffer)))) { }
+
+    public BinaryReaderEx(ReadOnlyMemory<byte> buffer)
     {
-        _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
+        _buffer = buffer;
         _position = 0;
         _end = buffer.Length;
     }
@@ -24,7 +28,11 @@ public sealed class BinaryReaderEx
     public BinaryReaderEx(byte[] buffer, int offset, int count)
     {
         if (buffer is null) throw new ArgumentNullException(nameof(buffer));
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        if (offset > buffer.Length - count) throw new ArgumentOutOfRangeException(nameof(count));
         _buffer = buffer;
+        _start = offset;
         _position = offset;
         _end = offset + count;
     }
@@ -38,7 +46,7 @@ public sealed class BinaryReaderEx
         get => _position;
         set
         {
-            if (value < 0 || value > _end)
+            if (value < _start || value > _end)
             {
                 throw new ArgumentOutOfRangeException(nameof(value));
             }
@@ -49,19 +57,20 @@ public sealed class BinaryReaderEx
     public byte ReadByte()
     {
         Ensure(1);
-        return _buffer[_position++];
+        return _buffer.Span[_position++];
     }
 
     public sbyte ReadSByte()
     {
         Ensure(1);
-        return unchecked((sbyte)_buffer[_position++]);
+        return unchecked((sbyte)_buffer.Span[_position++]);
     }
 
     public ushort ReadUInt16()
     {
         Ensure(2);
-        ushort v = (ushort)(_buffer[_position] | (_buffer[_position + 1] << 8));
+        var span = _buffer.Span;
+        ushort v = (ushort)(span[_position] | (span[_position + 1] << 8));
         _position += 2;
         return v;
     }
@@ -74,10 +83,11 @@ public sealed class BinaryReaderEx
     public uint ReadUInt32()
     {
         Ensure(4);
-        uint v = (uint)(_buffer[_position]
-            | (_buffer[_position + 1] << 8)
-            | (_buffer[_position + 2] << 16)
-            | (_buffer[_position + 3] << 24));
+        var span = _buffer.Span;
+        uint v = (uint)(span[_position]
+            | (span[_position + 1] << 8)
+            | (span[_position + 2] << 16)
+            | (span[_position + 3] << 24));
         _position += 4;
         return v;
     }
@@ -103,8 +113,7 @@ public sealed class BinaryReaderEx
     public byte[] ReadBytes(int count)
     {
         Ensure(count);
-        var result = new byte[count];
-        Buffer.BlockCopy(_buffer, _position, result, 0, count);
+        var result = _buffer.Slice(_position, count).ToArray();
         _position += count;
         return result;
     }
@@ -115,9 +124,17 @@ public sealed class BinaryReaderEx
         _position += count;
     }
 
+    public ReadOnlyMemory<byte> ReadMemory(int count)
+    {
+        Ensure(count);
+        var result = _buffer.Slice(_position, count);
+        _position += count;
+        return result;
+    }
+
     private void Ensure(int count)
     {
-        if (_position + count > _end)
+        if (count < 0 || count > _end - _position)
         {
             throw new EndOfStreamException(
                 $"Attempted to read {count} bytes at position {_position} but buffer length is {_end}.");
