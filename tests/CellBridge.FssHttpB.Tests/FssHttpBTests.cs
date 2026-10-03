@@ -224,13 +224,17 @@ public class BasicTypesTests
         Assert.Equal(content, decoded.Content);
     }
 
-    [Fact]
-    public void StringItem_RoundTrips()
+    [Theory]
+    [InlineData("Hello, FSSHTTPB!")]
+    [InlineData("Å文😀")]
+    public void StringItem_RoundTrips(string value)
     {
-        const string value = "Hello, FSSHTTPB!";
         var writer = new BinaryWriterEx();
         new StringItem(value).Serialize(writer);
         byte[] bytes = writer.ToArray();
+        var reader = new BinaryReaderEx(bytes);
+        Assert.Equal((ulong)value.Length, Compact64bitInt.Deserialize(reader).Value);
+        Assert.Equal(System.Text.Encoding.Unicode.GetBytes(value), reader.ReadBytes(reader.Remaining));
 
         var decoded = StringItem.Deserialize(new BinaryReaderEx(bytes));
         Assert.Equal(value, decoded.Value);

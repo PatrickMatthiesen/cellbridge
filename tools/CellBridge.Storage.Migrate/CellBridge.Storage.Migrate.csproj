@@ -4,4 +4,5 @@
     <ProjectReference Include="../../src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
   </ItemGroup>
+  <ItemGroup><ProjectReference Include="../../src/CellBridge.Authentication/CellBridge.Authentication.csproj" /></ItemGroup>
 </Project>

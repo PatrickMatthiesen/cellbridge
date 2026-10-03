@@ -11,7 +11,7 @@ public sealed class IdentityRoutingTests
     public async Task EncodedUrlAndResourceIdKeepReleaseOnTheOriginalFile()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
-        using var http = new HttpClient { BaseAddress = endpoint };
+        using var http = LiveInteropHttp.Create(endpoint);
         var name = "Excel encoding check " + Guid.NewGuid().ToString("N")[..8];
         using var created = await http.PostAsJsonAsync("/api/documents", new { name, type = "xlsx" });
         created.EnsureSuccessStatusCode();

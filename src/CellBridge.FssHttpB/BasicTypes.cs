@@ -48,8 +48,8 @@ public sealed class BinaryItem
 }
 
 /// <summary>
-/// A String Item: a compact length followed by UTF-8 bytes.
-/// [MS-FSSHTTPB] section 2.2.1.8.
+/// A String Item: a compact UTF-16 character count followed by little-endian UTF-16 bytes.
+/// [MS-FSSHTTPB] section 2.2.1.4.
 /// </summary>
 public sealed class StringItem
 {
@@ -71,8 +71,8 @@ public sealed class StringItem
     /// <summary>Serializes the string item to the writer.</summary>
     public void Serialize(BinaryWriterEx writer)
     {
-        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(Value);
-        new Compact64bitInt((ulong)bytes.Length).Serialize(writer);
+        byte[] bytes = System.Text.Encoding.Unicode.GetBytes(Value);
+        new Compact64bitInt((ulong)Value.Length).Serialize(writer);
         writer.WriteBytes(bytes);
     }
 
@@ -80,13 +80,13 @@ public sealed class StringItem
     public static StringItem Deserialize(BinaryReaderEx reader)
     {
         ulong length = Compact64bitInt.Deserialize(reader).Value;
-        if (length > int.MaxValue)
+        if (length > int.MaxValue / 2)
         {
             throw new InvalidDataException($"String item length {length} exceeds int.MaxValue.");
         }
 
-        byte[] bytes = reader.ReadBytes((int)length);
-        return new StringItem(System.Text.Encoding.UTF8.GetString(bytes));
+        byte[] bytes = reader.ReadBytes(checked((int)length * 2));
+        return new StringItem(System.Text.Encoding.Unicode.GetString(bytes));
     }
 
     /// <inheritdoc />

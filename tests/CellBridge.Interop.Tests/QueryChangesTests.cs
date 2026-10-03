@@ -36,7 +36,7 @@ public sealed class LiveQueryChangesTests
     public async Task FileKnowledgeProducedAndConsumedByMicrosoftClientReturnsNoKnownPayloads()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
-        using var http = new HttpClient();
+        using var http = LiveInteropHttp.Create();
         var client = new CellStorageClient(http, endpoint);
         var first = await client.SendCellAsync("/shared/test.docx", InteropRequestFactory.QueryChanges(1),
             partitionId: null, getFileProps: true);
@@ -60,7 +60,7 @@ public sealed class LiveQueryChangesTests
         var endpointText = Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT");
         Assert.False(string.IsNullOrWhiteSpace(endpointText));
 
-        using var http = new HttpClient(new HttpClientHandler { ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator });
+        using var http = LiveInteropHttp.Create();
         var client = new CellStorageClient(http, new Uri(endpointText));
         var partition = new Guid("383ADC0B-E66E-4438-95E6-E39EF9720122");
 

@@ -11,7 +11,7 @@ public sealed class DocumentLibraryTests
     public async Task MultipleDocumentsDownloadAndTwoClientsShareOneDocument()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
-        using var http = new HttpClient { BaseAddress = endpoint, Timeout = TimeSpan.FromSeconds(30) };
+        using var http = LiveInteropHttp.Create(endpoint);
         var before = await http.GetFromJsonAsync<List<Listing>>("/api/documents");
         Assert.NotNull(before);
         var first = Assert.Single(before, item => item.Path == "/shared/test.docx");

@@ -22,15 +22,16 @@ public sealed record PartitionState(int Kind, PartitionIdentity Identity, ulong 
     ImmutableArray<byte> InlineContent = default);
 public sealed record EditorState(Guid ClientId, string? UserName, DateTime JoinedUtc,
     DateTime LastSeenUtc, DateTime ExpiresUtc, int TimeoutSeconds, bool AsEditor, int EditorNumber,
-    ImmutableDictionary<string, ImmutableArray<byte>> Metadata);
-public sealed record LeaseState(string Id, string? Client, DateTime ExpiresUtc, int Kind, string? SchemaId);
+    ImmutableDictionary<string, ImmutableArray<byte>> Metadata, SubjectIdentity? Owner = null);
+public sealed record LeaseState(string Id, string? Client, DateTime ExpiresUtc, int Kind, string? SchemaId,
+    string? OwnerSubject = null);
 public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseState> SchemaOwners,
     LeaseState? Exclusive, long Generation)
 {
     public static CoordinationState Empty { get; } = new(null, [], null, 0);
 }
 public sealed record SaveReceipt(string OperationKey, string Digest, uint ContentVersion,
-    ContentHandle? Response);
+    ContentHandle? Response, string? OwnerSubject = null);
 
 /// <summary>One detached state version. Referenced content is immutable; reclamation requires quiescent maintenance.</summary>
 public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Path, string PathKey,
@@ -39,13 +40,17 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
     ImmutableArray<EditorState> Editors, CoordinationState Coordination,
     ImmutableArray<SaveReceipt> Receipts)
 {
-    public const int CurrentFormat = 1;
+    public const int CurrentFormat = 2;
+    public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
     public string Etag => $"\"{{{ResourceId.ToString("D").ToUpperInvariant()}}},{ContentVersion}\"";
 }
 
 /// <summary>Metadata only; listing does not fetch package or graph bytes.</summary>
 public sealed record DocumentSummary(Guid ResourceId, string Path, long Length,
-    uint ContentVersion, DateTime ModifiedUtc, int ActiveEditors);
+    uint ContentVersion, DateTime ModifiedUtc, int ActiveEditors)
+{
+    public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
+}
 
 /// <summary>Content writes must complete durably before their handles can be published.</summary>
 public interface IContentStore

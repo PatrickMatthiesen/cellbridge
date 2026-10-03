@@ -16,7 +16,6 @@ namespace CellBridge.Web;
 /// </summary>
 public static class MetadataVersioningResponseBuilder
 {
-    private const string DefaultUser = "officelab";
 
     // These are the values observed repeatedly in the SharePoint capture for
     // Document.docx (20260925T084814Z-session-f088f59e). They describe the
@@ -35,13 +34,13 @@ public static class MetadataVersioningResponseBuilder
     {
         ArgumentNullException.ThrowIfNull(document);
 
-        string user = string.IsNullOrWhiteSpace(userName) ? DefaultUser : userName;
+        string user = document.Security.ModifiedBy?.Login ?? userName ?? "unknown";
         var properties = new XElement("DocProps",
             Property("vti_filesize", document.ContentLength.ToString(CultureInfo.InvariantCulture)),
             Property("vti_contentversion", document.ContentVersion.ToString(CultureInfo.InvariantCulture)),
             Property("vti_docstoreversion", document.ContentVersion.ToString(CultureInfo.InvariantCulture)),
             Property("vti_modifiedby", user),
-            Property("vti_author", user),
+            Property("vti_author", document.Security.CreatedBy?.Login ?? userName ?? "unknown"),
             Property("vti_timecreated", FormatProtocolDate(document.CreatedUtc)),
             Property("vti_contentversionisdirty", "false"),
             Property("vti_level", CapturedItemLevel),
@@ -69,11 +68,11 @@ public static class MetadataVersioningResponseBuilder
         ArgumentNullException.ThrowIfNull(document);
         ArgumentException.ThrowIfNullOrWhiteSpace(publicOrigin);
 
-        string user = string.IsNullOrWhiteSpace(userName) ? DefaultUser : userName;
+        string user = document.Security.ModifiedBy?.Login ?? userName ?? "unknown";
         string documentUrl = BuildDocumentUrl(publicOrigin, document.Url);
         string version = $"@{Math.Max(1, document.ContentVersion)}.0";
-        string createdRaw = FormatProtocolDate(document.CreatedUtc);
-        string created = document.CreatedUtc.ToString("M/d/yyyy h:mm tt", CultureInfo.InvariantCulture);
+        string createdRaw = FormatProtocolDate(document.LastModifiedUtc);
+        string created = document.LastModifiedUtc.ToString("M/d/yyyy h:mm tt", CultureInfo.InvariantCulture);
 
         var nested = new XElement("GetVersionsResponse",
             new XElement("GetVersionsResult",
@@ -88,7 +87,7 @@ public static class MetadataVersioningResponseBuilder
                         new XAttribute("created", created),
                         new XAttribute("createdRaw", createdRaw),
                         new XAttribute("createdBy", user),
-                        new XAttribute("createdByName", user),
+                        new XAttribute("createdByName", document.Security.ModifiedBy?.DisplayName ?? userName ?? "unknown"),
                         new XAttribute("size", document.ContentLength.ToString(CultureInfo.InvariantCulture)),
                         new XAttribute("comments", string.Empty)))));
 

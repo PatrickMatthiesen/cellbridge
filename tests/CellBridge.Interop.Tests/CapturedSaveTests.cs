@@ -20,7 +20,7 @@ public sealed class CapturedSaveTests
     private static async Task Replay(string type, string[] saves)
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
-        using var http = new HttpClient();
+        using var http = LiveInteropHttp.Create();
         var name = "Save regression " + Guid.NewGuid().ToString("N")[..8];
         using var created = await http.PostAsJsonAsync(new Uri(endpoint, "/api/documents"), new { name, type });
         created.EnsureSuccessStatusCode();

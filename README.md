@@ -16,8 +16,12 @@ and two-desktop live coauthoring remain unverified.
 
 Aspire uses PostgreSQL to persist documents, resource IDs, retained graphs,
 versions, save receipts and unexpired sessions. Binary content can use PostgreSQL
-or a filesystem provider. Distinct authenticated user identities remain
-unimplemented. On 2026-10-03, desktop Word completed ten remote saves and
+or a filesystem provider. Local Identity accounts and per-document Read/Write
+permissions are implemented. A manual Windows Word trial on 2026-10-03
+demonstrated authenticated writer saves, reader read-only open and Write
+revocation with unchanged server bytes. MS-OFBA required explicit Office host
+approval; Office build qualification and authenticated fresh-process reopen
+remain pending. On 2026-10-03, desktop Word completed ten remote saves and
 a fresh-process reopen against the PostgreSQL-backed host through Tailscale.
 Each binary file save was matched to the client's ETag, all 17 captured binary
 responses passed the independent Office Inspectors parser, and the final server
@@ -68,7 +72,9 @@ aspire wait web --apphost aspire/apphost.cs
 aspire ps
 ```
 
-Open the `demo` endpoint shown in the Aspire dashboard. Desktop Office must be
+Provision an account and configure an import owner using the
+[authentication setup](docs/authentication.md). Open `/library` on the web
+HTTPS endpoint and sign in. Desktop Office must be
 able to reach and trust the server's HTTPS endpoint. The default Office/browser
 origin is `https://localhost:7292`; configure `collab-public-url` for other clients.
 Stop the AppHost with `aspire stop` before rebuilding if an executable is locked.
@@ -94,6 +100,7 @@ provide an independent reference implementation.
 
 ## Documentation
 
+- [Authentication and document permissions](docs/authentication.md)
 - [Demo and document library](docs/demo-library.md)
 - [Storage setup, NuGet consumption and provider authoring](docs/storage-providers.md)
 - [Automated checks, performance and desktop Word over Tailscale](docs/automated-testing.md)

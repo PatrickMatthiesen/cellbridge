@@ -19,6 +19,8 @@
     <Using Include="Xunit" />
     <None Include="../../testdata/api/excel-save-20260928.bin" Link="Fixtures/excel-save-20260928.bin" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="CellStorageClient.cs" />
+    <Compile Include="LiveInteropHttp.cs" />
+    <Compile Include="LibraryAuthenticationTests.cs" />
     <Compile Include="LiveInteropFactAttribute.cs" />
     <Compile Include="CapturedWordOpenTests.cs" />
     <Compile Include="CapturedSaveTests.cs" />

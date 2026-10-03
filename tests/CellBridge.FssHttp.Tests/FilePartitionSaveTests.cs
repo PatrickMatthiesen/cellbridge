@@ -22,14 +22,14 @@ public sealed class FilePartitionSaveTests
         Assert.Equal(0x8004, put.AdditionalFlagsBits);
         // The captured base identity belongs to a previous in-memory server.
         put.ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(response.SubResponses[0].Status, response.SubResponses[0].Error?.ErrorMessage);
         Assert.Equal(2u, document.ContentVersion);
         Assert.Equal(document.Content, document.FilePartition.FileGraph.Materialize());
         using var workbook = DocumentFormat.OpenXml.Packaging.SpreadsheetDocument.Open(new MemoryStream(document.Content), false);
         Assert.Empty(new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(workbook));
         Assert.Contains("asdf", workbook.WorkbookPart!.SharedStringTablePart!.SharedStringTable.InnerText);
-        var retry = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var retry = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(retry.SubResponses[0].Status);
         Assert.Equal(2u, document.ContentVersion);
     }
@@ -43,7 +43,7 @@ public sealed class FilePartitionSaveTests
         put.Flags |= 0x10;
         put.AdditionalFlagsBits = 0xffc0;
         put.ContentVersionCoherencyCheck = [1, 2, 3];
-        Assert.False(CellBinaryRequestExecutor.Execute(document, document.FilePartition, request).SubResponses[0].Status);
+        Assert.False(CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write).SubResponses[0].Status);
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public sealed class FilePartitionSaveTests
         var document = store.Get("/shared/book.xlsx")!;
         var before = document.Content;
         var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition,
-            Proposal(document, MinimalDocx.Create()));
+            Proposal(document, MinimalDocx.Create()), CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.True(result.SubResponses[0].Status);
         Assert.Equal(before, document.Content);
         Assert.Equal(1u, document.ContentVersion);
@@ -72,7 +72,7 @@ public sealed class FilePartitionSaveTests
         var before = document.Content.ToArray();
         var request = FsshttpbCellRequest.Deserialize(new BinaryReaderEx(File.ReadAllBytes(
             Path.Combine(AppContext.BaseDirectory, "Fixtures", "word-save-fresh.bin"))));
-        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(result.SubResponses[0].Status, result.SubResponses[0].Error?.ErrorMessage);
         Assert.False(before.SequenceEqual(document.Content));
         Assert.Equal(document.Content, document.FilePartition.FileGraph.Materialize());
@@ -89,7 +89,7 @@ public sealed class FilePartitionSaveTests
         request.DataElementPackage!.DataElements.Add(new DataElement(DataElementType.StorageIndexDataElementData,
             alias, SerialNumber.Null) { Data = index.Data!.ToArray() });
         ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex = alias;
-        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(result.SubResponses[0].Status, result.SubResponses[0].Error?.ErrorMessage);
     }
 
@@ -101,11 +101,11 @@ public sealed class FilePartitionSaveTests
             Path.Combine(AppContext.BaseDirectory, "Fixtures", "word-save-current.bin"))));
         var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
         var before = document.Content.ToArray();
-        var stale = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var stale = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.Equal((ulong)CellErrorCode.CoherencyFailure, stale.SubResponses[0].Error!.ErrorCode);
         Assert.Equal(before, document.Content);
         put.ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
-        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(result.SubResponses[0].Status, result.SubResponses[0].Error?.ErrorMessage);
         Assert.Equal(document.Content, document.FilePartition.FileGraph.Materialize());
     }
@@ -117,7 +117,7 @@ public sealed class FilePartitionSaveTests
         var next = MinimalDocx.Create("after");
         var request = Proposal(document, next);
         var before = document.ContentVersion;
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(Assert.Single(response.SubResponses).Status);
         Assert.Equal(next, document.Content);
         Assert.Equal(before + 1, document.ContentVersion);
@@ -127,7 +127,7 @@ public sealed class FilePartitionSaveTests
             RequestId = 9,
             Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true },
         });
-        var download = CellBinaryRequestExecutor.Execute(document, document.FilePartition, query);
+        var download = CellBinaryRequestExecutor.Execute(document, document.FilePartition, query, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var data = Assert.IsType<QueryChangesSubResponseData>(download.SubResponses[0].Data);
         var reopened = PartitionGraphSnapshot.Create(download.DataElementPackage!.DataElements, data.StorageIndexExtendedGuid);
         Assert.Equal(next, reopened.Materialize());
@@ -139,10 +139,10 @@ public sealed class FilePartitionSaveTests
         var document = new DocumentStore().Put("/test.docx", MinimalDocx.Create("before"));
         var first = Proposal(document, MinimalDocx.Create("first"));
         var stale = Proposal(document, MinimalDocx.Create("stale"));
-        Assert.False(CellBinaryRequestExecutor.Execute(document, document.FilePartition, first).SubResponses[0].Status);
+        Assert.False(CellBinaryRequestExecutor.Execute(document, document.FilePartition, first, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write).SubResponses[0].Status);
         var bytes = document.Content.ToArray();
         var version = document.ContentVersion;
-        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, stale).SubResponses[0];
+        var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, stale, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write).SubResponses[0];
         Assert.True(result.Status);
         Assert.Equal((ulong)ProtocolErrorCode.CoherencyFailure, result.Error!.ErrorCode);
         Assert.Equal(bytes, document.Content);
@@ -154,9 +154,9 @@ public sealed class FilePartitionSaveTests
     {
         var document = new DocumentStore().Put("/test.docx", MinimalDocx.Create());
         var request = Proposal(document, MinimalDocx.Create("saved"));
-        var first = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var first = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var version = document.ContentVersion;
-        var second = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var second = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(first.SubResponses[0].Status);
         Assert.False(second.SubResponses[0].Status);
         Assert.Equal(version, document.ContentVersion);
@@ -171,7 +171,7 @@ public sealed class FilePartitionSaveTests
         var bytes = document.Content.ToArray();
         var request = Proposal(document, MinimalDocx.Create("broken"));
         request.DataElementPackage!.DataElements.RemoveAll(x => x.DataElementType == DataElementType.ObjectGroupDataElementData);
-        Assert.True(CellBinaryRequestExecutor.Execute(document, document.FilePartition, request).SubResponses[0].Status);
+        Assert.True(CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write).SubResponses[0].Status);
         Assert.Same(before, document.FilePartition.FileGraph);
         Assert.Equal(bytes, document.Content);
     }
@@ -191,7 +191,7 @@ public sealed class FilePartitionSaveTests
             // The farm's starting storage index is foreign to this in-memory document.
             var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
             put.ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
-            var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+            var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
             Assert.False(result.SubResponses[0].Status, result.SubResponses[0].Error?.ErrorMessage);
             using var zip = new ZipArchive(new MemoryStream(document.Content));
             Assert.NotNull(zip.GetEntry("word/document.xml"));

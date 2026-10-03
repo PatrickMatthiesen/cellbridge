@@ -23,7 +23,7 @@ var cell = FsshttpbCellRequest.Deserialize(new BinaryReaderEx(binary.Content));
 ((PutChangesSubRequestData)cell.SubRequests.Single().Data!).ExpectedStorageIndex =
     (await StoredDocument.RestoreAsync(before, content)).FilePartition.FileGraph.StorageIndex;
 var service = new CellBridgeDocumentService(new(new PausedStateStore(state, phase, signal), content));
-var result = await service.ExecuteAsync(id, DocumentPartitionKind.FileContents, cell, new Dictionary<string, string>());
+var result = await service.ExecuteAsync(id, DocumentPartitionKind.FileContents, cell, new Dictionary<string, string>(), new CellBridgeActor(new SubjectIdentity("tests:writer", "test-writer", "Test writer"), CanCreate: true));
 if (result.Response.SubResponses.Any(r => r.Status)) throw new InvalidOperationException("Probe save failed.");
 
 sealed class PausedStateStore(IDocumentStateStore inner, string phase, string signal) : IDocumentStateStore

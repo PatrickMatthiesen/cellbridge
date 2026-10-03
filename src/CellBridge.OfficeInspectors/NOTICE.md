@@ -1,10 +1,14 @@
 # Office Inspectors parser port
 
-The parsers in `Parsers/BaseStructure.cs`, `FSSHTTPB.cs`, `FSSHTTPD.cs` and
-`ONESTORE.cs` derive from Microsoft's
+The parsers under `Parsers/Common`, `Parsers/FssHttpB`, `Parsers/FssHttpD` and
+`Parsers/OneStore` derive from Microsoft's
 [Office Inspectors for Fiddler](https://github.com/OfficeDev/Office-Inspectors-for-Fiddler)
 at commit `b526e008f46e0c974485555e70d4f715d2c861ff`. The upstream MIT license
 is retained in `LICENSE-MIT.txt`, along with source copyright notices.
+
+Upstream's `BaseStructure.cs`, `FSSHTTPB.cs`, `FSSHTTPD.cs` and `ONESTORE.cs`
+are split into one file per top-level type, grouped by protocol area. The port
+retains the original type names, namespace and declaration comments.
 
 CellBridge maintains this .NET 10 port. It includes the binary request/response,
 FSSHTTPD node/ZIP and OneStore property grammars used by the FSSHTTP inspector.
