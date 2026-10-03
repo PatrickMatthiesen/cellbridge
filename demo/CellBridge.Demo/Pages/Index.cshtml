@@ -15,7 +15,14 @@
             <div class="catalog-mark" aria-hidden="true"><span>CB</span><small>LIBRARY<br />/ 01</small></div>
         </div>
     </header>
+    <p>Signed in as @(User.FindFirst("cellbridge:display-name")?.Value ?? User.Identity?.Name).</p>
+    <form method="post" action="/auth/logout">
+        @Html.AntiForgeryToken()
+        <button type="submit" class="button button-quiet">Sign out</button>
+    </form>
 
+    @if (User.HasClaim("cellbridge:create", "true"))
+    {
     <section class="create-toolbar" aria-label="Create a document">
         <details class="create-document" open="@(Model.CreateError is not null)">
             <summary class="button button-primary">New document <span aria-hidden="true">+</span></summary>
@@ -29,7 +36,7 @@
                 </select>
                 <label asp-for="NewName">Name</label>
                 <input asp-for="NewName" placeholder="My test document" maxlength="120" required aria-describedby="name-help" />
-                <p id="name-help">The file extension is added automatically. Files stay in memory until the server restarts.</p>
+                <p id="name-help">The file extension is added automatically.</p>
                 @if (Model.CreateError is not null)
                 {
                     <p class="create-error" role="alert">@Model.CreateError</p>
@@ -42,6 +49,8 @@
             <p class="create-success" role="status">@Model.CreatedMessage</p>
         }
     </section>
+
+    }
 
     @if (Model.IsUnavailable)
     {
@@ -101,7 +110,7 @@
             }
         </section>
         <p class="no-results" id="no-results" hidden>No files match that search.</p>
-        <footer class="page-note">Word open and save have been tested. Excel and PowerPoint editing and live coauthoring are not yet verified.</footer>
+        <footer class="page-note">Authenticated desktop editing requires live validation. Two-desktop coauthoring remains unverified.</footer>
     }
 </main>
 

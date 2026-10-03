@@ -1,5 +1,6 @@
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
+using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Web;
 
@@ -18,6 +19,7 @@ public static class CellBinaryRequestExecutor
         StoredDocument document,
         DocumentPartition partition,
         FsshttpbCellRequest request,
+        DocumentAccess access,
         Func<ulong, FsshttpbResponse>? editorsTableQueryChanges = null)
     {
         var response = new FsshttpbResponse();
@@ -34,6 +36,12 @@ public static class CellBinaryRequestExecutor
         bool queryChangesAlreadyHandled = false;
         foreach (var subRequest in request.SubRequests)
         {
+            if (subRequest.RequestType != RequestTypes.QueryAccess &&
+                !access.HasFlag(subRequest.RequestType == RequestTypes.PutChanges ? DocumentAccess.Write : DocumentAccess.Read))
+            {
+                response.SubResponses.Add(CellBridge.AspNetCore.CellBridgeAuthorization.Denied(subRequest));
+                continue;
+            }
             if (subRequest.RequestType == RequestTypes.PutChanges)
             {
                 response.SubResponses.Add(FilePartitionSaveHandler.Apply(document, partition, subRequest, request.DataElementPackage));
@@ -55,18 +63,22 @@ public static class CellBinaryRequestExecutor
             }
 
             response.SubResponses.Add(subRequest.RequestType == RequestTypes.QueryAccess
-                ? QueryAccessSubResponse(subRequest.RequestId)
+                ? QueryAccessSubResponse(subRequest.RequestId, access)
                 : UnsupportedSubResponse(subRequest.RequestId, subRequest.RequestType));
         }
 
         return response;
     }
 
-    private static FsshttpbSubResponse QueryAccessSubResponse(ulong requestId) => new()
+    private static FsshttpbSubResponse QueryAccessSubResponse(ulong requestId, DocumentAccess access) => new()
     {
         RequestId = requestId,
         RequestType = RequestTypes.QueryAccess,
-        Data = new QueryAccessSubResponseData(),
+        Data = new QueryAccessSubResponseData
+        {
+            ReadAccessError = access.HasFlag(DocumentAccess.Read) ? null : CellBridge.AspNetCore.CellBridgeAuthorization.AccessError(),
+            WriteAccessError = access.HasFlag(DocumentAccess.Write) ? null : CellBridge.AspNetCore.CellBridgeAuthorization.AccessError(),
+        },
     };
 
     private static FsshttpbResponse QueryChanges(

@@ -27,7 +27,7 @@ To test an already running Aspire app, set the full SOAP endpoint. The peer
 endpoint is optional and enables the two-host storage/lock test:
 
 ```powershell
-$env:OFFICECOLLABSERVER_INTEROP_ENDPOINT = 'http://localhost:5181/_vti_bin/cellstorage.svc'
+$env:OFFICECOLLABSERVER_INTEROP_ENDPOINT = 'https://localhost:7292/_vti_bin/cellstorage.svc'
 $env:OFFICECOLLABSERVER_INTEROP_PEER = 'http://localhost:5182/_vti_bin/cellstorage.svc'
 dotnet test tests/CellBridge.Interop.Tests/CellBridge.Interop.Tests.csproj
 ```
@@ -37,3 +37,11 @@ Word and Excel PutChanges, identity routing, session visibility, shared exclusiv
 locks and forwarded HTTPS origins. Unconfigured HTTP checks report skipped.
 The proxy-origin test assumes a trusted loopback connection to the local host.
 It should run locally rather than targeting a remote proxy from another machine.
+
+Live HTTP tests require `CELLBRIDGE_INTEROP_COOKIE` and `CELLBRIDGE_INTEROP_CSRF`
+from an ordinary signed-in creator account. Cookies must include the paired
+antiforgery cookie; the token must be issued after sign-in. Keep these values
+out of logs and captures. `python3 tools/testing/run.py` provisions a temporary
+Identity account, performs the login form flow and supplies both privately for
+a disposable local run. A shared account across hosts tests cookie and storage
+sharing, not distinct authenticated desktop coauthoring.

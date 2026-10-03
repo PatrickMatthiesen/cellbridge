@@ -19,8 +19,10 @@ file graph using the independent Microsoft parser. A passing replay does not
 prove that desktop Word accepts the document application data or can save.
 
 `word-save-rejected.response.base64` preserves the binary rejection response
-from an early editable API session. `ResponseInspectorTests` uses it to check
-the inspector's error path and Protocol RequestNotSupported, code 4. The missing
+from an early editable API session. `ResponseInspectorTests` diagnoses its invalid UTF-8 supplemental string
+framing. [MS-FSSHTTPB String Item](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/5be4e273-5abe-4e43-a184-ba59c790ac62)
+requires UTF-16. Current response tests verify valid framing and Protocol
+RequestNotSupported, code 4. The missing
 request attachment prevents this response from serving as a save replay.
 
 `word-save-current.bin` is the complete 16,898-byte binary attachment from the

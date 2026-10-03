@@ -145,19 +145,20 @@ tailscale serve status
 ```
 
 Use the machine's full `*.ts.net` DNS name, for example
-`dev-machine.example.ts.net`. Start Aspire with the public origin and server
-wire capture enabled. The usual persistent development database is appropriate
-for a laptop session; do not set `CELLBRIDGE_TEST_RUN=1` here.
+`dev-machine.example.ts.net`. Choose a free HTTPS port. Start Aspire with that
+public origin and server wire capture enabled. A separate persistent volume
+keeps this authentication trial independent of other checkouts. Do not set
+`CELLBRIDGE_TEST_RUN=1` for a laptop session.
+Choose a different volume name for each concurrent trial. Aspire's `--isolated`
+randomizes ports but does not separate explicitly named Docker volumes.
 
 ```sh
-export CELLBRIDGE_PUBLIC_ORIGIN='https://dev-machine.example.ts.net'
+export CELLBRIDGE_PUBLIC_ORIGIN='https://dev-machine.example.ts.net:8444'
+export CELLBRIDGE_STORAGE_VOLUME=cellbridge-ofba-storage-data
 export CELLBRIDGE_WIRE_CAPTURE="$PWD/artifacts/office-wire"
 export CELLBRIDGE_SKIP_SHAREPOINT_CAPTURE=1
-aspire start --apphost aspire/apphost.cs --non-interactive
-aspire wait web --non-interactive
-aspire wait demo --non-interactive
-tailscale serve --bg --https=443 http://127.0.0.1:5181
-tailscale serve --bg --https=8443 http://127.0.0.1:5281
+aspire start --isolated --apphost aspire/apphost.cs --non-interactive
+python3 tools/testing/tailscale.py --https-port 8444
 tailscale serve status
 ```
 
@@ -178,21 +179,27 @@ the local file. Restart Aspire after changing capture configuration, then check
 that a SOAP request produces request, response and summary files before starting
 the desktop test. Remove the setting when the capture session is finished.
 
-The collaboration server is `https://dev-machine.example.ts.net`. The optional
-demo is `https://dev-machine.example.ts.net:8443`. Keep document and SOAP paths
-at their original roots. The demo sends Office to the collaboration origin on
-443. The web and demo hosts accept forwarded HTTPS/Host information from trusted
-loopback proxies using ASP.NET Core's defaults. An integration test verifies the
-SOAP origin through Aspire's HTTP proxy.
+The library is `https://dev-machine.example.ts.net:8444/library`; documents,
+authentication and SOAP use that same origin. The web host proxies the library
+to the internal demo. The helper discovers Aspire's current HTTP port, waits
+for both hosts, checks the configured authentication origin and refuses to
+overwrite an unrelated Serve listener. Run it again after restarting isolated
+Aspire because its local ports change. Serve may require `sudo`; the helper
+tries noninteractive sudo when the daemon denies configuration access.
 
-Use Serve for this private test environment. The current server has no distinct
-authenticated users, so restrict tailnet access to the test devices. Tailscale
-identity headers do not implement Office user authentication in CellBridge.
+Keep document and SOAP paths at their original roots. The web and demo hosts
+accept forwarded HTTPS/Host information from trusted loopback proxies using
+ASP.NET Core's defaults. An integration test verifies the SOAP origin through
+Aspire's HTTP proxy. Tailscale identity headers do not authenticate CellBridge
+users. Provision local accounts and document grants using the
+[authentication setup](authentication.md). Use an operator-owned document with
+Write granted to a writer and Read granted to a reader so revocation can be
+tested. Owners always retain Write.
 
 From the laptop, verify that this succeeds with the normal Windows trust store:
 
 ```powershell
-Invoke-RestMethod https://dev-machine.example.ts.net/health
+Invoke-RestMethod https://dev-machine.example.ts.net:8444/health
 ```
 
 ## Run real desktop Word
@@ -201,10 +208,19 @@ Copy `tools/testing/word-smoke.ps1` to the laptop or use a checkout. Open Word
 once to finish its account and first-run setup, then close Word. Run the check
 from a logged-in Windows desktop:
 
+The current host requires authentication. Privately supply
+`CELLBRIDGE_INTEROP_COOKIE` and `CELLBRIDGE_INTEROP_CSRF` from a signed-in creator
+account for the script's HTTP creation and verification calls. Include the
+paired antiforgery cookie and a token issued after sign-in. These credentials
+do not sign desktop Office in. First validate Office's own MS-OFBA exchange
+against the same origin using the [authentication checklist](authentication.md).
+Until that succeeds, this unattended script is not evidence of authenticated
+Office editing. Do not put cookie or token values in reports or command arguments.
+
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned `
   -File .\tools\testing\word-smoke.ps1 `
-  -BaseUrl https://dev-machine.example.ts.net `
+  -BaseUrl https://dev-machine.example.ts.net:8444 `
   -OutputDirectory .\artifacts\office-laptop-01
 ```
 
@@ -261,11 +277,12 @@ capture both flows before changing the protocol. The current script has passed
 a ten-edit, fresh-process reopen test with Word `16.0.20430` and PostgreSQL. See
 [interoperability coverage](interoperability.md).
 
-For cleanup, disable only the two Serve listeners added for this session:
+For cleanup, disable only the Serve listener added for this session. Leave the
+app running until the laptop session finishes. Stopping preserves the named
+PostgreSQL volume, documents and accounts:
 
 ```sh
-tailscale serve --https=443 off
-tailscale serve --https=8443 off
+tailscale serve --https=8444 off
 aspire stop --apphost aspire/apphost.cs --non-interactive
 ```
 

@@ -15,7 +15,7 @@ public sealed class CellBinaryRequestExecutorTests
         request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryAccess) { RequestId = 41 });
         request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges) { RequestId = 73 });
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
 
         Assert.Equal(new ulong[] { 41, 73 }, response.SubResponses.Select(x => x.RequestId));
         Assert.Equal(new[] { RequestTypes.QueryAccess, RequestTypes.QueryChanges },
@@ -54,7 +54,7 @@ public sealed class CellBinaryRequestExecutorTests
         };
         request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.PutChanges) { RequestId = 982 });
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var result = Assert.Single(response.SubResponses);
 
         Assert.Equal(982UL, result.RequestId);
@@ -83,14 +83,14 @@ public sealed class CellBinaryRequestExecutorTests
         var document = store.Put("/test.docx", [1]);
 
         var emptyResponse = CellBinaryRequestExecutor.Execute(
-            document, document.FilePartition, new FsshttpbCellRequest());
+            document, document.FilePartition, new FsshttpbCellRequest(), CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.True(emptyResponse.Status);
         Assert.Equal((ulong)ProtocolErrorCode.RequestStreamSchemaError, emptyResponse.Error?.ErrorCode);
 
         var request = new FsshttpbCellRequest();
         request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges) { RequestId = 12 });
         request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges) { RequestId = 34 });
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
 
         Assert.Equal(new ulong[] { 12, 34 }, response.SubResponses.Select(x => x.RequestId));
         Assert.False(response.SubResponses[0].Status);
@@ -106,7 +106,7 @@ public sealed class CellBinaryRequestExecutorTests
         var request = new FsshttpbCellRequest();
         request.SubRequests.Add(new FsshttpbCellSubRequest((RequestTypes)99) { RequestId = 321 });
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var result = Assert.Single(response.SubResponses);
 
         Assert.Equal(321UL, result.RequestId);

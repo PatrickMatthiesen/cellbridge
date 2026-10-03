@@ -10,7 +10,8 @@ tool below. The APIs are experimental; no published NuGet release is assumed.
 
 ## Run the durable sample
 
-Build while Aspire is stopped, then start it normally:
+Follow the [account and migration setup](authentication.md), then build while
+Aspire is stopped and start it normally:
 
 ```sh
 dotnet build CellBridge.slnx
@@ -31,12 +32,12 @@ application checks the schema; it does not alter tables during normal startup.
 An unsupported schema fails explicitly. Use deployment-controlled credentials
 and PostgreSQL backup/restore procedures appropriate to the installation.
 
-Schema version 2 adds a shared usage ledger. Stop all hosts before upgrading from
-version 1. Run migration with the same `Storage` settings as the hosts; it sets
+Schema version 3 combines the shared usage ledger with authenticated ownership. Stop all hosts before upgrading from
+version 1 or 2. Supply an explicit `Authentication:LegacyOwner` for documents without ownership; see [authentication setup](authentication.md). Run migration with the same `Storage` settings as the hosts; it sets
 the authoritative database byte and document-count limits. With filesystem
 content, also supply `Storage:ContentProvider=FileSystem` and `Storage:ContentRoot`
 so migration inventories existing `.blob` files. Existing data is preserved even
-when it already exceeds a limit. Version 1 binaries cannot write a version 2 database.
+when it already exceeds a limit. Older binaries cannot write a version 3 database.
 
 | Setting | Meaning |
 | --- | --- |
@@ -87,7 +88,11 @@ builder.Services.AddSingleton(source);
 var provider = new StorageProvider(
     new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
 builder.Services.AddCellBridge(provider, multipleInstances: true);
+// Register a real authentication scheme and map validated claims to
+// cellbridge:subject. See the authentication guide and NuGet example.
 var app = builder.Build();
+app.UseAuthentication();
+app.UseAuthorization();
 await provider.CheckHealthAsync();
 app.MapCellBridge();
 app.MapHealthChecks("/health");
@@ -108,22 +113,26 @@ shared accounting. Custom providers must implement their own atomic accounting.
 providers with default settings can still run without this guarantee. PostgreSQL
 state and content stores in a pair must use the same `NpgsqlDataSource` object.
 
-`CellBridgeDocumentService.CreateAsync` imports a missing document and returns
-null on a conflicting path/identity. `ResolveAsync` preserves ResourceID
+`CellBridgeDocumentService.CreateAsync` takes an explicit authenticated actor
+with creation permission and records initial ownership and authorship. It returns
+null on a conflicting path/identity. Trusted startup imports use `ImportAsync`
+with a supplied owner and system actor. `ResolveAsync` preserves ResourceID
 precedence when an ID is supplied. `ExecuteAsync` processes supported binary
 operations. Sample catalog/creation APIs, Office package generation, imports and
 Aspire dependencies remain in the executable project, outside the hosting package.
 Some protocol utility types retain the existing `CellBridge.Web` namespace for
 source compatibility, but reside in the hosting assembly.
 
-The consuming host owns authentication and authorization middleware. This
-release still returns the shared `officelab` identity and grants protocol access
-without distinct-user authorization. Provider selection does not add those
-features.
+The consuming host registers authentication and authorization middleware.
+Map validated principals to stable, authority-qualified CellBridge subjects.
+All endpoints require authentication, and document grants deny access by default.
+See [authentication and permissions](authentication.md) for the claim contract,
+operation matrix, sample account store, migrations and Office validation limits.
 
 The [NuGet consumer example](../examples/NuGetConsumer/README.md) is a minimal
 HTTP application using only package references. It registers in-memory storage,
-maps the endpoints and creates one downloadable text file. Its storage is
+maps the endpoints and imports one text file for a configured owner. It validates
+bearer tokens from the consuming application's configured authority. Its storage is
 deliberately volatile; the PostgreSQL composition above provides persistence.
 
 Run `python tools/verify_packages.py` with Aspire stopped to pack the nine
@@ -150,7 +159,8 @@ storage system's guarantees; asynchronous replication failover needs its own
 durability configuration. No failure switches to volatile storage.
 
 Receipts bind a proposed storage index to the document, an operation digest and
-the accepted response. Identical retry while that content version is current
+the accepted response and writer subject. Retries recheck current Write access
+and require the original writer. Identical retry while that content version is current
 returns the accepted response without advancing its version. Reusing the index
 for different bytes fails. A delayed retry after a later save returns coherency
 failure and preserves the current revision. A lost commit reply triggers a

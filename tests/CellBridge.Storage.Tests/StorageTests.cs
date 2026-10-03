@@ -39,7 +39,7 @@ public class StorageTests
     {
         var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
         var service = new CellBridgeDocumentService(provider);
-        var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => service.CreateAsync("/same.docx", MinimalDocx.Create()).AsTask()));
+        var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => service.CreateAsync("/same.docx", MinimalDocx.Create(), TestActor.Value).AsTask()));
         var initial = Assert.Single(outcomes, x => x is not null)!;
         await Task.WhenAll(Enumerable.Range(0, 32).Select(_ => provider.State.TransitionAsync(initial.ResourceId,
             (current, _) => new StateTransition<bool>(current with { ContentVersion = current.ContentVersion + 1 }, true)).AsTask()));
@@ -58,25 +58,25 @@ public class StorageTests
     internal static async Task CheckReferenceSaves(StorageProvider provider)
     {
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var first = Fixture("save-first");
         var second = Fixture("save-second");
         var initial = await StoredDocument.RestoreAsync(state, provider.Content);
         ((PutChangesSubRequestData)first.SubRequests.Single().Data!).ExpectedStorageIndex = initial.FilePartition.FileGraph.StorageIndex;
-        var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
+        var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(saved.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(state.StateVersion + 1, saved.State.StateVersion);
         Assert.Equal((await provider.State.FindByResourceIdAsync(state.ResourceId))!.StateVersion, saved.State.StateVersion);
         var initialVersion = saved.State.ContentVersion;
-        var retried = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
+        var retried = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(retried.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(initialVersion, retried.State.ContentVersion);
         Assert.Equal(saved.State.StateVersion, retried.State.StateVersion);
         Assert.Equal(saved.Response.ToByteArray(), retried.Response.ToByteArray());
-        var advanced = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, second, new Dictionary<string, string>());
+        var advanced = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, second, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(advanced.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(initialVersion + 1, advanced.State.ContentVersion);
-        var delayed = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
+        var delayed = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(delayed.Response.SubResponses).Status);
         Assert.Equal((ulong)CellErrorCode.CoherencyFailure, delayed.Response.SubResponses[0].Error!.ErrorCode);
         var final = await provider.State.FindByResourceIdAsync(state.ResourceId);
@@ -84,7 +84,7 @@ public class StorageTests
         var restored = await StoredDocument.RestoreAsync(final!, provider.Content);
         Assert.Equal(advanced.State.ContentVersion, restored.ContentVersion);
         Assert.Equal(restored.Content, restored.FilePartition.FileGraph.Materialize());
-        Assert.Null(await service.ResolveAsync(new FssHttpRequest { ResourceId = Guid.NewGuid().ToString(), UseResourceId = true, Url = state.Path }));
+        Assert.Null(await service.ResolveAsync(new FssHttpRequest { ResourceId = Guid.NewGuid().ToString(), UseResourceId = true, Url = state.Path }, TestActor.Value));
     }
 
     [Fact]
@@ -93,13 +93,13 @@ public class StorageTests
         var state = new InMemoryStateStore();
         var blobs = new InMemoryContentStore();
         var service = new CellBridgeDocumentService(new(state, blobs));
-        var document = (await service.CreateAsync("/failure.docx", MinimalDocx.Create()))!;
+        var document = (await service.CreateAsync("/failure.docx", MinimalDocx.Create(), TestActor.Value))!;
         var failed = new CellBridgeDocumentService(new(state, new FailingWrites(blobs)));
         var request = Fixture("save-first");
         ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
             (await StoredDocument.RestoreAsync(document, blobs)).FilePartition.FileGraph.StorageIndex;
         await Assert.ThrowsAsync<IOException>(() => failed.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents,
-            request, new Dictionary<string, string>()).AsTask());
+            request, new Dictionary<string, string>(), TestActor.Value).AsTask());
         Assert.Equal(document.ContentVersion, (await state.FindByResourceIdAsync(document.ResourceId))!.ContentVersion);
     }
 
@@ -109,11 +109,11 @@ public class StorageTests
         var inner = new InMemoryStateStore();
         var provider = new StorageProvider(new LostReplyState(inner), new InMemoryContentStore());
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/lost.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/lost.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = Fixture("save-first");
         ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
             (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
-        var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+        var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(saved.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(state.ContentVersion + 1, (await inner.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
     }
@@ -174,8 +174,15 @@ public class StorageTests
         public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
         public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken ct = default)
         {
-            await inner.TransitionAsync(id, transition, ct);
-            throw new StorageUnavailableException("Injected lost commit reply.");
+            bool published = false;
+            var result = await inner.TransitionAsync(id, (state, now) =>
+            {
+                var change = transition(state, now);
+                published = change.Next is not null;
+                return change;
+            }, ct);
+            if (published) throw new StorageUnavailableException("Injected lost commit reply.");
+            return result;
         }
     }
 }
@@ -216,8 +223,8 @@ public sealed class PostgreSqlTests
         await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
         var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
         var service = new CellBridgeDocumentService(provider);
-        var first = (await service.CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create()))!;
-        var second = (await service.CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create()))!;
+        var first = (await service.CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
+        var second = (await service.CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         await using var connection = await source.OpenConnectionAsync();
         await using var transaction = await connection.BeginTransactionAsync();
         await using var command = new NpgsqlCommand("SELECT resource_id FROM cellbridge_documents WHERE resource_id=$1 FOR UPDATE", connection, transaction);

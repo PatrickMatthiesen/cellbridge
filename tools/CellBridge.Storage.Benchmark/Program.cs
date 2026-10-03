@@ -64,8 +64,9 @@ foreach (int concurrency in clients)
     var total = Stopwatch.StartNew();
     await Task.WhenAll(Enumerable.Range(0, concurrency).Select(async client =>
     {
+        var actor = new CellBridgeActor(new SubjectIdentity("tests:writer", "test-writer", "Test writer"), CanCreate: true);
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/benchmark-" + Guid.NewGuid().ToString("N") + ".docx", payload))!;
+        var state = (await service.CreateAsync("/benchmark-" + Guid.NewGuid().ToString("N") + ".docx", payload, actor))!;
         var random = new Random(seed + client);
         ClientKnowledge? priorKnowledge = null;
         for (int i = 0; i < iterations; i++)
@@ -78,7 +79,7 @@ foreach (int concurrency in clients)
             if (workload == "captured" && i == 0)
                 ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
             var timer = Stopwatch.StartNew();
-            var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+            var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), actor);
             if (result.Response.SubResponses.Any(r => r.Status))
             {
                 var error = result.Response.SubResponses.First(r => r.Status).Error;
@@ -113,7 +114,7 @@ foreach (int concurrency in clients)
                     var query = new FsshttpbCellRequest();
                     query.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 1, Data = new QueryChangesSubRequestData
                     { IncludeStorageManifest = true, IncludeCellChanges = true, Knowledge = knowledge } });
-                    var queried = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, query, new Dictionary<string, string>());
+                    var queried = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, query, new Dictionary<string, string>(), actor);
                     if (queried.Response.SubResponses.Any(r => r.Status)) throw new InvalidOperationException("Benchmark query failed.");
                     return queried.Response.ToByteArray().LongLength;
                 }
@@ -134,7 +135,7 @@ foreach (int concurrency in clients)
                 managedLiveBytes = i % queryEvery == 0 || i == iterations - 1 ? GC.GetTotalMemory(true) : (long?)null }));
             if (args.Contains("--retry", StringComparer.Ordinal))
             {
-                var retry = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+                var retry = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), actor);
                 if (retry.State.StateVersion != state.StateVersion || retry.Response.SubResponses.Any(r => r.Status))
                     throw new InvalidOperationException("Identical retry changed state or failed.");
             }

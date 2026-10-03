@@ -11,6 +11,13 @@ import subprocess
 import sys
 import tempfile
 import time
+import secrets
+import http.cookiejar
+import html
+import re
+import ssl
+import urllib.parse
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 APPHOST = ROOT / "aspire/apphost.cs"
@@ -26,6 +33,27 @@ def cli_json(command):
             except json.JSONDecodeError:
                 pass
     raise RuntimeError("Aspire did not return JSON.")
+
+
+def login(origin, username, password):
+    """Use the actual login and CSRF flow; keep cookies out of run reports."""
+    if urllib.parse.urlsplit(origin).hostname not in ("localhost", "127.0.0.1"):
+        raise RuntimeError("The disposable login helper only accepts loopback origins.")
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar),
+        urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    def page_token():
+        with opener.open(origin + "/auth/login") as response:
+            page = response.read().decode()
+        return html.unescape(re.search(r'name="__RequestVerificationToken" value="([^"]+)"', page)[1])
+    token = page_token()
+    data = urllib.parse.urlencode({"login": username, "password": password,
+        "__RequestVerificationToken": token, "returnUrl": "/auth/complete"}).encode()
+    with opener.open(origin + "/auth/login", data) as response:
+        if not response.url.endswith("/auth/complete"):
+            raise RuntimeError("Disposable account sign-in failed.")
+    token = page_token()
+    return "; ".join(f"{c.name}={c.value}" for c in jar), token
 
 
 def main():
@@ -49,9 +77,12 @@ def main():
     env = os.environ.copy()
     # Do not inherit external storage or live-test endpoints into an isolated run.
     for key in ("ConnectionStrings__cellbridge", "OFFICECOLLABSERVER_INTEROP_ENDPOINT", "OFFICECOLLABSERVER_INTEROP_PEER",
-                "CELLBRIDGE_RUN_STORAGE_TESTS", "CELLBRIDGE_WIRE_CAPTURE"):
+                "CELLBRIDGE_RUN_STORAGE_TESTS", "CELLBRIDGE_WIRE_CAPTURE", "CELLBRIDGE_PUBLIC_ORIGIN",
+                "CELLBRIDGE_STORAGE_VOLUME", "CELLBRIDGE_IMPORT_OWNER", "CELLBRIDGE_LEGACY_OWNER",
+                "CELLBRIDGE_INTEROP_COOKIE", "CELLBRIDGE_INTEROP_CSRF"):
         env.pop(key, None)
     env.update(CELLBRIDGE_TEST_RUN="1", CELLBRIDGE_RUN_TWO_INSTANCES="1",
+               CELLBRIDGE_TEST_PASSWORD=secrets.token_urlsafe(24) + "Aa1!",
                CELLBRIDGE_WIRE_CAPTURE=str(output / "wire"))
     summary = {"startedUtc": stamp, "platform": platform.platform(), "processors": os.cpu_count(),
                "scope": "Protocol replay and synthetic HTTP/storage checks, not desktop Office", "checks": [], "passed": False}
@@ -72,14 +103,19 @@ def main():
         run("build", ["dotnet", "build", "CellBridge.slnx", "-c", "Release", "--nologo", "-v", "minimal"])
         run("demo-build", ["dotnet", "build", "demo/CellBridge.Demo.slnx", "-c", "Release", "--nologo", "-v", "minimal"])
         start_attempted = True
-        run("aspire-start", ["aspire", "start", "--apphost", str(APPHOST), "--non-interactive"], 600)
+        run("aspire-start", ["aspire", "start", "--apphost", str(APPHOST), "--isolated", "--non-interactive"], 600)
         for resource in ("web", "web-peer", "demo"):
             run(f"ready-{resource}", ["aspire", "wait", resource, "--apphost", str(APPHOST), "--non-interactive"], 180)
         description = cli_json(["aspire", "describe", "--apphost", str(APPHOST), "--non-interactive", "--format", "Json"])
         web = next(r for r in description["resources"] if r.get("displayName") == "web")
         env["ConnectionStrings__cellbridge"] = web["environment"]["ConnectionStrings__cellbridge"]
-        env["OFFICECOLLABSERVER_INTEROP_ENDPOINT"] = "http://localhost:5181/_vti_bin/cellstorage.svc"
-        env["OFFICECOLLABSERVER_INTEROP_PEER"] = "http://localhost:5182/_vti_bin/cellstorage.svc"
+        peer = next(r for r in description["resources"] if r.get("displayName") == "web-peer")
+        web_origin = next(u["url"] for u in web["urls"] if u.get("name") == "https" and u.get("isInternal"))
+        peer_origin = next(u["url"] for u in peer["urls"] if u.get("name") == "https" and u.get("isInternal"))
+        env["OFFICECOLLABSERVER_INTEROP_ENDPOINT"] = web_origin.rstrip("/") + "/_vti_bin/cellstorage.svc"
+        env["OFFICECOLLABSERVER_INTEROP_PEER"] = peer_origin.rstrip("/") + "/_vti_bin/cellstorage.svc"
+        env["CELLBRIDGE_INTEROP_COOKIE"], env["CELLBRIDGE_INTEROP_CSRF"] = login(
+            web_origin, "integration-writer", env["CELLBRIDGE_TEST_PASSWORD"])
         projects = ["CellBridge.FssHttpB.Tests", "CellBridge.FssHttp.Tests", "CellBridge.Storage.Tests",
                     "CellBridge.Interop.Tests", "OfficeInspectors.Adapter"]
         for project in projects:

@@ -2,8 +2,9 @@
 
 The standalone solution is `demo/CellBridge.Demo.slnx`. It contains an
 ASP.NET Core Razor Pages site and its tests. It reads the collaboration server's
-`GET /api/documents` endpoint over HTTP and has no reference to the protocol or
-storage projects. The catalog is a demo API, not an implementation of a SharePoint
+`GET /api/documents` endpoint over HTTP. It shares the sample authentication
+library and forwards the signed-in caller's cookies for each request. The
+catalog is a demo API, not an implementation of a SharePoint
 list API.
 
 ## Run
@@ -17,7 +18,8 @@ aspire wait demo --apphost aspire/apphost.cs --non-interactive
 aspire describe --apphost aspire/apphost.cs --non-interactive
 ```
 
-Open the `demo` HTTPS endpoint. Aspire supplies the collaboration server's HTTPS
+Provision accounts using the [authentication guide](authentication.md), then
+open `/library` on the `web` HTTPS endpoint and sign in. Aspire supplies the collaboration server's HTTPS
 endpoint through `CollabServer__BaseUrl`. The site shows file names, sizes,
 versions, modification times and active client sessions. Search filters by file
 name. Reload the page to refresh the catalog and session counts.
@@ -83,8 +85,11 @@ on restart. See [storage configuration](storage-providers.md).
 
 Each document has independent content, versions, graph identities, locks and
 editing sessions. The catalog counts client sessions, which are not necessarily
-different people. The sample has no authentication and returns the shared
-`officelab` identity. Two desktop clients coauthoring one file remain unverified.
+different people. Earlier desktop evidence used the shared `officelab` identity.
+The current
+host requires sign-in and enforces persisted document grants. Authenticated
+desktop Office editing still needs live validation; see
+[authentication setup](authentication.md). Two desktop clients coauthoring one file remain unverified.
 See [interoperability coverage](interoperability.md).
 
 A supplied ResourceID takes precedence over the document URL for every SOAP

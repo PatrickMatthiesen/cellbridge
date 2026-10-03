@@ -9,7 +9,7 @@ public sealed class ProxyOriginTests
     public async Task LoopbackHttpsProxyPreservesOfficeResponseOrigin()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
-        using var http = new HttpClient();
+        using var http = LiveInteropHttp.Create();
         var name = "proxy-origin-" + Guid.NewGuid().ToString("N") + ".docx";
         var created = await http.PostAsJsonAsync(new Uri(endpoint, "/api/documents"), new { name, type = "docx" });
         created.EnsureSuccessStatusCode();

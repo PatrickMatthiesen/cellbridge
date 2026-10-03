@@ -1,3 +1,5 @@
+using CellBridge.Authentication;
+using Microsoft.AspNetCore.Antiforgery;
 using CellBridge.AspNetCore;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
@@ -7,6 +9,7 @@ using CellBridge.Storage.FileSystem;
 using CellBridge.Web;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.HttpOverrides;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -24,7 +27,10 @@ if (storageKind.Equals("PostgreSql", StringComparison.OrdinalIgnoreCase))
     var state = new PostgreSqlStateStore(dataSource, limits);
     if (args.Contains("--migrate-storage", StringComparer.Ordinal))
     {
-        await state.InitializeAsync();
+        var legacySubject = builder.Configuration["Authentication:LegacyOwner"];
+        await state.InitializeAsync(legacyOwner: string.IsNullOrWhiteSpace(legacySubject) ? null :
+            new SubjectIdentity(legacySubject, "legacy-owner", "Legacy owner"));
+        await AuthenticationDatabase.InitializeAsync(connectionString);
         if (builder.Configuration["Storage:ContentProvider"]?.Equals("FileSystem", StringComparison.OrdinalIgnoreCase) == true)
             await new StorageMaintenance(dataSource).RegisterExistingFileSystemAsync(
                 builder.Configuration["Storage:ContentRoot"] ?? throw new InvalidOperationException("Filesystem migration requires Storage:ContentRoot."));
@@ -55,6 +61,8 @@ builder.Services.AddCellBridge(provider, requireDurability: storageKind.Equals("
         options.MaxMtomHeaderBytes = builder.Configuration.GetValue("Protocol:MaxMtomHeaderBytes", options.MaxMtomHeaderBytes);
         options.CaptureDirectory = builder.Configuration["Protocol:CaptureDirectory"];
     });
+builder.Services.AddCellBridgeAuthentication(builder.Configuration);
+builder.Services.AddHttpForwarder();
 var app = builder.Build();
 // Tailscale Serve terminates HTTPS and forwards over loopback HTTP. The framework
 // default trusts loopback proxies only; keep that restriction for forwarded origins.
@@ -62,6 +70,10 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
 });
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseAntiforgery();
+await AuthenticationDatabase.CheckSchemaAsync(app.Configuration.GetConnectionString("cellbridge")!);
 await provider.CheckHealthAsync();
 if (!provider.Capabilities.Durable)
     app.Logger.LogWarning("InMemory storage is volatile. A restart discards documents and protocol state.");
@@ -70,36 +82,67 @@ if (!provider.Capabilities.Durable)
 var imports = new DocumentStore();
 DocumentLibrary.Seed(imports, app.Configuration, app.Environment.ContentRootPath);
 var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
-foreach (var document in imports.List())
+var importOwner = app.Configuration["Authentication:ImportOwner"];
+if (imports.List().Any() && string.IsNullOrWhiteSpace(importOwner))
+    app.Logger.LogWarning("Imports skipped. Configure Authentication:ImportOwner with a provisioned account subject.");
+SubjectIdentity? importIdentity = null;
+if (!string.IsNullOrWhiteSpace(importOwner))
+{
+    using var scope = app.Services.CreateScope();
+    var user = importOwner.StartsWith("local:", StringComparison.Ordinal)
+        ? await scope.ServiceProvider.GetRequiredService<UserManager<CellBridgeUser>>().FindByIdAsync(importOwner[6..]) : null;
+    if (user is null) throw new InvalidOperationException("Authentication:ImportOwner must name a provisioned local account.");
+    importIdentity = new(user.Subject, user.UserName!, user.DisplayName);
+}
+foreach (var document in imports.List().Where(_ => !string.IsNullOrWhiteSpace(importOwner)))
 {
     if (await provider.State.FindByPathKeyAsync(StorageIds.PathKey(document.Url)) is not null) continue;
     var escaped = string.Join('/', document.Url.Split('/').Select(Uri.EscapeDataString));
-    await service.CreateAsync(escaped, document.Content);
+    await service.ImportAsync(escaped, document.Content, importIdentity!,
+        new CellBridgeActor(new SubjectIdentity("system:imports", "imports", "Document imports"), CanCreate: true));
 }
 
+app.MapCellBridgeAuthentication();
 app.MapCellBridge();
+app.MapGet("/", () => Results.LocalRedirect("/library")).AllowAnonymous();
+var demoUrl = app.Configuration["Demo:BaseUrl"];
+if (!string.IsNullOrWhiteSpace(demoUrl))
+{
+    if (!Uri.TryCreate(demoUrl, UriKind.Absolute, out var demoUri) || demoUri.Scheme is not ("http" or "https") || demoUri.UserInfo.Length != 0)
+        throw new InvalidOperationException("Demo:BaseUrl must be a fixed internal HTTP endpoint.");
+    app.MapForwarder("/library/{**path}", demoUrl).RequireAuthorization();
+}
 app.MapDefaultEndpoints();
 app.MapGet("/api/documents", async (HttpContext context) =>
 {
     context.Response.Headers.CacheControl = "no-store";
     var offset = int.TryParse(context.Request.Query["offset"], out var parsedOffset) ? Math.Max(0, parsedOffset) : 0;
     var limit = int.TryParse(context.Request.Query["limit"], out var parsedLimit) ? Math.Clamp(parsedLimit, 1, 1000) : 1000;
-    var documents = await provider.State.ListAsync(offset, limit, context.RequestAborted);
-    return Results.Ok(documents.Where(d => d.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase))
-        .Select(d => new DocumentListing(d.Path, Path.GetFileName(d.Path),
+    var actor = CellBridgeActor.FromPrincipal(context.User);
+    if (actor is null) return Results.Unauthorized();
+    var page = await AuthorizedDocumentCatalog.ReadAsync(service, actor, offset, limit, context.RequestAborted);
+    if (page.NextOffset is { } nextOffset) context.Response.Headers["X-CellBridge-Next-Offset"] = nextOffset.ToString();
+    return Results.Ok(page.Documents.Select(d => new DocumentListing(d.Path, Path.GetFileName(d.Path),
         DocumentLibrary.ContentType(d.Path), d.Length, d.ContentVersion, d.ModifiedUtc, d.ActiveEditors)));
-});
+}).RequireAuthorization();
 app.MapPost("/api/documents", async (CreateDocumentRequest request, HttpContext context) =>
 {
+    var actor = CellBridgeActor.FromPrincipal(context.User);
+    if (actor is null) return Results.Unauthorized();
+    if (!actor.CanCreate) return Results.StatusCode(403);
+    try { await context.RequestServices.GetRequiredService<IAntiforgery>().ValidateRequestAsync(context); }
+    catch (AntiforgeryValidationException) { return Results.BadRequest(); }
     var detached = new DocumentStore();
     var result = DocumentCreation.TryCreate(detached, request.Name, request.Type);
     if (!result.Created) return Results.BadRequest(new { error = result.Error });
     var document = detached.List().Single();
     var escaped = string.Join('/', document.Url.Split('/').Select(Uri.EscapeDataString));
     CellBridge.Storage.Abstractions.DocumentState? created;
-    try { created = await service.CreateAsync(escaped, document.Content, context.RequestAborted); }
+    try { created = await service.CreateAsync(escaped, document.Content, actor, context.RequestAborted); }
     catch (StorageQuotaExceededException ex) { return Results.Json(new { error = ex.Message, budget = ex.Budget }, statusCode: 507); }
     return created is null ? Results.Conflict(new { error = "A document with that name already exists." })
         : Results.Created(escaped, result.Document);
-});
+}).RequireAuthorization();
 await app.RunAsync();
+
+public partial class Program;

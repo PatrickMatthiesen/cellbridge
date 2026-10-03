@@ -194,10 +194,7 @@ public sealed class LivePartitionTests
         var endpointText = Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT");
         Assert.False(string.IsNullOrWhiteSpace(endpointText));
 
-        using var http = new HttpClient(new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator,
-        });
+        using var http = LiveInteropHttp.Create();
         var client = new CellStorageClient(http, new Uri(endpointText));
 
         await AssertPartition(client, EditorsTablePartitionId, "editors", requestId: 31);

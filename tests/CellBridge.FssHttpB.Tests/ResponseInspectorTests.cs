@@ -20,16 +20,26 @@ public sealed class ResponseInspectorTests
     }
 
     [Fact]
-    public void ActualWordSaveRejection_ReportsProtocolErrorWithoutFalseFramingFailure()
+    public void LegacyWordSaveRejectionReportsItsInvalidUtf8StringFraming()
     {
         var bytes = Convert.FromBase64String(File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory, "Fixtures", "word-save-rejected.response.base64")));
         var inspection = FsshttpbResponseInspector.Inspect(bytes);
-        Assert.Empty(inspection.Issues);
+        Assert.NotEmpty(inspection.Issues);
         var sub = Assert.Single(inspection.SubResponses);
         Assert.Equal(RequestTypes.PutChanges, sub.RequestType);
         Assert.True(sub.Status);
-        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, sub.Error!.ErrorCode);
+    }
+
+    [Fact]
+    public void ValidSaveRejectionReportsProtocolErrorWithUtf16SupplementalString()
+    {
+        var response = new FsshttpbResponse { SubResponses =
+        { new FsshttpbSubResponse { RequestId = 1, RequestType = RequestTypes.PutChanges, Status = true,
+            Error = new(ErrorType.Protocol, (ulong)ProtocolErrorCode.RequestNotSupported, "Unsupported upload.") } } };
+        var inspection = FsshttpbResponseInspector.Inspect(response.ToByteArray());
+        Assert.Empty(inspection.Issues);
+        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, Assert.Single(inspection.SubResponses).Error!.ErrorCode);
         Assert.Contains("error type=Protocol code=4", inspection.ToCanonicalText());
     }
 

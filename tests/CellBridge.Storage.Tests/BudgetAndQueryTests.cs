@@ -47,12 +47,12 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var initial = (await service.CreateAsync("/shared/serials.docx", MinimalDocx.Create()))!;
-        var before = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, Query(), new Dictionary<string, string>());
+        var initial = (await service.CreateAsync("/shared/serials.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var before = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, Query(), new Dictionary<string, string>(), TestActor.Value);
         var known = before.Response.DataElementPackage!.DataElements;
         ulong max = initial.Partitions.Single(p => p.Kind == 0).Knowledge + 1000;
         var request = NewSave(initial, nullSerials, max);
-        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
         var additions = saved.State.Partitions.Single(p => p.Kind == 0).Elements
             .Where(e => !initial.Partitions.Single(p => p.Kind == 0).Elements.Any(old => old.Id == e.Id)).ToArray();
@@ -76,16 +76,16 @@ public class BudgetAndQueryTests
         Assert.All(additions, e => Assert.Equal(new SerialNumber(e.Serial.Guid, e.Serial.Value), assignments[StorageIds.Restore(e.Id)]));
         var restarted = new CellBridgeDocumentService(provider);
         var delta = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            Query(ClientKnowledge.FromElements(known)), new Dictionary<string, string>());
+            Query(ClientKnowledge.FromElements(known)), new Dictionary<string, string>(), TestActor.Value);
         Assert.All(additions, e => Assert.Contains(delta.Response.DataElementPackage!.DataElements, d => d.DataElementExtendedGuid.Equals(StorageIds.Restore(e.Id))));
         var latest = Assert.IsType<QueryChangesSubResponseData>(delta.Response.SubResponses[0].Data).StorageIndexExtendedGuid;
         var restored = await StoredDocument.RestoreAsync(saved.State, provider.Content);
         Assert.Equal(restored.Content, PartitionGraphSnapshot.Create(known.Concat(delta.Response.DataElementPackage!.DataElements), latest).Materialize());
-        var retry = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+        var retry = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(retry.Response.SubResponses).Status);
         Assert.Equal(saved.State.StateVersion, retry.State.StateVersion);
         var second = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            NewSave(saved.State, true), new Dictionary<string, string>());
+            NewSave(saved.State, true), new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(second.Response.SubResponses).Status);
         Assert.True(second.State.Partitions.Single(p => p.Kind == 0).Knowledge > saved.State.Partitions.Single(p => p.Kind == 0).Knowledge);
     }
@@ -95,15 +95,15 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/mappings.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/mappings.docx", MinimalDocx.Create(), TestActor.Value))!;
         var partition = state.Partitions.Single(p => p.Kind == 0);
         var metadata = partition.Elements.Select(e => new DataElement((DataElementType)e.Type, StorageIds.Restore(e.Id), new(e.Serial.Guid, e.Serial.Value)));
         var delta = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            Query(ClientKnowledge.FromElements(metadata)), new Dictionary<string, string>());
+            Query(ClientKnowledge.FromElements(metadata)), new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal(DataElementType.StorageIndexDataElementData, Assert.Single(delta.Response.DataElementPackage!.DataElements).DataElementType);
         var mappingOnly = ClientKnowledge.Deserialize(new(BinaryKnowledgeBuilder.FromElements([], ExGuid.Null, 0,
             mappingSerials: partition.Elements.SelectMany(e => e.MappingSerials ?? []).Select(s => new SerialNumber(s.Guid, s.Value)))));
-        var full = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(mappingOnly), new Dictionary<string, string>());
+        var full = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(mappingOnly), new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal(partition.Elements.Length, full.Response.DataElementPackage!.DataElements.Count);
     }
 
@@ -112,9 +112,9 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/exhausted.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/exhausted.docx", MinimalDocx.Create(), TestActor.Value))!;
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            NewSave(state, true, ulong.MaxValue), new Dictionary<string, string>());
+            NewSave(state, true, ulong.MaxValue), new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(result.Response.SubResponses).Status);
         Assert.Equal(state.StateVersion, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.StateVersion);
     }
@@ -124,10 +124,10 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/mapping-conflict.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/mapping-conflict.docx", MinimalDocx.Create(), TestActor.Value))!;
         // Seed mappings have values 1, 2 and 3 under the server serial GUID.
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            NewSave(state, true, 3), new Dictionary<string, string>());
+            NewSave(state, true, 3), new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(result.Response.SubResponses).Status);
         Assert.Contains("mapping serial", Assert.Single(result.Response.SubResponses).Error!.ErrorMessage);
         Assert.Equal(state.StateVersion, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.StateVersion);
@@ -138,7 +138,7 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/legacy.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/legacy.docx", MinimalDocx.Create(), TestActor.Value))!;
         var partition = state.Partitions.Single(p => p.Kind == 0);
         var index = partition.Elements.Single(e => e.Type == (uint)DataElementType.StorageIndexDataElementData);
         Assert.NotEmpty(index.MappingSerials!.Value);
@@ -147,9 +147,9 @@ public class BudgetAndQueryTests
         { Partitions = current.Partitions.Select(p => p.Kind != 0 ? p : p with
             { Elements = p.Elements.Select(e => e with { MappingSerials = null,
                 Serial = e.Type == (uint)DataElementType.StorageManifestDataElementData ? alias : e.Serial }).ToImmutableArray() }).ToImmutableArray() }, true));
-        var full = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(), new Dictionary<string, string>());
+        var full = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(), new Dictionary<string, string>(), TestActor.Value);
         var known = ClientKnowledge.FromElements(full.Response.DataElementPackage!.DataElements);
-        var delta = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(known), new Dictionary<string, string>());
+        var delta = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(known), new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal(DataElementType.StorageManifestDataElementData, Assert.Single(delta.Response.DataElementPackage!.DataElements).DataElementType);
         Assert.False(Assert.Single(delta.Response.SubResponses).Status);
     }
@@ -159,14 +159,14 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/compact-proof.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/compact-proof.docx", MinimalDocx.Create(), TestActor.Value))!;
         PartitionGraphSnapshot? previous = null;
         foreach (var name in new[] { "save-first", "save-second" })
         {
             var request = StorageTests.Fixture(name);
             if (previous is null) ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
                 StorageIds.Restore(state.Partitions.Single(p => p.Kind == 0).StorageIndex!);
-            var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+            var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
             Assert.False(Assert.Single(saved.Response.SubResponses).Status);
             var document = await StoredDocument.RestoreAsync(saved.State, provider.Content);
             var graph = document.FilePartition.FileGraph;
@@ -194,8 +194,8 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/large-knowledge.docx", MinimalDocx.Create()))!;
-        var full = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(), new Dictionary<string, string>());
+        var state = (await service.CreateAsync("/shared/large-knowledge.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var full = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(), new Dictionary<string, string>(), TestActor.Value);
         var elements = full.Response.DataElementPackage!.DataElements;
         var serialGuid = Guid.NewGuid();
         var advertised = BinaryKnowledgeBuilder.FromElements(elements, ExGuid.Null, 0,
@@ -206,7 +206,7 @@ public class BudgetAndQueryTests
         var decoded = Assert.IsType<QueryChangesSubRequestData>(Assert.Single(request.SubRequests).Data);
         Assert.True(decoded.Knowledge!.RequiresFullResponse);
         Assert.Empty(decoded.Knowledge.Ranges);
-        var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+        var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(result.Response.SubResponses).Status);
         Assert.Equal(elements.Select(e => e.DataElementExtendedGuid).OrderBy(id => id.ToString()),
             result.Response.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid).OrderBy(id => id.ToString()));
@@ -230,7 +230,7 @@ public class BudgetAndQueryTests
         var service = new CellBridgeDocumentService(provider);
         async Task<bool> Create(int i)
         {
-            try { return await service.CreateAsync($"/shared/{i}.docx", MinimalDocx.Create()) is not null; }
+            try { return await service.CreateAsync($"/shared/{i}.docx", MinimalDocx.Create(), TestActor.Value) is not null; }
             catch (StorageQuotaExceededException) { return false; }
         }
         var results = await Task.WhenAll(Enumerable.Range(0, 16).Select(Create));
@@ -256,20 +256,20 @@ public class BudgetAndQueryTests
     {
         var provider = Memory(new() { MaxGraphElements = 30 });
         var service = new CellBridgeDocumentService(provider);
-        var initial = (await service.CreateAsync("/shared/quota.docx", MinimalDocx.Create()))!;
+        var initial = (await service.CreateAsync("/shared/quota.docx", MinimalDocx.Create(), TestActor.Value))!;
         var first = StorageTests.Fixture("save-first");
         ((PutChangesSubRequestData)first.SubRequests.Single().Data!).ExpectedStorageIndex =
             StorageIds.Restore(initial.Partitions.Single(p => p.Kind == 0).StorageIndex!);
-        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
+        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
         var rejected = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            StorageTests.Fixture("save-second"), new Dictionary<string, string>());
+            StorageTests.Fixture("save-second"), new Dictionary<string, string>(), TestActor.Value);
         var error = Assert.Single(rejected.Response.SubResponses).Error!;
         Assert.Equal(ErrorType.Win32, error.Type);
         Assert.Equal(112UL, error.ErrorCode);
         Assert.Equal(saved.State, await provider.State.FindByResourceIdAsync(initial.ResourceId));
         Assert.Equal(saved.State, rejected.State);
-        var retry = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
+        var retry = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(retry.Response.SubResponses).Status);
         Assert.Equal(saved.State.StateVersion, retry.State.StateVersion);
     }
@@ -281,7 +281,7 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/known.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/known.docx", MinimalDocx.Create(), TestActor.Value))!;
         var metadata = state.Partitions.Single(p => p.Kind == 0).Elements.Select(e =>
             new DataElement((DataElementType)e.Type, StorageIds.Restore(e.Id), new(e.Serial.Guid, e.Serial.Value)));
         var query = new FsshttpbCellRequest();
@@ -291,7 +291,7 @@ public class BudgetAndQueryTests
                     metadata, ExGuid.Null, 0, mappingSerials: state.Partitions.Single(p => p.Kind == 0).Elements
                         .SelectMany(e => e.MappingSerials ?? []).Select(s => new SerialNumber(s.Guid, s.Value))))), MaxDataElements = 1 } });
         var withoutContent = new CellBridgeDocumentService(new(provider.State, new NoReads()));
-        var result = await withoutContent.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, query, new Dictionary<string, string>());
+        var result = await withoutContent.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, query, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(result.Response.SubResponses).Status);
         Assert.Empty(result.Response.DataElementPackage!.DataElements);
         Assert.Empty(FsshttpbResponseInspector.Inspect(result.Response.ToByteArray()).Issues);
@@ -307,7 +307,7 @@ public class BudgetAndQueryTests
             await state.InitializeAsync(); // Repeated migrations must be idempotent.
             var content = new PostgreSqlContentStore(source);
             var provider = new StorageProvider(state, content, limits);
-            var document = (await new CellBridgeDocumentService(provider).CreateAsync("/shared/retention.docx", MinimalDocx.Create()))!;
+            var document = (await new CellBridgeDocumentService(provider).CreateAsync("/shared/retention.docx", MinimalDocx.Create(), TestActor.Value))!;
             for (int i = 0; i < 10; i++)
                 await state.TransitionAsync(document.ResourceId, (current, now) =>
                     new StateTransition<bool>(current with { ModifiedUtc = now }, true));
@@ -337,20 +337,20 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var initial = (await service.CreateAsync("/shared/delta.docx", MinimalDocx.Create()))!;
+        var initial = (await service.CreateAsync("/shared/delta.docx", MinimalDocx.Create(), TestActor.Value))!;
         FsshttpbCellRequest Query(ClientKnowledge? knowledge) => new()
         { SubRequests = { new(RequestTypes.QueryChanges) { RequestId = 1, Data = new QueryChangesSubRequestData
             { IncludeStorageManifest = true, IncludeCellChanges = true, Knowledge = knowledge,
                 RoundKnowledgeToWholeCellChanges = round } } } };
-        var before = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, Query(null), new Dictionary<string, string>());
+        var before = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, Query(null), new Dictionary<string, string>(), TestActor.Value);
         var known = before.Response.DataElementPackage!.DataElements;
         var save = StorageTests.Fixture("save-first");
         ((PutChangesSubRequestData)save.SubRequests.Single().Data!).ExpectedStorageIndex =
             StorageIds.Restore(initial.Partitions.Single(p => p.Kind == 0).StorageIndex!);
-        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, save, new Dictionary<string, string>());
+        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, save, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
         var delta = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            Query(ClientKnowledge.FromElements(known)), new Dictionary<string, string>());
+            Query(ClientKnowledge.FromElements(known)), new Dictionary<string, string>(), TestActor.Value);
         var incoming = delta.Response.DataElementPackage!.DataElements;
         if (round) Assert.Equal(saved.State.Partitions.Single(p => p.Kind == 0).Elements.Length, incoming.Count);
         else Assert.DoesNotContain(incoming, e => known.Any(k => k.SerialNumber.Equals(e.SerialNumber)));
@@ -370,11 +370,11 @@ public class BudgetAndQueryTests
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/shared/filter.docx", MinimalDocx.Create()))!;
+        var state = (await service.CreateAsync("/shared/filter.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = new FsshttpbCellRequest();
         request.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 1,
             Data = new QueryChangesSubRequestData { IncludeFilteredOutDataElementsInKnowledge = includeFiltered } });
-        var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>());
+        var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         var data = Assert.IsType<QueryChangesSubResponseData>(result.Response.SubResponses[0].Data);
         var knowledge = ClientKnowledge.Deserialize(new(data.KnowledgeBytes!));
         foreach (var element in state.Partitions.Single(p => p.Kind == 0).Elements)
@@ -389,15 +389,15 @@ public class BudgetAndQueryTests
     {
         var provider = Memory(new() { MaxSaveReceipts = 1 });
         var service = new CellBridgeDocumentService(provider);
-        var initial = (await service.CreateAsync("/shared/receipts.docx", MinimalDocx.Create()))!;
+        var initial = (await service.CreateAsync("/shared/receipts.docx", MinimalDocx.Create(), TestActor.Value))!;
         var first = StorageTests.Fixture("save-first");
         ((PutChangesSubRequestData)first.SubRequests.Single().Data!).ExpectedStorageIndex =
             StorageIds.Restore(initial.Partitions.Single(p => p.Kind == 0).StorageIndex!);
-        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
-        var retry = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
+        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
+        var retry = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(retry.Response.SubResponses[0].Status);
         Assert.Equal(saved.State.StateVersion, retry.State.StateVersion);
-        var rejected = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, StorageTests.Fixture("save-second"), new Dictionary<string, string>());
+        var rejected = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, StorageTests.Fixture("save-second"), new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal(112UL, rejected.Response.SubResponses[0].Error!.ErrorCode);
         Assert.Equal(saved.State.StateVersion, rejected.State.StateVersion);
         Assert.Equal(saved.State.Content, rejected.State.Content);
@@ -434,7 +434,7 @@ public class BudgetAndQueryTests
                 new PostgreSqlStateStore(source, limits), new PostgreSqlContentStore(source), limits)).ToArray();
             async Task<bool> Create(int i)
             {
-                try { return await new CellBridgeDocumentService(providers[i % 2]).CreateAsync($"/shared/race{i}.docx", MinimalDocx.Create()) is not null; }
+                try { return await new CellBridgeDocumentService(providers[i % 2]).CreateAsync($"/shared/race{i}.docx", MinimalDocx.Create(), TestActor.Value) is not null; }
                 catch (StorageQuotaExceededException) { return false; }
             }
             Assert.Single(await Task.WhenAll(Enumerable.Range(0, 8).Select(Create)), x => x);
@@ -448,7 +448,7 @@ public class BudgetAndQueryTests
     {
         var provider = Memory(new() { MaxDocumentBytes = 1 });
         await Assert.ThrowsAsync<StorageQuotaExceededException>(() =>
-            new CellBridgeDocumentService(provider).CreateAsync("/shared/too-large.docx", MinimalDocx.Create()).AsTask());
+            new CellBridgeDocumentService(provider).CreateAsync("/shared/too-large.docx", MinimalDocx.Create(), TestActor.Value).AsTask());
         Assert.Equal(0, ((InMemoryContentStore)provider.Content).Budget.StoredBytes);
     }
 

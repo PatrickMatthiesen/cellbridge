@@ -21,7 +21,7 @@ public class MultiInstanceTests
     {
         var first = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
         var peer = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_PEER")!);
-        using var http = new HttpClient();
+        using var http = LiveInteropHttp.Create();
         var name = "two instances " + Guid.NewGuid().ToString("N");
         using var created = await http.PostAsJsonAsync(new Uri(first, "/api/documents"), new { name, type = "docx" });
         created.EnsureSuccessStatusCode();

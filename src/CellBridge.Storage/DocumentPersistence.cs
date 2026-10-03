@@ -18,6 +18,7 @@ public sealed partial class StoredDocument
     private DateTime? _authoritativeNow;
     private DocumentState? _sourceState;
     private long? _metadataContentLength;
+    public DocumentSecurity Security { get; set; } = DocumentSecurity.Empty;
     private DateTime UtcNow => _authoritativeNow ?? DateTime.UtcNow;
     public void UseAuthoritativeTime(DateTime now) => _authoritativeNow = now;
 
@@ -32,6 +33,7 @@ public sealed partial class StoredDocument
         _lastModifiedUtc = state.ModifiedUtc;
         _contentVersion = state.ContentVersion;
         _sourceState = state;
+        Security = state.Security;
         _metadataContentLength = metadataOnly ? state.Content.Length : null;
         _content = metadataOnly ? [] : payloads[state.Content.Key].ToArray();
         FilePartition = new DocumentPartition(state.Partitions.Single(p => p.Kind == 0), payloads, metadataOnly);
@@ -102,7 +104,8 @@ public sealed partial class StoredDocument
             partitions.Add(await partition.CaptureAsync(content, cancellationToken));
         return new DocumentState(DocumentState.CurrentFormat, TransitionId, Url, StorageIds.PathKey(Url),
             CreatedUtc, LastModifiedUtc, ContentVersion, 0, contentHandle, partitions.ToImmutable(),
-            editors.ToImmutableArray(), coordination ?? CoordinationState.Empty, receipts.IsDefault ? [] : receipts);
+            editors.ToImmutableArray(), coordination ?? CoordinationState.Empty, receipts.IsDefault ? [] : receipts)
+            { Security = Security };
     }
 
     internal static async ValueTask<ContentHandle> WriteAsync(IContentStore content, byte[] bytes, CancellationToken cancellationToken,
@@ -188,10 +191,11 @@ public sealed partial class DocumentStorageIdentity
 public sealed partial class CoauthSession
 {
     internal EditorState Capture() => new(ClientId, UserName, JoinedUtc, LastSeenUtc, ExpiresUtc,
-        TimeoutSeconds, AsEditor, EditorNumber, Metadata.ToImmutableDictionary(p => p.Key, p => p.Value.ToImmutableArray(), StringComparer.Ordinal));
+        TimeoutSeconds, AsEditor, EditorNumber, Metadata.ToImmutableDictionary(p => p.Key, p => p.Value.ToImmutableArray(), StringComparer.Ordinal), Owner);
     private CoauthSession(EditorState state)
     {
         ClientId = state.ClientId; UserName = state.UserName; JoinedUtc = state.JoinedUtc;
+        Owner = state.Owner;
         LastSeenUtc = state.LastSeenUtc; ExpiresUtc = state.ExpiresUtc;
         TimeoutSeconds = state.TimeoutSeconds; AsEditor = state.AsEditor; EditorNumber = state.EditorNumber;
         foreach (var pair in state.Metadata) Metadata.Add(pair.Key, pair.Value.ToArray());
