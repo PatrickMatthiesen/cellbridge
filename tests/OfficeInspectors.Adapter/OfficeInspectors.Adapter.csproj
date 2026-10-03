@@ -1,41 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-    <OfficeInspectorsRoot Condition="'$(OfficeInspectorsRoot)' == ''">$(MSBuildThisFileDirectory)..\..\..\Office-Inspectors-for-Fiddler</OfficeInspectorsRoot>
-    <OfficeInspectorsAvailable Condition="Exists('$(OfficeInspectorsRoot)\FSSHTTPWOPIInspector\Source\Parsers\FSSHTTPB.cs')">true</OfficeInspectorsAvailable>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
-  </ItemGroup>
-
-  <PropertyGroup Condition="'$(OfficeInspectorsAvailable)' == 'true'">
-    <DefineConstants>$(DefineConstants);OFFICE_INSPECTORS</DefineConstants>
-  </PropertyGroup>
-
-  <ItemGroup Condition="'$(OfficeInspectorsAvailable)' == 'true'">
-    <Compile Include="$(OfficeInspectorsRoot)\FSSHTTPWOPIInspector\Source\Parsers\BaseStructure.cs" Link="OfficeInspectors\BaseStructure.cs" />
-    <Compile Include="$(OfficeInspectorsRoot)\FSSHTTPWOPIInspector\Source\Parsers\FSSHTTPB.cs" Link="OfficeInspectors\FSSHTTPB.cs" />
-    <Compile Include="$(OfficeInspectorsRoot)\FSSHTTPWOPIInspector\Source\Parsers\FSSHTTPD.cs" Link="OfficeInspectors\FSSHTTPD.cs" />
-    <Compile Include="$(OfficeInspectorsRoot)\FSSHTTPWOPIInspector\Source\Parsers\ONESTORE.cs" Link="OfficeInspectors\ONESTORE.cs" />
-    <Compile Include="$(OfficeInspectorsRoot)\FSSHTTPWOPIInspector\Source\Utilities.cs" Link="OfficeInspectors\Utilities.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
+    <ProjectReference Include="../../src/CellBridge.FssHttpB/CellBridge.FssHttpB.csproj" />
+    <ProjectReference Include="../../src/CellBridge.OfficeInspectors/CellBridge.OfficeInspectors.csproj" />
+    <None Include="../../testdata/sharepoint/fixtures/v13_11/*.b64" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>

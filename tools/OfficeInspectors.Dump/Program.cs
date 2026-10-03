@@ -1,4 +1,4 @@
-using OfficeInspectors.Adapter;
+using CellBridge.OfficeInspectors;
 
 if (args.Length == 0)
 {
@@ -6,13 +6,15 @@ if (args.Length == 0)
     return 2;
 }
 
+var passed = true;
 foreach (var path in args)
 {
-    var result = OfficeInspectorsAdapter.ParseResponse(File.ReadAllBytes(path));
-    Console.WriteLine($"=== {path} ===");
+    var result = OfficeInspector.ParseResponse(File.ReadAllBytes(path));
+    passed &= result.Parsed;
+    Console.WriteLine(path);
     Console.WriteLine(result.Summary);
     if (result.Error is not null)
         Console.WriteLine(result.Error);
 }
 
-return 0;
+return passed ? 0 : 1;

@@ -1,6 +1,4 @@
-#if OFFICE_INSPECTORS
-using FSSHTTPandWOPIInspector;
-using FSSHTTPandWOPIInspector.Parsers;
+using CellBridge.OfficeInspectors.Parsers;
 using ServerFss = CellBridge.FssHttpB;
 using Xunit.Abstractions;
 
@@ -69,7 +67,7 @@ public sealed class SharePointV13FixtureTests
     [InlineData("editors-table-token-8.fsshttpb.b64", "RevisionManifestDataElement,ObjectGroupDataElements,StorageManifestDataElement,CellManifestDataElement,ObjectGroupDataElements,StorageIndexDataElement")]
     [InlineData("metadata-token-7.fsshttpb.b64", "StorageIndexDataElement")]
     [InlineData("file-contents-token-6.fsshttpb.b64", "StorageIndexDataElement")]
-    public void PartitionPayload_HasExpectedLegacyElementSequence(string fixtureName, string expectedSequence)
+    public void PartitionPayload_HasExpectedElementSequence(string fixtureName, string expectedSequence)
     {
         var (response, _, _) = ParseFixture(fixtureName);
         Assert.NotNull(response.DataElementPackage);
@@ -83,9 +81,8 @@ public sealed class SharePointV13FixtureTests
     {
         var (response, _, _) = ParseFixture("query-access-token-13.fsshttpb.b64");
 
-        // Office Inspectors' QueryAccess grammar predates the third access
-        // result emitted by this SharePoint build, so use the portable parser
-        // for complete-consumption and object-shape assertions here.
+        // Compare the independent parsers, retaining the third access result
+        // as an opaque extension rather than inventing its semantics.
         var bytes = Convert.FromBase64String(File.ReadAllText(FindFixture("query-access-token-13.fsshttpb.b64")).Trim());
         var inspection = ServerFss.FsshttpbResponseInspector.Inspect(bytes);
         Assert.Equal(13, inspection.ProtocolVersion);
@@ -97,9 +94,12 @@ public sealed class SharePointV13FixtureTests
         Assert.Equal(3, subresponse.Objects.Count);
         Assert.Equal([67, 70, 164], subresponse.Objects.Select(x => x.TypeValue));
 
-        // The vendored parser still decodes the two standard access objects.
         var officeSubresponse = Assert.Single(response.SubResponses!);
-        Assert.IsType<QueryAccessResponse>(officeSubresponse.SubResponseData);
+        var access = Assert.IsType<QueryAccessResponse>(officeSubresponse.SubResponseData);
+        var extension = Assert.Single(access.AdditionalAccessResponses);
+        Assert.Equal(164, extension.Type);
+        Assert.Empty(extension.Payload);
+        Assert.Single(extension.Children);
     }
 
     [Fact]
@@ -151,7 +151,7 @@ public sealed class SharePointV13FixtureTests
         _output.WriteLine($"revision={revisionGuid} storage={storageGuid} cell={cellGuid}");
     }
 
-    private static (FSSHTTPandWOPIInspector.Parsers.FsshttpbResponse Response, long Consumed, byte[] Bytes) ParseFixture(string fixtureName)
+    private static (CellBridge.OfficeInspectors.Parsers.FsshttpbResponse Response, long Consumed, byte[] Bytes) ParseFixture(string fixtureName)
     {
         var fixturePath = FindFixture(fixtureName);
         var bytes = Convert.FromBase64String(File.ReadAllText(fixturePath).Trim());
@@ -161,16 +161,6 @@ public sealed class SharePointV13FixtureTests
 
     private static string FindFixture(string fixtureName)
     {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null)
-        {
-            var candidate = Path.Combine(directory.FullName, "testdata", "sharepoint", "fixtures", "v13_11", fixtureName);
-            if (File.Exists(candidate))
-                return candidate;
-            directory = directory.Parent;
-        }
-
-        throw new FileNotFoundException($"SharePoint fixture '{fixtureName}' was not found.");
+        return Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureName);
     }
 }
-#endif

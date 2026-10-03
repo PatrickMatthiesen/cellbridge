@@ -9,8 +9,8 @@ public sealed class OfficeInspectorsAdapterTests
 
     public OfficeInspectorsAdapterTests(ITestOutputHelper output) => _output = output;
 
-    [OfficeInspectorsFact]
-    public void GeneratedFileMetadataAndEditorsResponses_ExposeLegacyHeaderMismatch()
+    [Fact]
+    public void GeneratedFileMetadataAndEditorsResponses_AreConsumedCompletely()
     {
         var responses = new[]
         {
@@ -24,18 +24,17 @@ public sealed class OfficeInspectorsAdapterTests
         foreach (var response in responses)
         {
             var result = OfficeInspectorsAdapter.ParseResponse(response.ToByteArray());
-            Assert.True(result.Available);
 
             _output.WriteLine(result.Summary);
             if (result.Error is not null)
                 _output.WriteLine(result.Error);
-            Assert.False(result.Parsed);
-            Assert.Contains("consumed=19", result.Summary);
-            Assert.Contains("data-elements= subresponses=0", result.Summary);
+            Assert.True(result.Parsed, result.Error ?? result.Summary);
+            Assert.Contains($"consumed={response.ToByteArray().Length}", result.Summary);
+            Assert.Contains("subresponses=1", result.Summary);
         }
     }
 
-    [OfficeInspectorsFact]
+    [Fact]
     public void SharePoint13ProfileResponses_AreConsumedCompletely()
     {
         var identity = Guid.Parse("10000000-0000-0000-0000-000000000001");
@@ -76,7 +75,6 @@ public sealed class OfficeInspectorsAdapterTests
         {
             var bytes = response.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11);
             var result = OfficeInspectorsAdapter.ParseResponse(bytes);
-            Assert.True(result.Available);
             Assert.True(result.Parsed, result.Error ?? result.Summary);
         }
     }
