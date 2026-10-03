@@ -29,7 +29,7 @@ public class ProcessTests
         await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
         var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
         var service = new CellBridgeDocumentService(provider);
-        var initial = (await service.CreateAsync("/process-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create()))!;
+        var initial = (await service.CreateAsync("/process-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var first = StorageTests.Fixture("save-first");
         ((PutChangesSubRequestData)first.SubRequests.Single().Data!).ExpectedStorageIndex =
             (await StoredDocument.RestoreAsync(initial, provider.Content)).FilePartition.FileGraph.StorageIndex;
@@ -42,12 +42,12 @@ public class ProcessTests
         await using var restartedSource = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
         var restartedProvider = new StorageProvider(new PostgreSqlStateStore(restartedSource), new PostgreSqlContentStore(restartedSource));
         var restarted = new CellBridgeDocumentService(restartedProvider);
-        var retry = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>());
+        var retry = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(retry.Response.SubResponses).Status);
         Assert.Equal(initial.ContentVersion + 1, retry.State.ContentVersion);
         Assert.Single(retry.State.Receipts);
         var continued = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            StorageTests.Fixture("save-second"), new Dictionary<string, string>());
+            StorageTests.Fixture("save-second"), new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(continued.Response.SubResponses).Status);
         var restored = await StoredDocument.RestoreAsync(continued.State, restartedProvider.Content);
         Assert.Equal(restored.Content, restored.FilePartition.FileGraph.Materialize());

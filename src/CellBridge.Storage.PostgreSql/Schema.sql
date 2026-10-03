@@ -1,4 +1,4 @@
--- Version 2. Run while writers are stopped using the migration executable.
+-- Version 3. Run while writers are stopped using the migration executable.
 CREATE TABLE IF NOT EXISTS cellbridge_schema (version integer PRIMARY KEY);
 INSERT INTO cellbridge_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM cellbridge_schema);
 CREATE TABLE IF NOT EXISTS cellbridge_documents (
@@ -36,4 +36,4 @@ SELECT true,
     COALESCE((SELECT SUM(octet_length(state_json)) FROM cellbridge_states),0),
     (SELECT COUNT(*) FROM cellbridge_documents), 10737418240, 10000
 ON CONFLICT DO NOTHING;
-UPDATE cellbridge_schema SET version=2 WHERE version=1;
+UPDATE cellbridge_schema SET version=3 WHERE version IN (1,2);

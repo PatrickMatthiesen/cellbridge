@@ -37,7 +37,8 @@ public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudge
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
         IReadOnlyList<DocumentSummary> result = _documents.Values.OrderBy(x => x.PathKey, StringComparer.Ordinal)
             .Skip(offset).Take(limit).Select(x => new DocumentSummary(x.ResourceId, x.Path, x.Content.Length,
-                x.ContentVersion, x.ModifiedUtc, x.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow))).ToArray();
+                x.ContentVersion, x.ModifiedUtc, x.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow))
+                { Security = x.Security }).ToArray();
         return ValueTask.FromResult(result);
     }
     public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default)

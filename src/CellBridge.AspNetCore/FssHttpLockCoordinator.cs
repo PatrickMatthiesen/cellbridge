@@ -17,10 +17,11 @@ public sealed class FssHttpLockCoordinator
     private Lease? _exclusive;
     private long _generation;
     private DateTime? _authoritativeNow;
+    private SubjectIdentity? _actor;
 
-    public static FssHttpLockCoordinator Restore(StoredDocument document, CoordinationState state, DateTime? now = null)
+    public static FssHttpLockCoordinator Restore(StoredDocument document, CoordinationState state, DateTime? now = null, SubjectIdentity? actor = null)
     {
-        var coordinator = For(document);
+        var coordinator = For(document, actor);
         coordinator._schemaLockId = state.SchemaId;
         coordinator._generation = state.Generation;
         coordinator._authoritativeNow = now;
@@ -38,11 +39,22 @@ public sealed class FssHttpLockCoordinator
         _schemaOwners.Values.Select(CaptureLease).ToImmutableArray(),
         _exclusive is null ? null : CaptureLease(_exclusive), _generation);
 
-    private static Lease RestoreLease(LeaseState state) => new(state.Id, state.Client, state.ExpiresUtc, (LockKind)state.Kind, state.SchemaId);
-    private static LeaseState CaptureLease(Lease state) => new(state.Id, state.Client, state.ExpiresUtc, (int)state.Kind, state.SchemaId);
+    private static Lease RestoreLease(LeaseState state) => new(state.Id, state.Client, state.ExpiresUtc, (LockKind)state.Kind, state.SchemaId, state.OwnerSubject);
+    private static LeaseState CaptureLease(Lease state) => new(state.Id, state.Client, state.ExpiresUtc, (int)state.Kind, state.SchemaId, state.OwnerSubject);
 
-    public static FssHttpLockCoordinator For(StoredDocument document) =>
-        States.GetValue(document, static _ => new FssHttpLockCoordinator());
+    public static FssHttpLockCoordinator For(StoredDocument document, SubjectIdentity? actor = null)
+    {
+        var coordinator = States.GetValue(document, static _ => new FssHttpLockCoordinator());
+        if (actor is not null) coordinator._actor = actor;
+        return coordinator;
+    }
+
+    private LockOperationResult Denied(FssHttpSubResponse response)
+    {
+        response.ErrorCode = "FileUnauthorizedAccess";
+        response.HResult = CellBridge.AspNetCore.CellBridgeAuthorization.AccessDeniedHResult.ToString(CultureInfo.InvariantCulture);
+        return LockOperationResult.AccessDenied;
+    }
 
     /// <summary>Processes SchemaLockRequestType (GetLock, ReleaseLock, RefreshLock, ConvertToExclusive, CheckLockAvailability).</summary>
     public LockOperationResult ApplySchemaLock(FssHttpSubRequest request, FssHttpSubResponse response, DateTime? now = null)
@@ -56,8 +68,11 @@ public sealed class FssHttpLockCoordinator
         var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
-            ExpireLocked(instant);
             var client = ReadClient(attrs);
+            if (_actor is null || client is not null && _schemaOwners.TryGetValue(client, out var existingOwner)
+                && existingOwner.ExpiresUtc > instant && existingOwner.OwnerSubject != _actor.Subject)
+                return Denied(response);
+            ExpireLocked(instant);
             switch (operation)
             {
                 case "GetLock":
@@ -70,7 +85,7 @@ public sealed class FssHttpLockCoordinator
                     _schemaLockId ??= schemaId;
                     var refreshed = _schemaOwners.ContainsKey(client);
                     _schemaOwners[client] = new Lease(schemaId, client,
-                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Schema);
+                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Schema, OwnerSubject: _actor.Subject);
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return refreshed ? LockOperationResult.Refreshed : LockOperationResult.Granted;
 
@@ -78,7 +93,7 @@ public sealed class FssHttpLockCoordinator
                     if (client is null || !Same(_schemaLockId, schemaId) || !_schemaOwners.ContainsKey(client))
                         return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
                     _schemaOwners[client] = new Lease(schemaId, client,
-                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Schema);
+                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Schema, OwnerSubject: _actor.Subject);
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return LockOperationResult.Refreshed;
 
@@ -118,6 +133,9 @@ public sealed class FssHttpLockCoordinator
         var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
+            if (_actor is null || _exclusive is { } active && active.ExpiresUtc > instant &&
+                Same(active.Id, lockId) && active.OwnerSubject != _actor.Subject)
+                return Denied(response);
             ExpireLocked(instant);
             switch (operation)
             {
@@ -128,7 +146,7 @@ public sealed class FssHttpLockCoordinator
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
                     var refreshed = _exclusive is not null;
                     _exclusive = new Lease(lockId, ReadClient(attrs),
-                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Exclusive);
+                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Exclusive, OwnerSubject: _actor.Subject);
                     response.SubResponseDataAttributes["CoauthStatus"] = "Alone";
                     response.SubResponseDataAttributes["TransitionID"] = Guid.NewGuid().ToString("D");
                     return refreshed ? LockOperationResult.Refreshed : LockOperationResult.Granted;
@@ -231,6 +249,8 @@ public sealed class FssHttpLockCoordinator
         var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
+        if (_actor is null || document.GetSession(client) is { } existing && existing.Owner?.Subject != _actor.Subject)
+            return Denied(response);
         switch (operation)
         {
             case "JoinCoauthoring":
@@ -238,7 +258,7 @@ public sealed class FssHttpLockCoordinator
                 var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "GetLock"), response, instant);
                 if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed))
                     return result;
-                document.JoinEditingSession(client, ReadTimeout(attrs), asEditor: true);
+                document.JoinEditingSession(client, ReadTimeout(attrs), asEditor: true, userName: _actor.Login, owner: _actor);
                 response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                 response.SubResponseDataAttributes["CoauthStatus"] = document.Sessions.Count == 1 ? "Alone" : "Coauthoring";
                 response.SubResponseDataAttributes["TransitionID"] = document.TransitionId.ToString("D");
@@ -301,7 +321,17 @@ public sealed class FssHttpLockCoordinator
 
         lock (_gate)
         {
-            ExpireLocked(now ?? _authoritativeNow ?? DateTime.UtcNow);
+            var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
+            if (_actor is null || _exclusive is { } owned && owned.ExpiresUtc > instant && owned.OwnerSubject != _actor.Subject)
+                return RejectCellWrite(out result, out errorCode, "FileUnauthorizedAccess");
+            if (_schemaOwners.Values.Any(l => l.ExpiresUtc > instant))
+            {
+                var client = ReadClient(attrs);
+                if (!_schemaOwners.Values.Any(l => l.ExpiresUtc > instant && l.OwnerSubject == _actor.Subject &&
+                    (client is null || Same(l.Client, client))))
+                    return RejectCellWrite(out result, out errorCode, "FileUnauthorizedAccess");
+            }
+            ExpireLocked(instant);
             if (_exclusive is not null)
             {
                 if (!HasMatchingLockId(attrs, _exclusive.Id, "ExclusiveLockID"))
@@ -355,7 +385,7 @@ public sealed class FssHttpLockCoordinator
         _schemaOwners.Clear();
         _schemaLockId = null;
         _exclusive = new Lease(exclusiveId, client,
-            instant.AddSeconds(ReadTimeout(attrs)), LockKind.Exclusive, schemaId);
+            instant.AddSeconds(ReadTimeout(attrs)), LockKind.Exclusive, schemaId, _actor!.Subject);
         response.SubResponseDataAttributes["LockType"] = "ExclusiveLock";
         return LockOperationResult.Completed;
     }
@@ -449,11 +479,11 @@ public sealed class FssHttpLockCoordinator
     private static bool Same(string? left, string? right) =>
         left is not null && right is not null && EquivalentId(left, right);
 
-    private sealed record Lease(string Id, string? Client, DateTime ExpiresUtc, LockKind Kind, string? SchemaId = null);
+    private sealed record Lease(string Id, string? Client, DateTime ExpiresUtc, LockKind Kind, string? SchemaId = null, string? OwnerSubject = null);
     private enum LockKind { Schema, Exclusive }
 }
 
 public enum LockOperationResult
 {
-    Granted, Refreshed, Released, Completed, Observed, Conflict, NotFound, InvalidArgument, NotSupported,
+    Granted, Refreshed, Released, Completed, Observed, Conflict, NotFound, InvalidArgument, NotSupported, AccessDenied,
 }

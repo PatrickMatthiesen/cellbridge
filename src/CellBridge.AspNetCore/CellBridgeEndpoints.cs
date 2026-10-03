@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 
 namespace CellBridge.AspNetCore;
@@ -28,6 +29,8 @@ public static class CellBridgeEndpoints
         services.AddSingleton(new RequestAdmission(options.MaxConcurrentRequests));
         services.AddSingleton(options);
         services.AddSingleton(provider);
+        services.AddAuthorization();
+        services.TryAddSingleton<ICellBridgeAccessEvaluator, StoredDocumentAccessEvaluator>();
         services.AddSingleton<CellBridgeDocumentService>();
         services.AddHealthChecks().AddCheck<CellBridgeStorageHealthCheck>("cellbridge-storage");
         return services;
@@ -35,27 +38,31 @@ public static class CellBridgeEndpoints
 
     public static IEndpointRouteBuilder MapCellBridge(this IEndpointRouteBuilder app)
     {
-        app.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
-        app.MapMethods("/shared/{fileName}/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
-        app.MapMethods("/shared", ["OPTIONS"], (HttpContext context) =>
+        var routes = app.MapGroup("").RequireAuthorization();
+        routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
+        routes.MapMethods("/shared/{fileName}/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
+        routes.MapMethods("/shared", ["OPTIONS"], (HttpContext context) =>
         {
             var origin = $"{context.Request.Scheme}://{context.Request.Host}";
             context.Response.Headers["X-MSFSSHTTP"] = "1.0";
             context.Response.Headers["X-MS-AuthDomainSupport"] = "False";
-            context.Response.Headers["X-IDCRL_ACCEPTED"] = "t";
-            context.Response.Headers["X-MS-CookieUri"] = origin + "/";
+            context.Response.Headers["X-FORMS_BASED_AUTH_ACCEPTED"] = "t";
             context.Response.Headers["X-MSGETWEBURL"] = origin + "/shared/";
             context.Response.Headers["Public-Extension"] = "http://schemas.microsoft.com/repl-2";
             context.Response.Headers["Allow"] = "OPTIONS,GET,HEAD,POST";
             return Results.Ok();
         });
-        app.MapPost("/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
-        app.MapPost("/shared/{fileName}/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
-        app.MapMethods("/shared/{fileName}", ["GET", "HEAD"], async (HttpContext context, CellBridgeDocumentService service) =>
+        routes.MapPost("/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
+        routes.MapPost("/shared/{fileName}/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
+        routes.MapMethods("/shared/{fileName}", ["GET", "HEAD"], async (HttpContext context, CellBridgeDocumentService service) =>
         {
             var escaped = string.Join('/', context.Request.Path.Value!.Split('/').Select(Uri.EscapeDataString));
             var state = await service.Provider.State.FindByPathKeyAsync(StorageIds.PathKey(DocumentStore.NormalizeUrl(escaped)), context.RequestAborted);
+            var actor = CellBridgeActor.FromPrincipal(context.User);
+            if (actor is null) return Results.Unauthorized();
             if (state is null) return Results.NotFound();
+            if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) return Results.StatusCode(403);
+            context.Response.Headers.CacheControl = "private, no-store";
             context.Response.ContentLength = state.Content.Length;
             context.Response.Headers.ETag = state.Etag;
             context.Response.Headers.LastModified = state.ModifiedUtc.ToString("R");
@@ -74,6 +81,24 @@ public static class CellBridgeEndpoints
         });
         return app;
     }
+
+static bool ProtocolRequestAllowed(HttpContext context)
+{
+    var contentType = context.Request.ContentType?.Split(';')[0].Trim();
+    if (contentType is null || !(contentType.Equals("text/xml", StringComparison.OrdinalIgnoreCase) ||
+        contentType.Equals("application/soap+xml", StringComparison.OrdinalIgnoreCase) ||
+        contentType.Equals("multipart/related", StringComparison.OrdinalIgnoreCase))) return false;
+    var origin = context.Request.Headers.Origin.ToString();
+    return origin.Length == 0 || string.Equals(origin, $"{context.Request.Scheme}://{context.Request.Host}", StringComparison.OrdinalIgnoreCase);
+}
+
+static bool OwnsSession(DocumentState state, FssHttpSubRequest request, CellBridgeActor actor, DateTime now)
+{
+    if (request.Type is not (SubRequestType.EditorsTable or SubRequestType.Coauth)) return true;
+    if (!Guid.TryParse(request.SubRequestDataAttributes.GetValueOrDefault("ClientID"), out var client)) return true;
+    var session = state.Editors.FirstOrDefault(e => e.ClientId == client && e.ExpiresUtc > now);
+    return session is null || session.Owner?.Subject == actor.Identity.Subject;
+}
 
 static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
 {
@@ -99,6 +124,10 @@ private sealed class RequestAdmission(int maximum)
 
 static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
 {
+    var actor = CellBridgeActor.FromPrincipal(ctx.User);
+    if (actor is null) return Results.Unauthorized();
+    if (!ProtocolRequestAllowed(ctx)) return Results.StatusCode(415);
+    ctx.Response.Headers.CacheControl = "private, no-store";
     var log = ctx.RequestServices.GetRequiredService<ILogger<CellBridgeDocumentService>>();
     var options = ctx.RequestServices.GetRequiredService<CellBridgeOptions>();
     if (ctx.Request.ContentLength > options.MaxRequestBytes) return Results.StatusCode(413);
@@ -216,7 +245,7 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
 
     foreach (var fileRequest in request.Requests)
     {
-        var initial = await service.ResolveAsync(fileRequest, ctx.RequestAborted);
+        var initial = await service.LookupAsync(fileRequest, ctx.RequestAborted);
         var doc = initial is null ? null : StoredDocument.RestoreMetadata(initial, DateTime.UtcNow);
         if (doc is null)
         {
@@ -230,13 +259,15 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
         }
 
         // Every subrequest, including lock release, targets the resolved file.
-        fileRequest.Url = DocumentRequestResolver.CanonicalUrl(doc, $"{ctx.Request.Scheme}://{ctx.Request.Host}");
+        var canRead = service.Access(actor, initial!).HasFlag(DocumentAccess.Read);
+        if (canRead) fileRequest.Url = DocumentRequestResolver.CanonicalUrl(doc, $"{ctx.Request.Scheme}://{ctx.Request.Host}");
+        else response.VersionErrorCode = "FileUnauthorizedAccess";
         var fileResponse = new FssHttpResponse
         {
             Url = fileRequest.Url,
             RequestToken = fileRequest.RequestToken,
             IntervalOverride = 0,
-            ResourceId = doc.TransitionId,
+            ResourceId = canRead ? doc.TransitionId : null,
         };
 
         foreach (var subRequest in fileRequest.SubRequests)
@@ -258,15 +289,23 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
                     subResponse.EmitEmptySubResponseData = true;
                 }
                 else if (subRequest.Type == SubRequestType.Cell)
-                    await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, ctx.RequestAborted);
+                    await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, actor, ctx.RequestAborted);
                 else
                     await service.Provider.State.TransitionAsync(doc.TransitionId, (current, now) =>
                     {
+                        var access = service.Access(actor, current);
+                        if (!access.HasFlag(CellBridgeAuthorization.RequiredAccess(subRequest)) || !OwnsSession(current, subRequest, actor, now))
+                        {
+                            subResponse.ErrorCode = "FileUnauthorizedAccess";
+                            subResponse.HResult = CellBridgeAuthorization.AccessDeniedHResult.ToString();
+                            return new StateTransition<bool>(null, false);
+                        }
                         var document = StoredDocument.RestoreMetadata(current, now);
-                        var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now);
+                        var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, actor.Identity);
                         var store = new DocumentStore();
                         store.Attach(document);
-                        ApplyMetadata(document, store, fileRequest, subRequest, subResponse, log, $"{ctx.Request.Scheme}://{ctx.Request.Host}");
+                        ApplyMetadata(document, store, fileRequest, subRequest, subResponse, log, $"{ctx.Request.Scheme}://{ctx.Request.Host}", actor);
+                        if (subResponse.ErrorCode == "FileUnauthorizedAccess") return new StateTransition<bool>(null, false);
                         var next = document.CaptureCoordination(current, coordinator.Capture());
                         if (System.Text.Json.JsonSerializer.Serialize(next) == System.Text.Json.JsonSerializer.Serialize(current))
                             return new StateTransition<bool>(null, true);
@@ -331,7 +370,7 @@ static async Task HandleCellSubRequest(
     Guid resourceId,
     FssHttpSubRequest subRequest,
     FssHttpSubResponse subResponse,
-    ILogger log, CancellationToken cancellationToken)
+    ILogger log, CellBridgeActor actor, CancellationToken cancellationToken)
 {
 
     if (!TryResolvePartition(subRequest, out var partitionKind))
@@ -370,19 +409,20 @@ static async Task HandleCellSubRequest(
         return;
     }
     var execution = await service.ExecuteAsync(resourceId, partitionKind, fsshttpbRequest,
-        subRequest.SubRequestDataAttributes, cancellationToken);
+        subRequest.SubRequestDataAttributes, actor, cancellationToken);
     if (execution.LockError is not null)
     {
         subResponse.ErrorCode = execution.LockError;
         return;
     }
     var fsshttpbResponse = execution.Response;
-    if (string.Equals(subRequest.SubRequestDataAttributes.GetValueOrDefault("GetFileProps"), "true", StringComparison.OrdinalIgnoreCase))
+    if (service.Access(actor, execution.State).HasFlag(DocumentAccess.Read) &&
+        string.Equals(subRequest.SubRequestDataAttributes.GetValueOrDefault("GetFileProps"), "true", StringComparison.OrdinalIgnoreCase))
     {
         subResponse.SubResponseDataAttributes["Etag"] = execution.State.Etag;
         subResponse.SubResponseDataAttributes["CreateTime"] = execution.State.CreatedUtc.ToFileTimeUtc().ToString();
         subResponse.SubResponseDataAttributes["LastModifiedTime"] = execution.State.ModifiedUtc.ToFileTimeUtc().ToString();
-        subResponse.SubResponseDataAttributes["ModifiedBy"] = "officelab";
+        subResponse.SubResponseDataAttributes["ModifiedBy"] = execution.State.Security.ModifiedBy?.Login ?? "unknown";
     }
     subResponse.SubResponseDataBase64 = fsshttpbResponse.ToByteArray(
         FsshttpbSerializationProfile.SharePoint13_11);
@@ -417,9 +457,9 @@ static FsshttpbResponse BuildEditorsTableSharePoint13QueryChangesResponse(
         var editors = doc.Sessions.Select(session => new EditorsTableEditor(
             session.ClientId.ToString("D"),
             session.ExpiresUtc.Ticks,
-            session.UserName,
-            session.UserName,
-            HasEditorPermission: session.AsEditor,
+            session.Owner?.DisplayName ?? session.UserName,
+            session.Owner?.Login ?? session.UserName,
+            HasEditorPermission: session.AsEditor && session.Owner is not null && doc.Security.AccessFor(session.Owner.Subject).HasFlag(DocumentAccess.Write),
             Metadata: session.Metadata));
 
         return EditorsTablePartitionBuilder.BuildSharePointV13QueryChangesResponse(
@@ -438,6 +478,7 @@ static FsshttpbResponse BuildEditorsTableSharePoint13QueryChangesResponse(
 /// validation failures are returned as protocol errors without that element.
 /// </summary>
 static void HandleEditorsTableSubRequest(
+    CellBridgeActor actor,
     DocumentStore store,
     FssHttpRequest fileRequest,
     FssHttpSubRequest subRequest,
@@ -473,7 +514,7 @@ static void HandleEditorsTableSubRequest(
                 return;
             }
 
-            doc.JoinEditingSession(clientId, joinTimeout, joinAsEditor);
+            doc.JoinEditingSession(clientId, joinTimeout, joinAsEditor, actor.Identity.Login, actor.Identity);
             log.LogInformation("EditorsTable join: client={Client} asEditor={AsEditor} timeout={Timeout} editors={Count}",
                 clientId, joinAsEditor, joinTimeout, doc.Sessions.Count);
             break;
@@ -763,7 +804,7 @@ static void HandleSchemaLockSubRequest(
 }
 
 static void ApplyMetadata(StoredDocument doc, DocumentStore store, FssHttpRequest fileRequest,
-    FssHttpSubRequest subRequest, FssHttpSubResponse subResponse, ILogger log, string publicOrigin)
+    FssHttpSubRequest subRequest, FssHttpSubResponse subResponse, ILogger log, string publicOrigin, CellBridgeActor actor)
 {
             switch (subRequest.Type)
             {
@@ -779,8 +820,8 @@ static void ApplyMetadata(StoredDocument doc, DocumentStore store, FssHttpReques
                     break;
 
                 case SubRequestType.WhoAmI:
-                    subResponse.SubResponseDataAttributes["UserName"] = "officelab";
-                    subResponse.SubResponseDataAttributes["UserLogin"] = "officelab";
+                    subResponse.SubResponseDataAttributes["UserName"] = actor.Identity.DisplayName;
+                    subResponse.SubResponseDataAttributes["UserLogin"] = actor.Identity.Login;
                     break;
 
                 case SubRequestType.ServerTime:
@@ -811,7 +852,7 @@ static void ApplyMetadata(StoredDocument doc, DocumentStore store, FssHttpReques
                     break;
 
                 case SubRequestType.EditorsTable:
-                    HandleEditorsTableSubRequest(store, fileRequest, subRequest, subResponse, log);
+                    HandleEditorsTableSubRequest(actor, store, fileRequest, subRequest, subResponse, log);
                     break;
 
                 default:

@@ -10,7 +10,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void CoauthorLifecycleSharesLockAndReleasesItAfterLastExit()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var schema = Guid.NewGuid().ToString();
         var first = Guid.NewGuid();
         var second = Guid.NewGuid();
@@ -33,7 +33,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void SchemaLock_AllowsAnotherClientWithTheSameSchemaId()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var first = Guid.NewGuid();
         var second = Guid.NewGuid();
         var lockId = Guid.NewGuid();
@@ -54,7 +54,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void ExclusiveLock_RequiresTheSchemaOwnerAndCanBeReleasedByToken()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var owner = Guid.NewGuid();
         var other = Guid.NewGuid();
         var schemaId = Guid.NewGuid();
@@ -83,7 +83,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void ExclusiveLockTokenAcceptsEquivalentGuidRepresentationsAcrossRequests()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var lockId = Guid.NewGuid();
         var canonical = lockId.ToString("D").ToUpperInvariant();
 
@@ -111,7 +111,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void SchemaLockAndCoauthorExitAcceptEquivalentGuidRepresentations()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var schemaId = Guid.NewGuid();
         var clientId = Guid.NewGuid();
 
@@ -137,7 +137,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void LockStatus_ReportsExpiryAsUnlocked()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var response = new FssHttpSubResponse();
         var at = DateTime.UtcNow;
         var owner = Guid.NewGuid();
@@ -154,7 +154,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void AmIAloneRequiresTheCallerToBeAnActiveSession()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var owner = Guid.NewGuid();
         var stranger = Guid.NewGuid();
         document.JoinSession(owner);
@@ -172,7 +172,7 @@ public sealed class FssHttpLockCoordinatorTests
     public void CoauthTransitionsAreExplicitlyUnsupportedUntilTransitionStateIsImplemented()
     {
         var document = NewDocument();
-        var coordinator = FssHttpLockCoordinator.For(document);
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var owner = Guid.NewGuid();
         var other = Guid.NewGuid();
         var schemaId = Guid.NewGuid().ToString();
@@ -190,7 +190,7 @@ public sealed class FssHttpLockCoordinatorTests
     [Fact]
     public void CellWriteRunsWithoutAnActiveLock()
     {
-        var coordinator = FssHttpLockCoordinator.For(NewDocument());
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
 
         var allowed = coordinator.ExecuteCellWrite(
             new Dictionary<string, string>(),
@@ -206,7 +206,7 @@ public sealed class FssHttpLockCoordinatorTests
     [Fact]
     public void CellWriteRequiresTheActiveSchemaLockAndOptionalClientOwner()
     {
-        var coordinator = FssHttpLockCoordinator.For(NewDocument());
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
         var owner = Guid.NewGuid();
         var schema = Guid.NewGuid();
         var schemaAttributes = new Dictionary<string, string>
@@ -257,7 +257,7 @@ public sealed class FssHttpLockCoordinatorTests
     [Fact]
     public void CellWriteRequiresTheActiveExclusiveLockAndExpiresIt()
     {
-        var coordinator = FssHttpLockCoordinator.For(NewDocument());
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
         var lockId = Guid.NewGuid();
         var grantedAt = DateTime.UtcNow;
         Assert.Equal(LockOperationResult.Granted, coordinator.ApplyExclusiveLock(
@@ -291,7 +291,7 @@ public sealed class FssHttpLockCoordinatorTests
     [Fact]
     public void CellWritesAreSerializedPerDocument()
     {
-        var coordinator = FssHttpLockCoordinator.For(NewDocument());
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
         var active = 0;
         var maximum = 0;
 

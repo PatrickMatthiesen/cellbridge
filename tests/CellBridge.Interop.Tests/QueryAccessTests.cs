@@ -4,6 +4,25 @@ namespace CellBridge.Interop.Tests;
 
 public sealed class QueryAccessTests
 {
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public void DeniedQueryAccessRoundTripsThroughMicrosoftParser(bool read, bool write)
+    {
+        var denied = new CellBridge.FssHttpB.ResponseError(CellBridge.FssHttpB.ErrorType.HResult, 0x80070005, "Document access denied.");
+        var response = new CellBridge.FssHttpB.FsshttpbResponse { SubResponses =
+        { new CellBridge.FssHttpB.FsshttpbSubResponse { RequestId = 9,
+            RequestType = CellBridge.FssHttpB.RequestTypes.QueryAccess,
+            Data = new CellBridge.FssHttpB.QueryAccessSubResponseData
+            { ReadAccessError = read ? null : denied, WriteAccessError = write ? null : denied } } } };
+        var parsed = FsshttpbResponse.DeserializeResponseFromByteArray(response.ToByteArray(), 0);
+        var data = parsed.CellSubResponses.Single().GetSubResponseData<QueryAccessSubResponseData>();
+        Assert.Equal(read ? 0 : unchecked((int)0x80070005), data.ReadAccessResponse.ReadResponseError.GetErrorData<HRESULTError>().ErrorCode);
+        Assert.Equal(write ? 0 : unchecked((int)0x80070005), data.WriteAccessResponse.WriteResponseError.GetErrorData<HRESULTError>().ErrorCode);
+        if (!read) Assert.Equal(Guid.Parse(ResponseError.HresultErrorGuid), data.ReadAccessResponse.ReadResponseError.ErrorTypeGUID);
+        if (!write) Assert.Equal(Guid.Parse(ResponseError.HresultErrorGuid), data.WriteAccessResponse.WriteResponseError.ErrorTypeGUID);
+    }
+
     [Fact]
     public void QueryAccessRequest_UsesS11ProtocolDefaults()
     {

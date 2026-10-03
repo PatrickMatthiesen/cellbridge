@@ -205,11 +205,15 @@ try {
     $result.localWordPreflightPassed = $true
 
     $result.phase = 'create-remote-document'
+    if (-not $env:CELLBRIDGE_INTEROP_COOKIE -or -not $env:CELLBRIDGE_INTEROP_CSRF) {
+        throw 'Supply CELLBRIDGE_INTEROP_COOKIE and CELLBRIDGE_INTEROP_CSRF from a signed-in creator account. Office must separately sign in to this origin.'
+    }
+    $httpHeaders = @{ Cookie = $env:CELLBRIDGE_INTEROP_COOKIE; 'X-CellBridge-CSRF' = $env:CELLBRIDGE_INTEROP_CSRF }
     $body = @{ name = $fileName; type = 'docx' } | ConvertTo-Json
-    Invoke-RestMethod "$BaseUrl/api/documents" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
-    $before = Invoke-WebRequest $documentUrl -Method Head -UseBasicParsing -TimeoutSec 30
+    Invoke-RestMethod "$BaseUrl/api/documents" -Headers $httpHeaders -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
+    $before = Invoke-WebRequest $documentUrl -Headers $httpHeaders -Method Head -UseBasicParsing -TimeoutSec 30
     $result.initialEtag = [string]$before.Headers['ETag']
-    Invoke-WebRequest $documentUrl -UseBasicParsing -TimeoutSec 30 `
+    Invoke-WebRequest $documentUrl -Headers $httpHeaders -UseBasicParsing -TimeoutSec 30 `
         -OutFile (Join-Path $OutputDirectory 'server-initial.docx') | Out-Null
     $result.phase = 'open-remote-document'
     $word = Start-OwnedWord
@@ -233,8 +237,10 @@ try {
     $download = Join-Path $OutputDirectory "server-save-$edit.docx"
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     do {
-        $response = Invoke-WebRequest "$documentUrl`?verification=$runId" -UseBasicParsing -TimeoutSec 15 `
-            -Headers @{ 'Cache-Control' = 'no-cache' } -OutFile $download -PassThru
+        $verificationHeaders = $httpHeaders.Clone()
+        $verificationHeaders['Cache-Control'] = 'no-cache'
+        $response = Invoke-WebRequest "$documentUrl`?verification=$runId" -Headers $verificationHeaders -UseBasicParsing -TimeoutSec 15 `
+            -OutFile $download -PassThru
         $zip = [IO.Compression.ZipFile]::OpenRead($download)
         try {
             $entry = $zip.GetEntry('word/document.xml')

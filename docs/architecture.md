@@ -26,6 +26,12 @@ The endpoint resolves document identity before dispatch and serializes each
 operation's protocol response. HTTP 200 alone does not indicate save success.
 See [protocol scope](protocol-version-decision.md).
 
+Authentication runs before parsing. The sample supplies PostgreSQL Identity
+accounts, MS-OFBA challenges and shared cookie protection keys. Each operation
+checks the caller's stable subject against the resolved document's ownership
+and grants. Sessions, leases and receipts retain their authenticated owner.
+See [authentication and permissions](authentication.md).
+
 ## Libraries and executables
 
 | Project | Responsibility |
@@ -40,6 +46,8 @@ See [protocol scope](protocol-version-decision.md).
 | `CellBridge.Storage.Conformance` | Provider contract checks for consumers |
 | `CellBridge.AspNetCore` | Save orchestration, discovery, download and cellstorage endpoints |
 | `CellBridge.Web` | Sample host, document imports, package generation and catalog APIs |
+| `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |
+| `tools/CellBridge.Admin` | Operator account provisioning and document permission updates |
 | `demo/CellBridge.Demo` | Razor Pages client of the sample HTTP catalog |
 | `aspire/apphost.cs` | PostgreSQL, schema migration, sample host, demo and optional capture proxy |
 
@@ -63,7 +71,7 @@ valid file partition.
 
 Content preparation and immutable-object writes occur before the document
 transaction. Publication takes the document's row lock, reads the current state
-and authoritative database time, rechecks graph coherency and leases, and commits
+and authoritative database time, rechecks Write permission, graph coherency and lease ownership, and commits
 one state snapshot with the accepted response receipt. Different documents can
 progress independently. Session and lease changes use the same coordination.
 

@@ -22,13 +22,18 @@ public sealed class PackageConsumerTests
         var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        TestActor.Register(builder.Services);
         builder.Services.AddCellBridge(provider, requireDurability: false, configure: o => o.MaxRequestBytes = 32);
         await using var app = builder.Build();
+        app.UseAuthentication();
+        app.UseAuthorization();
         app.MapCellBridge();
         await app.StartAsync();
         using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("X-Test-User", "writer");
         using HttpContent content = unknownLength
             ? new StreamContent(new NonSeekableReadStream(new byte[33])) : new ByteArrayContent(new byte[33]);
+        content.Headers.ContentType = new("text/xml");
         using var response = await client.PostAsync("/_vti_bin/cellstorage.svc", content);
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
         Assert.Empty(await provider.State.ListAsync(0, 10));
@@ -59,18 +64,22 @@ public sealed class PackageConsumerTests
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        TestActor.Register(builder.Services);
         builder.Services.AddCellBridge(provider, requireDurability: false);
 
         await using var app = builder.Build();
+        app.UseAuthentication();
+        app.UseAuthorization();
         app.MapCellBridge();
         await app.StartAsync();
 
         var documents = app.Services.GetRequiredService<CellBridgeDocumentService>();
         byte[] bytes = [1, 2, 3, 4];
-        var document = await documents.CreateAsync("/shared/example.bin", bytes);
+        var document = await documents.CreateAsync("/shared/example.bin", bytes, TestActor.Value);
         Assert.NotNull(document);
 
         using var client = app.GetTestClient();
+        client.DefaultRequestHeaders.Add("X-Test-User", "writer");
         using var discovery = await client.SendAsync(new(HttpMethod.Options, "/shared"));
         Assert.Equal(HttpStatusCode.OK, discovery.StatusCode);
         Assert.True(discovery.Headers.Contains("X-MSFSSHTTP"));

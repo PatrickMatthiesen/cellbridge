@@ -15,4 +15,5 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <Using Include="Xunit" />
   </ItemGroup>
+  <ItemGroup><Compile Include="../CellBridge.TestIdentity.cs" Link="TestIdentity.cs" /></ItemGroup>
 </Project>

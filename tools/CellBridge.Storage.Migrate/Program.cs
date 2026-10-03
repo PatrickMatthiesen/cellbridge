@@ -1,4 +1,5 @@
 using CellBridge.Storage.PostgreSql;
+using CellBridge.Authentication;
 using CellBridge.Storage.Abstractions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -19,9 +20,12 @@ if (args.Contains("--collect-orphans", StringComparer.Ordinal))
 }
 else
 {
-    await new PostgreSqlStateStore(source, limits).InitializeAsync();
+    var legacySubject = builder.Configuration["Authentication:LegacyOwner"];
+    var legacyOwner = string.IsNullOrWhiteSpace(legacySubject) ? null : new SubjectIdentity(legacySubject, "legacy-owner", "Legacy owner");
+    await new PostgreSqlStateStore(source, limits).InitializeAsync(legacyOwner: legacyOwner);
+    await AuthenticationDatabase.InitializeAsync(connectionString);
     if (builder.Configuration["Storage:ContentProvider"]?.Equals("FileSystem", StringComparison.OrdinalIgnoreCase) == true)
         await new StorageMaintenance(source).RegisterExistingFileSystemAsync(
             builder.Configuration["Storage:ContentRoot"] ?? throw new InvalidOperationException("Filesystem migration requires Storage:ContentRoot."));
-    Console.WriteLine("CellBridge storage schema version 2 is ready.");
+    Console.WriteLine("CellBridge storage schema version 3 and authentication schema version 1 are ready.");
 }

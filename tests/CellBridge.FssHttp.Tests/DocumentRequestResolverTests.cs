@@ -85,7 +85,7 @@ public sealed class DocumentRequestResolverTests
         lockRequest.SubRequestDataAttributes["ClientID"] = clientId.ToString("D");
         var lockResponse = new FssHttpSubResponse();
         Assert.Equal(LockOperationResult.Granted,
-            FssHttpLockCoordinator.For(document).ApplySchemaLock(lockRequest, lockResponse));
+            FssHttpLockCoordinator.For(document, TestActor.Value.Identity).ApplySchemaLock(lockRequest, lockResponse));
 
         var resolved = DocumentRequestResolver.Resolve(store, new FssHttpRequest
         {
@@ -97,7 +97,7 @@ public sealed class DocumentRequestResolverTests
 
         var statusResponse = new FssHttpSubResponse();
         Assert.Equal(LockOperationResult.Observed,
-            FssHttpLockCoordinator.For(resolved!).ApplyLockStatus(
+            FssHttpLockCoordinator.For(resolved!, TestActor.Value.Identity).ApplyLockStatus(
                 new FssHttpSubRequest { Type = SubRequestType.LockStatus }, statusResponse));
         Assert.Equal("1", statusResponse.SubResponseDataAttributes["LockType"]);
         Assert.Equal(lockId, statusResponse.SubResponseDataAttributes["LockID"]);

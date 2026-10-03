@@ -14,22 +14,47 @@ var testRun = Environment.GetEnvironmentVariable("CELLBRIDGE_TEST_RUN") == "1";
 if (!testRun)
     builder.Configuration.AddJsonFile(Path.Combine(builder.AppHostDirectory, "apphost.settings.json"), optional: true);
 var postgres = builder.AddPostgres("storage");
-if (!testRun) postgres.WithDataVolume("cellbridge-storage-data");
+// A separate durable volume lets a laptop auth trial coexist with another checkout.
+if (!testRun) postgres.WithDataVolume(
+    Environment.GetEnvironmentVariable("CELLBRIDGE_STORAGE_VOLUME") ?? "cellbridge-storage-data");
 var database = postgres.AddDatabase("cellbridge");
+var legacyOwner = Environment.GetEnvironmentVariable("CELLBRIDGE_LEGACY_OWNER");
+var importOwner = Environment.GetEnvironmentVariable("CELLBRIDGE_IMPORT_OWNER");
+if (testRun) importOwner = "local:integration-writer";
 
 #pragma warning disable ASPIRECSHARPAPPS001
 var migration = builder.AddCSharpApp("storage-migration", "../tools/CellBridge.Storage.Migrate/CellBridge.Storage.Migrate.csproj")
     .WithReference(database)
     .WaitFor(database);
+if (!string.IsNullOrWhiteSpace(legacyOwner)) migration.WithEnvironment("Authentication__LegacyOwner", legacyOwner);
 #pragma warning restore ASPIRECSHARPAPPS001
+
+IResourceBuilder<ExecutableResource>? testAccount = null;
+if (testRun)
+{
+    var password = Environment.GetEnvironmentVariable("CELLBRIDGE_TEST_PASSWORD")
+        ?? throw new InvalidOperationException("Disposable test runs require CELLBRIDGE_TEST_PASSWORD.");
+    testAccount = builder.AddExecutable("test-account", OperatingSystem.IsWindows() ? "python" : "python3", "..", "tools/testing/bootstrap.py")
+        .WithReference(database)
+        .WithEnvironment("CELLBRIDGE_TEST_PASSWORD", password)
+        .WaitForCompletion(migration);
+}
+
+var collabPublicUrl = builder.AddParameter("collab-public-url",
+    Environment.GetEnvironmentVariable("CELLBRIDGE_PUBLIC_ORIGIN") ?? "https://localhost:7292")
+    .WithDescription("Collaboration server HTTPS origin reachable by browsers and desktop Office.");
 
 #pragma warning disable ASPIRECSHARPAPPS001
 var web = builder.AddCSharpApp("web", "../src/CellBridge.Web/CellBridge.Web.csproj")
     .WithReference(database)
     .WithEnvironment("Storage__Provider", "PostgreSql")
+    .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
     .WaitForCompletion(migration)
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
+
+if (!string.IsNullOrWhiteSpace(importOwner)) web.WithEnvironment("Authentication__ImportOwner", importOwner);
+if (testAccount is not null) web.WaitForCompletion(testAccount);
 
 var wireCapture = Environment.GetEnvironmentVariable("CELLBRIDGE_WIRE_CAPTURE")
     ?? builder.Configuration["Protocol:CaptureDirectory"];
@@ -43,6 +68,7 @@ if (Environment.GetEnvironmentVariable("CELLBRIDGE_RUN_TWO_INSTANCES") == "1")
         .WithReference(database)
         .WithEnvironment("Storage__Provider", "PostgreSql")
         .WithEnvironment("Storage__MultipleInstances", "true")
+        .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
         .WithEndpoint("http", endpoint => endpoint.Port = 5182)
         .WithEndpoint("https", endpoint => endpoint.Port = 7293)
         .WaitForCompletion(migration)
@@ -58,18 +84,15 @@ if (Environment.GetEnvironmentVariable("CELLBRIDGE_RUN_STORAGE_TESTS") == "1")
         .WaitForCompletion(migration);
 }
 
-// Desktop Office uses Windows DNS, which does not resolve *.localhost here.
-// Use localhost for this machine; configure a resolvable host for remote clients.
-var collabPublicUrl = builder.AddParameter("collab-public-url",
-    Environment.GetEnvironmentVariable("CELLBRIDGE_PUBLIC_ORIGIN") ?? "https://localhost:7292")
-    .WithDescription("Collaboration server HTTPS origin reachable by browsers and desktop Office.");
-
-builder.AddCSharpApp("demo", "../demo/CellBridge.Demo/CellBridge.Demo.csproj")
+// Both Office and the library use the public web origin.
+var demo = builder.AddCSharpApp("demo", "../demo/CellBridge.Demo/CellBridge.Demo.csproj")
+    .WithReference(database)
+    .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
     .WithEnvironment("CollabServer__BaseUrl", web.GetEndpoint("https"))
     .WithEnvironment("CollabServer__PublicBaseUrl", collabPublicUrl)
     .WithHttpHealthCheck("/health")
-    .WaitFor(web)
-    .WithExternalHttpEndpoints();
+    .WaitFor(web);
+web.WithEnvironment("Demo__BaseUrl", demo.GetEndpoint("http"));
 
 #pragma warning restore ASPIRECSHARPAPPS001
 

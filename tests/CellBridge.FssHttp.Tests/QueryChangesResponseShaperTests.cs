@@ -13,7 +13,7 @@ public sealed class QueryChangesResponseShaperTests
         var document = store.Put("/test.docx", [1, 2, 3]);
         var request = QueryChanges(includeStorageManifest: true, includeCellChanges: true);
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
 
         Assert.Equal(
             new[]
@@ -46,7 +46,7 @@ public sealed class QueryChangesResponseShaperTests
         var document = store.Put("/test.docx", [1]);
         var request = QueryChanges(includeStorageManifest: false, includeCellChanges: false);
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var types = response.DataElementPackage!.DataElements.Select(element => element.DataElementType);
 
         Assert.DoesNotContain(DataElementType.StorageManifestDataElementData, types);
@@ -68,7 +68,7 @@ public sealed class QueryChangesResponseShaperTests
             MaxDataElements = 1,
         };
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request);
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var subResponse = Assert.Single(response.SubResponses);
 
         Assert.Null(response.DataElementPackage);

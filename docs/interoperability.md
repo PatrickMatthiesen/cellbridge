@@ -8,14 +8,16 @@ page to choose the validation needed for a change.
 
 | Scenario | Coverage |
 | --- | --- |
-| Word remote open, two saves and fresh-process reopen | Verified on Windows with Word `16.0.20430`, using Tailscale HTTPS and PostgreSQL state/content on 2026-10-02. Both file-partition PutChanges responses and final downloaded content were verified. |
-| Word remote open, ten saves and fresh-process reopen | Verified on 2026-10-03 with Word `16.0.20430`, Tailscale HTTPS and PostgreSQL state/content. Ten accepted file-partition PutChanges responses matched the client's per-edit ETags. All 17 captured binary responses passed the independent Office Inspectors parser. Final server download matched the client's SHA-256 and contained all ten edit markers. |
+| Anonymous Word remote open, two saves and fresh-process reopen | Verified on Windows with Word `16.0.20430`, using Tailscale HTTPS and PostgreSQL state/content on 2026-10-02. Both file-partition PutChanges responses and final downloaded content were verified. |
+| Anonymous Word remote open, ten saves and fresh-process reopen | Verified on 2026-10-03 with Word `16.0.20430`, Tailscale HTTPS and PostgreSQL state/content. Ten accepted file-partition PutChanges responses matched the client's per-edit ETags. All 17 captured binary responses passed the independent Office Inspectors parser. Final server download matched the client's SHA-256 and contained all ten edit markers. |
+| Authenticated Word sign-in, save and reader open | Demonstrated manually on one Windows client through Tailscale HTTPS and PostgreSQL on 2026-10-03. MS-OFBA required explicit Office host approval. Two writer file-partition saves and independently downloaded server bytes were verified; the reader opened the saved content read-only. Office build/channel and fresh-process reopen remain to be recorded. |
+| Write revocation while Word remains open | Demonstrated in the same authenticated trial. The next binary PutChanges was rejected, Word displayed Upload Failed, and an independent download retained the identical bytes and version. |
 | Word and Excel captured save sequences | Automated HTTP replay, graph materialization, retry and download checks |
 | Excel remote saving | Demonstrated before the storage-provider migration; repeat desktop validation for the durable host before claiming current client coverage |
 | PowerPoint package creation and local open/save/reopen | Package validation; remote saving remains unverified |
 | Two service instances using one database | Automated identity, shared lease and protocol routing checks |
 | Two desktop clients coauthoring one document | Unverified |
-| Distinct authenticated Office users | Unimplemented; the sample returns a shared identity |
+| Distinct authenticated Office users | Implemented with local Identity accounts. Sequential writer and reader requests returned distinct WhoAmI identities in the manual trial; simultaneous use by two desktops remains unverified. |
 | Large files and production concurrency | Unqualified; the synthetic benchmark is a measurement tool, not a throughput guarantee |
 
 The Word check observes server bytes independently of Office's cache and requires

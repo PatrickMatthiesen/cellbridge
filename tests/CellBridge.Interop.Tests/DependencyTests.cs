@@ -10,7 +10,7 @@ public sealed class DependencyTests
     public async Task UnsupportedSoapOperationAllowsFallbackDependencies()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
-        using var http = new HttpClient();
+        using var http = LiveInteropHttp.Create();
         var name = "dependencies-" + Guid.NewGuid().ToString("N") + ".docx";
         using var created = await http.PostAsJsonAsync(new Uri(endpoint, "/api/documents"), new { name, type = "docx" });
         created.EnsureSuccessStatusCode();
@@ -41,14 +41,15 @@ public sealed class DependencyTests
         foreach (var token in new[] { "2", "3" })
         {
             Assert.Equal("Success", (string)replies[token].Attribute("ErrorCode"));
-            Assert.Equal("officelab", (string)replies[token].Elements().Single().Attribute("UserName"));
+            Assert.False(string.IsNullOrWhiteSpace((string)replies[token].Elements().Single().Attribute("UserName")));
+            Assert.Equal((string)replies["2"].Elements().Single().Attribute("UserName"), (string)replies[token].Elements().Single().Attribute("UserName"));
         }
         Assert.Equal("DependentOnlyOnSuccessRequestFailed", (string)replies["4"].Attribute("ErrorCode"));
         Assert.Null(replies["4"].Elements().SingleOrDefault()?.Attribute("UserName"));
         Assert.Equal("DependentOnlyOnNotSupportedRequestGetSupported", (string)replies["5"].Attribute("ErrorCode"));
         // An evaluated OnNotSupported fallback permits OnExecute continuation.
         Assert.Equal("Success", (string)replies["6"].Attribute("ErrorCode"));
-        Assert.Equal("officelab", (string)replies["6"].Elements().Single().Attribute("UserName"));
+        Assert.Equal((string)replies["2"].Elements().Single().Attribute("UserName"), (string)replies["6"].Elements().Single().Attribute("UserName"));
         foreach (var token in new[] { "7", "8" })
         {
             Assert.Equal("DependentRequestNotExecuted", (string)replies[token].Attribute("ErrorCode"));

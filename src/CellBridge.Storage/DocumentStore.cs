@@ -298,7 +298,8 @@ public sealed partial class StoredDocument
         Guid clientId,
         int timeoutSeconds,
         bool asEditor,
-        string? userName = null)
+        string? userName = null,
+        CellBridge.Storage.Abstractions.SubjectIdentity? owner = null)
     {
         lock (this)
         {
@@ -307,6 +308,7 @@ public sealed partial class StoredDocument
             if (existing is not null)
             {
                 existing.AsEditor = asEditor;
+                existing.Owner = owner ?? existing.Owner;
                 existing.TimeoutSeconds = timeoutSeconds;
                 existing.Refresh(timeoutSeconds, UtcNow);
                 if (!string.IsNullOrWhiteSpace(userName))
@@ -321,6 +323,7 @@ public sealed partial class StoredDocument
             var session = new CoauthSession(clientId, userName)
             {
                 AsEditor = asEditor,
+                Owner = owner,
                 TimeoutSeconds = timeoutSeconds,
                 LastSeenUtc = UtcNow,
             };
@@ -391,6 +394,17 @@ public sealed partial class StoredDocument
             session.Refresh(timeoutSeconds, UtcNow);
             UpdateEditorsTablePartition();
             return true;
+        }
+    }
+
+    public void SetEditorPermission(Guid clientId, bool asEditor)
+    {
+        lock (this)
+        {
+            var session = _sessions.FirstOrDefault(s => s.ClientId == clientId);
+            if (session is null || session.AsEditor == asEditor) return;
+            session.AsEditor = asEditor;
+            UpdateEditorsTablePartition();
         }
     }
 
@@ -465,8 +479,8 @@ public sealed partial class StoredDocument
 
             if (!string.IsNullOrWhiteSpace(session.UserName))
             {
-                editor.Add(new XElement("FriendlyName", session.UserName));
-                editor.Add(new XElement("LoginName", session.UserName));
+                editor.Add(new XElement("FriendlyName", session.Owner?.DisplayName ?? session.UserName));
+                editor.Add(new XElement("LoginName", session.Owner?.Login ?? session.UserName));
             }
 
             editor.Add(new XElement("HasEditorPermission", session.AsEditor ? "true" : "false"));
@@ -661,6 +675,7 @@ public sealed partial class CoauthSession
     {
         ClientId = source.ClientId;
         UserName = source.UserName;
+        Owner = source.Owner;
         JoinedUtc = source.JoinedUtc;
         TimeoutSeconds = source.TimeoutSeconds;
         ExpiresUtc = source.ExpiresUtc;
@@ -678,6 +693,7 @@ public sealed partial class CoauthSession
 
     /// <summary>The user name, if known.</summary>
     public string? UserName { get; set; }
+    public CellBridge.Storage.Abstractions.SubjectIdentity? Owner { get; internal set; }
 
     /// <summary>Whether the client joined with editor permission.</summary>
     public bool AsEditor { get; internal set; }

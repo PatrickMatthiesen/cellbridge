@@ -18,4 +18,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup><ProjectReference Include="../CellBridge.Authentication/CellBridge.Authentication.csproj" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" /></ItemGroup>
 </Project>

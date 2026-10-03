@@ -20,6 +20,7 @@ public sealed class IndexModel(
 
     public async Task<IActionResult> OnPostCreateAsync(CancellationToken cancellationToken)
     {
+        if (!User.HasClaim("cellbridge:create", "true")) return Forbid();
         if (string.IsNullOrWhiteSpace(NewName) || NewName.Length > 120 ||
             NewType is not ("docx" or "xlsx" or "pptx"))
         {

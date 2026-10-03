@@ -29,4 +29,6 @@
     <ProjectReference Include="..\..\src\CellBridge.Web\CellBridge.Web.csproj" />
   </ItemGroup>
 
+  <ItemGroup><Compile Include="../CellBridge.TestIdentity.cs" Link="TestIdentity.cs" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.12" /></ItemGroup>
 </Project>
