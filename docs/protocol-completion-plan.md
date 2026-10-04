@@ -81,7 +81,7 @@ file-hash facility is not an unconditional failure in every supported profile.
 | Enable automatic graph pruning/compaction. | Operational feature with storage-efficiency benefits. | Longer operation within quotas. It requires complete reference traversal and stale-client recovery; existing orphan collection is separate. |
 | Provider export/import, migration and public restoration tools. | Operational features. | Recovery and portability; not new binary framing support. |
 | Fuzzing and differential decoding. | Reliability and validation. | Find malformed-input and interpretation defects; neither is a performance feature. |
-| Remote PowerPoint, durable Excel requalification, authenticated fresh-process reopen and two distinct authenticated desktops. | Unverified scenarios. | Evidence for actual Office compatibility; do not assume every missing test is missing code. |
+| Durable Excel requalification and two distinct authenticated desktops editing together. | Unverified scenarios. | Qualify these environments and workflows; see [client coverage](interoperability.md#client-coverage). |
 | Additional Office builds and deployment failure/power-loss qualification. | Unverified client/operational scenarios. | Establish explicit supported environments and recovery limits. |
 
 ## OneNote complexity and scope
