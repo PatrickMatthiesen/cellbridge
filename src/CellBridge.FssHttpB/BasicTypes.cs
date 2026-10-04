@@ -85,8 +85,8 @@ public sealed class StringItem
             throw new InvalidDataException($"String item length {length} exceeds int.MaxValue.");
         }
 
-        byte[] bytes = reader.ReadBytes(checked((int)length * 2));
-        return new StringItem(System.Text.Encoding.Unicode.GetString(bytes));
+        var bytes = reader.ReadMemory(checked((int)length * 2));
+        return new StringItem(System.Text.Encoding.Unicode.GetString(bytes.Span));
     }
 
     /// <inheritdoc />

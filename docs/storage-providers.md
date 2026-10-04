@@ -38,7 +38,7 @@ development databases. Existing data stays intact when a limit is reduced.
 | `Storage:MaxObjectBytes` | Maximum bytes per binary object, default 512 MiB. This is a quota, not a tested document-size promise. |
 | `Storage:MultipleInstances` | Require shared state and content; reject incompatible provider combinations. |
 | `Storage:SharedContent` | Operator declaration that the filesystem root is shared with verified flush/rename semantics. Default false. |
-| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM request size, default 128 MiB. Binary protocol parsing and materialization still buffer content. |
+| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM request size, default 128 MiB. Requests and retained graph payloads still occupy memory. |
 | `Protocol:MaxConcurrentRequests` | Maximum cellstorage requests per host, including response delivery, default 8; excess requests return HTTP 503. |
 | `Protocol:MaxMtomParts` | Maximum MIME parts per request, default 128. |
 | `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
@@ -141,8 +141,11 @@ size only; its PostgreSQL wrapper adds shared accounting.
 
 ## Commit and retry behavior
 
-A save loads the current graph, combines changes with retained parts, reconstructs
-the document and durably stages content. It then locks the document row, reads
+A durable save verifies and combines the retained graph without loading the previous
+complete package. It reconstructs into an exclusively created temporary file,
+validates every ZIP member under the expanded-byte budget and rewinds for content
+storage. Graph payloads still load eagerly. The staging file is deleted on every
+exit path. The save then locks the document row, reads
 the current state and database time, rechecks permission, coherency and leases,
 and publishes a snapshot with a save receipt. File I/O happens outside the lock;
 different documents have independent locks.
@@ -177,6 +180,11 @@ write-through flushes and `MoveFileEx` with `MOVEFILE_WRITE_THROUGH`.
 Reads verify length and SHA-256. PostgreSQL verifies chunks while streaming;
 filesystem reads verify the file before returning a stream, adding a read pass.
 Downloads use content and headers from one state snapshot.
+
+Restoration, queries and receipt replay read at most the handle's declared length
+plus an EOF probe, verify SHA-256 and honor cancellation. Conflicting handles
+sharing a cache key are rejected before caching. Receipt replay requires a complete
+successful binary save response without trailing bytes.
 
 PostgreSQL retains the latest 64 state snapshots per document by default,
 including lease-only changes. The current state retains its synchronization
@@ -282,8 +290,10 @@ The creation API returns HTTP 507 for quota failures, file saves return Win32
 `ERROR_DISK_FULL` 112, and oversized HTTP bodies return 413. Server/proxy limits
 can reject a request earlier.
 
-Graph merging, package reconstruction and ZIP validation buffer data; defaults
-are admission limits rather than qualified Office file sizes. Automatic graph
+Requests and graph payloads occupy memory, and graph merging retains defensive
+copies. Durable package reconstruction/ZIP validation use a seekable staging file;
+MTOM output streams without a base64 round trip or complete multipart buffer.
+Configured defaults are admission limits rather than qualified Office file sizes. Automatic graph
 pruning is disabled, so even a constant-size file can accumulate history until a
 quota blocks further saves. See [synchronization knowledge and graph retention](protocol-version-decision.md#synchronization-knowledge)
 for the graph rules, and [automated testing](automated-testing.md) for measurements.

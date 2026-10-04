@@ -303,8 +303,9 @@ internal sealed class Parser
         ExtractRelationships(item, start, end);
     }
 
-    private FsshttpbStreamObjectInspection ParseObject(BinaryReaderEx reader, int boundary)
+    private FsshttpbStreamObjectInspection ParseObject(BinaryReaderEx reader, int boundary, int depth = 0)
     {
+        if (depth > 32) throw new InvalidDataException("Diagnostic object nesting limit exceeded.");
         int offset = reader.Position;
         var header = StreamObjectHeaderStart.Parse(reader);
         int immediateEnd = CheckedEnd(reader.Position, header.Length);
@@ -319,12 +320,12 @@ internal sealed class Parser
         DescribeImmediateFields(item, fieldsReader);
         int immediateStart = reader.Position;
         if (header.Compound == 1)
-            TryParseEmbeddedChildren(item, immediateStart, immediateEnd);
+            TryParseEmbeddedChildren(item, immediateStart, immediateEnd, depth);
         reader.Position = immediateEnd;
         if (header.Compound == 1)
         {
             while (reader.Position < boundary && !IsEnd(reader))
-                item.Children.Add(ParseObject(reader, boundary));
+                item.Children.Add(ParseObject(reader, boundary, depth + 1));
             if (reader.Position >= boundary) throw new InvalidDataException($"compound {header.Type} has no end header");
             reader.Position += HeaderEndSize(reader);
         }
@@ -335,7 +336,7 @@ internal sealed class Parser
     // first child objects inside the compound header's declared payload.  The
     // newer grammar places them after the immediate payload.  Accept both
     // forms so a comparison dump remains useful across captures.
-    private void TryParseEmbeddedChildren(FsshttpbStreamObjectInspection item, int start, int end)
+    private void TryParseEmbeddedChildren(FsshttpbStreamObjectInspection item, int start, int end, int depth)
     {
         if (start >= end) return;
         var reader = new BinaryReaderEx(_bytes) { Position = start };
@@ -343,7 +344,7 @@ internal sealed class Parser
         try
         {
             while (reader.Position < end && !IsEnd(reader))
-                children.Add(ParseObject(reader, end));
+                children.Add(ParseObject(reader, end, depth + 1));
             if (reader.Position != end) return;
             item.Children.AddRange(children);
         }
@@ -525,9 +526,9 @@ internal sealed class Parser
         ulong length = Compact64bitInt.Deserialize(reader).Value;
         if (length > int.MaxValue || length > (ulong)reader.Remaining)
             throw new InvalidDataException($"{name} length {length} exceeds remaining payload");
-        byte[] value = reader.ReadBytes((int)length);
+        var value = reader.ReadMemory((int)length);
         item.Fields.Add(name + "-bytes=" + length);
-        item.Fields.Add(name + "-sha256=" + Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant());
+        item.Fields.Add(name + "-sha256=" + Convert.ToHexString(SHA256.HashData(value.Span)).ToLowerInvariant());
     }
 
     private static bool TryLastCompact(FsshttpbStreamObjectInspection item, out ulong value)
@@ -568,15 +569,16 @@ internal sealed class Parser
         var end = StreamObjectHeaderEnd.Parse(reader);
         if (end.Type != expected) throw new InvalidDataException($"Expected {expected} end, got {end.Type}.");
     }
-    private static void SkipObject(BinaryReaderEx reader, int? boundary)
+    private static void SkipObject(BinaryReaderEx reader, int? boundary, int depth = 0)
     {
+        if (depth > 32) throw new InvalidDataException("Diagnostic object nesting limit exceeded.");
         var header = StreamObjectHeaderStart.Parse(reader);
         int end = CheckedEnd(reader.Position, header.Length);
         reader.Position = end;
         if (header.Compound == 1)
         {
             int max = boundary ?? reader.Length;
-            while (reader.Position < max && !IsEnd(reader)) SkipObject(reader, max);
+            while (reader.Position < max && !IsEnd(reader)) SkipObject(reader, max, depth + 1);
             if (reader.Position < max) reader.Position += HeaderEndSize(reader);
         }
     }

@@ -144,13 +144,19 @@ public sealed class CellStorageResponse
     public bool UsesDirectBody { get; set; }
 
     /// <summary>Serializes this response to a SOAP envelope string.</summary>
-    public string ToSoapEnvelope()
+    public string ToSoapEnvelope() => SerializeSoapEnvelope(null);
+
+    private string SerializeSoapEnvelope(List<(string ContentId, byte[] Data)>? binaryParts)
     {
         var sb = new StringBuilder();
-        sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+        if (binaryParts is null)
+            sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
         sb.Append("<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\" ");
         sb.Append("xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" ");
-        sb.Append("xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">");
+        sb.Append("xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"");
+        if (binaryParts is not null)
+            sb.Append(" xmlns:xop=\"http://www.w3.org/2004/08/xop/include\"");
+        sb.Append('>');
         sb.Append("<soap:Body>");
         if (!UsesDirectBody)
         {
@@ -251,7 +257,14 @@ public sealed class CellStorageResponse
                     }
 
                     sb.Append(">");
-                    sb.Append(Convert.ToBase64String(subResponse.SubResponseDataBase64));
+                    if (binaryParts is not null && subResponse.SubResponseDataBase64.Length > 0)
+                    {
+                        var contentId = $"http://tempuri.org/{binaryParts.Count + 1}";
+                        binaryParts.Add((contentId, subResponse.SubResponseDataBase64));
+                        sb.Append("<xop:Include href=\"cid:").Append(contentId).Append("\" />");
+                    }
+                    else
+                        sb.Append(Convert.ToBase64String(subResponse.SubResponseDataBase64));
                     sb.Append("</SubResponseData>");
                 }
                 else if (subResponse.SubResponseDataAttributes.Count > 0)
@@ -289,57 +302,45 @@ public sealed class CellStorageResponse
     /// <summary>Creates an MTOM response matching Word's multipart request.</summary>
     public (string ContentType, byte[] Body) ToMtomMessage()
     {
+        var message = PrepareMtomMessage();
+        return (message.ContentType, message.ToArray());
+    }
+
+    /// <summary>
+    /// Prepares one multipart message for buffering, capture, or streaming.
+    /// Binary arrays are borrowed and must not be mutated until writing completes.
+    /// Changes to response collections after preparation do not change the message.
+    /// </summary>
+    public MtomResponseMessage PrepareMtomMessage()
+    {
         var boundary = "urn:uuid:" + Guid.NewGuid().ToString().ToUpperInvariant();
         var rootContentId = "http://tempuri.org/0";
-        var xml = XDocument.Parse(ToSoapEnvelope(), LoadOptions.PreserveWhitespace);
-        XNamespace xop = "http://www.w3.org/2004/08/xop/include";
         var binaryParts = new List<(string ContentId, byte[] Data)>();
-        var index = 0;
-
-        foreach (var dataElement in xml.Descendants().Where(e =>
-                     e.Name.LocalName == "SubResponseData" &&
-                     !string.IsNullOrWhiteSpace(e.Value)))
-        {
-            byte[] data;
-            try
-            {
-                data = Convert.FromBase64String(dataElement.Value.Trim());
-            }
-            catch (FormatException)
-            {
-                continue;
-            }
-
-            var contentId = $"http://tempuri.org/{++index}";
-            binaryParts.Add((contentId, data));
-            dataElement.RemoveNodes();
-            dataElement.Add(new XElement(xop + "Include", new XAttribute("href", "cid:" + contentId)));
-        }
-
-        xml.Root!.Add(new XAttribute(XNamespace.Xmlns + "xop", xop));
+        // Validate raw XML fragments before any output. Binary payloads have
+        // already become XOP references, so this parses only the small envelope.
+        var xml = XDocument.Parse(SerializeSoapEnvelope(binaryParts), LoadOptions.PreserveWhitespace);
         var soapBytes = Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting));
-        using var output = new MemoryStream();
+        var segments = new List<ReadOnlyMemory<byte>>();
         // Match the WCF/SharePoint preamble and root-part headers captured from
         // a successful Word exchange. Word rejected our previous framing with
         // "Xml stream exists": false, before interpreting any subresponses.
-        WriteAscii(output, $"\r\n--{boundary}\r\n");
-        WriteAscii(output, $"Content-ID: <{rootContentId}>\r\nContent-Transfer-Encoding: 8bit\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"text/xml\"\r\n\r\n");
-        output.Write(soapBytes);
-        WriteAscii(output, "\r\n");
+        AddAscii($"\r\n--{boundary}\r\n");
+        AddAscii($"Content-ID: <{rootContentId}>\r\nContent-Transfer-Encoding: 8bit\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"text/xml\"\r\n\r\n");
+        segments.Add(soapBytes);
+        AddAscii("\r\n");
 
         foreach (var part in binaryParts)
         {
-            WriteAscii(output, $"--{boundary}\r\nContent-ID: <{part.ContentId}>\r\nContent-Transfer-Encoding: binary\r\nContent-Type: application/octet-stream\r\n\r\n");
-            output.Write(part.Data);
-            WriteAscii(output, "\r\n");
+            AddAscii($"--{boundary}\r\nContent-ID: <{part.ContentId}>\r\nContent-Transfer-Encoding: binary\r\nContent-Type: application/octet-stream\r\n\r\n");
+            segments.Add(part.Data);
+            AddAscii("\r\n");
         }
 
-        WriteAscii(output, $"--{boundary}--\r\n");
-        return ($"multipart/related; type=\"application/xop+xml\"; boundary=\"{boundary}\"; start=\"<{rootContentId}>\"; start-info=\"text/xml\"", output.ToArray());
-    }
+        AddAscii($"--{boundary}--\r\n");
+        return new MtomResponseMessage($"multipart/related; type=\"application/xop+xml\"; boundary=\"{boundary}\"; start=\"<{rootContentId}>\"; start-info=\"text/xml\"", segments);
 
-    private static void WriteAscii(Stream stream, string value) =>
-        stream.Write(Encoding.ASCII.GetBytes(value));
+        void AddAscii(string value) => segments.Add(Encoding.ASCII.GetBytes(value));
+    }
 
     private static string XmlEscape(string value) => value
         .Replace("&", "&amp;")

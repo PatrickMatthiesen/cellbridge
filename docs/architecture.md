@@ -69,7 +69,10 @@ choosing an individual binary object by size.
 
 ## Save publication
 
-The service prepares immutable content before acquiring the document's row lock.
+Durable saves reconstruct the package into an exclusive temporary file and check
+every ZIP member under the expanded-byte budget before storing immutable content.
+The staging file is deleted on success, failure or cancellation. The synchronous
+in-memory save API remains buffered. This work precedes the document's row lock.
 It then reads the current state and database time, rechecks Write permission,
 coherency and leases, and commits the selected revision with a save receipt.
 Different documents can progress independently. Sessions use the same coordination.
@@ -80,4 +83,9 @@ Prior file parts remain available for subsequent edits and detached readers.
 
 [Storage providers](storage-providers.md) explains publication, retries, maintenance
 and provider contracts. The [protocol guide](protocol-version-decision.md#synchronization-knowledge)
-explains changed-part selection and graph retention.
+explains changed-part selection, graph retention and materialization constraints.
+
+MTOM responses stream one prepared message with matching capture bytes and exact
+content length. Incoming requests and retained graph payloads still occupy memory.
+See [response serialization](protocol-version-decision.md#response-serialization)
+for buffer ownership and XML precedence.

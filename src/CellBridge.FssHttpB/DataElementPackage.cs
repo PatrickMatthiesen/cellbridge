@@ -162,7 +162,9 @@ public sealed class DataElement
             throw new InvalidDataException($"Expected DataElement header, got {start.Type}.");
         }
 
-        int metadataEnd = checked(reader.Position + start.Length);
+        if (start.Length > reader.Remaining)
+            throw new InvalidDataException("Data element metadata length exceeds the remaining payload.");
+        int metadataEnd = reader.Position + start.Length;
 
         var element = new DataElement(
             DataElementType.None,
@@ -220,9 +222,13 @@ public sealed class DataElement
         return result;
     }
 
-    private static void SkipStreamObject(BinaryReaderEx reader)
+    private static void SkipStreamObject(BinaryReaderEx reader, int depth = 0)
     {
+        if (depth > 32)
+            throw new InvalidDataException("Data element object nesting limit exceeded.");
         var header = StreamObjectHeaderStart.Parse(reader);
+        if (header.Length > reader.Remaining)
+            throw new InvalidDataException("Data element object length exceeds the remaining payload.");
         int immediateEnd = checked(reader.Position + header.Length);
         reader.Position = immediateEnd;
 
@@ -237,7 +243,7 @@ public sealed class DataElement
         // end marks the boundary.
         while (reader.Remaining > 0 && !IsHeaderEnd(reader))
         {
-            SkipStreamObject(reader);
+            SkipStreamObject(reader, depth + 1);
         }
 
         var end = StreamObjectHeaderEnd.Parse(reader);

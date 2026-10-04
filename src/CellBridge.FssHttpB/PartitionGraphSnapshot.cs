@@ -130,15 +130,26 @@ public sealed partial class PartitionGraphSnapshot
 
     /// <summary>Materializes the object graph selected by the manifest chain.</summary>
     public byte[] Materialize(long maxBytes = int.MaxValue)
+        => SelectedObjectGraph().Materialize(_rootObject!, maxBytes);
+
+    /// <summary>Validates and writes the selected file graph, leaving the destination open.</summary>
+    public long MaterializeTo(Stream destination, long maxBytes = int.MaxValue)
+        => SelectedObjectGraph().MaterializeTo(destination, _rootObject!, maxBytes);
+
+    /// <summary>Validates and asynchronously writes the selected file graph, leaving the destination open.</summary>
+    public ValueTask<long> MaterializeToAsync(Stream destination, long maxBytes = int.MaxValue,
+        CancellationToken cancellationToken = default)
+        => SelectedObjectGraph().MaterializeToAsync(destination, _rootObject!, maxBytes, cancellationToken);
+
+    private ObjectGroupGraph SelectedObjectGraph()
     {
-        if (RootObject is null)
+        if (_rootObject is null)
             throw new InvalidDataException("The partition has no revision-manifest root object.");
 
         // Historical groups remain available for delta saves, but only the
         // selected revision's groups define the objects of this revision.
-        var objectGraph = ObjectGroupGraph.FromDataElements(
+        return ObjectGroupGraph.FromDataElements(
             _objectGroups.Select(id => _elements[id]));
-        return objectGraph.Materialize(RootObject, maxBytes);
     }
 
     /// <summary>Checks the expected values for the keys updated by a Put Changes request.</summary>
@@ -210,6 +221,8 @@ public sealed partial class PartitionGraphSnapshot
         var revisionElement = RequireElement(elements, revisionMapping.Mapping.Guid,
             DataElementType.RevisionManifestDataElementData, "revision manifest");
         var revision = ParseRevisionManifest(revisionElement);
+        if (!revision.Revision.Equals(currentRevision))
+            throw new InvalidDataException("Revision mapping does not match its target revision.");
 
         if (!revision.RootExtendedGuid.Equals(manifest.RootExtendedGuid))
             throw new InvalidDataException("The revision and storage manifests use different root extended GUIDs.");
@@ -335,7 +348,7 @@ public sealed partial class PartitionGraphSnapshot
             throw new InvalidDataException($"Expected revision manifest, got {manifestHeader.Type}.");
         var manifestBody = new BinaryReaderEx(ReadBody(reader, manifestHeader, "revision manifest"));
         var revision = ExGuid.Deserialize(manifestBody);
-        _ = ExGuid.Deserialize(manifestBody); // Base revision is not needed for current materialization.
+        var baseRevision = ExGuid.Deserialize(manifestBody);
         RequireEmpty(manifestBody, "revision manifest");
 
         RevisionManifestInfo? result = null;
@@ -358,7 +371,7 @@ public sealed partial class PartitionGraphSnapshot
                     {
                         if (result is not null)
                             throw new InvalidDataException("Revision manifest contains duplicate fixed roots.");
-                        result = new RevisionManifestInfo(revision, root, objectGuid, groups);
+                        result = new RevisionManifestInfo(revision, baseRevision, root, objectGuid, groups);
                     }
                     break;
                 case StreamObjectTypeHeaderStart.RevisionManifestObjectGroupReferences:
@@ -410,11 +423,11 @@ public sealed partial class PartitionGraphSnapshot
 
     private static ExGuid Clone(ExGuid value) => new(value.Value, value.Guid);
 
-    private static byte[] ReadBody(BinaryReaderEx reader, StreamObjectHeaderStart header, string description)
+    private static ReadOnlyMemory<byte> ReadBody(BinaryReaderEx reader, StreamObjectHeaderStart header, string description)
     {
         if (header.Length < 0 || header.Length > reader.Remaining)
             throw new InvalidDataException($"{description} header length {header.Length} exceeds the remaining payload.");
-        return reader.ReadBytes(header.Length);
+        return reader.ReadMemory(header.Length);
     }
 
     private static void RequireEmpty(BinaryReaderEx reader, string description)
@@ -438,6 +451,7 @@ public sealed partial class PartitionGraphSnapshot
 
     private sealed record RevisionManifestInfo(
         ExGuid Revision,
+        ExGuid BaseRevision,
         ExGuid RootExtendedGuid,
         ExGuid ObjectGuid,
         IReadOnlyList<ExGuid> ObjectGroups);

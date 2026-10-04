@@ -89,6 +89,8 @@ public sealed class ObjectGroupDataElement
                 throw new InvalidDataException($"Unexpected {header.Type} in object-group declarations.");
             }
 
+            if (declarations.Count >= 100_000)
+                throw new InvalidDataException("Object declaration count limit exceeded.");
             var body = ReadBody(reader, header, "object declaration");
             var bodyReader = new BinaryReaderEx(body);
             var declaration = new ObjectGroupObjectDeclaration(
@@ -125,6 +127,10 @@ public sealed class ObjectGroupDataElement
             var bodyReader = new BinaryReaderEx(body);
             var objectReferences = ReadExtendedGuids(bodyReader, "object references");
             var cellReferences = ReadCellIds(bodyReader);
+            var declaration = declarations[objects.Count];
+            if (declaration.ObjectReferencesCount != (ulong)objectReferences.Count ||
+                declaration.CellReferencesCount != (ulong)cellReferences.Count)
+                throw new InvalidDataException("Object reference counts do not match the declaration.");
             var dataSize = Compact64bitInt.Deserialize(bodyReader).Value;
             if (dataSize > int.MaxValue)
                 throw new InvalidDataException($"Object data size {dataSize} exceeds the supported buffer size.");
@@ -174,7 +180,7 @@ public sealed class ObjectGroupDataElement
         var count = Compact64bitInt.Deserialize(reader).Value;
         if (count > 100_000 || count > (ulong)reader.Remaining)
             throw new InvalidDataException($"{field} count {count} exceeds the supported buffer size.");
-        var result = new List<ExGuid>((int)count);
+        var result = new List<ExGuid>();
         for (var i = 0; i < (int)count; i++)
             result.Add(ExGuid.Deserialize(reader));
         return result;
@@ -185,7 +191,7 @@ public sealed class ObjectGroupDataElement
         var count = Compact64bitInt.Deserialize(reader).Value;
         if (count > 100_000 || count > (ulong)reader.Remaining)
             throw new InvalidDataException($"Cell reference count {count} exceeds the supported buffer size.");
-        var result = new List<CellId>((int)count);
+        var result = new List<CellId>();
         for (var i = 0; i < (int)count; i++)
             result.Add(CellId.Deserialize(reader));
         return result;
@@ -261,11 +267,11 @@ public sealed class ObjectGroupDataElement
         return (kind, new ObjectGroupNode(kind, signature.Content, representedSize, hash));
     }
 
-    private static byte[] ReadBody(BinaryReaderEx reader, StreamObjectHeaderStart header, string description)
+    private static ReadOnlyMemory<byte> ReadBody(BinaryReaderEx reader, StreamObjectHeaderStart header, string description)
     {
         if (header.Length < 0 || header.Length > reader.Remaining)
             throw new InvalidDataException($"{description} header length {header.Length} exceeds the remaining payload.");
-        return reader.ReadBytes(header.Length);
+        return reader.ReadMemory(header.Length);
     }
 
     private static void RequireStart(BinaryReaderEx reader, StreamObjectTypeHeaderStart expected)
@@ -350,45 +356,102 @@ public sealed class ObjectGroupGraph
 
     public byte[] Materialize(ExGuid rootObjectGuid, long maxBytes = int.MaxValue)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBytes);
-        using var output = new MemoryStream();
-        var active = new HashSet<ExGuid>();
-        Visit(rootObjectGuid, output, active, maxBytes);
-        return output.ToArray();
+        var plan = PlanMaterialization(rootObjectGuid, Math.Min(maxBytes, Array.MaxLength));
+        var output = GC.AllocateUninitializedArray<byte>((int)plan.Length);
+        int position = 0;
+        foreach (var chunk in plan.Chunks)
+        {
+            chunk.CopyTo(output, position);
+            position += chunk.Length;
+        }
+        return output;
     }
 
-    private void Visit(ExGuid objectGuid, MemoryStream output, HashSet<ExGuid> active, long maxBytes)
+    /// <summary>
+    /// Validates the complete selected graph before writing bytes to a writable stream.
+    /// The destination need not support seeking and remains open. Destination I/O failures
+    /// can leave partial output; structural and byte-limit failures leave it untouched.
+    /// Callers must not mutate this graph during materialization.
+    /// </summary>
+    public long MaterializeTo(Stream destination, ExGuid rootObjectGuid, long maxBytes = int.MaxValue)
     {
-        if (!_objects.TryGetValue(objectGuid, out var obj))
-            throw new InvalidDataException($"Object reference {objectGuid} is unresolved.");
-        if (!active.Add(objectGuid))
-            throw new InvalidDataException($"Object graph contains a cycle at {objectGuid}.");
-        if (active.Count > 256) throw new InvalidDataException("Object graph nesting limit exceeded.");
-        if (obj.Node is not null && obj.Node.RepresentedDataSize > (ulong)maxBytes)
-            throw new GraphMaterializationLimitException(maxBytes);
-
-        var before = output.Length;
-        if (obj.ObjectReferences.Count == 0)
-        {
-            if (obj.Content.LongLength > maxBytes - output.Length)
-                throw new GraphMaterializationLimitException(maxBytes);
-            output.Write(obj.Content);
-        }
-        else
-        {
-            foreach (var reference in obj.ObjectReferences)
-                Visit(reference, output, active, maxBytes);
-        }
-
-        var materialized = checked((ulong)(output.Length - before));
-        if (obj.Node is not null && obj.Node.RepresentedDataSize != materialized)
-        {
-            throw new InvalidDataException(
-                $"Object {objectGuid} represents {obj.Node.RepresentedDataSize} bytes but its references materialize {materialized} bytes.");
-        }
-
-        active.Remove(objectGuid);
+        RequireWritable(destination);
+        var plan = PlanMaterialization(rootObjectGuid, maxBytes);
+        foreach (var chunk in plan.Chunks) destination.Write(chunk);
+        return plan.Length;
     }
+
+    /// <summary>
+    /// Asynchronously writes a validated graph without seeking or closing the destination.
+    /// Cancellation and destination I/O failures can leave partial output.
+    /// Callers must not mutate this graph during materialization.
+    /// </summary>
+    public async ValueTask<long> MaterializeToAsync(Stream destination, ExGuid rootObjectGuid,
+        long maxBytes = int.MaxValue, CancellationToken cancellationToken = default)
+    {
+        RequireWritable(destination);
+        var plan = PlanMaterialization(rootObjectGuid, maxBytes, cancellationToken);
+        foreach (var chunk in plan.Chunks)
+            await destination.WriteAsync(chunk, cancellationToken);
+        return plan.Length;
+    }
+
+    private static void RequireWritable(Stream destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (!destination.CanWrite)
+            throw new ArgumentException("The destination stream must be writable.", nameof(destination));
+    }
+
+    private MaterializationPlan PlanMaterialization(ExGuid rootObjectGuid, long maxBytes,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(rootObjectGuid);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBytes);
+        var chunks = new List<byte[]>();
+        var active = new HashSet<ExGuid>();
+        long length = 0;
+        int visits = 0;
+        Visit(rootObjectGuid);
+        return new(length, chunks);
+
+        void Visit(ExGuid objectGuid)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Repeated child references can expand a small DAG exponentially, including
+            // zero-byte leaves that never reach the byte budget.
+            if (++visits > 1_000_000)
+                throw new InvalidDataException("Object graph traversal limit exceeded.");
+            if (!_objects.TryGetValue(objectGuid, out var obj))
+                throw new InvalidDataException($"Object reference {objectGuid} is unresolved.");
+            if (!active.Add(objectGuid))
+                throw new InvalidDataException($"Object graph contains a cycle at {objectGuid}.");
+            if (active.Count > 256) throw new InvalidDataException("Object graph nesting limit exceeded.");
+            if (obj.Node is not null && obj.Node.RepresentedDataSize > (ulong)maxBytes)
+                throw new GraphMaterializationLimitException(maxBytes);
+
+            var before = length;
+            if (obj.ObjectReferences.Count == 0)
+            {
+                if (obj.Content.LongLength > maxBytes - length)
+                    throw new GraphMaterializationLimitException(maxBytes);
+                if (obj.Content.Length != 0) chunks.Add(obj.Content);
+                length += obj.Content.LongLength;
+            }
+            else
+            {
+                foreach (var reference in obj.ObjectReferences) Visit(reference);
+            }
+
+            var materialized = (ulong)(length - before);
+            if (obj.Node is not null && obj.Node.RepresentedDataSize != materialized)
+                throw new InvalidDataException(
+                    $"Object {objectGuid} represents {obj.Node.RepresentedDataSize} bytes but its references materialize {materialized} bytes.");
+            active.Remove(objectGuid);
+        }
+    }
+
+    private sealed record MaterializationPlan(long Length, IReadOnlyList<byte[]> Chunks);
 }
 
 public sealed class GraphMaterializationLimitException(long limit)

@@ -77,7 +77,42 @@ The standalone `Compact` API rejects incomplete analysis. The HTTP host does
 not invoke it; saves reject at a storage quota rather than deleting required
 history. See [storage limits](storage-providers.md#limits-and-qualification).
 
+## Binary validation and materialization
+
+The selected revision manifest identifies the revision named by the cell/storage
+index. Materialization follows that revision's explicit object-group references;
+missing objects fail even when an unrelated retained revision contains them.
+Self-contained graphs can materialize with an unavailable base revision, but
+retention analysis blocks compaction until dependencies resolve.
+
+Parsing uses bounded memory views for intermediate bodies. Snapshots and public
+parsed content own defensive copies of mutable input. Array materialization
+validates the graph and allocates one exact output buffer. `MaterializeTo` and
+`MaterializeToAsync` support non-seekable destinations and leave them open.
+References, cycles, represented sizes and byte limits are validated before
+writing; structural failures leave the destination untouched. I/O failure or
+cancellation can leave partial output. Do not mutate `ObjectGroupGraph` during
+materialization.
+
+Data-element framing, diagnostic object parsing and PutChanges response framing
+allow 33 nested stream objects. Lengths are checked before offsets are computed.
+The binary writer copies spans into its owned buffer; returned arrays are independent.
+Graphs allow 256 objects on an active path and one million visits per materialization,
+including repeated references. The visit budget also bounds zero-byte expansion.
+
+## Response serialization
+
+MTOM prepares SOAP/XOP references directly from binary model fields. One prepared
+message supplies exact content length and multipart framing for both capture
+and HTTP streaming. Binary arrays are borrowed until writing finishes. Raw XML
+responses retain XML precedence and are not decoded as binary. Non-MTOM responses
+continue to inline base64.
+
 ## Authorities
+
+The [protocol completion plan](protocol-completion-plan.md) distinguishes known
+implementation gaps, valid fallbacks, unverified clients and performance work,
+and orders the remaining work including OneNote desktop synchronization.
 
 - [MS-OCPROTO](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-ocproto/)
 - [MS-FSSHTTP](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/)

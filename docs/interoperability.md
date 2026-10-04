@@ -43,6 +43,9 @@ SOAP dependencies determine which subsequent operations execute.
 - Exclusive-lock conversion to a schema lock, with or without joining
   coauthoring, is unsupported.
 - The binary application-metadata stream is incomplete.
+- General ancestor-revision object lookup and OneNote notebook/page synchronization
+  are unimplemented. File reconstruction follows the selected revision's explicitly
+  referenced object groups.
 - Automatic graph pruning is disabled. The host retains graph and save identities
   and rejects growth at its [storage limits](storage-providers.md#limits-and-qualification).
 
@@ -79,6 +82,12 @@ hosts through Aspire. It covers protocol replay, provider consistency, quota
 races, retry/failure behavior, metadata retention and quiescent cleanup.
 Query tests reconstruct saved files from prior client knowledge and returned
 parts. CI also uses the independent [Office Inspectors parser](office-inspectors.md).
+
+Buffered and streaming reconstruction use the same reviewed save captures.
+HTTP tests check multipart preambles/headers, content length and capture/output
+byte equality. Durable-save tests compare streamed graph, response, versions and
+metadata with the buffered path, including ingestion failure, cancellation and
+expanded ZIP limits before publication.
 
 See [automated testing](automated-testing.md) for commands and desktop test
 procedures. Hardware power loss, asynchronous database failover and Office

@@ -56,7 +56,7 @@ internal static class QueryChangesResponseShaper
             {
                 var writer = new BinaryWriterEx();
                 element.Serialize(writer);
-                ulong size = (ulong)writer.ToArray().Length;
+                ulong size = (ulong)writer.Length;
                 if (size > maximum - used)
                 {
                     response.DataElementPackage = null;

@@ -126,10 +126,8 @@ public sealed class StorageProvider(IDocumentStateStore state, IContentStore con
         await State.CheckHealthAsync(cancellationToken);
         using var source = new MemoryStream(new byte[] { 67, 66 });
         var handle = await Content.WriteAsync(source, cancellationToken);
-        await using var read = await Content.OpenReadAsync(handle, cancellationToken);
-        using var target = new MemoryStream();
-        await read.CopyToAsync(target, cancellationToken);
-        if (!target.ToArray().SequenceEqual(new byte[] { 67, 66 }))
+        var bytes = await Content.ReadVerifiedAsync(handle, 2, cancellationToken);
+        if (!bytes.SequenceEqual(new byte[] { 67, 66 }))
             throw new StorageCorruptionException("The content health probe failed.");
     }
 }
