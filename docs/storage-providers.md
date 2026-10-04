@@ -10,7 +10,7 @@ tool below. The APIs are experimental; no published NuGet release is assumed.
 
 ## Run the durable sample
 
-Follow the [account and migration setup](authentication.md), then build while
+Follow the [account and storage setup](authentication.md), then build while
 Aspire is stopped and start it normally:
 
 ```sh
@@ -21,23 +21,24 @@ aspire wait demo --non-interactive
 ```
 
 The AppHost starts PostgreSQL with the named `cellbridge-storage-data` volume.
-`storage-migration` runs the versioned schema initialization before the web host.
-The host checks the selected state and content stores before importing documents.
-Health checks also probe both stores. Imports create missing paths and preserve
-existing saved revisions. Removing the database volume removes persisted state.
+`storage-init` initializes fresh/current storage before the web host and refuses
+to upgrade an older schema. The host checks the selected state and content stores;
+health checks also probe both stores. Imports are an explicit operator command
+and preserve existing saved revisions. Removing the database volume removes persisted state.
 
-For deployment without the sample AppHost, run the migration executable against
+For deployment without the sample AppHost, run the setup executable against
 `ConnectionStrings__cellbridge` before starting any application instance. The
 application checks the schema; it does not alter tables during normal startup.
 An unsupported schema fails explicitly. Use deployment-controlled credentials
 and PostgreSQL backup/restore procedures appropriate to the installation.
 
-Schema version 3 combines the shared usage ledger with authenticated ownership. Stop all hosts before upgrading from
-version 1 or 2. Supply an explicit `Authentication:LegacyOwner` for documents without ownership; see [authentication setup](authentication.md). Run migration with the same `Storage` settings as the hosts; it sets
-the authoritative database byte and document-count limits. With filesystem
-content, also supply `Storage:ContentProvider=FileSystem` and `Storage:ContentRoot`
-so migration inventories existing `.blob` files. Existing data is preserved even
-when it already exceeds a limit. Older binaries cannot write a version 3 database.
+Storage schema version 3 includes the shared usage ledger and authenticated
+ownership. Initialization creates a fresh schema or configures the current one;
+it rejects older and unknown schemas without modifying their data. There are no
+production deployments requiring upgrade support. Recreate outdated development
+databases instead of converting anonymous snapshots or backfilling old filesystem
+objects. The setup tool supplies the authoritative database byte and
+document-count limits. Current data remains intact even when it exceeds a limit.
 
 | Setting | Meaning |
 | --- | --- |
@@ -56,8 +57,10 @@ when it already exceeds a limit. Older binaries cannot write a version 3 databas
 
 Environment variables use double underscores, for example
 `Storage__ContentProvider=FileSystem`. To exercise two independent hosts, start
-Aspire with `CELLBRIDGE_RUN_TWO_INSTANCES=1`. The peer uses ports 5182 and 7293;
-the usual host uses 5181 and 7292. Both use the same migrated database.
+Aspire with `AppHost__PeerEnabled=true`, then explicitly start the peer with
+`aspire resource web-peer start --apphost aspire/apphost.cs --non-interactive`.
+Both hosts use the same initialized database. Aspire assigns peer ports; discover
+current endpoints with `aspire describe` rather than assuming fixed ports.
 
 Local directories on different machines cannot provide shared content. Do not
 set `SharedContent` to bypass that restriction. PostgreSQL state with filesystem
@@ -73,7 +76,7 @@ state. `CellBridge.AspNetCore` provides endpoint registration and save orchestra
 Provider packages are `.InMemory`, `.PostgreSql` and `.FileSystem`. The filesystem
 package implements content storage; it does not replace authoritative state.
 
-For a host with a migrated PostgreSQL database:
+For a host with an initialized PostgreSQL database:
 
 ```csharp
 using CellBridge.AspNetCore;
@@ -104,7 +107,7 @@ external content and use `multipleInstances: false`. A host explicitly using
 volatile providers must call `AddCellBridge(..., requireDurability: false)`.
 
 Pass the same `StorageLimits` to the PostgreSQL state store, content store's
-object-size argument, `StorageProvider`, and migration. Composing empty in-memory
+object-size argument, `StorageProvider`, and setup. Composing empty in-memory
 stores through `StorageProvider` joins their counters. Standalone
 `FileSystemContentStore` enforces object size only; the PostgreSQL wrapper adds
 shared accounting. Custom providers must implement their own atomic accounting.
@@ -115,19 +118,18 @@ state and content stores in a pair must use the same `NpgsqlDataSource` object.
 
 `CellBridgeDocumentService.CreateAsync` takes an explicit authenticated actor
 with creation permission and records initial ownership and authorship. It returns
-null on a conflicting path/identity. Trusted startup imports use `ImportAsync`
+null on a conflicting path/identity. Trusted imports use `ImportAsync`
 with a supplied owner and system actor. `ResolveAsync` preserves ResourceID
 precedence when an ID is supplied. `ExecuteAsync` processes supported binary
 operations. Sample catalog/creation APIs, Office package generation, imports and
 Aspire dependencies remain in the executable project, outside the hosting package.
-Some protocol utility types retain the existing `CellBridge.Web` namespace for
-source compatibility, but reside in the hosting assembly.
+Protocol hosting helpers use the `CellBridge.AspNetCore` namespace in the hosting assembly.
 
 The consuming host registers authentication and authorization middleware.
 Map validated principals to stable, authority-qualified CellBridge subjects.
 All endpoints require authentication, and document grants deny access by default.
 See [authentication and permissions](authentication.md) for the claim contract,
-operation matrix, sample account store, migrations and Office validation limits.
+operation matrix, sample account store, setup and Office validation limits.
 
 The [NuGet consumer example](../examples/NuGetConsumer/README.md) is a minimal
 HTTP application using only package references. It registers in-memory storage,
@@ -149,7 +151,7 @@ materializes the Office package and durably stages new binary objects. It then
 acquires the document's PostgreSQL row, reads its current pointer and actual
 database time, rechecks coherency and leases, and atomically publishes the new
 snapshot with a receipt. Package/blob I/O happens outside the document lock.
-Different documents use different rows. The migration's database-wide advisory
+Different documents use different rows. Initialization's database-wide advisory
 lock runs only during explicit schema initialization.
 
 PostgreSQL publications require `fsync=on`, force `synchronous_commit=on`, and
@@ -205,10 +207,10 @@ all writers are stopped. Do not delete `.blob` files based on age or the current
 materialized document. Historic graph references may still be required by a
 delta save.
 
-The migration tool can report objects unreferenced by **every retained snapshot**:
+The setup tool can report objects unreferenced by **every retained snapshot**:
 
 ```sh
-dotnet tools/CellBridge.Storage.Migrate/bin/Release/net10.0/CellBridge.Storage.Migrate.dll --collect-orphans
+dotnet tools/CellBridge.Storage.Setup/bin/Release/net10.0/CellBridge.Storage.Setup.dll --collect-orphans
 ```
 
 Supply the database connection and, for filesystem content, its root through
@@ -293,7 +295,7 @@ reading payloads, and return elements whose possession is not established. Mappi
 serials identify mappings separately from their target elements. New elements get
 server serials above the persisted high-water mark. Retry processing preserves
 existing serials. Reusing a nonnull mapping serial for a different key or target
-fails before publication. Legacy snapshots recover mapping metadata from index payloads;
+fails before publication. Current snapshots persist mapping metadata; incomplete snapshots are rejected;
 ambiguous element serials cause conservative retransmission. These rules follow
 [data-element serial assignment](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/9db15fa4-0dc2-4b17-b091-d33886d8a0f6)
 and [storage-index mapping knowledge](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/f5724986-bd0f-488d-9b85-7d5f954d8e9a).

@@ -6,9 +6,16 @@ Server authentication and authorization tests do not establish desktop Office co
 
 ## First setup
 
-Aspire migrates the document schema to version 3 and creates authentication schema version 1 before starting web instances. Existing documents without authenticated ownership (storage schema version 1 or main’s version 2) require `CELLBRIDGE_LEGACY_OWNER`, a stable subject such as `local:operator`. Stop all writers before that migration. It assigns every historical snapshot to that owner, preserves file graphs, versions and receipts, clears anonymous sessions and leases, and leaves legacy authorship unknown. Unowned legacy receipts cannot return an authenticated successful retry.
+Normal authenticated creation needs no owner configuration: `CreateAsync`
+records the authenticated creator as owner. The web host performs no imports or
+schema migrations. Aspire's `storage-init` job initializes fresh storage schema
+version 3 and authentication schema version 1, and rejects older storage schemas.
+Recreate outdated development databases, as described below.
 
-Start Aspire with `CELLBRIDGE_SKIP_SHAREPOINT_CAPTURE=1` when capture is unnecessary. Imports are skipped until an import owner is configured. Retrieve `ConnectionStrings__cellbridge` privately from the web resource's Aspire environment and supply it to the operator tool. Do not copy the connection string into logs or committed configuration.
+The SharePoint capture resource requires explicit startup; a normal Aspire run
+leaves it stopped. Retrieve `ConnectionStrings__cellbridge` privately from the web
+resource's Aspire environment and supply it to the operator tool. Do not copy the
+connection string into logs or committed configuration.
 
 ```sh
 # Password is read from stdin, not passed as a command argument.
@@ -18,9 +25,59 @@ dotnet run --project tools/CellBridge.Admin -- create-user --login reader --disp
 
 Use a password satisfying Identity's policy: at least 12 characters with uppercase, lowercase, digit and nonalphanumeric characters. There is no public registration. Five failed attempts lock the account for 15 minutes.
 
-After provisioning, stop Aspire and start it with `CELLBRIDGE_IMPORT_OWNER=local:operator`. An import owner must be a provisioned account. Imports create missing documents only, record `system:imports` as creator and initial modifier, and never overwrite saved content. An existing migration owner can be provisioned with the matching `--id` after migration. Configure `CELLBRIDGE_PUBLIC_ORIGIN` as the HTTPS origin reachable and trusted by Windows. Its default is `https://localhost:7292`.
+After provisioning, create documents from the signed-in library, or explicitly
+import a directory with a chosen owner:
+
+```sh
+dotnet run --project tools/CellBridge.Admin -- import-directory --directory /absolute/path/to/documents --owner local:operator
+```
+
+Imports create missing documents only, record `system:imports` as creator and
+initial modifier, and preserve existing saved revisions and ownership. The owner
+must be an enabled, provisioned local account. There is no global import owner
+setting. Supply the same `Storage` settings as the web host when importing.
+Configure `Parameters__PublicOrigin` as the HTTPS origin reachable and trusted by
+Windows. Its default is `https://localhost:7292`.
+
+### Development database versions
+
+CellBridge has no production deployments or supported upgrades from older
+experimental schemas. Storage initialization accepts a fresh database or the
+current schema only. Recreate outdated development databases, then provision
+accounts and create or explicitly import documents again. Initialization never
+rewrites ownership or converts old snapshots. The setup tool has no legacy-owner
+option. Database and snapshot version markers still reject unsupported formats.
 
 Open `https://localhost:7292/library`, sign in, and create or download an allowed document. The web host proxies the library to the internal demo. Web instances and demo share the PostgreSQL account store, Data Protection keys and cookie settings. Demo sends only the current request's authentication cookies to the fixed web endpoint, including chunked cookies. It forwards the paired antiforgery cookie and form token for creation. It has no service account or shared cookie jar.
+
+## Customize the sign-in page
+
+The sample sign-in name defaults to `CellBridge`. Set Aspire's
+`Parameters:ApplicationName` parameter, or `Parameters__ApplicationName` in its
+environment, to change it. For a host running outside Aspire, use
+`Authentication:ApplicationName` in configuration or
+`Authentication__ApplicationName` in its environment. This changes the heading,
+page title and completion message; it does not change cookie names or identities.
+
+Hosts using the sample authentication library can replace the entire login page
+without replacing the sign-in POST handler:
+
+```csharp
+app.MapCellBridgeAuthentication(renderLoginPage: page => MyLoginPage.Render(page));
+```
+
+The renderer receives a `LoginPageContext` with the application name,
+antiforgery tokens, validated local return URL and sign-in failure flag. Its HTML
+must submit a form by POST to `/auth/login` with `login`, `password`, `returnUrl`,
+and a hidden field named `page.Antiforgery.FormFieldName` containing
+`page.Antiforgery.RequestToken`. HTML-encode all values inserted into the page.
+The endpoint issues the antiforgery cookie and disables caching before rendering;
+the existing POST handler validates the token, credentials and return URL.
+Keep the page usable inside Office's sign-in window.
+
+This page belongs to the sample authentication library. Consumers of the
+reusable packages can provide their own authentication and sign-in pages, as
+described below; they need not adopt this library or its HTML.
 
 ## Manage access
 
@@ -55,15 +112,29 @@ Authentication runs before SOAP or MTOM parsing. Anonymous Office discovery and 
 
 SOAP denials use `FileUnauthorizedAccess`. Binary denials use HRESULT `E_ACCESSDENIED`, including each denied QueryAccess field. Responses to callers without Read omit resource IDs, canonical document URLs and GetFileProps metadata. Each executable SOAP dependency is independently authorized. Matching ClientID or lock GUIDs cannot impersonate another subject. Office saves omitting ClientID can use a lease only when the authenticated subject owns it.
 
-WhoAmI reports the caller. Author metadata reports the persisted creator; ModifiedBy reports the last successful content writer. Readers and session joins never replace authorship. Unknown legacy authors stay unknown.
+WhoAmI reports the caller. Author metadata reports the persisted creator; ModifiedBy reports the last successful content writer. Readers and session joins never replace authorship. Unavailable authorship is reported as unknown.
 
 Login, logout and document creation require antiforgery validation. SOAP endpoints accept XML or MTOM and reject browser simple content types and cross-origin Origin headers. Health checks remain anonymous. Account passwords, cookies, tokens and connection strings must not enter shared capture evidence. Database access grants access to cookie protection keys, so restrict and protect that database and its backups.
 
 ## Reusable hosts
 
+Consumers can keep their existing ASP.NET Core authentication, including their
+own cookie/Identity setup or validated bearer tokens. `CellBridge.AspNetCore`
+does not reference `CellBridge.Authentication`, its local accounts, or its
+Identity database. The [package consumer](../examples/NuGetConsumer/README.md)
+demonstrates a host using its own JWT authority and in-memory document storage.
+
 `CellBridge.AspNetCore` owns no authentication provider. Register authentication middleware and map a validated principal to an authority-qualified `cellbridge:subject`, with optional `cellbridge:display-name` and `cellbridge:create=true` claims. Arbitrary NameIdentifier, email, ClientID and forwarded user headers are never used as identity. Middleware must authenticate before authorization and endpoint execution.
 
 Request-facing service methods require an explicit `CellBridgeActor`. `CreateAsync` sets that actor as owner and creator. Trusted import code supplies an explicit owner and importer to `ImportAsync`. `ResolveAsync` still honors ResourceID precedence. A custom `ICellBridgeAccessEvaluator` can restrict the stored grants; it must be deterministic and perform no I/O inside document transactions. Catalog filtering uses stored grants before applying that evaluator. Storage and binary serialization remain independent of ASP.NET identity types.
+
+Authentication integration does not replace document authorization. Catalog
+filtering and editor/lease reconciliation still use stored document grants.
+Integrating an application's independent permission store throughout these
+operations requires additional design; the access evaluator alone is not a
+complete replacement. Existing login middleware also needs an Office-compatible
+challenge/sign-in exchange for desktop editing. The JWT example demonstrates
+authenticated API hosting, not automatic Office sign-in.
 
 The sample authentication library is an executable-project dependency, not part of the nine reusable NuGet packages. See the [authenticated package consumer](../examples/NuGetConsumer/README.md).
 

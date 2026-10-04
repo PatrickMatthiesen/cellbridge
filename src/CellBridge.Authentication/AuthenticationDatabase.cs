@@ -45,7 +45,7 @@ public sealed class AuthenticationDatabase(DbContextOptions<AuthenticationDataba
         {
             var options = new DbContextOptionsBuilder<AuthenticationDatabase>().UseNpgsql(connectionString).Options;
             await using var context = new AuthenticationDatabase(options);
-            // Explicit deployment migration. EnsureCreated would skip Identity in
+            // Explicit schema initialization. EnsureCreated would skip Identity in
             // a database that already contains the document tables.
             await using var schema = new NpgsqlCommand(context.Database.GenerateCreateScript() +
                 "CREATE TABLE cellbridge_auth_schema(version integer PRIMARY KEY); INSERT INTO cellbridge_auth_schema VALUES (1);",
@@ -63,7 +63,7 @@ public sealed class AuthenticationDatabase(DbContextOptions<AuthenticationDataba
         await using var command = new NpgsqlCommand("SELECT version FROM cellbridge_auth_schema", connection);
         await using var rows = await command.ExecuteReaderAsync(cancellationToken);
         if (!await rows.ReadAsync(cancellationToken) || rows.GetInt32(0) != 1 || await rows.ReadAsync(cancellationToken))
-            throw new InvalidOperationException("Run the explicit CellBridge authentication migration before starting the host.");
+            throw new InvalidOperationException("Run CellBridge.Storage.Setup before starting the host.");
     }
 }
 

@@ -5,7 +5,7 @@ using CellBridge.Storage.Abstractions;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 /// <summary>Stateful MS-FSSHTTP schema and exclusive lock coordinator.</summary>
 public sealed class FssHttpLockCoordinator

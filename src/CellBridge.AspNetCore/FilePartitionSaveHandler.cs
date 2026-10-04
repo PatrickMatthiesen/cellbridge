@@ -3,7 +3,7 @@ using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 /// <summary>Validates and commits a complete file graph, including retained delta objects.</summary>
 public static class FilePartitionSaveHandler

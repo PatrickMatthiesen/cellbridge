@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using CellBridge.Storage.Abstractions;
 using Npgsql;
@@ -14,42 +13,6 @@ public sealed record StorageMaintenanceReport(long StoredBytes, long Documents, 
 /// </summary>
 public sealed class StorageMaintenance(NpgsqlDataSource source)
 {
-    /// <summary>Migration backfill for existing filesystem bytes, including unreferenced objects.</summary>
-    public async Task RegisterExistingFileSystemAsync(string root, CancellationToken cancellationToken = default)
-    {
-        root = Path.GetFullPath(root);
-        if (!Directory.Exists(root)) return;
-        foreach (var path in Directory.EnumerateFiles(root, "*.blob"))
-        {
-            string key = Path.GetFileNameWithoutExtension(path);
-            await using var input = File.OpenRead(path);
-            if (key.Length != 64 || key != Convert.ToHexStringLower(await SHA256.HashDataAsync(input, cancellationToken)))
-                throw new StorageCorruptionException("Filesystem inventory contains a corrupt object.");
-            await using var connection = await source.OpenConnectionAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            await PostgreSqlStateStore.ConfigureTransactionAsync(connection, transaction, cancellationToken);
-            await using var insert = new NpgsqlCommand("INSERT INTO cellbridge_objects VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", connection, transaction);
-            insert.Parameters.Add(new NpgsqlParameter { Value = key });
-            insert.Parameters.Add(new NpgsqlParameter { Value = input.Length });
-            if (await insert.ExecuteNonQueryAsync(cancellationToken) != 0)
-            {
-                // Existing data can be over budget. Backfill records it without deleting it.
-                await using var account = new NpgsqlCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes+$1 WHERE singleton=true", connection, transaction);
-                account.Parameters.Add(new NpgsqlParameter { Value = input.Length });
-                await account.ExecuteNonQueryAsync(cancellationToken);
-            }
-            else
-            {
-                await using var verify = new NpgsqlCommand("SELECT length,sha256 FROM cellbridge_objects WHERE object_key=$1", connection, transaction);
-                verify.Parameters.Add(new NpgsqlParameter { Value = key });
-                await using var metadata = await verify.ExecuteReaderAsync(cancellationToken);
-                if (!await metadata.ReadAsync(cancellationToken) || metadata.GetInt64(0) != input.Length || metadata.GetString(1) != key)
-                    throw new StorageCorruptionException("Filesystem inventory disagrees with reserved metadata.");
-            }
-            await transaction.CommitAsync(CancellationToken.None);
-        }
-    }
-
     public async Task<StorageMaintenanceReport> CollectOrphansAsync(bool apply = false,
         bool quiescent = false, string? fileSystemRoot = null, CancellationToken cancellationToken = default)
     {
@@ -91,7 +54,7 @@ public sealed class StorageMaintenance(NpgsqlDataSource source)
                 else if (expected != handle) throw new StorageCorruptionException("Referenced object metadata is corrupt.");
             }
         }
-        if (references.Count != 0) throw new StorageCorruptionException("Referenced objects are absent from the usage inventory. Run filesystem migration backfill before collection.");
+        if (references.Count != 0) throw new StorageCorruptionException("Referenced objects are absent from the usage inventory. Recreate the development store; importing untracked filesystem objects is not supported.");
         long orphanBytes = orphans.Sum(h => h.Length);
         if (apply)
         {

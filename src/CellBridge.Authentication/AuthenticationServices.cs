@@ -22,13 +22,17 @@ public static class AuthenticationServices
         IConfiguration configuration, bool renewCookies = true, bool serveOffice = true)
     {
         var connectionString = configuration.GetConnectionString("cellbridge")
-            ?? throw new InvalidOperationException("Authentication requires a migrated PostgreSQL identity database.");
+            ?? throw new InvalidOperationException("Authentication requires an initialized PostgreSQL identity database.");
         var publicOrigin = configuration["Authentication:PublicOrigin"]
             ?? throw new InvalidOperationException("Set Authentication:PublicOrigin to the HTTPS origin reachable by Office.");
         if (!Uri.TryCreate(publicOrigin, UriKind.Absolute, out var origin) || origin.Scheme != "https" ||
             origin.AbsolutePath != "/" || origin.Query.Length != 0 || origin.Fragment.Length != 0 || origin.UserInfo.Length != 0)
             throw new InvalidOperationException("Authentication:PublicOrigin must be an HTTPS origin without path or credentials.");
         services.AddSingleton(new AuthenticationOrigin(origin.GetLeftPart(UriPartial.Authority)));
+        services.AddOptions<AuthenticationPageOptions>()
+            .Bind(configuration.GetSection("Authentication"))
+            .Validate(o => !string.IsNullOrWhiteSpace(o.ApplicationName), "Authentication:ApplicationName must not be blank.")
+            .ValidateOnStart();
         services.AddDbContextFactory<AuthenticationDatabase>(o => o.UseNpgsql(connectionString));
         services.AddIdentityCore<CellBridgeUser>(o =>
         {

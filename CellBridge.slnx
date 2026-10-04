@@ -25,7 +25,7 @@
     <Project Path="tools/OfficeInspectors.Dump/OfficeInspectors.Dump.csproj" />
     <Project Path="tools/CellBridge.Admin/CellBridge.Admin.csproj" />
     <Project Path="tools/CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />
-    <Project Path="tools/CellBridge.Storage.Migrate/CellBridge.Storage.Migrate.csproj" />
+    <Project Path="tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj" />
     <Project Path="tools/CellBridge.Storage.ProcessProbe/CellBridge.Storage.ProcessProbe.csproj" />
   </Folder>
 </Solution>

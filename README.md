@@ -63,7 +63,7 @@ Windows desktop Word check and connecting the laptop through Tailscale Serve.
 ## Run locally
 
 Start the app from the repository root. Aspire starts PostgreSQL with a persistent
-volume, runs the schema migration, then starts the web host. Its Python integration
+volume, initializes the current schema, then starts the web host. Its Python integration
 prepares the capture proxy environment and installs its dependencies:
 
 ```sh
@@ -72,15 +72,16 @@ aspire wait web --apphost aspire/apphost.cs
 aspire ps
 ```
 
-Provision an account and configure an import owner using the
-[authentication setup](docs/authentication.md). Open `/library` on the web
+Provision an account using the [authentication setup](docs/authentication.md).
+Create documents from the library or import a directory with the explicit admin command. Open `/library` on the web
 HTTPS endpoint and sign in. Desktop Office must be
 able to reach and trust the server's HTTPS endpoint. The default Office/browser
-origin is `https://localhost:7292`; configure `collab-public-url` for other clients.
+origin is `https://localhost:7292`; configure `Parameters__PublicOrigin` for other clients.
 Stop the AppHost with `aspire stop` before rebuilding if an executable is locked.
 
-Aspire also starts a SharePoint capture proxy. Its upstream is an example domain;
-configure `capture-upstream` for your own test farm before using capture features.
+Aspire also declares an explicitly started SharePoint capture proxy. Its upstream
+is an example domain; configure `Parameters__CaptureUpstream` for your own test
+farm before starting the resource.
 See the [capture guide](docs/capture-kit.md) for configuration and certificates.
 
 ## Protocol and implementation

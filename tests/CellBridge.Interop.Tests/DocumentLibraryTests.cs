@@ -12,11 +12,20 @@ public sealed class DocumentLibraryTests
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
         using var http = LiveInteropHttp.Create(endpoint);
+        // Other live checks save shared fixtures concurrently. Give this test
+        // its own documents so catalog lengths and editor counts stay stable.
+        var sessionName = "Session test " + Guid.NewGuid().ToString("N");
+        var downloadName = "Download test " + Guid.NewGuid().ToString("N");
+        foreach (var name in new[] { sessionName, downloadName })
+        {
+            using var created = await http.PostAsJsonAsync("/api/documents", new { name, type = "docx" });
+            created.EnsureSuccessStatusCode();
+        }
         var before = await http.GetFromJsonAsync<List<Listing>>("/api/documents");
         Assert.NotNull(before);
-        var first = Assert.Single(before, item => item.Path == "/shared/test.docx");
-        var other = Assert.Single(before, item => item.Path == "/shared/save-test.docx");
-        await Task.WhenAll(before.Select(async item =>
+        var first = Assert.Single(before, item => item.Path == "/shared/" + sessionName + ".docx");
+        var other = Assert.Single(before, item => item.Path == "/shared/" + downloadName + ".docx");
+        await Task.WhenAll(new[] { first, other }.Select(async item =>
         {
             var path = string.Join('/', item.Path.Split('/').Select(Uri.EscapeDataString));
             using var response = await http.GetAsync(path);
@@ -32,13 +41,6 @@ public sealed class DocumentLibraryTests
             Assert.Equal("attachment", download.Content.Headers.ContentDisposition?.DispositionType);
         }));
 
-        // Give this test its own document. Captured-open checks may join the
-        // seeded document concurrently, and durable sessions survive restarts.
-        var sessionName = "Session test " + Guid.NewGuid().ToString("N");
-        using var created = await http.PostAsJsonAsync("/api/documents", new { name = sessionName, type = "docx" });
-        created.EnsureSuccessStatusCode();
-        first = (await http.GetFromJsonAsync<List<Listing>>("/api/documents"))!
-            .Single(item => item.Path == "/shared/" + sessionName + ".docx");
         var clients = new[] { Guid.NewGuid(), Guid.NewGuid() };
         // The schema identifier used by the captured Word request.
         const string schema = "29358EC1-E813-4793-8E70-ED0344E7B73C";
