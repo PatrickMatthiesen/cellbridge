@@ -12,12 +12,8 @@ public static class ProviderConformance
         byte[] bytes = [0, 127, 255, 4];
         using var source = new MemoryStream(bytes, writable: false);
         var handle = await provider.Content.WriteAsync(source, cancellationToken);
-        await using (var read = await provider.Content.OpenReadAsync(handle, cancellationToken))
-        {
-            using var target = new MemoryStream();
-            await read.CopyToAsync(target, cancellationToken);
-            Require(bytes.SequenceEqual(target.ToArray()), "Content round trip changed bytes.");
-        }
+        var restored = await provider.Content.ReadVerifiedAsync(handle, bytes.Length, cancellationToken);
+        Require(bytes.SequenceEqual(restored), "Content round trip changed bytes.");
         var id = Guid.NewGuid();
         var path = "/conformance/" + id.ToString("N");
         var now = DateTime.UtcNow;

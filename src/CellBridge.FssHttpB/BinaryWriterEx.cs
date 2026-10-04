@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Buffers.Binary;
+
 namespace CellBridge.FssHttpB;
 
 /// <summary>
@@ -6,41 +9,48 @@ namespace CellBridge.FssHttpB;
 /// </summary>
 public sealed class BinaryWriterEx
 {
-    private readonly List<byte> _buffer = new();
+    private readonly ArrayBufferWriter<byte> _buffer = new();
 
-    public int Length => _buffer.Count;
+    public int Length => _buffer.WrittenCount;
 
-    public void WriteByte(byte value) => _buffer.Add(value);
+    public void WriteByte(byte value)
+    {
+        _buffer.GetSpan(1)[0] = value;
+        _buffer.Advance(1);
+    }
 
-    public void WriteSByte(sbyte value) => _buffer.Add(unchecked((byte)value));
+    public void WriteSByte(sbyte value) => WriteByte(unchecked((byte)value));
 
     public void WriteUInt16(ushort value)
     {
-        _buffer.Add((byte)(value & 0xFF));
-        _buffer.Add((byte)((value >> 8) & 0xFF));
+        BinaryPrimitives.WriteUInt16LittleEndian(_buffer.GetSpan(2), value);
+        _buffer.Advance(2);
     }
 
     public void WriteInt16(short value) => WriteUInt16(unchecked((ushort)value));
 
     public void WriteUInt32(uint value)
     {
-        _buffer.Add((byte)(value & 0xFF));
-        _buffer.Add((byte)((value >> 8) & 0xFF));
-        _buffer.Add((byte)((value >> 16) & 0xFF));
-        _buffer.Add((byte)((value >> 24) & 0xFF));
+        BinaryPrimitives.WriteUInt32LittleEndian(_buffer.GetSpan(4), value);
+        _buffer.Advance(4);
     }
 
     public void WriteInt32(int value) => WriteUInt32(unchecked((uint)value));
 
     public void WriteUInt64(ulong value)
     {
-        WriteUInt32((uint)(value & 0xFFFFFFFF));
-        WriteUInt32((uint)((value >> 32) & 0xFFFFFFFF));
+        BinaryPrimitives.WriteUInt64LittleEndian(_buffer.GetSpan(8), value);
+        _buffer.Advance(8);
     }
 
     public void WriteInt64(long value) => WriteUInt64(unchecked((ulong)value));
 
-    public void WriteBytes(ReadOnlySpan<byte> bytes) => _buffer.AddRange(bytes.ToArray());
+    public void WriteBytes(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty) return;
+        bytes.CopyTo(_buffer.GetSpan(bytes.Length));
+        _buffer.Advance(bytes.Length);
+    }
 
-    public byte[] ToArray() => _buffer.ToArray();
+    public byte[] ToArray() => _buffer.WrittenSpan.ToArray();
 }

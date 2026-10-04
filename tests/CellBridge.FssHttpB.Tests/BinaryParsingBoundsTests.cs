@@ -3,6 +3,59 @@ namespace CellBridge.FssHttpB.Tests;
 public sealed class BinaryParsingBoundsTests
 {
     [Theory]
+    [InlineData(33)]
+    [InlineData(34)]
+    [InlineData(1000)]
+    public void PutChangesResponseNestingIncludesOuterKnowledgeObject(int levels)
+    {
+        var wire = new BinaryWriterEx();
+        new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.Knowledge, 0).Serialize(wire);
+        for (int i = 1; i < levels; i++)
+            new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.ObjectGroupDeclarations, 0).Serialize(wire);
+        for (int i = 1; i < levels; i++)
+            new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.ObjectGroupDeclarations).Serialize(wire);
+        new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.Knowledge).Serialize(wire);
+        var bytes = wire.ToArray();
+        var reader = new BinaryReaderEx(bytes);
+        if (levels == 33)
+        {
+            Assert.Equal(bytes, PutChangesSubResponseData.Deserialize(reader).KnowledgeBytes);
+            Assert.Equal(0, reader.Remaining);
+        }
+        else
+            Assert.Contains("nesting limit", Assert.Throws<InvalidDataException>(() =>
+                PutChangesSubResponseData.Deserialize(reader)).Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PutChangesResponseChecksHugeLengthsBeforeOffsetArithmetic(bool child)
+    {
+        var wire = new BinaryWriterEx();
+        if (child)
+            new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.Knowledge, 0).Serialize(wire);
+        new StreamObjectHeaderStart32Bit(child ? StreamObjectTypeHeaderStart.UserAgentGUID :
+            StreamObjectTypeHeaderStart.Knowledge, int.MaxValue).Serialize(wire);
+        Assert.Throws<EndOfStreamException>(() => PutChangesSubResponseData.Deserialize(new(wire.ToArray())));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PutChangesResponseRejectsMissingOrWrongKnowledgeEnd(bool wrongEnd)
+    {
+        var wire = new BinaryWriterEx();
+        new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.Knowledge, 0).Serialize(wire);
+        if (wrongEnd)
+            new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.ObjectGroupDeclarations).Serialize(wire);
+        if (wrongEnd)
+            Assert.Throws<InvalidDataException>(() => PutChangesSubResponseData.Deserialize(new(wire.ToArray())));
+        else
+            Assert.Throws<EndOfStreamException>(() => PutChangesSubResponseData.Deserialize(new(wire.ToArray())));
+    }
+
+    [Theory]
     [InlineData(0x80000000UL)]
     [InlineData(0x100000000UL)]
     [InlineData(0x100000001UL)]

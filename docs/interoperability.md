@@ -39,6 +39,12 @@ ancestor-revision object lookup and OneNote notebook/page synchronization are no
 implemented. Buffered and streaming materialization are checked against the same
 reviewed save captures; this does not add desktop-client coverage.
 
+Multipart output preserves the reviewed SharePoint root-part preamble and MIME
+headers. HTTP tests verify content length and exact capture/output equality with
+capture enabled and disabled. Streamed durable-save tests compare graph,
+response, version and metadata against the buffered save path, and check failed
+ingestion, cancellation and expanded ZIP budgets before publication.
+
 A successful protocol lock transition or editors-table response does not establish
 two-desktop coauthoring. Provider durability does not add user authorization.
 The consuming host owns its access controls.

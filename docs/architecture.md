@@ -85,6 +85,9 @@ failure or cancellation during writing can leave partial output. Callers of the
 mutable `ObjectGroupGraph` must avoid changing it during materialization.
 
 Data-element framing and diagnostic object parsing allow 33 nested stream objects.
+PutChanges response framing applies the same nesting limit and checks lengths
+before computing offsets. The binary writer copies spans directly into its owned
+buffer; returned arrays remain independent copies.
 Object graphs allow 256 objects on an active path and at most one million visits
 per materialization, including repeated references. The traversal budget also
 bounds zero-byte graphs that would otherwise expand without reaching a byte limit.
@@ -93,7 +96,11 @@ These checks complement the host's request and retained-state budgets.
 ## Save publication
 
 Content preparation and immutable-object writes occur before the document
-transaction. Publication takes the document's row lock, reads the current state
+transaction. Durable saves verify the retained graph without reading the previous
+complete package, materialize into an exclusively created temporary file, read
+every ZIP member under the expanded-byte budget, then rewind for content storage.
+The temporary file closes and is deleted on success, failure or cancellation.
+The synchronous in-memory save API retains its buffered behavior. Publication takes the document's row lock, reads the current state
 and authoritative database time, rechecks Write permission, graph coherency and lease ownership, and commits
 one state snapshot with the accepted response receipt. Different documents can
 progress independently. Session and lease changes use the same coordination.
@@ -112,7 +119,19 @@ reading payloads. Foreign scopes and historical versions remain unsupported.
 Automatic graph pruning is disabled until references and stale-client recovery
 are qualified.
 
+MTOM responses prepare SOAP with XOP references directly from binary model fields.
+One prepared message supplies its exact content length and multipart framing to
+both wire capture and HTTP streaming. Binary arrays remain borrowed until writing
+finishes. Raw XML responses keep their XML precedence and are not decoded as
+binary. Non-MTOM responses continue to inline base64.
+
+Restoration, queries and save-receipt replay read at most the declared content
+length plus one EOF probe, verify SHA-256, and reject conflicting handles that
+share a cache key. Receipt replay also requires a complete successful binary save
+response with no trailing bytes.
+
 [Storage providers](storage-providers.md) documents the contracts, failure
-behavior, migration, backup and retention requirements. Parsing and graph
-materialization still buffer data and can allocate several copies of large files.
-Streaming content storage alone does not establish large-file performance.
+behavior, migration, backup and retention requirements. Incoming HTTP messages and
+retained graph payloads still occupy memory, and graph merging retains defensive
+copies. Streamed durable packages and MTOM output reduce additional buffering;
+these changes do not establish qualified Office file sizes.

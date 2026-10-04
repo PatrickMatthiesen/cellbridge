@@ -745,10 +745,9 @@ public sealed class PutChangesSubResponseData : ISubResponseData
                 $"Expected {expectedType}, got {header.Type}.");
         }
 
-        int immediateEnd = checked(reader.Position + header.Length);
-        if (immediateEnd > reader.Length)
+        if (header.Length > reader.Remaining)
             throw new EndOfStreamException("Stream object payload exceeds the response boundary.");
-        reader.Position = immediateEnd;
+        reader.Position += header.Length;
 
         if (header.Compound == 1)
         {
@@ -771,7 +770,7 @@ public sealed class PutChangesSubResponseData : ISubResponseData
 
                 // The child is consumed for framing only.  Its bytes remain
                 // in the outer slice returned below.
-                ReadAnyFramedObject(reader);
+                ReadAnyFramedObject(reader, 1);
             }
         }
 
@@ -782,13 +781,14 @@ public sealed class PutChangesSubResponseData : ISubResponseData
         return result;
     }
 
-    private static void ReadAnyFramedObject(BinaryReaderEx reader)
+    private static void ReadAnyFramedObject(BinaryReaderEx reader, int depth)
     {
+        if (depth > 32)
+            throw new InvalidDataException("Response object nesting limit exceeded.");
         var header = StreamObjectHeaderStart.Parse(reader);
-        int immediateEnd = checked(reader.Position + header.Length);
-        if (immediateEnd > reader.Length)
+        if (header.Length > reader.Remaining)
             throw new EndOfStreamException("Stream object payload exceeds the response boundary.");
-        reader.Position = immediateEnd;
+        reader.Position += header.Length;
 
         if (header.Compound == 1)
         {
@@ -802,7 +802,7 @@ public sealed class PutChangesSubResponseData : ISubResponseData
                     StreamObjectHeaderEnd.Parse(reader);
                     break;
                 }
-                ReadAnyFramedObject(reader);
+                ReadAnyFramedObject(reader, depth + 1);
             }
         }
     }

@@ -49,7 +49,7 @@ document-count limits. Current data remains intact even when it exceeds a limit.
 | `Storage:MaxObjectBytes` | Maximum bytes per binary object, default 512 MiB. This is a quota, not a tested document-size promise. |
 | `Storage:MultipleInstances` | Require shared state and content; reject incompatible provider combinations. |
 | `Storage:SharedContent` | Operator declaration that the filesystem root is shared with verified flush/rename semantics. Default false. |
-| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM request size, default 128 MiB. Binary protocol parsing and materialization still buffer content. |
+| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM request size, default 128 MiB. Requests and retained graph payloads still occupy memory. |
 | `Protocol:MaxConcurrentRequests` | Maximum cellstorage requests per host, including response delivery, default 8; excess requests return HTTP 503. |
 | `Protocol:MaxMtomParts` | Maximum MIME parts per request, default 128. |
 | `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
@@ -146,8 +146,11 @@ package cache are under ignored `artifacts/packages`.
 
 ## Commit and retry behavior
 
-A save loads one immutable state snapshot, validates/merges the selected graph,
-materializes the Office package and durably stages new binary objects. It then
+A save loads one immutable state snapshot, verifies/merges the retained graph,
+materializes the Office package into an exclusive temporary file and validates
+every ZIP member before rewinding the file for durable content ingestion. It
+does not load the previous complete package. Graph payloads still load eagerly.
+The temporary file is deleted on every exit path. The save then
 acquires the document's PostgreSQL row, reads its current pointer and actual
 database time, rechecks coherency and leases, and atomically publishes the new
 snapshot with a receipt. Package/blob I/O happens outside the document lock.
@@ -313,7 +316,13 @@ filters are ignored unless `FailIfUnsupported` requests an error. Version querie
 and foreign cell scopes remain explicitly unsupported. See the protocol's
 [Query Changes rules](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/5b8d1d29-0adf-4b29-b3d1-1a1fe8590642).
 
-Graph merging, package materialization and ZIP validation still buffer data.
+Graph merging still retains payload arrays and defensive copies. Durable package
+materialization and ZIP validation use a seekable staging file; MTOM responses
+stream a prepared message without a base64 round trip or complete multipart
+buffer. Captures use the same prepared boundary and bytes as HTTP output.
+Content consumers verify the handle's length and hash, probe for excess bytes,
+honor cancellation and reject conflicting aliases before caching. Stored save
+responses require complete binary consumption on replay.
 Configured defaults are admission limits, not qualified Office file sizes.
 Automatic graph compaction remains disabled. Supported revision-base chains can
 grow their required closure with a constant-size file. Object-group metadata is
