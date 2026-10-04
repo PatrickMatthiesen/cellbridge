@@ -52,9 +52,8 @@ See [authentication and permissions](authentication.md).
 | `demo/CellBridge.Demo` | Razor Pages client of the sample HTTP catalog |
 | `aspire/apphost.cs` | PostgreSQL, schema initialization, sample host, demo and optional capture proxy |
 
-The binary library has no ASP.NET Core or database dependency. Provider
-contracts have no protocol dependency. The hosting library contains neither
-sample package creation nor Aspire orchestration.
+The binary library is independent of ASP.NET Core and storage. Provider contracts
+are independent of the protocols. The sample owns file creation and Aspire setup.
 
 ## Document identity and partitions
 
@@ -64,74 +63,29 @@ lookup failure. Lookup does not create a document or redirect to a matching path
 
 File contents, application metadata and the editors table have independent
 partition identities, serials and synchronization knowledge. File saves merge
-against the retained graph and materialize the Office package through
-`PartitionGraphSnapshot`. Selecting the largest binary object cannot recover a
-valid file partition.
-
-The selected revision manifest must identify the revision named by the cell and
-storage index. Materialization uses only that revision's explicitly referenced
-object groups. General lookup through ancestor revisions is not implemented;
-a missing object fails even if an unrelated retained revision contains it. A
-self-contained graph can still materialize when its base revision is unavailable,
-but retention analysis blocks compaction until those dependencies resolve.
-
-Binary parsing uses bounded memory views for intermediate object bodies, while
-snapshots and public parsed content own defensive copies of mutable input bytes.
-Array materialization validates the graph and allocates one exact output buffer.
-`MaterializeTo` and `MaterializeToAsync` write to non-seekable destinations and
-leave them open. Both validate references, cycles, represented sizes and the byte
-limit before writing; structural failures leave the destination untouched. I/O
-failure or cancellation during writing can leave partial output. Callers of the
-mutable `ObjectGroupGraph` must avoid changing it during materialization.
-
-Data-element framing and diagnostic object parsing allow 33 nested stream objects.
-PutChanges response framing applies the same nesting limit and checks lengths
-before computing offsets. The binary writer copies spans directly into its owned
-buffer; returned arrays remain independent copies.
-Object graphs allow 256 objects on an active path and at most one million visits
-per materialization, including repeated references. The traversal budget also
-bounds zero-byte graphs that would otherwise expand without reaching a byte limit.
-These checks complement the host's request and retained-state budgets.
+against the retained graph and reconstruct the Office package through
+`PartitionGraphSnapshot`. Reconstruction follows graph references rather than
+choosing an individual binary object by size.
 
 ## Save publication
 
-Content preparation and immutable-object writes occur before the document
-transaction. Durable saves verify the retained graph without reading the previous
-complete package, materialize into an exclusively created temporary file, read
-every ZIP member under the expanded-byte budget, then rewind for content storage.
-The temporary file closes and is deleted on success, failure or cancellation.
-The synchronous in-memory save API retains its buffered behavior. Publication takes the document's row lock, reads the current state
-and authoritative database time, rechecks Write permission, graph coherency and lease ownership, and commits
-one state snapshot with the accepted response receipt. Different documents can
-progress independently. Session and lease changes use the same coordination.
+Durable saves reconstruct the package into an exclusive temporary file and check
+every ZIP member under the expanded-byte budget before storing immutable content.
+The staging file is deleted on success, failure or cancellation. The synchronous
+in-memory save API remains buffered. This work precedes the document's row lock.
+It then reads the current state and database time, rechecks Write permission,
+coherency and leases, and commits the selected revision with a save receipt.
+Different documents can progress independently. Sessions use the same coordination.
 
-Readers acquire one state snapshot for both content and headers. A concurrent
-save cannot mix one revision's length or ETag with another revision's bytes.
-Published objects remain available until quiescent collection over every retained
-snapshot, allowing detached readers and later graph updates to reference prior
-data. PostgreSQL bounds JSON history independently of content versions. A retry
-resolves through its stored identity and digest rather than publishing a second
-version. Shared accounting admits object bytes and metadata atomically; a quota
-failure preserves the current revision.
+Downloads take content and headers from one snapshot. Receipts identify duplicate
+saves; shared budgets reject excessive growth before selecting a new revision.
+Prior file parts remain available for subsequent edits and detached readers.
 
-File queries select unknown GUID/serial ranges from persisted metadata before
-reading payloads. Foreign scopes and historical versions remain unsupported.
-Automatic graph pruning is disabled until references and stale-client recovery
-are qualified.
+[Storage providers](storage-providers.md) explains publication, retries, maintenance
+and provider contracts. The [protocol guide](protocol-version-decision.md#synchronization-knowledge)
+explains changed-part selection, graph retention and materialization constraints.
 
-MTOM responses prepare SOAP with XOP references directly from binary model fields.
-One prepared message supplies its exact content length and multipart framing to
-both wire capture and HTTP streaming. Binary arrays remain borrowed until writing
-finishes. Raw XML responses keep their XML precedence and are not decoded as
-binary. Non-MTOM responses continue to inline base64.
-
-Restoration, queries and save-receipt replay read at most the declared content
-length plus one EOF probe, verify SHA-256, and reject conflicting handles that
-share a cache key. Receipt replay also requires a complete successful binary save
-response with no trailing bytes.
-
-[Storage providers](storage-providers.md) documents the contracts, failure
-behavior, migration, backup and retention requirements. Incoming HTTP messages and
-retained graph payloads still occupy memory, and graph merging retains defensive
-copies. Streamed durable packages and MTOM output reduce additional buffering;
-these changes do not establish qualified Office file sizes.
+MTOM responses stream one prepared message with matching capture bytes and exact
+content length. Incoming requests and retained graph payloads still occupy memory.
+See [response serialization](protocol-version-decision.md#response-serialization)
+for buffer ownership and XML precedence.

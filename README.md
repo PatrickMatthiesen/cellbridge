@@ -1,46 +1,86 @@
 # CellBridge
 
-An experimental ASP.NET Core server for opening, saving, and coauthoring
-Microsoft Office documents through **MS-FSSHTTP** and **MS-FSSHTTPB**.
+[![Build and tests](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml/badge.svg?branch=main)](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-CellBridge implements the SOAP endpoint and binary synchronization protocol
-used by desktop Office. A Razor Pages demo lets you create, browse, download,
-and open documents in their desktop applications.
+Edit Microsoft Office documents in their desktop apps and save them to your own
+ASP.NET Core server. CellBridge implements MS-FSSHTTP and MS-FSSHTTPB, the
+protocols Office uses to open documents, send changes and coordinate editing.
 
-## Status
+The repository includes reusable .NET libraries and a sample document library.
+Create or import a file, open it in Word, Excel or PowerPoint, and save changes
+back to CellBridge. Use the sample to try desktop editing, or add the endpoints
+to your own ASP.NET Core application.
 
-Desktop Word editing and saving, and Excel saving, have been demonstrated in
-local development. Blank Word, Excel, and PowerPoint packages can be created.
-PowerPoint package open/save/reopen was tested locally; remote PowerPoint saves
-and two-desktop live coauthoring remain unverified.
+CellBridge is experimental. The APIs may change, and production-scale operation
+has not been qualified.
 
-Aspire uses PostgreSQL to persist documents, resource IDs, retained graphs,
-versions, save receipts and unexpired sessions. Binary content can use PostgreSQL
-or a filesystem provider. Local Identity accounts and per-document Read/Write
-permissions are implemented. A manual Windows Word trial on 2026-10-03
-demonstrated authenticated writer saves, reader read-only open and Write
-revocation with unchanged server bytes. MS-OFBA required explicit Office host
-approval; Office build qualification and authenticated fresh-process reopen
-remain pending. On 2026-10-03, desktop Word completed ten remote saves and
-a fresh-process reopen against the PostgreSQL-backed host through Tailscale.
-Each binary file save was matched to the client's ETag, all 17 captured binary
-responses passed the independent Office Inspectors parser, and the final server
-bytes matched the client's SHA-256. See the
-[interoperability coverage](docs/interoperability.md).
-Partial and unsupported uploads return protocol errors.
+## Features
 
-Storage and request budgets reject growth before publishing a new revision.
-Knowledge-aware file queries avoid reading payloads the client already knows.
-Automatic graph pruning remains disabled pending reference and recovery coverage;
-see [limits and retention](docs/storage-providers.md#limits-and-qualification).
+| Feature | Current support |
+| --- | --- |
+| Word editing | Open, edit, save and reopen documents, including while signed in. |
+| Excel editing | Desktop saves tested; the current durable host needs a repeat desktop check. |
+| PowerPoint editing | Save and reopen presentations, including complex Copilot-generated slides. |
+| Document library | Create blank Office files, import existing documents and download saved files. |
+| Accounts and permissions | Local sign-in, document ownership, read-only/editing access and revocation. |
+| Persistent storage | PostgreSQL document state with PostgreSQL or filesystem file content. |
+| Incremental transfers | Reuse stored file parts and send parts the client does not already have. |
+| Coauthoring | Editor sessions and locks are implemented; two-desktop editing remains unverified. |
 
-## Requirements
+Version-history browsing/restoration, some advanced synchronization options and
+automatic graph pruning are unimplemented or disabled. See
+[protocol support and compatibility](docs/interoperability.md) for exact coverage.
 
-- .NET 10 SDK.
-- Aspire CLI compatible with the preview SDK pinned in `aspire/apphost.cs`.
-- Docker for Aspire's PostgreSQL container and persistent volume.
-- Python 3.12 or newer for the bundled SharePoint capture proxy.
-- Desktop Office on Windows for manual interoperability testing.
+## Try the demo
+
+Install the .NET 10 SDK, an Aspire CLI compatible with the preview SDK pinned
+in `aspire/apphost.cs`, Docker and Python 3.12 or newer.
+Desktop editing requires Office on Windows.
+
+From the repository root:
+
+```sh
+aspire start --apphost aspire/apphost.cs --non-interactive
+aspire wait web --non-interactive
+aspire wait demo --non-interactive
+aspire ps --non-interactive
+```
+
+Aspire starts PostgreSQL, initializes the schema and starts the host and library.
+[Provision an account](docs/authentication.md#first-setup), then open
+`https://localhost:7292/library`. Sign in, create a document and use its Office
+open link to edit and save it.
+
+For another computer, set `Parameters__PublicOrigin` to an HTTPS origin that
+Office can reach and trust. The [demo guide](docs/demo-library.md) covers imports
+and remote clients.
+
+Stop Aspire before rebuilding locked outputs. If a capture is active, stop it
+with `tools/capture/stop.py` first, then run `aspire stop --non-interactive`.
+
+## Use in ASP.NET Core
+
+After configuring authentication and a durable `StorageProvider`, register the
+services and endpoints in `Program.cs`:
+
+```csharp
+using CellBridge.AspNetCore;
+
+builder.Services.AddCellBridge(provider);
+var app = builder.Build();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapCellBridge();
+await app.RunAsync();
+```
+
+Follow the [hosting guide](docs/storage-providers.md#consume-the-packages) for
+provider setup and the [authentication guide](docs/authentication.md#reusable-hosts)
+for identity mapping. The [package consumer](examples/NuGetConsumer/README.md)
+provides a complete example with bearer authentication and in-memory storage.
+Packages are built locally; no published NuGet release is assumed.
 
 ## Build and test
 
@@ -50,68 +90,21 @@ dotnet test CellBridge.slnx
 dotnet test demo/CellBridge.Demo.slnx
 ```
 
-Protocol, provider and the in-repo Office Inspectors parser tests run on Linux
-and Windows. Desktop Office checks require Windows.
-Live interoperability tests are opt-in. See the
-[interop test instructions](tests/CellBridge.Interop.Tests/README.md).
-
-For a disposable PostgreSQL database and two live hosts, run
-`python3 tools/testing/run.py`. Add `--performance` for provider measurements.
-The [automation guide](docs/automated-testing.md) covers prerequisites, the
-Windows desktop Word check and connecting the laptop through Tailscale Serve.
-
-## Run locally
-
-Start the app from the repository root. Aspire starts PostgreSQL with a persistent
-volume, initializes the current schema, then starts the web host. Its Python integration
-prepares the capture proxy environment and installs its dependencies:
-
-```sh
-aspire start --apphost aspire/apphost.cs
-aspire wait web --apphost aspire/apphost.cs
-aspire ps
-```
-
-Provision an account using the [authentication setup](docs/authentication.md).
-Create documents from the library or import a directory with the explicit admin command. Open `/library` on the web
-HTTPS endpoint and sign in. Desktop Office must be
-able to reach and trust the server's HTTPS endpoint. The default Office/browser
-origin is `https://localhost:7292`; configure `Parameters__PublicOrigin` for other clients.
-Stop the AppHost with `aspire stop` before rebuilding if an executable is locked.
-
-Aspire also declares an explicitly started SharePoint capture proxy. Its upstream
-is an example domain; configure `Parameters__CaptureUpstream` for your own test
-farm before starting the resource.
-See the [capture guide](docs/capture-kit.md) for configuration and certificates.
-
-## Protocol and implementation
-
-- `CellBridge.FssHttp` parses SOAP and MTOM requests and serializes responses.
-- `CellBridge.FssHttpB` contains binary framing, object graphs, and synchronization messages.
-- `CellBridge.AspNetCore` provides document execution and reusable HTTP endpoint registration.
-- `CellBridge.Storage.Abstractions` defines immutable state and streaming content contracts.
-- `CellBridge.Storage` restores and prepares protocol document state.
-- `CellBridge.Storage.PostgreSql`, `.FileSystem` and `.InMemory` implement storage providers.
-- `CellBridge.Web` is the sample host, with imports and demo JSON APIs.
-
-The protocol references are MS-OCPROTO, MS-FSSHTTP, and MS-FSSHTTPB. SOAP and
-binary structures work together; see the [protocol notes](docs/protocol-version-decision.md).
-The [OfficeDev test suites](https://github.com/OfficeDev/Interop-TestSuites)
-provide an independent reference implementation.
+CI runs protocol, storage, demo, parser and capture checks on Linux and Windows.
+See [automated testing](docs/automated-testing.md) for the disposable two-host
+runner and desktop tests. [Live interoperability tests](tests/CellBridge.Interop.Tests/README.md)
+are opt-in.
 
 ## Documentation
 
-- [Authentication and document permissions](docs/authentication.md)
-- [Demo and document library](docs/demo-library.md)
-- [Storage setup, NuGet consumption and provider authoring](docs/storage-providers.md)
-- [Automated checks, performance and desktop Word over Tailscale](docs/automated-testing.md)
+- [Document library and desktop editing](docs/demo-library.md)
+- [Authentication and permissions](docs/authentication.md)
+- [Storage, hosting and provider authoring](docs/storage-providers.md)
+- [Protocol support and compatibility](docs/interoperability.md)
 - [Architecture](docs/architecture.md)
-- [Interoperability and test coverage](docs/interoperability.md)
-- [Capture tooling](docs/capture-kit.md)
-
-Recorded fixtures are sanitized regression inputs. Their READMEs explain which
-properties they test and how their bytes differ from the original captures.
-Keep raw traffic, private keys, and local configuration outside Git.
+- [Protocol scope and references](docs/protocol-version-decision.md)
+- [Automated testing](docs/automated-testing.md)
+- [SharePoint capture tooling](docs/capture-kit.md)
 
 ## License
 

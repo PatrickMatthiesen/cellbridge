@@ -1,87 +1,58 @@
 # Authentication and document permissions
 
-The sample host uses operator-provisioned ASP.NET Core Identity accounts in PostgreSQL. Browser and Office requests use a Secure, HttpOnly cookie. Documents default to denying access; each has an owner and explicit subject grants. The owner can read and write, and Write implies Read. Library creation is a separate account permission.
+The sample host uses operator-provisioned ASP.NET Core Identity accounts in
+PostgreSQL. Browser and Office requests use a Secure, HttpOnly cookie.
+Each document has an owner and explicit user grants. Access is denied unless
+ownership or a grant permits it. Owners can read and write; Write implies Read.
+Creating documents requires a separate account permission.
 
-Server authentication and authorization tests do not establish desktop Office compatibility. The sample implements the [MS-OFBA challenge](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-ofba/c2c4baef-c611-4e7b-9a4c-d009e678e3d2). A manual Windows Word trial on 2026-10-03 demonstrated sign-in, two writer saves, reader read-only open and Write revocation during an open editing session. Office required explicit forms-sign-in host approval. Office build/channel and authenticated fresh-process reopen remain to be recorded. See [interoperability coverage](interoperability.md) for the scope of that evidence.
+Desktop Office signs in through the [MS-OFBA challenge](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-ofba/c2c4baef-c611-4e7b-9a4c-d009e678e3d2).
+Office displays the host's sign-in form and uses the resulting cookie for
+document requests.
 
 ## First setup
 
-Normal authenticated creation needs no owner configuration: `CreateAsync`
-records the authenticated creator as owner. The web host performs no imports or
-schema migrations. Aspire's `storage-init` job initializes fresh storage schema
-version 3 and authentication schema version 1, and rejects older storage schemas.
-Recreate outdated development databases, as described below.
+Start the sample through Aspire. Its `storage-init` job initializes storage
+schema version 3 and authentication schema version 1. The web host checks the
+schema at startup. Creating a document records the signed-in user as its owner.
 
-The SharePoint capture resource requires explicit startup; a normal Aspire run
-leaves it stopped. Retrieve `ConnectionStrings__cellbridge` privately from the web
-resource's Aspire environment and supply it to the operator tool. Do not copy the
-connection string into logs or committed configuration.
+Retrieve `ConnectionStrings__cellbridge` privately from the web resource's
+Aspire environment and supply it to the operator tool. Keep it out of logs and
+committed configuration.
 
 ```sh
-# Password is read from stdin, not passed as a command argument.
+# Password is read from stdin.
 dotnet run --project tools/CellBridge.Admin -- create-user --id operator --login operator --display-name Operator --can-create true
 dotnet run --project tools/CellBridge.Admin -- create-user --login reader --display-name Reader
 ```
 
-Use a password satisfying Identity's policy: at least 12 characters with uppercase, lowercase, digit and nonalphanumeric characters. There is no public registration. Five failed attempts lock the account for 15 minutes.
+Passwords need at least 12 characters with uppercase, lowercase, a digit and a
+nonalphanumeric character. Five failed attempts lock the account for 15 minutes.
+Accounts are provisioned by the operator; there is no public registration.
 
-After provisioning, create documents from the signed-in library, or explicitly
-import a directory with a chosen owner:
+Open `https://localhost:7292/library`, sign in and create a document. To import
+existing files with a chosen owner:
 
 ```sh
 dotnet run --project tools/CellBridge.Admin -- import-directory --directory /absolute/path/to/documents --owner local:operator
 ```
 
-Imports create missing documents only, record `system:imports` as creator and
-initial modifier, and preserve existing saved revisions and ownership. The owner
-must be an enabled, provisioned local account. There is no global import owner
-setting. Supply the same `Storage` settings as the web host when importing.
-Configure `Parameters__PublicOrigin` as the HTTPS origin reachable and trusted by
-Windows. Its default is `https://localhost:7292`.
+Supply an enabled local account as owner and the web host's `Storage` settings.
+Imports create missing files only, preserve saved content and ownership, and
+record `system:imports` as creator and initial modifier. The
+[demo guide](demo-library.md#import-existing-files) describes import behavior.
 
 ### Development database versions
 
-CellBridge has no production deployments or supported upgrades from older
-experimental schemas. Storage initialization accepts a fresh database or the
-current schema only. Recreate outdated development databases, then provision
-accounts and create or explicitly import documents again. Initialization never
-rewrites ownership or converts old snapshots. The setup tool has no legacy-owner
-option. Database and snapshot version markers still reject unsupported formats.
-
-Open `https://localhost:7292/library`, sign in, and create or download an allowed document. The web host proxies the library to the internal demo. Web instances and demo share the PostgreSQL account store, Data Protection keys and cookie settings. Demo sends only the current request's authentication cookies to the fixed web endpoint, including chunked cookies. It forwards the paired antiforgery cookie and form token for creation. It has no service account or shared cookie jar.
-
-## Customize the sign-in page
-
-The sample sign-in name defaults to `CellBridge`. Set Aspire's
-`Parameters:ApplicationName` parameter, or `Parameters__ApplicationName` in its
-environment, to change it. For a host running outside Aspire, use
-`Authentication:ApplicationName` in configuration or
-`Authentication__ApplicationName` in its environment. This changes the heading,
-page title and completion message; it does not change cookie names or identities.
-
-Hosts using the sample authentication library can replace the entire login page
-without replacing the sign-in POST handler:
-
-```csharp
-app.MapCellBridgeAuthentication(renderLoginPage: page => MyLoginPage.Render(page));
-```
-
-The renderer receives a `LoginPageContext` with the application name,
-antiforgery tokens, validated local return URL and sign-in failure flag. Its HTML
-must submit a form by POST to `/auth/login` with `login`, `password`, `returnUrl`,
-and a hidden field named `page.Antiforgery.FormFieldName` containing
-`page.Antiforgery.RequestToken`. HTML-encode all values inserted into the page.
-The endpoint issues the antiforgery cookie and disables caching before rendering;
-the existing POST handler validates the token, credentials and return URL.
-Keep the page usable inside Office's sign-in window.
-
-This page belongs to the sample authentication library. Consumers of the
-reusable packages can provide their own authentication and sign-in pages, as
-described below; they need not adopt this library or its HTML.
+Initialization accepts a fresh database or the current schema. Older experimental
+schemas are rejected. Recreate an outdated development database, then provision
+accounts and create or import documents again.
 
 ## Manage access
 
-Obtain the resource GUID from an authorized FSSHTTP response or an operator database query. The catalog intentionally exposes no hidden document IDs or counts. Commands require operator database credentials; protocol and library users cannot grant access.
+Use the resource GUID from an authorized FSSHTTP response or an operator database
+query. The admin commands need the database connection. Protocol and library
+users cannot grant access.
 
 ```sh
 dotnet run --project tools/CellBridge.Admin -- grant --resource-id GUID --subject local:USER_ID --access read
@@ -92,92 +63,115 @@ dotnet run --project tools/CellBridge.Admin -- set-user --subject local:USER_ID 
 dotnet run --project tools/CellBridge.Admin -- set-user --subject local:USER_ID --can-create false
 ```
 
-Owners retain Read and Write until ownership transfers. Transfer does not create a grant for the former owner. Account IDs are stable across display-name changes. Account updates change the Identity security stamp. Existing cookies are rejected at the next one-minute stamp check in each host. Document grants are read from authoritative document state on each operation, independently of cookies.
+Owners retain Read and Write until ownership transfers. Transfer does not create
+a grant for the former owner. Account IDs stay stable when display names change.
+Account changes invalidate cookies at the next one-minute security-stamp check.
 
-Revoking Write atomically downgrades editor sessions to readers, advances editor-table knowledge, and removes that subject's editing leases. Revoking Read also removes its sessions. Changes use the same document transaction as publication. A save rechecks current Write permission and lease ownership before publishing staged bytes. Receipts require their original writer and current Write permission on every retry path.
+Document grants are checked on each operation. Revoking Write downgrades editor
+sessions to readers and removes editing leases. Revoking Read removes sessions
+too. Saves recheck permission and lease ownership before publishing; retry
+receipts require the original writer and current Write access.
+
+## Customize the sign-in page
+
+Set Aspire's `Parameters__ApplicationName` to change the displayed application
+name. Outside Aspire, use `Authentication__ApplicationName`. The default is
+`CellBridge`.
+
+To replace the sample login page:
+
+```csharp
+app.MapCellBridgeAuthentication(renderLoginPage: page => MyLoginPage.Render(page));
+```
+
+The renderer receives `LoginPageContext` with the application name, antiforgery
+tokens, validated local return URL and sign-in failure flag. Submit a form by
+POST to `/auth/login` with `login`, `password`, `returnUrl`, and a hidden
+field named `page.Antiforgery.FormFieldName` containing
+`page.Antiforgery.RequestToken`. HTML-encode inserted values. The existing
+handler validates the token and credentials.
 
 ## Protocol behavior
 
-Authentication runs before SOAP or MTOM parsing. Anonymous Office discovery and file requests receive HTTP 403 with fixed MS-OFBA login and completion URLs. JSON APIs return 401. Browser library requests redirect to login. Authenticated denials do not trigger another login challenge.
+Authentication runs before SOAP/MTOM parsing. Anonymous Office requests receive
+HTTP 403 with MS-OFBA login and completion URLs. JSON APIs return 401; browser
+library requests redirect to login. Authenticated denials do not start another
+sign-in exchange.
 
 | Operation | Required permission |
 | --- | --- |
 | Catalog, GET, HEAD, metadata, versions, QueryChanges, lock status | Read |
 | QueryAccess | Reports Read and Write separately |
-| PutChanges, acquire or refresh editing locks, JoinCoauthoring | Write |
-| Join or refresh EditorsTable as reader | Read |
-| Join or refresh EditorsTable as editor | Write |
+| PutChanges, acquire/refresh editing locks, JoinCoauthoring | Write |
+| Join/refresh EditorsTable as reader | Read |
+| Join/refresh EditorsTable as editor | Write |
 | Release own lock or leave own session | Read and matching authenticated owner |
 | Create document | Account creation permission |
 
-SOAP denials use `FileUnauthorizedAccess`. Binary denials use HRESULT `E_ACCESSDENIED`, including each denied QueryAccess field. Responses to callers without Read omit resource IDs, canonical document URLs and GetFileProps metadata. Each executable SOAP dependency is independently authorized. Matching ClientID or lock GUIDs cannot impersonate another subject. Office saves omitting ClientID can use a lease only when the authenticated subject owns it.
+SOAP denials use `FileUnauthorizedAccess`; binary denials use
+`E_ACCESSDENIED`. A caller without Read receives no resource IDs, canonical
+document URLs or file properties. Each dependent SOAP operation is authorized
+independently. Client or lock IDs cannot impersonate another user.
 
-WhoAmI reports the caller. Author metadata reports the persisted creator; ModifiedBy reports the last successful content writer. Readers and session joins never replace authorship. Unavailable authorship is reported as unknown.
-
-Login, logout and document creation require antiforgery validation. SOAP endpoints accept XML or MTOM and reject browser simple content types and cross-origin Origin headers. Health checks remain anonymous. Account passwords, cookies, tokens and connection strings must not enter shared capture evidence. Database access grants access to cookie protection keys, so restrict and protect that database and its backups.
+`WhoAmI` reports the caller; author metadata records the creator and
+`ModifiedBy` the last successful writer. Login, logout and document creation
+use antiforgery validation. SOAP accepts XML/MTOM and rejects browser simple
+content types and cross-origin Origin headers. Health checks remain anonymous.
 
 ## Reusable hosts
 
-Consumers can keep their existing ASP.NET Core authentication, including their
-own cookie/Identity setup or validated bearer tokens. `CellBridge.AspNetCore`
-does not reference `CellBridge.Authentication`, its local accounts, or its
-Identity database. The [package consumer](../examples/NuGetConsumer/README.md)
-demonstrates a host using its own JWT authority and in-memory document storage.
+Use your existing ASP.NET Core cookie/Identity setup or validated bearer tokens.
+`CellBridge.AspNetCore` is independent of the sample authentication library and
+its account database. Register authentication before authorization and map
+validated principals to these claims:
 
-`CellBridge.AspNetCore` owns no authentication provider. Register authentication middleware and map a validated principal to an authority-qualified `cellbridge:subject`, with optional `cellbridge:display-name` and `cellbridge:create=true` claims. Arbitrary NameIdentifier, email, ClientID and forwarded user headers are never used as identity. Middleware must authenticate before authorization and endpoint execution.
+| Claim | Meaning |
+| --- | --- |
+| `cellbridge:subject` | Required stable, authority-qualified user identity. |
+| `cellbridge:display-name` | Optional display name. |
+| `cellbridge:create=true` | Permission to create documents. |
 
-Request-facing service methods require an explicit `CellBridgeActor`. `CreateAsync` sets that actor as owner and creator. Trusted import code supplies an explicit owner and importer to `ImportAsync`. `ResolveAsync` still honors ResourceID precedence. A custom `ICellBridgeAccessEvaluator` can restrict the stored grants; it must be deterministic and perform no I/O inside document transactions. Catalog filtering uses stored grants before applying that evaluator. Storage and binary serialization remain independent of ASP.NET identity types.
+The [package consumer](../examples/NuGetConsumer/README.md) demonstrates JWT
+validation and claim mapping. Desktop Office needs a compatible challenge/sign-in
+exchange in addition to API authentication.
 
-Authentication integration does not replace document authorization. Catalog
-filtering and editor/lease reconciliation still use stored document grants.
-Integrating an application's independent permission store throughout these
-operations requires additional design; the access evaluator alone is not a
-complete replacement. Existing login middleware also needs an Office-compatible
-challenge/sign-in exchange for desktop editing. The JWT example demonstrates
-authenticated API hosting, not automatic Office sign-in.
+### Integration constraints
 
-The sample authentication library is an executable-project dependency, not part of the nine reusable NuGet packages. See the [authenticated package consumer](../examples/NuGetConsumer/README.md).
+Request-facing service methods take a `CellBridgeActor`. `CreateAsync` records
+the actor as owner and creator; trusted imports supply an owner and importer.
+NameIdentifier, email, ClientID and forwarded headers are not substitutes for
+the validated CellBridge subject.
+
+Stored grants drive catalog filtering, sessions and leases. A custom
+`ICellBridgeAccessEvaluator` can restrict those grants; it must be deterministic
+and perform no I/O within document transactions. Replacing stored grants with an
+external permission store requires integrating that store across these operations.
+
+The sample authentication library is outside the reusable NuGet packages.
+Keep passwords, tokens, cookies and connection strings out of shared captures.
+The authentication database holds cookie protection keys; protect its access
+and backups.
 
 ## Desktop validation
 
-The [Tailscale setup](automated-testing.md#connect-the-windows-laptop-through-tailscale)
-uses a private HTTPS listener, an isolated Aspire run and a named persistent
-database volume. Browser sign-in verifies the web form and library. To test
-Office's own sign-in, start in a Windows profile without cached credentials for
-the test origin and launch the document directly:
+Office must reach and trust the public HTTPS origin. Set
+`Parameters__PublicOrigin` for remote clients; see the
+[Tailscale setup](automated-testing.md#connect-the-windows-laptop-through-tailscale).
+You can open a document from the library or launch its URL directly:
 
 ```powershell
 Start-Process 'ms-word:ofe|u|https://dev-machine.example.ts.net:8444/shared/ofba-laptop.docx'
 ```
 
-Office may block the MS-OFBA prompt with "Office has blocked this content because
-it uses a sign-in method that may be insecure." This happened in the laptop
-trial on 2026-10-03. The server received Word's `OPTIONS /shared/` and returned
-the HTTP 403 challenge; that attempt had no subsequent login request.
-After explicit host approval, the user signed in and completed the writer,
-reader and revocation checks described above.
+If Word blocks the sign-in prompt, open File > Options > Trust Center > Trust
+Center Settings > Form-based Sign-in. Select "Ask me what to do for each host",
+retry and approve the test host when prompted. Organization policy may control
+this setting.
 
-For a controlled trial, open Word's File > Options > Trust Center > Trust Center
-Settings > Form-based Sign-in. Select "Ask me what to do for each host", retry,
-and allow the exact test host when prompted. Record this explicit trust decision
-as a prerequisite of the result. Organization policy may prevent changing the
-setting. Use host-specific approval rather than allowing every sign-in prompt.
-This setting is separate from macro and Protected View settings.
+Office receives the HTTP 403 challenge, displays the CellBridge form, reaches
+`/auth/complete` and retries with its cookie. Use separate Windows profiles or
+machines to test different accounts, because Office can share cached credentials.
 
-Word must receive the HTTP 403 challenge, show the CellBridge sign-in form,
-reach `/auth/complete` and retry with the authentication cookie. Record whether
-Word shows that dialog; opening a document after browser login alone cannot
-establish this exchange. Save two unique text markers, download the server
-document independently and inspect both markers, close Word completely, then
-reopen the same remote URL. A marker visible only in Word can be cached locally.
-Preserve the matching file-partition PutChanges captures as save evidence.
-
-The manual trial observed distinct writer and reader identities, successful
-writer publication, reader editing denial and a rejected save after Write
-revocation. Remaining checks include recording the Office build/channel,
-confirming a fresh Word process for authenticated reopen, account disablement
-and comparison with denied SharePoint reference traffic. Server tests already
-exercise the cookie, antiforgery, authorization, ownership and publication
-rules. An AD domain is unnecessary for this local-account MS-OFBA trial.
-
-Use separate Windows profiles or machines for two accounts because Office may share cached credentials. Record the Office build and the browser/Office authentication exchange. Verify authenticated OPTIONS, GET, HEAD and both SOAP route shapes; distinct WhoAmI results; a reader denied locks and saves; a writer save followed by a fresh-process reopen; lease impersonation denied; and permission revocation before publication. Repeat against the Windows-resolvable remote HTTPS origin if remote editing is required. Sanitize cookies and credentials before retaining fixtures. Do not report authenticated desktop support or two-desktop coauthoring from synthetic HTTP tests alone.
+For repeatable save/reopen checks, follow
+[desktop Word testing](automated-testing.md#run-real-desktop-word).
+Tested scenarios are listed in [client coverage](interoperability.md#client-coverage).

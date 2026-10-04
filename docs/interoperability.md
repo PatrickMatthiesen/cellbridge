@@ -1,93 +1,102 @@
-# Interoperability and test coverage
+# Protocol support and compatibility
 
-CellBridge is an experimental protocol implementation. Supported package creation,
-protocol replay and desktop remote editing are different capabilities. Use this
-page to choose the validation needed for a change.
+CellBridge implements the desktop Office editing protocols described by
+[MS-OCPROTO, MS-FSSHTTP and MS-FSSHTTPB](protocol-version-decision.md#authorities).
+This page lists the implemented operations, remaining gaps and tested clients.
+
+## Protocol parity
+
+### Implemented behavior
+
+Office discovers and downloads documents over HTTP. Editing requests go to
+`/_vti_bin/cellstorage.svc` as SOAP with inline binary data or MTOM attachments.
+The server resolves the document, checks access and executes the requested
+operations.
+
+| Feature | Implementation |
+| --- | --- |
+| Read/write permissions | Binary `QueryAccess` reports the caller's access. |
+| Read file changes | `QueryChanges` returns file parts the client does not already have. It supports manifest/cell-change inclusion, filtered knowledge and whole-cell rounding. |
+| Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Save receipts identify retries so an accepted save is not published twice. |
+| Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
+| Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` reports the current version. |
+
+File content, application metadata and editor presence have separate synchronization
+partitions. File saves update the content partition. Editor queries return current
+participants; binary application-metadata queries return storage-index information.
+SOAP dependencies determine which subsequent operations execute.
+
+### Known limitations
+
+- Uploads marked partial, uploads spanning multiple requests, alternate coherency
+  modes and writes to non-file partitions are unsupported. Ordinary saves can
+  still reuse unchanged file parts.
+- Historical-version queries, foreign cell scopes, waterline-only query controls
+  and some filters are unsupported. Optional unsupported filters fall back to
+  more data unless `FailIfUnsupported` requires an error.
+- A binary request can contain only one `QueryChanges`; a second is rejected.
+- `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
+  `QueryDiagnosticStoreInfo` and `AllocateExtendedGuidRange` are unsupported.
+- SOAP `FileOperation`, `Properties` and `Versioning`, historical downloads
+  and version restoration are unimplemented. Internal storage snapshots are
+  separate from Office version history.
+- Exclusive-lock conversion to a schema lock, with or without joining
+  coauthoring, is unsupported.
+- The binary application-metadata stream is incomplete.
+- General ancestor-revision object lookup and OneNote notebook/page synchronization
+  are unimplemented. File reconstruction follows the selected revision's explicitly
+  referenced object groups.
+- Automatic graph pruning is disabled. The host retains graph and save identities
+  and rejects growth at its [storage limits](storage-providers.md#limits-and-qualification).
+
+SharePoint lists and search are outside the project's scope.
 
 ## Client coverage
 
-| Scenario | Coverage |
+| Client or scenario | Coverage |
 | --- | --- |
-| Anonymous Word remote open, two saves and fresh-process reopen | Verified on Windows with Word `16.0.20430`, using Tailscale HTTPS and PostgreSQL state/content on 2026-10-02. Both file-partition PutChanges responses and final downloaded content were verified. |
-| Anonymous Word remote open, ten saves and fresh-process reopen | Verified on 2026-10-03 with Word `16.0.20430`, Tailscale HTTPS and PostgreSQL state/content. Ten accepted file-partition PutChanges responses matched the client's per-edit ETags. All 17 captured binary responses passed the independent Office Inspectors parser. Final server download matched the client's SHA-256 and contained all ten edit markers. |
-| Authenticated Word sign-in, save and reader open | Demonstrated manually on one Windows client through Tailscale HTTPS and PostgreSQL on 2026-10-03. MS-OFBA required explicit Office host approval. Two writer file-partition saves and independently downloaded server bytes were verified; the reader opened the saved content read-only. Office build/channel and fresh-process reopen remain to be recorded. |
-| Write revocation while Word remains open | Demonstrated in the same authenticated trial. The next binary PutChanges was rejected, Word displayed Upload Failed, and an independent download retained the identical bytes and version. |
-| Word and Excel captured save sequences | Automated HTTP replay, graph materialization, retry and download checks |
-| Excel remote saving | Demonstrated before the storage-provider migration; repeat desktop validation for the durable host before claiming current client coverage |
-| PowerPoint package creation and local open/save/reopen | Package validation; remote saving remains unverified |
-| Two service instances using one database | Automated identity, shared lease and protocol routing checks |
-| Two desktop clients coauthoring one document | Unverified |
-| Distinct authenticated Office users | Implemented with local Identity accounts. Sequential writer and reader requests returned distinct WhoAmI identities in the manual trial; simultaneous use by two desktops remains unverified. |
-| Large files and production concurrency | Unqualified; the synthetic benchmark is a measurement tool, not a throughput guarantee |
+| Word open, save and reopen | Remote saves and reopen tested, including repeated manual tests while signed in. |
+| Word permissions | Manual sign-in, writer saves, reader read-only open and Write revocation while editing tested. |
+| Excel saving | Desktop saves demonstrated before the storage-provider migration; repeat on the current durable host. Captured saves also run in automated replay. |
+| PowerPoint save and reopen | Manually tested, including complex Copilot-generated slides. |
+| Blank Office file creation | Automated package checks. |
+| Two service instances | Automated identity, shared lease and protocol routing checks against one database. |
+| Two desktop clients coauthoring | Unverified, including simultaneous changes and reconnect/recovery. |
+| Large files and production concurrency | Not qualified. Synthetic benchmarks measure provider behavior. |
 
-The Word check observes server bytes independently of Office's cache and requires
-a new Word process for reopen. Its server verifier requires a successful binary
-file save, not just HTTP or SOAP success. See [automated testing](automated-testing.md)
-for reproduction and evidence handling.
+The recorded Word trial on 2026-10-03 used Word `16.0.20430`, Tailscale HTTPS
+and PostgreSQL. Ten saves matched client ETags, all 17 binary responses passed
+the independent Office Inspectors parser, and the final download matched the
+client's SHA-256. Reopen used a new Word process. That trial used the earlier
+anonymous host.
 
-## Protocol limits
-
-Supported file-partition saves retain graph identities and validate coherency.
-Partial, multi-request and non-file partition uploads return explicit errors.
-Repeated binary QueryChanges in one request is unsupported because the response
-carries one data package. Full knowledge/filter-based incremental synchronization
-and application-specific metadata remain incomplete. No SharePoint list or search
-API is provided.
-
-File reconstruction uses the selected revision's object-group references. General
-ancestor-revision object lookup and OneNote notebook/page synchronization are not
-implemented. Buffered and streaming materialization are checked against the same
-reviewed save captures; this does not add desktop-client coverage.
-
-Multipart output preserves the reviewed SharePoint root-part preamble and MIME
-headers. HTTP tests verify content length and exact capture/output equality with
-capture enabled and disabled. Streamed durable-save tests compare graph,
-response, version and metadata against the buffered save path, and check failed
-ingestion, cancellation and expanded ZIP budgets before publication.
-
-A successful protocol lock transition or editors-table response does not establish
-two-desktop coauthoring. Provider durability does not add user authorization.
-The consuming host owns its access controls.
+A separate authenticated trial on the same date verified writer/reader access
+and revocation. Word required explicit forms-sign-in host approval. Repeated
+authenticated save/reopen and the complex PowerPoint test were confirmed by the
+project maintainer.
 
 ## Automated checks
 
-The [test runner](../tools/testing/run.py) builds the main and demo solutions,
-starts disposable PostgreSQL and two independent web hosts through Aspire, and
-runs protocol, provider, replay, demo and capture checks. The disposable run does
-not mount the development document volume.
+The [test runner](../tools/testing/run.py) starts disposable PostgreSQL and two
+hosts through Aspire. It covers protocol replay, provider consistency, quota
+races, retry/failure behavior, metadata retention and quiescent cleanup.
+Query tests reconstruct saved files from prior client knowledge and returned
+parts. CI also uses the independent [Office Inspectors parser](office-inspectors.md).
 
-Provider tests cover save receipts, identical retry, stale retry, concurrent
-publication, failed staging, unknown commit acknowledgement, lease expiry after
-lock waiting, and process termination before and after publication. Tests also
-check immutable content reads, quota and corruption failures. These process tests
-do not simulate hardware power loss or asynchronous PostgreSQL failover.
+Buffered and streaming reconstruction use the same reviewed save captures.
+HTTP tests check multipart preambles/headers, content length and capture/output
+byte equality. Durable-save tests compare streamed graph, response, versions and
+metadata with the buffered path, including ingestion failure, cancellation and
+expanded ZIP limits before publication.
 
-Budget tests also cover cross-provider admission races, deduplicated charging,
-bounded metadata history and quiescent orphan collection. Query tests reconstruct
-a saved file from prior knowledge plus returned elements, check filtered knowledge
-and whole-cell rounding, and round-trip server knowledge through the independent
-Microsoft client over HTTP. These checks do not establish Office recovery after
-graph eviction; the host does not evict protocol graph or receipt identities.
-
-CI runs the in-repo Office Inspectors parser on Linux and Windows. Its grammar is
-separate from the server serializer, and the suite checks reviewed SharePoint
-fixtures and generated responses without an external checkout. See
-[the parser guide](office-inspectors.md). PowerShell tests with
-managed Word stand-ins check wrapper behavior, ownership and cleanup logic only.
-Actual Word COM calls require the interactive Windows desktop test.
+See [automated testing](automated-testing.md) for commands and desktop test
+procedures. Hardware power loss, asynchronous database failover and Office
+recovery after graph eviction are outside the tested scenarios.
 
 ## Fixtures and generated evidence
 
-Keep only fixtures used by automated tests in `testdata/`. Their README files
-record provenance, sanitization and any rebasing needed for a fresh test document.
-Sanitized fixtures preserve protocol structure, but do not authenticate the
-original capture or establish a current desktop result.
-
-Raw SOAP/MTOM, binary traffic, saved Office files, test reports and benchmark JSON
-belong in ignored local output or CI artifacts. Review document text, compressed
-editor records and embedded Office metadata before preparing a public fixture.
-Removing SOAP URLs alone does not sanitize binary content.
-
-Use [the capture guide](capture-kit.md) for SharePoint comparison. Failed client
-runs can reveal a response shape that local parsers accept but Office rejects;
-retain their evidence privately rather than turning run journals into user docs.
+Reviewed regression fixtures live in `testdata/`; their READMEs describe
+provenance and sanitization. Raw captures, saved Office files and run reports
+belong in ignored local output or CI artifacts. Sanitize document content and
+embedded metadata as well as URLs and credentials before publishing a fixture.
+See the [capture guide](capture-kit.md).

@@ -1,107 +1,87 @@
 # Demo document library
 
-The standalone solution is `demo/CellBridge.Demo.slnx`. It contains an
-ASP.NET Core Razor Pages site and its tests. It reads the collaboration server's
-`GET /api/documents` endpoint over HTTP. It shares the sample authentication
-library and forwards the signed-in caller's cookies for each request. The
-catalog is a demo API, not an implementation of a SharePoint
-list API.
+The Razor Pages library lets you create, browse, download and open Office files
+stored by CellBridge. It runs as Aspire's `demo` resource and is available through
+the web host at `/library`.
 
 ## Run
 
 From the repository root:
 
-```powershell
+```sh
 aspire start --apphost aspire/apphost.cs --non-interactive
-aspire wait web --apphost aspire/apphost.cs --non-interactive
-aspire wait demo --apphost aspire/apphost.cs --non-interactive
-aspire describe --apphost aspire/apphost.cs --non-interactive
+aspire wait web --non-interactive
+aspire wait demo --non-interactive
+aspire describe --non-interactive
 ```
 
-Provision accounts using the [authentication guide](authentication.md), then
-open `/library` on the `web` HTTPS endpoint and sign in. Aspire supplies the collaboration server's HTTPS
-endpoint through `CollabServer__BaseUrl`. The site shows file names, sizes,
-versions, modification times and active client sessions. Search filters by file
-name. Reload the page to refresh the catalog and session counts.
+[Provision an account](authentication.md#first-setup), open
+`https://localhost:7292/library` and sign in. The library shows files you can
+read, with their size, saved version, modification time and active sessions.
+Search filters by filename. Reload to refresh the listing.
 
-Use **New document** to create a Word document, Excel workbook or PowerPoint
-presentation. Enter a name without an extension, or use the matching extension.
-Creation adds the file to the server immediately and returns to the library,
-where its Office launch and download buttons are available. Existing names are
-rejected. This uses `POST /api/documents` with JSON `{ "name": "My test", "type": "docx" }`;
-the other supported types are `xlsx` and `pptx`. It returns 201 on creation,
-400 for an invalid name/type and 409 for a duplicate name.
+## Create and edit a document
 
-Aspire's `PublicOrigin` parameter supplies the browser/Office origin,
-defaulting to `https://localhost:7292`. Desktop Office must resolve the public hostname through the client's operating
-system. Set `Parameters__PublicOrigin` before starting Aspire when testing from
-other computers. See [remote desktop testing](automated-testing.md).
+Choose **New document**, select Word, Excel or PowerPoint and enter a filename.
+CellBridge adds the file immediately. Duplicate names are rejected.
 
-Each Office link opens the original collaboration-server URL in Word, Excel or
-PowerPoint according to the extension. Download links request an attachment from
-the server. Unsupported extensions still have download links. Office must be
-installed on the computer where the link is clicked. The URI syntax follows
-[Microsoft's Office URI schemes](https://learn.microsoft.com/en-us/office/client-developer/office-uri-schemes).
+Use the Office open button to open the server URL in the matching desktop app.
+Edit and save normally. The download button retrieves the latest stored file.
 
-For an independently hosted demo, configure `CollabServer:BaseUrl`. If the browser
-and desktop Office need a different address from the server-side HTTP client,
-set `CollabServer:PublicBaseUrl` too. For another physical computer, that public
-address must resolve to the server and its HTTPS certificate must be trusted;
-`*.localhost` points to the client computer itself.
+Office must be installed on the client computer and trust the server's HTTPS
+endpoint. Word may require approval of its forms-sign-in host; see
+[Office sign-in](authentication.md#desktop-validation).
+[Client coverage](interoperability.md#client-coverage) lists tested scenarios.
 
-## Available files
+## Import existing files
 
-The library starts empty on a fresh database. Create documents from its signed-in
-UI, or use the explicit import command after provisioning an owner:
+After provisioning an owner, supply the admin command with the same database
+connection and `Storage` configuration as the web host:
 
 ```sh
 dotnet run --project tools/CellBridge.Admin -- import-directory --directory /absolute/path/to/documents --owner local:operator
 ```
 
-The directory must exist; relative paths resolve against the operator command's
-working directory. Top-level files are imported as `/shared/<filename>`; nested
-directories and Office `~$` lock files are ignored. Existing paths retain their
-saved content and ownership even if the source file or requested owner changes.
-Importing is an explicit action and never runs during web startup. The previous
-`Documents:Directory` and `Documents:SeedExamples` settings are removed. There is
-no upload form or automatic folder watcher. Automated runs create `test.docx`,
-`save-test.docx` and `save-check.docx` through the authenticated API.
+Top-level files become `/shared/<filename>`. Subdirectories and Office
+`~$` lock files are skipped. Imports create missing files only, preserving
+existing saved content and ownership.
 
-Aspire uses durable PostgreSQL storage. Office saves update the stored revision,
-not the input file on disk. Restarts preserve the resource ID and graph needed by
-the next save. An explicitly configured in-memory provider still discards edits
-on restart. See [storage configuration](storage-providers.md).
+Saves update CellBridge storage and leave the import directory unchanged.
+Aspire uses persistent PostgreSQL storage. An explicitly configured in-memory
+provider loses documents and edits on restart.
 
-## Concurrent access and identity
+## Connect another computer
 
-Each document has independent content, versions, graph identities, locks and
-editing sessions. The catalog counts client sessions, which are not necessarily
-different people. Earlier desktop evidence used the shared `officelab` identity.
-The current
-host requires sign-in and enforces persisted document grants. Authenticated
-desktop Office editing still needs live validation; see
-[authentication setup](authentication.md). Two desktop clients coauthoring one file remain unverified.
-See [interoperability coverage](interoperability.md).
+Set Aspire's `Parameters__PublicOrigin` to the HTTPS origin reachable by the
+browser and Office. The default is `https://localhost:7292`; another computer
+needs a hostname that resolves to the server and a trusted certificate.
+See [Tailscale setup](automated-testing.md#connect-the-windows-laptop-through-tailscale).
 
-A supplied ResourceID takes precedence over the document URL for every SOAP
-subrequest, including lock release. Unknown IDs fail explicitly. URL fallback
-must not redirect a request carrying an obsolete ID to another document. When
-using volatile storage, create a fresh document after restart so Office cannot
-reuse a cached identity from a deleted instance.
+For an independently hosted demo, configure `CollabServer:BaseUrl` as its
+internal API address and `CollabServer:PublicBaseUrl` as the browser/Office
+address. Aspire supplies both automatically.
 
-GET and HEAD acquire metadata and content from one revision. Catalog listing
-reads metadata only. File saves retain the graph used by later delta requests;
-partial, multi-request and non-file partition uploads remain unsupported.
+## API and document identity
+
+The standalone solution is `demo/CellBridge.Demo.slnx`.
+The library calls `GET /api/documents` and creates documents with
+`POST /api/documents` using JSON such as
+`{ "name": "My test", "type": "docx" }`. The other types are `xlsx` and
+`pptx`. Creation returns 201, invalid input returns 400 and duplicate names
+return 409. Requests use the signed-in caller's cookies and antiforgery token.
+
+A supplied protocol ResourceID takes precedence over the URL. Unknown IDs fail;
+lookup never creates a document or redirects an obsolete ID to another file.
+After restarting volatile storage, create a fresh document to get a new identity.
+GET and HEAD return content and headers from one saved revision.
 
 ## Test the demo
 
-Build while Aspire is stopped. Run the demo suite with:
+With Aspire stopped:
 
 ```sh
 dotnet test demo/CellBridge.Demo.slnx
 ```
 
-For the catalog and session HTTP checks, use the
-[isolated test runner](automated-testing.md). These checks create fresh documents
-and use the sample API. They do not launch Office or establish desktop
-coauthoring support.
+The [isolated test runner](automated-testing.md) also exercises catalog and
+session requests against live hosts.

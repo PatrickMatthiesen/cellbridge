@@ -36,15 +36,10 @@ These fixtures exposed two parser failures, now covered by regression tests:
   validation of a block when present. This is capture-derived compatibility,
   not a claim that the specification declares the whole block optional.
 
-Passing these tests does not implement server-side saves: PutChanges still
-returns RequestNotSupported. Next work is applying the partition object graph
-and returning resulting knowledge, using the paired successful save responses
-as evidence. Do not restore the largest-BLOB extraction heuristic.
-
-Validation: 122 offline .NET tests passed, with two opt-in live tests skipped.
-Both live interop tests then passed against the running Aspire server at
-https://localhost:7292. The generated web-aspire.dev.localhost name does not
-resolve through this laptop's OS DNS; no hosts or trust settings were changed.
+These fixtures exercise parsing of paired exchanges. Server-side save regressions
+separately reconstruct documents from the partition graph and verify publication.
+See [protocol support and compatibility](../../../../docs/interoperability.md)
+for current save support and client coverage.
 
 ## Public fixture sanitization
 

@@ -24,8 +24,7 @@ Each top-level parser type has its own file under
 | `FssHttpD` | Node objects and ZIP records in `Nodes` and `Zip` |
 | `OneStore` | Basic types, property values and object streams in separate subdirectories |
 
-All types retain the `CellBridge.OfficeInspectors.Parsers` namespace and their
-upstream names. The directories organize the source without changing the API.
+Types retain the `CellBridge.OfficeInspectors.Parsers` namespace and upstream names.
 
 ## Run the checks
 
@@ -33,9 +32,8 @@ upstream names. The directories organize the source without changing the API.
 dotnet test tests/OfficeInspectors.Adapter
 ```
 
-The main solution, disposable Aspire test runner and Windows/Linux CI jobs all
-include these checks. Fixtures copy to the test output directory; no source-tree
-search or external checkout is needed. The suite compares reviewed SharePoint
+The main solution, test runner and Windows/Linux CI include these checks.
+Fixtures copy to the test output directory. The suite compares reviewed SharePoint
 13/11 payloads and generated responses, verifies storage-index and manifest
 references, rejects truncated messages and checks concurrent editors-table parses.
 
@@ -57,9 +55,8 @@ decodes the serial reassignment records handled by Microsoft's OfficeDev test
 suites, including element IDs, unsigned serial values and declared-length checks.
 These records are absent from the public August 2024 Put Changes description;
 their grammar follows the OfficeDev implementation and observed Word traffic.
-It decodes the
-standard QueryAccess read/write results and retains additional access results as
-opaque objects. Consuming an unknown extension does not establish its semantics.
+It decodes standard QueryAccess read/write results and retains additional access
+results as opaque objects, without interpreting their semantics.
 OneStore interpretation is opt-in through `OfficeInspector.ParseResponse`.
 
 Each input stream owns its parser state. Editors-table decompression reads the
@@ -68,6 +65,4 @@ limit. Truncation and unsupported grammar return an error and consumed offset.
 The inherited grammars do not cover every Office format or every protocol
 extension. This diagnostic parser does not replace the server's request validation.
 
-A passing parse or fixture replay does not establish desktop open/save/reopen or
-coauthoring. Those still need the evidence described in
-[interoperability coverage](interoperability.md).
+See [client coverage](interoperability.md#client-coverage) for desktop validation.
