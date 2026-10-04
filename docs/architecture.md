@@ -68,6 +68,28 @@ against the retained graph and materialize the Office package through
 `PartitionGraphSnapshot`. Selecting the largest binary object cannot recover a
 valid file partition.
 
+The selected revision manifest must identify the revision named by the cell and
+storage index. Materialization uses only that revision's explicitly referenced
+object groups. General lookup through ancestor revisions is not implemented;
+a missing object fails even if an unrelated retained revision contains it. A
+self-contained graph can still materialize when its base revision is unavailable,
+but retention analysis blocks compaction until those dependencies resolve.
+
+Binary parsing uses bounded memory views for intermediate object bodies, while
+snapshots and public parsed content own defensive copies of mutable input bytes.
+Array materialization validates the graph and allocates one exact output buffer.
+`MaterializeTo` and `MaterializeToAsync` write to non-seekable destinations and
+leave them open. Both validate references, cycles, represented sizes and the byte
+limit before writing; structural failures leave the destination untouched. I/O
+failure or cancellation during writing can leave partial output. Callers of the
+mutable `ObjectGroupGraph` must avoid changing it during materialization.
+
+Data-element framing and diagnostic object parsing allow 33 nested stream objects.
+Object graphs allow 256 objects on an active path and at most one million visits
+per materialization, including repeated references. The traversal budget also
+bounds zero-byte graphs that would otherwise expand without reaching a byte limit.
+These checks complement the host's request and retained-state budgets.
+
 ## Save publication
 
 Content preparation and immutable-object writes occur before the document

@@ -118,6 +118,7 @@ public sealed class StreamObjectHeaderStart16Bit : StreamObjectHeaderStart
     /// <summary>Creates a 16-bit header start for the given type and payload length.</summary>
     public StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart type, int length)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
         if (length > Max16BitLength)
         {
             throw new ArgumentOutOfRangeException(nameof(length),
@@ -199,6 +200,7 @@ public sealed class StreamObjectHeaderStart32Bit : StreamObjectHeaderStart
     /// <summary>Creates a 32-bit header start for the given type and payload length.</summary>
     public StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart type, int length)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
         HeaderType = HeaderType32Bit;
         Type = type;
         Compound = CompoundTypes.Contains(type) ? 1 : 0;
@@ -248,6 +250,8 @@ public sealed class StreamObjectHeaderStart32Bit : StreamObjectHeaderStart
         if (Length == LargeLengthSentinel)
         {
             LargeLength = Compact64bitInt.Deserialize(reader);
+            if (LargeLength.Value > int.MaxValue)
+                throw new InvalidDataException($"Stream object length {LargeLength.Value} exceeds the supported buffer size.");
             Length = (int)LargeLength.Value;
         }
         else

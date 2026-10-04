@@ -34,6 +34,11 @@ carries one data package. Full knowledge/filter-based incremental synchronizatio
 and application-specific metadata remain incomplete. No SharePoint list or search
 API is provided.
 
+File reconstruction uses the selected revision's object-group references. General
+ancestor-revision object lookup and OneNote notebook/page synchronization are not
+implemented. Buffered and streaming materialization are checked against the same
+reviewed save captures; this does not add desktop-client coverage.
+
 A successful protocol lock transition or editors-table response does not establish
 two-desktop coauthoring. Provider durability does not add user authorization.
 The consuming host owns its access controls.

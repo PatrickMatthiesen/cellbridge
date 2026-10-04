@@ -178,6 +178,36 @@ public sealed class FilePartitionSaveTests
     }
 
     [Fact]
+    public void MismatchedRevisionManifestRejectsSaveWithoutPublishingState()
+    {
+        var document = new DocumentStore().Put("/test.docx", MinimalDocx.Create("before"));
+        var graph = document.FilePartition.FileGraph;
+        var bytes = document.Content.ToArray();
+        var version = document.ContentVersion;
+        var knowledge = document.FilePartition.KnowledgeSequence;
+        var request = Proposal(document, MinimalDocx.Create("rejected"));
+        var manifest = request.DataElementPackage!.DataElements.Single(
+            e => e.DataElementType == DataElementType.RevisionManifestDataElementData);
+        var reader = new BinaryReaderEx(manifest.Data!);
+        _ = StreamObjectHeaderStart.Parse(reader);
+        var offset = reader.Position;
+        var revision = ExGuid.Deserialize(reader);
+        var wrongId = new BinaryWriterEx();
+        new ExGuid(revision.Value, Guid.NewGuid()).Serialize(wrongId);
+        wrongId.ToArray().CopyTo(manifest.Data!, offset);
+
+        var result = Assert.Single(CellBinaryRequestExecutor.Execute(document, document.FilePartition, request,
+            CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write).SubResponses);
+
+        Assert.True(result.Status);
+        Assert.Equal((ulong)CellErrorCode.InvalidObject, result.Error!.ErrorCode);
+        Assert.Same(graph, document.FilePartition.FileGraph);
+        Assert.Equal(bytes, document.Content);
+        Assert.Equal(version, document.ContentVersion);
+        Assert.Equal(knowledge, document.FilePartition.KnowledgeSequence);
+    }
+
+    [Fact]
     public void CapturedSavesApplyInSequenceIncludingRetainedDeltaObjects()
     {
         var document = new DocumentStore().Put("/test.docx", MinimalDocx.Create());
