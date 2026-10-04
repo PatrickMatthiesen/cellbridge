@@ -40,11 +40,42 @@ its own identities and serials. File-partition PutChanges applies graph changes
 and validates coherency before publication. Unsupported upload modes return
 explicit protocol errors.
 
-The independent Microsoft parser and sanitized fixtures check serialization and
-materialization. They cannot prove that a particular desktop Office build accepts
-all responses or that two users can coauthor. See
-[interoperability coverage](interoperability.md) and
-[testing instructions](automated-testing.md).
+See [protocol support and compatibility](interoperability.md) for implemented
+operations and tested clients.
+
+## Synchronization knowledge
+
+File queries compare client GUID/serial ranges against stored metadata before
+loading payloads. Mapping serials identify mappings independently of their target
+elements. New elements receive server serials above the stored high-water mark;
+retries preserve existing serials. Reusing a nonnull mapping serial for a different
+key or target fails before publication. Snapshots retain this metadata and reject
+incomplete state. Ambiguous element serials cause conservative retransmission.
+These rules follow [data-element serial assignment](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/9db15fa4-0dc2-4b17-b091-d33886d8a0f6)
+and [storage-index mapping knowledge](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/f5724986-bd0f-488d-9b85-7d5f954d8e9a).
+The PutChanges writer retains the observed legacy serial-reassignment stream shape.
+
+Waterline-only knowledge does not establish possession. Whole-cell rounding returns
+all visible elements when any are unknown. Filtered knowledge excludes withheld
+elements unless the request includes them explicitly. Unknown knowledge
+specializations or more than 10,000 decoded entries fall back to a complete
+response after validating the exchange. Partial ranges never suppress payloads;
+malformed framing fails. Optional unsupported filters are ignored unless
+`FailIfUnsupported` requires an error. See the [Query Changes rules](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/5b8d1d29-0adf-4b29-b3d1-1a1fe8590642).
+
+## Graph retention
+
+The host keeps graph history because later edits can reference earlier revisions.
+Even a constant-size file can have a growing chain of required parts. Object-group
+metadata records [change frequencies](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/507c6b42-2772-4319-b530-8fbbf4d34afd)
+and carries no references. `AnalyzeRetention` resolves references within the
+declaring revision and its explicit base chain, following the
+[protocol data model](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/6c7e4447-6ccd-4764-8dbc-17a382fb631d).
+Incomplete analysis reports a lower bound only.
+
+The standalone `Compact` API rejects incomplete analysis. The HTTP host does
+not invoke it; saves reject at a storage quota rather than deleting required
+history. See [storage limits](storage-providers.md#limits-and-qualification).
 
 ## Authorities
 

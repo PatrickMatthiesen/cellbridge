@@ -52,9 +52,8 @@ See [authentication and permissions](authentication.md).
 | `demo/CellBridge.Demo` | Razor Pages client of the sample HTTP catalog |
 | `aspire/apphost.cs` | PostgreSQL, schema initialization, sample host, demo and optional capture proxy |
 
-The binary library has no ASP.NET Core or database dependency. Provider
-contracts have no protocol dependency. The hosting library contains neither
-sample package creation nor Aspire orchestration.
+The binary library is independent of ASP.NET Core and storage. Provider contracts
+are independent of the protocols. The sample owns file creation and Aspire setup.
 
 ## Document identity and partitions
 
@@ -64,33 +63,21 @@ lookup failure. Lookup does not create a document or redirect to a matching path
 
 File contents, application metadata and the editors table have independent
 partition identities, serials and synchronization knowledge. File saves merge
-against the retained graph and materialize the Office package through
-`PartitionGraphSnapshot`. Selecting the largest binary object cannot recover a
-valid file partition.
+against the retained graph and reconstruct the Office package through
+`PartitionGraphSnapshot`. Reconstruction follows graph references rather than
+choosing an individual binary object by size.
 
 ## Save publication
 
-Content preparation and immutable-object writes occur before the document
-transaction. Publication takes the document's row lock, reads the current state
-and authoritative database time, rechecks Write permission, graph coherency and lease ownership, and commits
-one state snapshot with the accepted response receipt. Different documents can
-progress independently. Session and lease changes use the same coordination.
+The service prepares immutable content before acquiring the document's row lock.
+It then reads the current state and database time, rechecks Write permission,
+coherency and leases, and commits the selected revision with a save receipt.
+Different documents can progress independently. Sessions use the same coordination.
 
-Readers acquire one state snapshot for both content and headers. A concurrent
-save cannot mix one revision's length or ETag with another revision's bytes.
-Published objects remain available until quiescent collection over every retained
-snapshot, allowing detached readers and later graph updates to reference prior
-data. PostgreSQL bounds JSON history independently of content versions. A retry
-resolves through its stored identity and digest rather than publishing a second
-version. Shared accounting admits object bytes and metadata atomically; a quota
-failure preserves the current revision.
+Downloads take content and headers from one snapshot. Receipts identify duplicate
+saves; shared budgets reject excessive growth before selecting a new revision.
+Prior file parts remain available for subsequent edits and detached readers.
 
-File queries select unknown GUID/serial ranges from persisted metadata before
-reading payloads. Foreign scopes and historical versions remain unsupported.
-Automatic graph pruning is disabled until references and stale-client recovery
-are qualified.
-
-[Storage providers](storage-providers.md) documents the contracts, failure
-behavior, migration, backup and retention requirements. Parsing and graph
-materialization still buffer data and can allocate several copies of large files.
-Streaming content storage alone does not establish large-file performance.
+[Storage providers](storage-providers.md) explains publication, retries, maintenance
+and provider contracts. The [protocol guide](protocol-version-decision.md#synchronization-knowledge)
+explains changed-part selection and graph retention.
