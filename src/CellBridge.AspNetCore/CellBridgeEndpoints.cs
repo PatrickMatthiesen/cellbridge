@@ -328,26 +328,29 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
         response.Responses.Add(fileResponse);
     }
 
-    string envelope = response.ToSoapEnvelope();
     if (options.CaptureDirectory is { } summaryDirectory)
         await File.WriteAllTextAsync(Path.Combine(summaryDirectory, captureId + ".summary.json"),
-            WireCaptureSummary.Create(request, response));
-    log.LogInformation("FSSHTTP response id={CaptureId} chars={Length}", captureId, envelope.Length);
+            WireCaptureSummary.Create(request, response), ctx.RequestAborted);
 
     if (ctx.Request.ContentType?.StartsWith("multipart/", StringComparison.OrdinalIgnoreCase) == true)
     {
-        var mtom = response.ToMtomMessage();
+        var mtom = response.PrepareMtomMessage();
         if (options.CaptureDirectory is { } responseCaptureDirectory)
         {
-            await File.WriteAllBytesAsync(Path.Combine(responseCaptureDirectory, captureId + ".response.bin"), mtom.Body);
-            await File.WriteAllTextAsync(Path.Combine(responseCaptureDirectory, captureId + ".response.content-type.txt"), mtom.ContentType);
+            await using (var capture = new FileStream(Path.Combine(responseCaptureDirectory, captureId + ".response.bin"),
+                FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous))
+                await mtom.WriteToAsync(capture, ctx.RequestAborted);
+            await File.WriteAllTextAsync(Path.Combine(responseCaptureDirectory, captureId + ".response.content-type.txt"), mtom.ContentType, ctx.RequestAborted);
         }
         ctx.Response.ContentType = mtom.ContentType;
-        ctx.Response.ContentLength = mtom.Body.Length;
-        await ctx.Response.Body.WriteAsync(mtom.Body);
+        ctx.Response.ContentLength = mtom.ContentLength;
+        log.LogInformation("FSSHTTP response id={CaptureId} bytes={Length}", captureId, mtom.ContentLength);
+        await mtom.WriteToAsync(ctx.Response.Body, ctx.RequestAborted);
         return Results.Empty;
     }
 
+    string envelope = response.ToSoapEnvelope();
+    log.LogInformation("FSSHTTP response id={CaptureId} chars={Length}", captureId, envelope.Length);
     if (options.CaptureDirectory is { } soapCaptureDirectory)
     {
         await File.WriteAllTextAsync(Path.Combine(soapCaptureDirectory, captureId + ".response.bin"), envelope);

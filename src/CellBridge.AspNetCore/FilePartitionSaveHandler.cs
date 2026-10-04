@@ -11,27 +11,60 @@ public static class FilePartitionSaveHandler
     public static FsshttpbSubResponse Apply(StoredDocument document, DocumentPartition partition,
         FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null)
     {
+        limits ??= new StorageLimits();
+        lock (document)
+        {
+            var prepared = Prepare(document, partition, subRequest, package, limits);
+            if (prepared.Graph is null) return prepared.Response;
+            try
+            {
+                byte[] bytes;
+                try { bytes = prepared.Graph.Materialize(limits.MaxDocumentBytes); }
+                catch (GraphMaterializationLimitException)
+                { throw new StorageQuotaExceededException("document bytes", limits.MaxDocumentBytes + 1, limits.MaxDocumentBytes); }
+                using var stream = new MemoryStream(bytes, writable: false);
+                ValidateDocument(stream, document.Url, limits.MaxDocumentBytes);
+                if (!prepared.Repeat) document.CommitFileRevision(prepared.Graph, bytes, prepared.KnowledgeSequence);
+                return prepared.Response;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
+            {
+                return Failure(subRequest.RequestId, CellErrorCode.InvalidObject, ex.Message);
+            }
+        }
+    }
+
+    internal sealed record PreparedFileSave(FsshttpbSubResponse Response,
+        PartitionGraphSnapshot? Graph = null, ulong KnowledgeSequence = 0, bool Repeat = false);
+
+    private static PreparedFileSave Reject(ulong id, CellErrorCode code, string message)
+        => new(Failure(id, code, message));
+
+    internal static PreparedFileSave Prepare(StoredDocument document, DocumentPartition partition,
+        FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null,
+        PartitionGraphSnapshot? currentGraph = null)
+    {
         if (partition.Kind != DocumentPartitionKind.FileContents ||
             subRequest.Data is not PutChangesSubRequestData put || package is null)
-            return Failure(subRequest.RequestId, CellErrorCode.RequestNotSupported,
+            return Reject(subRequest.RequestId, CellErrorCode.RequestNotSupported,
                 "A file partition PutChanges request requires a data element package.");
         // MS-FSSHTTPB 2.2.2.1.4: abort-on-failure and the legacy content-version
         // item are ignored. 2.2.2.1.4.1 also requires ignoring reserved bits.
         // Excel sets reserved bit 15; it does not request a partial upload.
         if ((put.Flags & ~0x59) != 0 || (put.AdditionalFlagsBits & 0x38) != 0)
-            return Failure(subRequest.RequestId, CellErrorCode.RequestNotSupported,
+            return Reject(subRequest.RequestId, CellErrorCode.RequestNotSupported,
                 "Partial, multi-request and alternate coherency modes are not implemented.");
 
         lock (document)
         {
             try
             {
-                var current = partition.FileGraph;
+                var current = currentGraph ?? partition.FileGraph;
                 bool repeat = put.StorageIndex.Equals(current.StorageIndex);
                 if (!repeat && !current.MatchesPutChanges(
                     current.StorageIndexes.Concat(package.DataElements), put.StorageIndex, put.ExpectedStorageIndex,
                     (put.Flags & 1) != 0))
-                    return Failure(subRequest.RequestId, CellErrorCode.CoherencyFailure,
+                    return Reject(subRequest.RequestId, CellErrorCode.CoherencyFailure,
                         "The expected storage index is no longer current.");
                 var existing = current.ElementMetadata.ToDictionary(x => x.DataElementExtendedGuid);
                 limits ??= new StorageLimits();
@@ -41,7 +74,7 @@ public static class FilePartitionSaveHandler
                 StorageLimits.Check("graph bytes", current.PayloadBytes + additions.Sum(e => (long)(e.Data?.Length ?? 0)), limits.MaxGraphBytes);
                 foreach (var element in package.DataElements)
                     if (current.ConflictsWith(element))
-                        return Failure(subRequest.RequestId, CellErrorCode.InvalidObject,
+                        return Reject(subRequest.RequestId, CellErrorCode.InvalidObject,
                             "A data element identifier was reused for different content.");
                 ulong sequence = partition.KnowledgeSequence;
                 var serialGuid = partition.ProtocolIdentity.SerialGuid;
@@ -70,12 +103,6 @@ public static class FilePartitionSaveHandler
                 var next = current.Merge(accepted, put.StorageIndex);
                 StorageLimits.Check("graph elements", next.ElementCount, limits.MaxGraphElements);
                 StorageLimits.Check("graph bytes", next.PayloadBytes, limits.MaxGraphBytes);
-                byte[] bytes;
-                try { bytes = next.Materialize(limits.MaxDocumentBytes); }
-                catch (GraphMaterializationLimitException)
-                { throw new StorageQuotaExceededException("document bytes", limits.MaxDocumentBytes + 1, limits.MaxDocumentBytes); }
-                ValidateDocument(bytes, document.Url, limits.MaxDocumentBytes);
-
                 // Prepare the response before changing visible document state.
                 var knowledge = CreateQueryData(partition, next, sequence);
                 var writer = new BinaryWriterEx();
@@ -95,12 +122,11 @@ public static class FilePartitionSaveHandler
                         KnowledgeBytes = writer.ToArray(),
                     },
                 };
-                if (!repeat) document.CommitFileRevision(next, bytes, sequence);
-                return result;
+                return new(result, next, sequence, repeat);
             }
             catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
             {
-                return Failure(subRequest.RequestId, CellErrorCode.InvalidObject, ex.Message);
+                return Reject(subRequest.RequestId, CellErrorCode.InvalidObject, ex.Message);
             }
         }
     }
@@ -118,18 +144,9 @@ public static class FilePartitionSaveHandler
             mappingSerials: graph.MappingSerials.Values.SelectMany(s => s)),
     };
 
-    private static void ValidateDocument(byte[] content, string documentUrl, long maxExpandedBytes)
+    private static void ValidateDocument(Stream content, string documentUrl, long maxExpandedBytes)
     {
-        using var archive = new ZipArchive(new MemoryStream(content), ZipArchiveMode.Read);
-        var mainPart = Path.GetExtension(documentUrl).ToLowerInvariant() switch
-        {
-            ".docx" => "word/document.xml",
-            ".xlsx" => "xl/workbook.xml",
-            ".pptx" => "ppt/presentation.xml",
-            _ => throw new InvalidDataException("The proposed file type is not supported."),
-        };
-        if (archive.GetEntry("[Content_Types].xml") is null || archive.GetEntry(mainPart) is null)
-            throw new InvalidDataException("The proposed package does not match the document's file type.");
+        using var archive = OpenDocumentArchive(content, documentUrl);
         // Read all parts before committing so truncated ZIP members cannot become stored content.
         long expanded = 0;
         var buffer = new byte[65536];
@@ -141,6 +158,53 @@ public static class FilePartitionSaveHandler
             int read;
             while ((read = stream.Read(buffer)) != 0)
             {
+                expanded = checked(expanded + read);
+                StorageLimits.Check("expanded package bytes", expanded, maxExpandedBytes);
+            }
+        }
+    }
+
+    private static ZipArchive OpenDocumentArchive(Stream content, string documentUrl)
+    {
+        content.Position = 0;
+        var archive = new ZipArchive(content, ZipArchiveMode.Read, leaveOpen: true);
+        try
+        {
+            var mainPart = Path.GetExtension(documentUrl).ToLowerInvariant() switch
+            {
+                ".docx" => "word/document.xml",
+                ".xlsx" => "xl/workbook.xml",
+                ".pptx" => "ppt/presentation.xml",
+                _ => throw new InvalidDataException("The proposed file type is not supported."),
+            };
+            if (archive.GetEntry("[Content_Types].xml") is null || archive.GetEntry(mainPart) is null)
+                throw new InvalidDataException("The proposed package does not match the document's file type.");
+            return archive;
+        }
+        catch
+        {
+            archive.Dispose();
+            throw;
+        }
+    }
+
+    internal static async ValueTask ValidateDocumentAsync(Stream content, string documentUrl,
+        long maxExpandedBytes, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var archive = OpenDocumentArchive(content, documentUrl);
+        long expanded = 0;
+        var buffer = new byte[65536];
+        foreach (var entry in archive.Entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (entry.Length > maxExpandedBytes - expanded)
+                throw new StorageQuotaExceededException("expanded package bytes", checked(expanded + entry.Length), maxExpandedBytes);
+            await using var stream = entry.Open();
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cancellationToken)) != 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
                 expanded = checked(expanded + read);
                 StorageLimits.Check("expanded package bytes", expanded, maxExpandedBytes);
             }

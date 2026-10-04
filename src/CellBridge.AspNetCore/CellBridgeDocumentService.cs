@@ -162,6 +162,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         if (!FileQueryResponseBuilder.Supports(request, cell)) return FileQueryResponseBuilder.Unsupported(operation.RequestId);
         var metadata = partition.Elements.Select(e => new DataElement((DataElementType)e.Type,
             StorageIds.Restore(e.Id), new SerialNumber(e.Serial.Guid, e.Serial.Value))).ToArray();
+        _ = ContentStoreReader.UniqueHandles(partition.Elements.Select(e => e.Payload));
         var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         var mappingSerials = new Dictionary<ExGuid, IReadOnlyList<SerialNumber>>();
         foreach (var stored in partition.Elements.Where(e => e.Type == (uint)DataElementType.StorageIndexDataElementData))
@@ -186,12 +187,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         async ValueTask<byte[]> ReadPayloadAsync(ContentHandle handle)
         {
             if (payloads.TryGetValue(handle.Key, out var bytes)) return bytes;
-            await using var source = await provider.Content.OpenReadAsync(handle, cancellationToken);
-            using var output = new MemoryStream();
-            await source.CopyToAsync(output, cancellationToken);
-            bytes = output.ToArray();
-            if (bytes.LongLength != handle.Length || Convert.ToHexStringLower(SHA256.HashData(bytes)) != handle.Sha256)
-                throw new StorageCorruptionException("Query payload failed integrity verification.");
+            bytes = await provider.Content.ReadVerifiedAsync(handle, provider.Limits.MaxObjectBytes, cancellationToken);
             payloads.Add(handle.Key, bytes);
             return bytes;
         }
@@ -217,11 +213,43 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             if (!Access(actor, before).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), before);
             if (before.Receipts.FirstOrDefault(r => r.OperationKey == key) is { } prior)
                 return await RepeatAsync(before, prior, digest, operation.RequestId, actor, cancellationToken);
-            var document = await StoredDocument.RestoreAsync(before, provider.Content, cancellationToken);
+            var document = StoredDocument.RestoreMetadata(before, DateTime.UtcNow);
+            var currentGraph = await DocumentPartition.RestoreFileGraphAsync(before, provider.Content, provider.Limits, cancellationToken);
             StorageLimits.Check("save receipts", before.Receipts.Length + 1L, provider.Limits.MaxSaveReceipts);
-            var result = FilePartitionSaveHandler.Apply(document, document.FilePartition, operation, package, provider.Limits);
+            var prepared = FilePartitionSaveHandler.Prepare(document, document.FilePartition, operation, package,
+                provider.Limits, currentGraph);
+            var result = prepared.Response;
             if (result.Status) return Wrap(result, before);
-            var candidate = await document.CaptureAsync(provider.Content, before.Coordination, before.Receipts, cancellationToken);
+            DocumentState candidate;
+            try
+            {
+                uint version = prepared.Repeat ? before.ContentVersion : checked(before.ContentVersion + 1);
+                await using var staging = OpenSaveStagingStream();
+                try { await prepared.Graph!.MaterializeToAsync(staging, provider.Limits.MaxDocumentBytes, cancellationToken); }
+                catch (GraphMaterializationLimitException)
+                { throw new StorageQuotaExceededException("document bytes", provider.Limits.MaxDocumentBytes + 1, provider.Limits.MaxDocumentBytes); }
+                await FilePartitionSaveHandler.ValidateDocumentAsync(staging, document.Url,
+                    provider.Limits.MaxDocumentBytes, cancellationToken);
+                if (prepared.Repeat)
+                    candidate = before;
+                else
+                {
+                    staging.Position = 0;
+                    var handle = await provider.Content.WriteAsync(staging, cancellationToken);
+                    var file = await DocumentPartition.CaptureFileGraphAsync(before.Partitions.Single(p => p.Kind == 0),
+                        prepared.Graph!, prepared.KnowledgeSequence, handle, provider.Content, cancellationToken);
+                    candidate = before with
+                    {
+                        Content = handle, ContentVersion = version,
+                        Partitions = before.Partitions.Select(p => p.Kind == 0 ? file : p.Kind == 1 ? p with
+                            { Knowledge = unchecked(p.Knowledge + 1) } : p).ToImmutableArray(),
+                    };
+                }
+            }
+            catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
+            {
+                return Wrap(Failure(operation.RequestId, CellErrorCode.InvalidObject, ex.Message), before);
+            }
             var receiptResponse = new FsshttpbResponse();
             receiptResponse.SubResponses.Add(result);
             using var receiptStream = new MemoryStream(receiptResponse.ToByteArray());
@@ -297,16 +325,38 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             return Wrap(Failure(requestId, CellErrorCode.InvalidObject, "An accepted storage index was reused for a different operation."), state);
         if (state.ContentVersion != receipt.ContentVersion)
             return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted operation has been superseded by a later revision."), state);
-        await using var stream = await provider.Content.OpenReadAsync(receipt.Response ??
-            throw new StorageCorruptionException("The current save receipt has no response."), cancellationToken);
-        using var buffer = new MemoryStream();
-        await stream.CopyToAsync(buffer, cancellationToken);
-        var response = FsshttpbResponse.Deserialize(new BinaryReaderEx(buffer.ToArray()));
-        response.SubResponses.Single().RequestId = requestId;
+        var bytes = await provider.Content.ReadVerifiedAsync(receipt.Response ??
+            throw new StorageCorruptionException("The current save receipt has no response."),
+            provider.Limits.MaxObjectBytes, cancellationToken);
+        FsshttpbResponse response;
+        try
+        {
+            var reader = new BinaryReaderEx(bytes);
+            response = FsshttpbResponse.Deserialize(reader);
+            if (reader.Remaining != 0 || response.SubResponses.Count != 1 ||
+                response.SubResponses[0].RequestType != RequestTypes.PutChanges || response.SubResponses[0].Status)
+                throw new StorageCorruptionException("The save receipt is not a complete successful PutChanges response.");
+        }
+        catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or FormatException or ArgumentException or OverflowException)
+        {
+            throw new StorageCorruptionException("The saved response receipt contains malformed binary data.", ex);
+        }
+        response.SubResponses[0].RequestId = requestId;
         return new(response, state);
     }
 
     private ValueTask<DocumentState> CurrentAsync(Guid id, CancellationToken cancellationToken) => GetCurrentAsync(id, cancellationToken);
+
+    private static FileStream OpenSaveStagingStream()
+    {
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew, Access = FileAccess.ReadWrite, Share = FileShare.None,
+            BufferSize = 65536, Options = FileOptions.Asynchronous | FileOptions.DeleteOnClose,
+        };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        return new FileStream(Path.Combine(Path.GetTempPath(), "cellbridge-save-" + Guid.NewGuid().ToString("N") + ".tmp"), options);
+    }
     private ValueTask<(DocumentState State, DateTime Now)> ExpireEditorsAsync(Guid id, CellBridgeActor actor, CancellationToken cancellationToken) =>
         provider.State.TransitionAsync(id, (current, now) =>
         {

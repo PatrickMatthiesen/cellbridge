@@ -91,11 +91,9 @@ public sealed partial class PartitionGraphSnapshot
                             break;
                         case DataElementType.RevisionManifestDataElementData:
                             var start = StreamObjectHeaderStart.Parse(reader);
-                            var fixedBody = new BinaryReaderEx(ReadBody(reader, start, "revision"));
-                            _ = ExGuid.Deserialize(fixedBody);
-                            var baseRevision = ExGuid.Deserialize(fixedBody);
-                            if (!baseRevision.IsNull) EnqueueRevision(baseRevision);
+                            reader.Skip(start.Length);
                             var manifest = ParseRevisionManifest(element);
+                            if (!manifest.BaseRevision.IsNull) EnqueueRevision(manifest.BaseRevision);
                             var declaredObjects = RevisionObjects(manifest.Revision);
                             foreach (var group in manifest.ObjectGroups) pending.Enqueue(group);
                             while (reader.Remaining > 0)
@@ -151,11 +149,7 @@ public sealed partial class PartitionGraphSnapshot
                                 throw new InvalidDataException("Revision mapping does not match its target revision.");
                             var objects = manifest.ObjectGroups.SelectMany(group => ObjectGroupDataElement.Parse(
                                 RequireElement(_elements, group, DataElementType.ObjectGroupDataElementData, "object group")).Objects).ToArray();
-                            var reader = new BinaryReaderEx(element.Data!);
-                            var header = StreamObjectHeaderStart.Parse(reader);
-                            var body = new BinaryReaderEx(ReadBody(reader, header, "revision"));
-                            _ = ExGuid.Deserialize(body);
-                            info = (ExGuid.Deserialize(body), objects);
+                            info = (manifest.BaseRevision, objects);
                             revisionObjects.Add(revision, info);
                         }
                         foreach (var item in info.Objects) declared.Add(item.ObjectGuid);

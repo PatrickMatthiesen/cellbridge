@@ -55,6 +55,54 @@ public sealed class PartitionGraphSnapshotTests
     }
 
     [Fact]
+    public void SelectedRevisionManifestMustMatchTheMappingKey()
+    {
+        var identity = CreateIdentity();
+        var elements = FileContentPartitionBuilder.BuildQueryChangesResponse(1, [1, 2, 3], identity, 1)
+            .DataElementPackage!.DataElements;
+        var manifest = elements.Single(e => e.DataElementExtendedGuid.Equals(identity.RevisionManifestGuid));
+        var reader = new BinaryReaderEx(manifest.Data!);
+        var header = StreamObjectHeaderStart.Parse(reader);
+        var body = new BinaryWriterEx();
+        new ExGuid(identity.RevisionId.Value, Guid.NewGuid()).Serialize(body);
+        ExGuid.Null.Serialize(body);
+        Assert.Equal(header.Length, body.Length);
+        body.ToArray().CopyTo(manifest.Data!, reader.Position);
+
+        var error = Assert.Throws<InvalidDataException>(() =>
+            PartitionGraphSnapshot.Create(elements, identity.ObjectDataBlobGuid));
+        Assert.Contains("Revision mapping does not match", error.Message);
+    }
+
+    [Fact]
+    public async Task CapturedDeltaSnapshotsStreamIdenticalBytesAndOwnTheirInputBuffers()
+    {
+        var firstElements = ReadFixture("save-first");
+        var secondElements = ReadFixture("save-second");
+        var first = PartitionGraphSnapshot.Create(firstElements,
+            new(1, Guid.Parse("d4b03a71-d96a-49c0-914f-0894afd37295")));
+        var next = first.Merge(secondElements,
+            new(1, Guid.Parse("6fba7790-4e0a-4e18-a34e-f7716c3c0680")));
+        var firstBytes = first.Materialize();
+        var nextBytes = next.Materialize();
+        foreach (var element in firstElements.Concat(secondElements))
+        {
+            element.DataElementExtendedGuid.Guid = Guid.Empty;
+            if (element.Data is not null) Array.Fill(element.Data, (byte)255);
+        }
+
+        foreach (var (snapshot, expected) in new[] { (first, firstBytes), (next, nextBytes) })
+        {
+            using var sync = new MemoryStream();
+            Assert.Equal(expected.Length, snapshot.MaterializeTo(sync, expected.Length));
+            Assert.Equal(expected, sync.ToArray());
+            using var asynchronous = new MemoryStream();
+            Assert.Equal(expected.Length, await snapshot.MaterializeToAsync(asynchronous, expected.Length));
+            Assert.Equal(expected, asynchronous.ToArray());
+        }
+    }
+
+    [Fact]
     public void CapturedDeltaGraphRestorationIsIndependentOfRowOrder()
     {
         var first = PartitionGraphSnapshot.Create(ReadFixture("save-first"), new ExGuid(1, Guid.Parse("d4b03a71-d96a-49c0-914f-0894afd37295")));

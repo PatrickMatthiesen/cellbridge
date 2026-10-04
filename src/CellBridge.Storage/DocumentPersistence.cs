@@ -71,17 +71,13 @@ public sealed partial class StoredDocument
     public static async ValueTask<StoredDocument> RestoreAsync(DocumentState state, IContentStore content,
         CancellationToken cancellationToken = default)
     {
-        var handles = state.Partitions.Where(p => p.Kind == 0).SelectMany(p => p.Elements.Select(e => e.Payload).Append(p.Content))
-            .Append(state.Content).DistinctBy(h => h.Key);
+        _ = ContentStoreReader.UniqueHandles(StorageReferences.Handles(state));
+        var handles = ContentStoreReader.UniqueHandles(state.Partitions.Where(p => p.Kind == 0)
+            .SelectMany(p => p.Elements.Select(e => e.Payload).Append(p.Content)).Append(state.Content));
         var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         foreach (var handle in handles)
         {
-            await using var source = await content.OpenReadAsync(handle, cancellationToken);
-            using var target = new MemoryStream();
-            await source.CopyToAsync(target, cancellationToken);
-            var bytes = target.ToArray();
-            if (bytes.LongLength != handle.Length || Convert.ToHexStringLower(SHA256.HashData(bytes)) != handle.Sha256)
-                throw new StorageCorruptionException("Referenced content failed integrity verification.");
+            var bytes = await content.ReadVerifiedAsync(handle, cancellationToken: cancellationToken);
             payloads.Add(handle.Key, bytes);
         }
         return new StoredDocument(state, payloads);
@@ -121,6 +117,45 @@ public sealed partial class StoredDocument
 public sealed partial class DocumentPartition
 {
     private PartitionState? _sourceState;
+
+    /// <summary>Verifies the retained graph without loading the previous materialized package.</summary>
+    public static async ValueTask<PartitionGraphSnapshot> RestoreFileGraphAsync(DocumentState state,
+        IContentStore content, StorageLimits limits, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        limits.CheckDocument(state);
+        _ = ContentStoreReader.UniqueHandles(StorageReferences.Handles(state));
+        var partition = state.Partitions.Single(p => p.Kind == 0);
+        if (state.Content.Length != partition.Content.Length || state.Content.Sha256 != partition.Content.Sha256)
+            throw new StorageCorruptionException("Document and file partition content disagree.");
+        if (partition.StorageIndex is null)
+            throw new StorageCorruptionException("Missing selected file storage index.");
+        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var elements = new List<DataElement>();
+        foreach (var stored in partition.Elements)
+        {
+            if (!payloads.TryGetValue(stored.Payload.Key, out var bytes))
+            {
+                bytes = await content.ReadVerifiedAsync(stored.Payload, limits.MaxObjectBytes, cancellationToken);
+                payloads.Add(stored.Payload.Key, bytes);
+            }
+            elements.Add(new DataElement((DataElementType)stored.Type, StorageIds.Restore(stored.Id),
+                new SerialNumber(stored.Serial.Guid, stored.Serial.Value)) { Data = bytes });
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return PartitionGraphSnapshot.Create(elements, StorageIds.Restore(partition.StorageIndex));
+    }
+
+    /// <summary>Persists a detached graph around an already durable, validated package handle.</summary>
+    public static async ValueTask<PartitionState> CaptureFileGraphAsync(PartitionState source,
+        PartitionGraphSnapshot graph, ulong knowledgeSequence, ContentHandle package,
+        IContentStore content, CancellationToken cancellationToken = default)
+    {
+        if (source.Kind != 0) throw new ArgumentException("A file partition is required.", nameof(source));
+        var elements = await CaptureElementsAsync(graph, source, content, cancellationToken);
+        return source with { Knowledge = knowledgeSequence, Content = package,
+            StorageIndex = StorageIds.Capture(graph.StorageIndex), Elements = elements, InlineContent = [] };
+    }
     internal DocumentPartition(PartitionState state, IReadOnlyDictionary<string, byte[]> payloads, bool metadataOnly = false)
     {
         Kind = (DocumentPartitionKind)state.Kind;
@@ -142,12 +177,20 @@ public sealed partial class DocumentPartition
         var payload = Kind == DocumentPartitionKind.FileContents
             ? await StoredDocument.WriteAsync(content, _content, cancellationToken, _sourceState?.Content)
             : _sourceState?.Content ?? await StoredDocument.WriteAsync(content, [], cancellationToken);
-        var elements = ImmutableArray.CreateBuilder<GraphElementState>();
-        var previous = _sourceState?.Elements.ToDictionary(e => e.Id);
         var graph = Kind == DocumentPartitionKind.FileContents ? FileGraph : null;
-        var mappingSerials = graph?.MappingSerials;
-        if (graph is not null)
-            await graph.VisitElementsAsync(async (element, stream) =>
+        var elements = graph is null ? [] : await CaptureElementsAsync(graph, _sourceState, content, cancellationToken);
+        return new((int)Kind, ProtocolIdentity.Capture(), KnowledgeSequence, payload,
+            graph is null ? null : StorageIds.Capture(graph.StorageIndex), elements,
+            graph is null ? Content.ToImmutableArray() : []);
+    }
+
+    private static async ValueTask<ImmutableArray<GraphElementState>> CaptureElementsAsync(
+        PartitionGraphSnapshot graph, PartitionState? source, IContentStore content, CancellationToken cancellationToken)
+    {
+        var elements = ImmutableArray.CreateBuilder<GraphElementState>();
+        var previous = source?.Elements.ToDictionary(e => e.Id);
+        var mappingSerials = graph.MappingSerials;
+        await graph.VisitElementsAsync(async (element, stream) =>
             {
                 var id = StorageIds.Capture(element.DataElementExtendedGuid);
                 // Merge rejects changes to an existing element ID, so a restored
@@ -165,13 +208,11 @@ public sealed partial class DocumentPartition
                 elements.Add(new GraphElementState(id, (uint)element.DataElementType,
                     new(element.SerialNumber.Guid, element.SerialNumber.Value), handle)
                 {
-                    MappingSerials = mappingSerials?.TryGetValue(element.DataElementExtendedGuid, out var serials) == true
+                    MappingSerials = mappingSerials.TryGetValue(element.DataElementExtendedGuid, out var serials)
                         ? serials.Select(s => new SerialId(s.Guid, s.Value)).ToImmutableArray() : [],
                 });
             });
-        return new((int)Kind, ProtocolIdentity.Capture(), KnowledgeSequence, payload,
-            graph is null ? null : StorageIds.Capture(graph.StorageIndex), elements.ToImmutable(),
-            graph is null ? Content.ToImmutableArray() : []);
+        return elements.ToImmutable();
     }
 }
 
