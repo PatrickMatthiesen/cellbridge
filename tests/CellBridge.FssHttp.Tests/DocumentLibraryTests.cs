@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Configuration;
 using CellBridge.Storage;
 using CellBridge.Web;
 
@@ -33,41 +32,4 @@ public sealed class DocumentLibraryTests
     public void UsesFileSpecificContentType(string file, string expected) =>
         Assert.Equal(expected, DocumentLibrary.ContentType(file));
 
-    [Fact]
-    public void ConfiguredDirectoryLoadsFlatFilesAndSkipsOfficeLockFiles()
-    {
-        var directory = Path.Combine(Path.GetTempPath(), "collab-library-" + Guid.NewGuid());
-        Directory.CreateDirectory(directory);
-        try
-        {
-            File.WriteAllBytes(Path.Combine(directory, "Budget 100% #1.xlsx"), [7, 8]);
-            File.WriteAllBytes(Path.Combine(directory, "~$Budget.xlsx"), [0]);
-            Directory.CreateDirectory(Path.Combine(directory, "nested"));
-            File.WriteAllBytes(Path.Combine(directory, "nested", "hidden.docx"), [0]);
-            var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["Documents:SeedExamples"] = "false",
-                ["Documents:Directory"] = directory,
-            }).Build();
-            var store = new DocumentStore();
-
-            DocumentLibrary.Seed(store, config, directory);
-
-            var item = Assert.Single(DocumentLibrary.List(store));
-            Assert.Equal("Budget 100% #1.xlsx", item.Name);
-            Assert.Equal(new byte[] { 7, 8 }, store.Get("/shared/Budget%20100%25%20%231.xlsx")!.Content);
-        }
-        finally { Directory.Delete(directory, recursive: true); }
-    }
-
-    [Fact]
-    public void MissingConfiguredDirectoryFailsInsteadOfSilentlyShowingExamples()
-    {
-        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
-        {
-            ["Documents:Directory"] = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()),
-        }).Build();
-        Assert.Throws<DirectoryNotFoundException>(() =>
-            DocumentLibrary.Seed(new DocumentStore(), config, Path.GetTempPath()));
-    }
 }

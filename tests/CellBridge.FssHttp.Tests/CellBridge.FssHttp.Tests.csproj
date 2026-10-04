@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\src\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
     <ProjectReference Include="..\..\src\CellBridge.Storage\CellBridge.Storage.csproj" />
     <ProjectReference Include="..\..\src\CellBridge.Web\CellBridge.Web.csproj" />
+    <ProjectReference Include="../../tools/CellBridge.Admin/CellBridge.Admin.csproj" />
   </ItemGroup>
 
   <ItemGroup><Compile Include="../CellBridge.TestIdentity.cs" Link="TestIdentity.cs" /></ItemGroup>

@@ -5,7 +5,11 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Npgsql;
 
-var builder = Host.CreateApplicationBuilder(args.Where(a => a is not ("--collect-orphans" or "--apply" or "--quiescent")).ToArray());
+var builder = Host.CreateApplicationBuilder(args.Where(a => a is not ("--collect-orphans" or "--apply" or "--quiescent" or "--initialize-only")).ToArray());
+var initializeOnly = args.Contains("--initialize-only", StringComparer.Ordinal);
+var legacySubject = builder.Configuration["legacy-owner"];
+if (!string.IsNullOrWhiteSpace(legacySubject) && (initializeOnly || !args.Contains("--quiescent", StringComparer.Ordinal)))
+    throw new ArgumentException("Legacy ownership migration requires --legacy-owner <subject> --quiescent, with all writers stopped; it cannot run with --initialize-only.");
 var connectionString = builder.Configuration.GetConnectionString("cellbridge")
     ?? throw new InvalidOperationException("Set ConnectionStrings:cellbridge for migration.");
 await using var source = NpgsqlDataSource.Create(connectionString);
@@ -20,9 +24,9 @@ if (args.Contains("--collect-orphans", StringComparer.Ordinal))
 }
 else
 {
-    var legacySubject = builder.Configuration["Authentication:LegacyOwner"];
     var legacyOwner = string.IsNullOrWhiteSpace(legacySubject) ? null : new SubjectIdentity(legacySubject, "legacy-owner", "Legacy owner");
-    await new PostgreSqlStateStore(source, limits).InitializeAsync(legacyOwner: legacyOwner);
+    await new PostgreSqlStateStore(source, limits).InitializeAsync(legacyOwner: legacyOwner,
+        allowUpgrade: !initializeOnly && args.Contains("--quiescent", StringComparer.Ordinal));
     await AuthenticationDatabase.InitializeAsync(connectionString);
     if (builder.Configuration["Storage:ContentProvider"]?.Equals("FileSystem", StringComparison.OrdinalIgnoreCase) == true)
         await new StorageMaintenance(source).RegisterExistingFileSystemAsync(

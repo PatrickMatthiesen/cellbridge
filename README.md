@@ -72,8 +72,8 @@ aspire wait web --apphost aspire/apphost.cs
 aspire ps
 ```
 
-Provision an account and configure an import owner using the
-[authentication setup](docs/authentication.md). Open `/library` on the web
+Provision an account using the [authentication setup](docs/authentication.md).
+Create documents from the library or import a directory with the explicit admin command. Open `/library` on the web
 HTTPS endpoint and sign in. Desktop Office must be
 able to reach and trust the server's HTTPS endpoint. The default Office/browser
 origin is `https://localhost:7292`; configure `Parameters__PublicOrigin` for other clients.

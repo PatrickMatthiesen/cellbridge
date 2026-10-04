@@ -7,14 +7,15 @@ Server authentication and authorization tests do not establish desktop Office co
 ## First setup
 
 Normal authenticated creation needs no owner configuration: `CreateAsync`
-records the authenticated creator as owner. The optional `LegacyOwner` and
-`ImportOwner` AppHost parameters apply to upgrading anonymous data and loading
-the sample's startup files, respectively. They do not select an authentication
-provider and are not settings required by the reusable host.
+records the authenticated creator as owner. The web host performs no imports or
+schema migrations. Aspire's `storage-init` job initializes fresh storage schema
+version 3 and authentication schema version 1, and rejects older storage schemas.
+Upgrade those explicitly with all writers stopped, as described below.
 
-Aspire migrates the document schema to version 3 and creates authentication schema version 1 before starting web instances. Existing documents without authenticated ownership (storage schema version 1 or main’s version 2) require `Parameters__LegacyOwner`, a stable subject such as `local:operator`. Stop all writers before that migration. It assigns every historical snapshot to that owner, preserves file graphs, versions and receipts, clears anonymous sessions and leases, and leaves legacy authorship unknown. Unowned legacy receipts cannot return an authenticated successful retry.
-
-The SharePoint capture resource requires explicit startup; a normal Aspire run leaves it stopped. Imports are skipped until an import owner is configured. Retrieve `ConnectionStrings__cellbridge` privately from the web resource's Aspire environment and supply it to the operator tool. Do not copy the connection string into logs or committed configuration.
+The SharePoint capture resource requires explicit startup; a normal Aspire run
+leaves it stopped. Retrieve `ConnectionStrings__cellbridge` privately from the web
+resource's Aspire environment and supply it to the operator tool. Do not copy the
+connection string into logs or committed configuration.
 
 ```sh
 # Password is read from stdin, not passed as a command argument.
@@ -24,7 +25,38 @@ dotnet run --project tools/CellBridge.Admin -- create-user --login reader --disp
 
 Use a password satisfying Identity's policy: at least 12 characters with uppercase, lowercase, digit and nonalphanumeric characters. There is no public registration. Five failed attempts lock the account for 15 minutes.
 
-After provisioning, stop Aspire and start it with `Parameters__ImportOwner=local:operator`. An import owner must be a provisioned account. Imports create missing documents only, record `system:imports` as creator and initial modifier, and never overwrite saved content. An existing migration owner can be provisioned with the matching `--id` after migration. Configure `Parameters__PublicOrigin` as the HTTPS origin reachable and trusted by Windows. Its default is `https://localhost:7292`.
+After provisioning, create documents from the signed-in library, or explicitly
+import a directory with a chosen owner:
+
+```sh
+dotnet run --project tools/CellBridge.Admin -- import-directory --directory /absolute/path/to/documents --owner local:operator
+```
+
+Imports create missing documents only, record `system:imports` as creator and
+initial modifier, and preserve existing saved revisions and ownership. The owner
+must be an enabled, provisioned local account. There is no global import owner
+setting. Supply the same `Storage` settings as the web host when importing.
+Configure `Parameters__PublicOrigin` as the HTTPS origin reachable and trusted by
+Windows. Its default is `https://localhost:7292`.
+
+### Upgrade anonymous legacy documents
+
+For storage schema version 1 or 2, stop all writers, supply the database connection
+privately, and run the migration tool explicitly. Documents without ownership
+need a chosen stable subject, for example:
+
+```sh
+dotnet run --project tools/CellBridge.Storage.Migrate -- --legacy-owner local:operator --quiescent
+```
+
+`--quiescent` confirms that all writers are stopped. The command assigns every
+anonymous historical snapshot to that owner, preserves file graphs, versions and
+receipts, clears anonymous sessions and leases, and leaves legacy authorship
+unknown. Unowned legacy receipts cannot return an authenticated successful retry.
+If older data already has authenticated ownership, migrate with `--quiescent`
+and omit `--legacy-owner`; existing ownership is preserved. Provision a local migration
+owner with the matching `--id` before allowing sign-in. This is a one-time
+operator action; no legacy owner option is passed to ordinary web startup.
 
 Open `https://localhost:7292/library`, sign in, and create or download an allowed document. The web host proxies the library to the internal demo. Web instances and demo share the PostgreSQL account store, Data Protection keys and cookie settings. Demo sends only the current request's authentication cookies to the fixed web endpoint, including chunked cookies. It forwards the paired antiforgery cookie and form token for creation. It has no service account or shared cookie jar.
 

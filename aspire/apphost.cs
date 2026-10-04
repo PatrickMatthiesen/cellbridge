@@ -27,15 +27,10 @@ if (!testRun)
     postgres.WithDataVolume((await storageVolume.Resource.GetValueAsync(default))!);
 }
 var database = postgres.AddDatabase("cellbridge");
-var legacyOwner = Parameter("LegacyOwner", "")
-    .WithDescription("Optional subject for upgrading anonymous document state. Empty for fresh/already migrated databases.");
-var importOwner = Parameter("ImportOwner", testRun ? "local:integration-writer" : "")
-    .WithDescription("Optional owner of sample startup imports. Ordinary authenticated creation needs no configured owner.");
-
 #pragma warning disable ASPIRECSHARPAPPS001
-var migration = builder.AddCSharpApp("storage-migration", "../tools/CellBridge.Storage.Migrate/CellBridge.Storage.Migrate.csproj")
+var initialization = builder.AddCSharpApp("storage-init", "../tools/CellBridge.Storage.Migrate/CellBridge.Storage.Migrate.csproj")
+    .WithArgs("--initialize-only")
     .WithReference(database)
-    .WithEnvironment("Authentication__LegacyOwner", legacyOwner)
     .WaitFor(database);
 #pragma warning restore ASPIRECSHARPAPPS001
 
@@ -50,7 +45,7 @@ if (testRun)
         .WithReference(database)
         .WithEnvironment("DOTNET_ENVIRONMENT", "Testing")
         .WithEnvironment("Seed__Password", password)
-        .WaitForCompletion(migration)
+        .WaitForCompletion(initialization)
         .WithExplicitStart();
 #pragma warning restore ASPIRECSHARPAPPS001
 }
@@ -63,8 +58,7 @@ var web = builder.AddCSharpApp("web", "../src/CellBridge.Web/CellBridge.Web.cspr
     .WithReference(database)
     .WithEnvironment("Storage__Provider", "PostgreSql")
     .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
-    .WithEnvironment("Authentication__ImportOwner", importOwner)
-    .WaitForCompletion(migration)
+    .WaitForCompletion(initialization)
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
 
@@ -84,7 +78,7 @@ if (testRun || builder.Configuration.GetValue("AppHost:PeerEnabled", false))
         .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
         .WithEndpoint("http", endpoint => endpoint.Port = null)
         .WithEndpoint("https", endpoint => endpoint.Port = null)
-        .WaitForCompletion(migration)
+        .WaitForCompletion(initialization)
         .WithHttpHealthCheck("/health")
         .WithExternalHttpEndpoints()
         .WithExplicitStart();
@@ -96,7 +90,7 @@ if (builder.Configuration.GetValue("Testing:RunStorageTests", false))
 {
     builder.AddExecutable("storage-tests", "dotnet", "..", "test", "tests/CellBridge.Storage.Tests", "--no-build", "--nologo", "--verbosity", "minimal")
         .WithReference(database)
-        .WaitForCompletion(migration)
+        .WaitForCompletion(initialization)
         .WithExplicitStart();
 }
 

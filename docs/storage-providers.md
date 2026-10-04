@@ -21,10 +21,10 @@ aspire wait demo --non-interactive
 ```
 
 The AppHost starts PostgreSQL with the named `cellbridge-storage-data` volume.
-`storage-migration` runs the versioned schema initialization before the web host.
-The host checks the selected state and content stores before importing documents.
-Health checks also probe both stores. Imports create missing paths and preserve
-existing saved revisions. Removing the database volume removes persisted state.
+`storage-init` initializes fresh/current storage before the web host and refuses
+to upgrade an older schema. The host checks the selected state and content stores;
+health checks also probe both stores. Imports are an explicit operator command
+and preserve existing saved revisions. Removing the database volume removes persisted state.
 
 For deployment without the sample AppHost, run the migration executable against
 `ConnectionStrings__cellbridge` before starting any application instance. The
@@ -33,7 +33,7 @@ An unsupported schema fails explicitly. Use deployment-controlled credentials
 and PostgreSQL backup/restore procedures appropriate to the installation.
 
 Schema version 3 combines the shared usage ledger with authenticated ownership. Stop all hosts before upgrading from
-version 1 or 2. Supply an explicit `Authentication:LegacyOwner` for documents without ownership; see [authentication setup](authentication.md). Run migration with the same `Storage` settings as the hosts; it sets
+version 1 or 2. Supply `--legacy-owner <subject> --quiescent` for documents without ownership; see [authentication setup](authentication.md). Run migration with the same `Storage` settings as the hosts; it sets
 the authoritative database byte and document-count limits. With filesystem
 content, also supply `Storage:ContentProvider=FileSystem` and `Storage:ContentRoot`
 so migration inventories existing `.blob` files. Existing data is preserved even
@@ -117,7 +117,7 @@ state and content stores in a pair must use the same `NpgsqlDataSource` object.
 
 `CellBridgeDocumentService.CreateAsync` takes an explicit authenticated actor
 with creation permission and records initial ownership and authorship. It returns
-null on a conflicting path/identity. Trusted startup imports use `ImportAsync`
+null on a conflicting path/identity. Trusted imports use `ImportAsync`
 with a supplied owner and system actor. `ResolveAsync` preserves ResourceID
 precedence when an ID is supplied. `ExecuteAsync` processes supported binary
 operations. Sample catalog/creation APIs, Office package generation, imports and

@@ -16,7 +16,8 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
     }
     public bool Durable => true;
     public bool Shared => true;
-    public async Task InitializeAsync(CancellationToken cancellationToken = default, SubjectIdentity? legacyOwner = null)
+    public async Task InitializeAsync(CancellationToken cancellationToken = default, SubjectIdentity? legacyOwner = null,
+        bool allowUpgrade = true)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -38,6 +39,8 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
             }
         if (schema is 1 or 2)
         {
+            if (!allowUpgrade)
+                throw new StorageUnavailableException("Legacy storage requires an explicit migration with all writers stopped. Run CellBridge.Storage.Migrate before starting the host.");
             var oldStates = new List<(Guid Id, long Version, string Json)>();
             await using (var query = new NpgsqlCommand("SELECT resource_id,state_version,state_json FROM cellbridge_states", connection, transaction))
             await using (var rows = await query.ExecuteReaderAsync(cancellationToken))

@@ -21,9 +21,11 @@ The runner refuses to interrupt an already running app.
 
 The runner builds Release binaries, starts Aspire with a disposable PostgreSQL
 container, explicitly starts the .NET test-account seed job and peer host, waits
-for `web`, `web-peer` and `demo`, and runs:
+for `web`, `web-peer` and `demo`, creates its three test documents through the
+authenticated API, and runs:
 
 - Binary and SOAP unit tests.
+- Explicit operator import and repeat-import checks against the disposable store.
 - Provider tests against real PostgreSQL, including process termination before
   and after publication, retries, concurrent updates and lease timing.
 - HTTP replay of captured Word/Excel saves, Word open exchanges, shared locks
@@ -56,12 +58,10 @@ Store secrets through Aspire's secret configuration rather than in the file.
 | `StorageVolume` | `cellbridge-storage-data` | Durable development database volume; omitted in disposable test mode |
 | `PublicOrigin` | `https://localhost:7292` | HTTPS origin reachable by Office and browsers |
 | `WireCaptureDirectory` | Empty | Optional absolute server capture directory |
-| `LegacyOwner` | Empty | One-time ownership assignment when migrating anonymous documents |
-| `ImportOwner` | Empty | Owner of sample startup imports; authenticated creation needs no configured owner |
 | `TestPassword` | Required in test mode | Secret password supplied to the explicitly started .NET seed resource |
 
 `Testing__Enabled=true` selects the disposable test model: no durable volume or
-SharePoint capture resource, and imports belong to the seeded integration user.
+SharePoint capture resource. Its documents belong to the signed-in integration user.
 The runner supplies a temporary secret and starts its required resources.
 `AppHost__PeerEnabled=true` adds an explicitly started second host in ordinary
 development. `Testing__RunStorageTests=true` adds an explicitly started storage
@@ -71,7 +71,9 @@ proxy is declared in ordinary development and starts only when requested; see
 [capture instructions](capture-kit.md).
 
 Earlier `CELLBRIDGE_*` AppHost switches and parameter names are replaced by the
-configuration above. Update local launch scripts before restarting. Disposable
+configuration above. `LegacyOwner` and `ImportOwner` are removed from the AppHost;
+use the explicit [migration and import commands](authentication.md) instead.
+Update local launch scripts before restarting. Disposable
 runs clear inherited AppHost settings and ignore the local settings file.
 
 ## Performance measurements

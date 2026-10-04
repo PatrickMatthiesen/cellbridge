@@ -43,6 +43,7 @@ public sealed class SecurityMigrationTests
             { update.Parameters.AddWithValue(JsonSerializer.Serialize(legacy)); await update.ExecuteNonQueryAsync(); }
             await using (var history = source.CreateCommand($"INSERT INTO cellbridge_states SELECT resource_id,1,state_json FROM cellbridge_states; UPDATE cellbridge_documents SET state_version=1; UPDATE cellbridge_schema SET version={priorSchema}"))
                 await history.ExecuteNonQueryAsync();
+            await Assert.ThrowsAsync<StorageUnavailableException>(() => states.InitializeAsync(legacyOwner: owner, allowUpgrade: false));
             await Assert.ThrowsAsync<InvalidOperationException>(() => states.InitializeAsync());
             await using (var unchanged = source.CreateCommand("SELECT version FROM cellbridge_schema"))
                 Assert.Equal(priorSchema, await unchanged.ExecuteScalarAsync());

@@ -43,7 +43,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         return await CreateOwnedAsync(escapedPath, bytes, DocumentSecurity.Create(actor.Identity), cancellationToken);
     }
 
-    /// <summary>Trusted startup import: an explicit owner and the importing actor are recorded atomically.</summary>
+    /// <summary>Trusted import: an explicit owner and the importing actor are recorded atomically.</summary>
     public ValueTask<DocumentState?> ImportAsync(string escapedPath, byte[] bytes, SubjectIdentity owner,
         CellBridgeActor importer, CancellationToken cancellationToken = default)
     {

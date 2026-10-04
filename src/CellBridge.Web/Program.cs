@@ -9,7 +9,6 @@ using CellBridge.Storage.FileSystem;
 using CellBridge.Web;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.HttpOverrides;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,18 +24,6 @@ if (storageKind.Equals("PostgreSql", StringComparison.OrdinalIgnoreCase))
     var dataSource = NpgsqlDataSource.Create(connectionString);
     builder.Services.AddSingleton(dataSource);
     var state = new PostgreSqlStateStore(dataSource, limits);
-    if (args.Contains("--migrate-storage", StringComparer.Ordinal))
-    {
-        var legacySubject = builder.Configuration["Authentication:LegacyOwner"];
-        await state.InitializeAsync(legacyOwner: string.IsNullOrWhiteSpace(legacySubject) ? null :
-            new SubjectIdentity(legacySubject, "legacy-owner", "Legacy owner"));
-        await AuthenticationDatabase.InitializeAsync(connectionString);
-        if (builder.Configuration["Storage:ContentProvider"]?.Equals("FileSystem", StringComparison.OrdinalIgnoreCase) == true)
-            await new StorageMaintenance(dataSource).RegisterExistingFileSystemAsync(
-                builder.Configuration["Storage:ContentRoot"] ?? throw new InvalidOperationException("Filesystem migration requires Storage:ContentRoot."));
-        await dataSource.DisposeAsync();
-        return;
-    }
     var maxBytes = limits.MaxObjectBytes;
     IContentStore content = builder.Configuration["Storage:ContentProvider"]?.ToLowerInvariant() switch
     {
@@ -78,30 +65,7 @@ await provider.CheckHealthAsync();
 if (!provider.Capabilities.Durable)
     app.Logger.LogWarning("InMemory storage is volatile. A restart discards documents and protocol state.");
 
-// Imports only create missing documents. Persisted saves always take precedence.
-var imports = new DocumentStore();
-DocumentLibrary.Seed(imports, app.Configuration, app.Environment.ContentRootPath);
 var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
-var importOwner = app.Configuration["Authentication:ImportOwner"];
-if (imports.List().Any() && string.IsNullOrWhiteSpace(importOwner))
-    app.Logger.LogWarning("Imports skipped. Configure Authentication:ImportOwner with a provisioned account subject.");
-SubjectIdentity? importIdentity = null;
-if (!string.IsNullOrWhiteSpace(importOwner))
-{
-    using var scope = app.Services.CreateScope();
-    var user = importOwner.StartsWith("local:", StringComparison.Ordinal)
-        ? await scope.ServiceProvider.GetRequiredService<UserManager<CellBridgeUser>>().FindByIdAsync(importOwner[6..]) : null;
-    if (user is null) throw new InvalidOperationException("Authentication:ImportOwner must name a provisioned local account.");
-    importIdentity = new(user.Subject, user.UserName!, user.DisplayName);
-}
-foreach (var document in imports.List().Where(_ => !string.IsNullOrWhiteSpace(importOwner)))
-{
-    if (await provider.State.FindByPathKeyAsync(StorageIds.PathKey(document.Url)) is not null) continue;
-    var escaped = string.Join('/', document.Url.Split('/').Select(Uri.EscapeDataString));
-    await service.ImportAsync(escaped, document.Content, importIdentity!,
-        new CellBridgeActor(new SubjectIdentity("system:imports", "imports", "Document imports"), CanCreate: true));
-}
-
 app.MapCellBridgeAuthentication();
 app.MapCellBridge();
 app.MapGet("/", () => Results.LocalRedirect("/library")).AllowAnonymous();

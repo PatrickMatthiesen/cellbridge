@@ -1,7 +1,10 @@
 using CellBridge.Authentication;
+using CellBridge.Admin;
+using CellBridge.AspNetCore;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
+using CellBridge.Storage.FileSystem;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -9,7 +12,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
 using Npgsql;
 
-if (args.Length == 0) throw new ArgumentException("Commands: create-user, set-user, grant, set-owner, seed-test-user. Pass options as --name value. Operator passwords are read from stdin.");
+if (args.Length == 0) throw new ArgumentException("Commands: create-user, set-user, grant, set-owner, import-directory, seed-test-user. Pass options as --name value. Operator passwords are read from stdin.");
 var commandName = args[0];
 var values = new Dictionary<string, string>(StringComparer.Ordinal);
 for (int i = 1; i < args.Length; i += 2)
@@ -75,6 +78,30 @@ else if (commandName == "set-user")
     if (values.TryGetValue("display-name", out var displayName)) user.DisplayName = displayName;
     Check(await users.UpdateSecurityStampAsync(user));
     Console.WriteLine($"Updated subject {user.Subject}; existing cookies expire at their next security-stamp check.");
+}
+else if (commandName == "import-directory")
+{
+    var subject = Required("owner");
+    var user = subject.StartsWith("local:", StringComparison.Ordinal)
+        ? await users.FindByIdAsync(subject[6..]) : null;
+    if (user is null || !user.Enabled) throw new ArgumentException("Supply --owner with the subject of an enabled, provisioned local user.");
+    var directory = Path.GetFullPath(Required("directory"));
+    var limits = builder.Configuration.GetSection("Storage").Get<StorageLimits>() ?? new StorageLimits();
+    limits.Validate();
+    await using var source = NpgsqlDataSource.Create(connectionString);
+    IContentStore content = builder.Configuration["Storage:ContentProvider"]?.ToLowerInvariant() switch
+    {
+        null or "postgresql" => new PostgreSqlContentStore(source, limits.MaxObjectBytes),
+        "filesystem" => new PostgreSqlFileSystemContentStore(source, builder.Configuration["Storage:ContentRoot"]
+            ?? throw new InvalidOperationException("Filesystem content requires Storage:ContentRoot."), limits.MaxObjectBytes,
+            builder.Configuration.GetValue("Storage:SharedContent", false)),
+        _ => throw new InvalidOperationException("Unknown binary content provider."),
+    };
+    var provider = new StorageProvider(new PostgreSqlStateStore(source, limits), content, limits);
+    await provider.CheckHealthAsync();
+    var result = await DocumentImports.ImportDirectoryAsync(new CellBridgeDocumentService(provider), directory,
+        new SubjectIdentity(user.Subject, user.UserName!, user.DisplayName));
+    Console.WriteLine($"Imported {result.Imported} documents; preserved {result.Skipped} existing paths. owner={subject}");
 }
 else if (commandName is "grant" or "set-owner")
 {
