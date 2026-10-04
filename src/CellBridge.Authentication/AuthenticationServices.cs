@@ -29,6 +29,10 @@ public static class AuthenticationServices
             origin.AbsolutePath != "/" || origin.Query.Length != 0 || origin.Fragment.Length != 0 || origin.UserInfo.Length != 0)
             throw new InvalidOperationException("Authentication:PublicOrigin must be an HTTPS origin without path or credentials.");
         services.AddSingleton(new AuthenticationOrigin(origin.GetLeftPart(UriPartial.Authority)));
+        services.AddOptions<AuthenticationPageOptions>()
+            .Bind(configuration.GetSection("Authentication"))
+            .Validate(o => !string.IsNullOrWhiteSpace(o.ApplicationName), "Authentication:ApplicationName must not be blank.")
+            .ValidateOnStart();
         services.AddDbContextFactory<AuthenticationDatabase>(o => o.UseNpgsql(connectionString));
         services.AddIdentityCore<CellBridgeUser>(o =>
         {

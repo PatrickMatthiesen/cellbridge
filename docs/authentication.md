@@ -50,6 +50,35 @@ option. Database and snapshot version markers still reject unsupported formats.
 
 Open `https://localhost:7292/library`, sign in, and create or download an allowed document. The web host proxies the library to the internal demo. Web instances and demo share the PostgreSQL account store, Data Protection keys and cookie settings. Demo sends only the current request's authentication cookies to the fixed web endpoint, including chunked cookies. It forwards the paired antiforgery cookie and form token for creation. It has no service account or shared cookie jar.
 
+## Customize the sign-in page
+
+The sample sign-in name defaults to `CellBridge`. Set Aspire's
+`Parameters:ApplicationName` parameter, or `Parameters__ApplicationName` in its
+environment, to change it. For a host running outside Aspire, use
+`Authentication:ApplicationName` in configuration or
+`Authentication__ApplicationName` in its environment. This changes the heading,
+page title and completion message; it does not change cookie names or identities.
+
+Hosts using the sample authentication library can replace the entire login page
+without replacing the sign-in POST handler:
+
+```csharp
+app.MapCellBridgeAuthentication(renderLoginPage: page => MyLoginPage.Render(page));
+```
+
+The renderer receives a `LoginPageContext` with the application name,
+antiforgery tokens, validated local return URL and sign-in failure flag. Its HTML
+must submit a form by POST to `/auth/login` with `login`, `password`, `returnUrl`,
+and a hidden field named `page.Antiforgery.FormFieldName` containing
+`page.Antiforgery.RequestToken`. HTML-encode all values inserted into the page.
+The endpoint issues the antiforgery cookie and disables caching before rendering;
+the existing POST handler validates the token, credentials and return URL.
+Keep the page usable inside Office's sign-in window.
+
+This page belongs to the sample authentication library. Consumers of the
+reusable packages can provide their own authentication and sign-in pages, as
+described below; they need not adopt this library or its HTML.
+
 ## Manage access
 
 Obtain the resource GUID from an authorized FSSHTTP response or an operator database query. The catalog intentionally exposes no hidden document IDs or counts. Commands require operator database credentials; protocol and library users cannot grant access.

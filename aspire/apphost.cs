@@ -51,12 +51,15 @@ if (testRun)
 
 var collabPublicUrl = Parameter("PublicOrigin", "https://localhost:7292")
     .WithDescription("Collaboration server HTTPS origin reachable by browsers and desktop Office.");
+var applicationName = Parameter("ApplicationName", "CellBridge")
+    .WithDescription("Application name shown on the sample sign-in and completion pages.");
 
 #pragma warning disable ASPIRECSHARPAPPS001
 var web = builder.AddCSharpApp("web", "../src/CellBridge.Web/CellBridge.Web.csproj")
     .WithReference(database)
     .WithEnvironment("Storage__Provider", "PostgreSql")
     .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
+    .WithEnvironment("Authentication__ApplicationName", applicationName)
     .WaitForCompletion(initialization)
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
@@ -75,6 +78,7 @@ if (testRun || builder.Configuration.GetValue("AppHost:PeerEnabled", false))
         .WithEnvironment("Storage__Provider", "PostgreSql")
         .WithEnvironment("Storage__MultipleInstances", "true")
         .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
+        .WithEnvironment("Authentication__ApplicationName", applicationName)
         .WithEndpoint("http", endpoint => endpoint.Port = null)
         .WithEndpoint("https", endpoint => endpoint.Port = null)
         .WaitForCompletion(initialization)
@@ -97,6 +101,7 @@ if (builder.Configuration.GetValue("Testing:RunStorageTests", false))
 var demo = builder.AddCSharpApp("demo", "../demo/CellBridge.Demo/CellBridge.Demo.csproj")
     .WithReference(database)
     .WithEnvironment("Authentication__PublicOrigin", collabPublicUrl)
+    .WithEnvironment("Authentication__ApplicationName", applicationName)
     .WithEnvironment("CollabServer__BaseUrl", web.GetEndpoint("https"))
     .WithEnvironment("CollabServer__PublicBaseUrl", collabPublicUrl)
     .WithHttpHealthCheck("/health")
