@@ -14,8 +14,7 @@ public sealed record PartitionIdentity(ExtendedId StorageManifest, ExtendedId Ce
     ExtendedId Object, ExtendedId Revision, ExtendedId CellLong, ExtendedId CellShort, Guid SerialGuid);
 public sealed record GraphElementState(ExtendedId Id, uint Type, SerialId Serial, ContentHandle Payload)
 {
-    // Null denotes legacy state that needs its index payload decoded before a query.
-    public ImmutableArray<SerialId>? MappingSerials { get; init; }
+    public required ImmutableArray<SerialId> MappingSerials { get; init; }
 }
 public sealed record PartitionState(int Kind, PartitionIdentity Identity, ulong Knowledge,
     ContentHandle Content, ExtendedId? StorageIndex, ImmutableArray<GraphElementState> Elements,

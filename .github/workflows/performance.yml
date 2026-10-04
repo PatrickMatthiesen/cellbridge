@@ -51,9 +51,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet build tools/CellBridge.Storage.Migrate -c Release --nologo
+      - run: dotnet build tools/CellBridge.Storage.Setup -c Release --nologo
       - run: dotnet build tools/CellBridge.Storage.Benchmark -c Release --nologo
-      - run: dotnet tools/CellBridge.Storage.Migrate/bin/Release/net10.0/CellBridge.Storage.Migrate.dll
+      - run: dotnet tools/CellBridge.Storage.Setup/bin/Release/net10.0/CellBridge.Storage.Setup.dll
       - name: Measure synthetic durable saves and verified downloads
         run: >-
           dotnet tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll

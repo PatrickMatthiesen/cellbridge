@@ -22,7 +22,7 @@ public static class AuthenticationServices
         IConfiguration configuration, bool renewCookies = true, bool serveOffice = true)
     {
         var connectionString = configuration.GetConnectionString("cellbridge")
-            ?? throw new InvalidOperationException("Authentication requires a migrated PostgreSQL identity database.");
+            ?? throw new InvalidOperationException("Authentication requires an initialized PostgreSQL identity database.");
         var publicOrigin = configuration["Authentication:PublicOrigin"]
             ?? throw new InvalidOperationException("Set Authentication:PublicOrigin to the HTTPS origin reachable by Office.");
         if (!Uri.TryCreate(publicOrigin, UriKind.Absolute, out var origin) || origin.Scheme != "https" ||

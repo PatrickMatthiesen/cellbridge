@@ -4,7 +4,6 @@ using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
-using CellBridge.Web;
 
 namespace CellBridge.AspNetCore;
 
@@ -166,9 +165,12 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         var mappingSerials = new Dictionary<ExGuid, IReadOnlyList<SerialNumber>>();
         foreach (var stored in partition.Elements.Where(e => e.Type == (uint)DataElementType.StorageIndexDataElementData))
-            mappingSerials.Add(StorageIds.Restore(stored.Id), stored.MappingSerials is { } serials
-                ? serials.Select(s => new SerialNumber(s.Guid, s.Value)).ToArray()
-                : StorageIndexMappingSerials.Read(await ReadPayloadAsync(stored.Payload)));
+        {
+            if (stored.MappingSerials.IsDefault)
+                throw new StorageCorruptionException("Storage index is missing persisted mapping metadata.");
+            mappingSerials.Add(StorageIds.Restore(stored.Id),
+                stored.MappingSerials.Select(s => new SerialNumber(s.Guid, s.Value)).ToArray());
+        }
         var selection = FileQueryResponseBuilder.Select(metadata,
             StorageIds.Restore(partition.StorageIndex ?? throw new StorageCorruptionException("Missing file storage index.")),
             cell, partition.Knowledge, request, mappingSerials);

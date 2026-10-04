@@ -10,7 +10,7 @@ Normal authenticated creation needs no owner configuration: `CreateAsync`
 records the authenticated creator as owner. The web host performs no imports or
 schema migrations. Aspire's `storage-init` job initializes fresh storage schema
 version 3 and authentication schema version 1, and rejects older storage schemas.
-Upgrade those explicitly with all writers stopped, as described below.
+Recreate outdated development databases, as described below.
 
 The SharePoint capture resource requires explicit startup; a normal Aspire run
 leaves it stopped. Retrieve `ConnectionStrings__cellbridge` privately from the web
@@ -39,24 +39,14 @@ setting. Supply the same `Storage` settings as the web host when importing.
 Configure `Parameters__PublicOrigin` as the HTTPS origin reachable and trusted by
 Windows. Its default is `https://localhost:7292`.
 
-### Upgrade anonymous legacy documents
+### Development database versions
 
-For storage schema version 1 or 2, stop all writers, supply the database connection
-privately, and run the migration tool explicitly. Documents without ownership
-need a chosen stable subject, for example:
-
-```sh
-dotnet run --project tools/CellBridge.Storage.Migrate -- --legacy-owner local:operator --quiescent
-```
-
-`--quiescent` confirms that all writers are stopped. The command assigns every
-anonymous historical snapshot to that owner, preserves file graphs, versions and
-receipts, clears anonymous sessions and leases, and leaves legacy authorship
-unknown. Unowned legacy receipts cannot return an authenticated successful retry.
-If older data already has authenticated ownership, migrate with `--quiescent`
-and omit `--legacy-owner`; existing ownership is preserved. Provision a local migration
-owner with the matching `--id` before allowing sign-in. This is a one-time
-operator action; no legacy owner option is passed to ordinary web startup.
+CellBridge has no production deployments or supported upgrades from older
+experimental schemas. Storage initialization accepts a fresh database or the
+current schema only. Recreate outdated development databases, then provision
+accounts and create or explicitly import documents again. Initialization never
+rewrites ownership or converts old snapshots. The setup tool has no legacy-owner
+option. Database and snapshot version markers still reject unsupported formats.
 
 Open `https://localhost:7292/library`, sign in, and create or download an allowed document. The web host proxies the library to the internal demo. Web instances and demo share the PostgreSQL account store, Data Protection keys and cookie settings. Demo sends only the current request's authentication cookies to the fixed web endpoint, including chunked cookies. It forwards the paired antiforgery cookie and form token for creation. It has no service account or shared cookie jar.
 
@@ -93,7 +83,7 @@ Authentication runs before SOAP or MTOM parsing. Anonymous Office discovery and 
 
 SOAP denials use `FileUnauthorizedAccess`. Binary denials use HRESULT `E_ACCESSDENIED`, including each denied QueryAccess field. Responses to callers without Read omit resource IDs, canonical document URLs and GetFileProps metadata. Each executable SOAP dependency is independently authorized. Matching ClientID or lock GUIDs cannot impersonate another subject. Office saves omitting ClientID can use a lease only when the authenticated subject owns it.
 
-WhoAmI reports the caller. Author metadata reports the persisted creator; ModifiedBy reports the last successful content writer. Readers and session joins never replace authorship. Unknown legacy authors stay unknown.
+WhoAmI reports the caller. Author metadata reports the persisted creator; ModifiedBy reports the last successful content writer. Readers and session joins never replace authorship. Unavailable authorship is reported as unknown.
 
 Login, logout and document creation require antiforgery validation. SOAP endpoints accept XML or MTOM and reject browser simple content types and cross-origin Origin headers. Health checks remain anonymous. Account passwords, cookies, tokens and connection strings must not enter shared capture evidence. Database access grants access to cookie protection keys, so restrict and protect that database and its backups.
 

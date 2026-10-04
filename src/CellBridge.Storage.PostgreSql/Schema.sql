@@ -1,6 +1,6 @@
--- Version 3. Run while writers are stopped using the migration executable.
+-- Current development schema. Initialize a fresh database with the setup tool.
 CREATE TABLE IF NOT EXISTS cellbridge_schema (version integer PRIMARY KEY);
-INSERT INTO cellbridge_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM cellbridge_schema);
+INSERT INTO cellbridge_schema SELECT 3 WHERE NOT EXISTS (SELECT 1 FROM cellbridge_schema);
 CREATE TABLE IF NOT EXISTS cellbridge_documents (
     resource_id uuid PRIMARY KEY,
     path_key text COLLATE "C" NOT NULL UNIQUE,
@@ -36,4 +36,3 @@ SELECT true,
     COALESCE((SELECT SUM(octet_length(state_json)) FROM cellbridge_states),0),
     (SELECT COUNT(*) FROM cellbridge_documents), 10737418240, 10000
 ON CONFLICT DO NOTHING;
-UPDATE cellbridge_schema SET version=3 WHERE version IN (1,2);

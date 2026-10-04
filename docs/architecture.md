@@ -45,11 +45,12 @@ See [authentication and permissions](authentication.md).
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
 | `CellBridge.Storage.Conformance` | Provider contract checks for consumers |
 | `CellBridge.AspNetCore` | Save orchestration, discovery, download and cellstorage endpoints |
-| `CellBridge.Web` | Sample host, document imports, package generation and catalog APIs |
+| `CellBridge.Web` | Sample host, package generation and catalog APIs |
 | `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |
-| `tools/CellBridge.Admin` | Operator account provisioning and document permission updates |
+| `tools/CellBridge.Admin` | Operator account provisioning, explicit file imports and document permission updates |
+| `tools/CellBridge.Storage.Setup` | Current-schema initialization and quiescent object maintenance |
 | `demo/CellBridge.Demo` | Razor Pages client of the sample HTTP catalog |
-| `aspire/apphost.cs` | PostgreSQL, schema migration, sample host, demo and optional capture proxy |
+| `aspire/apphost.cs` | PostgreSQL, schema initialization, sample host, demo and optional capture proxy |
 
 The binary library has no ASP.NET Core or database dependency. Provider
 contracts have no protocol dependency. The hosting library contains neither

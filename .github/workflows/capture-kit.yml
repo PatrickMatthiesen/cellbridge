@@ -78,8 +78,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet build tools/CellBridge.Storage.Migrate --nologo
-      - run: dotnet tools/CellBridge.Storage.Migrate/bin/Debug/net10.0/CellBridge.Storage.Migrate.dll
+      - run: dotnet build tools/CellBridge.Storage.Setup --nologo
+      - run: dotnet tools/CellBridge.Storage.Setup/bin/Debug/net10.0/CellBridge.Storage.Setup.dll
       - run: dotnet test CellBridge.slnx --nologo --verbosity minimal
       - run: dotnet test demo/CellBridge.Demo.slnx --nologo --verbosity minimal
   capture:

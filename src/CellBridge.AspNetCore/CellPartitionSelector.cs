@@ -1,6 +1,6 @@
 using CellBridge.Storage;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 public static class CellPartitionSelector
 {

@@ -63,7 +63,7 @@ Windows desktop Word check and connecting the laptop through Tailscale Serve.
 ## Run locally
 
 Start the app from the repository root. Aspire starts PostgreSQL with a persistent
-volume, runs the schema migration, then starts the web host. Its Python integration
+volume, initializes the current schema, then starts the web host. Its Python integration
 prepares the capture proxy environment and installs its dependencies:
 
 ```sh

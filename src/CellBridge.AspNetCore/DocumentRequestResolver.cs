@@ -1,7 +1,7 @@
 using CellBridge.FssHttp;
 using CellBridge.Storage;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 /// <summary>
 /// Resolves an MS-FSSHTTP Request to the document it addresses.

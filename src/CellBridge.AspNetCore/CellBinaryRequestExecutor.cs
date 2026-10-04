@@ -2,7 +2,7 @@ using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 /// <summary>Executes each binary operation in a SOAP Cell payload.</summary>
 public static class CellBinaryRequestExecutor

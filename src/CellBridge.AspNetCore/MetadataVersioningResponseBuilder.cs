@@ -3,7 +3,7 @@ using System.Xml.Linq;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 /// <summary>
 /// Builds the two metadata responses that Word requests when the server

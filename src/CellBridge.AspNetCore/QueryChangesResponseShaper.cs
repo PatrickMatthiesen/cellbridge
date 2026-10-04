@@ -1,7 +1,7 @@
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 /// <summary>
 /// Applies the request-side QueryChanges controls that the current response

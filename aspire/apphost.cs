@@ -28,8 +28,7 @@ if (!testRun)
 }
 var database = postgres.AddDatabase("cellbridge");
 #pragma warning disable ASPIRECSHARPAPPS001
-var initialization = builder.AddCSharpApp("storage-init", "../tools/CellBridge.Storage.Migrate/CellBridge.Storage.Migrate.csproj")
-    .WithArgs("--initialize-only")
+var initialization = builder.AddCSharpApp("storage-init", "../tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj")
     .WithReference(database)
     .WaitFor(database);
 #pragma warning restore ASPIRECSHARPAPPS001

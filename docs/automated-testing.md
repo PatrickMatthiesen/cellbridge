@@ -72,7 +72,8 @@ proxy is declared in ordinary development and starts only when requested; see
 
 Earlier `CELLBRIDGE_*` AppHost switches and parameter names are replaced by the
 configuration above. `LegacyOwner` and `ImportOwner` are removed from the AppHost;
-use the explicit [migration and import commands](authentication.md) instead.
+Legacy ownership upgrades are unsupported; recreate outdated development
+databases. Use the explicit [import command](authentication.md) to load files.
 Update local launch scripts before restarting. Disposable
 runs clear inherited AppHost settings and ignore the local settings file.
 

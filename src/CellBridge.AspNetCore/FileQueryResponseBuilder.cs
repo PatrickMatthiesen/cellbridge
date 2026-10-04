@@ -1,6 +1,6 @@
 using CellBridge.FssHttpB;
 
-namespace CellBridge.Web;
+namespace CellBridge.AspNetCore;
 
 internal sealed record FileQuerySelection(HashSet<ExGuid> PayloadIds, QueryChangesSubResponseData Data);
 
@@ -17,7 +17,7 @@ internal static class FileQueryResponseBuilder
     {
         var metadata = elements.ToArray();
         mappingSerials ??= new Dictionary<ExGuid, IReadOnlyList<SerialNumber>>();
-        // Legacy snapshots may have aliased DE serials to each other or to mappings.
+        // Client graphs can alias DE serials to each other or to mappings.
         // Those serials cannot prove possession of an individual payload.
         var ambiguous = metadata.Where(e => !e.SerialNumber.IsNull).GroupBy(e => e.SerialNumber)
             .Where(g => g.Select(e => e.DataElementExtendedGuid).Distinct().Count() > 1)
