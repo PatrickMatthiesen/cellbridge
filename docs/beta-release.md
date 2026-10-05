@@ -77,10 +77,14 @@ describes the policy fields and temporary credential exchange.
 After merging reviewed changes and configuring the policy, open
 [Publish NuGet beta](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/publish-nuget.yml).
 Select `main`, enter the version in `Directory.Build.props` and leave `publish`
-unchecked for a validation run. The workflow tests protocol/storage and demo
+unchecked to validate packages and test the NuGet login without uploading.
+The workflow tests protocol/storage and demo
 code against PostgreSQL, runs Python checks, packs the nine libraries and tests
 package consumption. It uploads `nuget-release-<commit>` containing the exact
-packages, symbols and manifest.
+packages, symbols and manifest. It validates that run's downloaded artifacts
+and requests temporary credentials through the configured Trusted Publishing
+policy. A successful login verifies authentication; it does not prove package
+upload permissions or first-publication success.
 
 For publication, run the same workflow on the intended unchanged `main` commit
 with `publish` checked. It builds and validates that run's artifacts, then
