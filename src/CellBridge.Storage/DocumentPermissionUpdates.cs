@@ -23,6 +23,8 @@ public static class DocumentPermissionUpdates
                 security.AccessFor(l.OwnerSubject).HasFlag(DocumentAccess.Write)).ToImmutableArray(),
             Exclusive = current.Coordination.Exclusive is { OwnerSubject: { } subject } exclusive &&
                 security.AccessFor(subject).HasFlag(DocumentAccess.Write) ? exclusive : null,
+            HostLock = current.Coordination.HostLock is { } host &&
+                security.AccessFor(host.OwnerSubject).HasFlag(DocumentAccess.Write) ? host : null,
             Generation = checked(current.Coordination.Generation + 1),
         };
         coordination = coordination with

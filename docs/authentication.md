@@ -13,7 +13,7 @@ document requests.
 ## First setup
 
 Start the sample through Aspire. Its `storage-init` job initializes storage
-schema version 3 and authentication schema version 1. The web host checks the
+schema version 4 and authentication schema version 1. The web host checks the
 schema at startup. Creating a document records the signed-in user as its owner.
 
 Retrieve `ConnectionStrings__cellbridge` privately from the web resource's

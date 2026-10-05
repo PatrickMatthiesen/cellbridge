@@ -15,6 +15,62 @@ namespace CellBridge.Storage.Tests;
 
 public class GenericGraphPersistenceTests
 {
+    [Fact]
+    public async Task OversizedReceiptCannotPublishContentReceiptsOrOutbox()
+    {
+        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore(),
+            new StorageLimits { MaxObjectBytes = 4096 });
+        var service = new CellBridgeDocumentService(provider);
+        var initial = (await service.CreateAsync("/receipt-bound.docx", MinimalDocx.Create(), TestActor.Value))!;
+        await provider.State.TransitionAsync(initial.ResourceId, (current, _) => new StateTransition<bool>(current with
+            { Publication = new(Guid.NewGuid(), "external", "revision-0", 1, []) }, true));
+        initial = (await provider.State.FindByResourceIdAsync(initial.ResourceId))!;
+        var file = new GraphFixture(MinimalDocx.Create("after"), blob: true);
+        // Many small admitted elements produce a response larger than any payload.
+        for (uint i = 0; i < 200; i++)
+            file.Elements.Add(GraphFixture.Element(DataElementType.ObjectDataBLOBDataElementData,
+                new ExGuid(i + 100, Guid.NewGuid()), w => GraphFixture.Record(w,
+                    StreamObjectTypeHeaderStart.ObjectDataBLOB, b => b.WriteBytes([1]))));
+        var result = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
+            Save(initial, file), new Dictionary<string, string>(), TestActor.Value);
+        Assert.True(Assert.Single(result.Response.SubResponses).Status);
+        Assert.Contains("save receipt bytes", result.Response.SubResponses[0].Error!.ErrorMessage);
+        Assert.Empty(result.AcceptedSaves);
+        Assert.Equal(initial, await provider.State.FindByResourceIdAsync(initial.ResourceId));
+    }
+
+    [Fact]
+    public async Task FileSavePreservesOpaqueMetadataAndItsScopedReceipt()
+    {
+        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var service = new CellBridgeDocumentService(provider);
+        var initial = (await service.CreateAsync("/opaque-save.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var opaque = await DocumentPartition.CaptureGraphAsync(initial.Partitions.Single(p => p.Kind == 1),
+            new GraphFixture([1], blob: true).Generic(), 9, provider.Content, new());
+        var file = new GraphFixture(MinimalDocx.Create("after"), blob: true);
+        using var response = new MemoryStream([1, 2, 3]);
+        var scoped = new SaveReceipt($"{file.Index.Value}:{file.Index.Guid:D}", "digest", initial.ContentVersion,
+            await provider.Content.WriteAsync(response), TestActor.Value.Identity.Subject)
+            { PartitionKind = 1, AcceptedStorageIndex = opaque.StorageIndex };
+        await provider.State.TransitionAsync(initial.ResourceId, (current, _) => new StateTransition<bool>(current with
+        {
+            Partitions = current.Partitions.Select(p => p.Kind == 1 ? opaque : p).ToImmutableArray(),
+            Receipts = [scoped]
+        }, true));
+        var request = Save(initial, file);
+        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
+            request, new Dictionary<string, string>(), TestActor.Value);
+        Assert.False(Assert.Single(saved.Response.SubResponses).Status);
+        Assert.Equal(opaque, saved.State.Partitions.Single(p => p.Kind == 1));
+        Assert.Equal(scoped, saved.State.Receipts.Single(r => r.PartitionKind == 1));
+        Assert.Contains(scoped.Response!, StorageReferences.Handles(saved.State));
+        var repeat = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
+            request, new Dictionary<string, string>(), TestActor.Value);
+        Assert.True(Assert.Single(repeat.AcceptedSaves).IsReplay);
+        Assert.Equal(opaque, repeat.State.Partitions.Single(p => p.Kind == 1));
+        Assert.Equal(scoped, repeat.State.Receipts.Single(r => r.PartitionKind == 1));
+    }
+
     [PostgreSqlFact]
     public async Task PostgreSqlReopenedServicesPreserveInheritedBlobAndOpaquePartitionGraphs()
     {

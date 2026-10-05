@@ -27,12 +27,26 @@ public sealed record LeaseState(string Id, string? Client, DateTime ExpiresUtc, 
 public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseState> SchemaOwners,
     LeaseState? Exclusive, long Generation)
 {
+    public HostLease? HostLock { get; init; }
     public ImmutableArray<string> CoauthorClients { get; init; } = [];
     public bool CoauthorTransitionPending { get; init; }
     public static CoordinationState Empty { get; } = new(null, [], null, 0);
 }
 public sealed record SaveReceipt(string OperationKey, string Digest, uint ContentVersion,
-    ContentHandle? Response, string? OwnerSubject = null);
+    ContentHandle? Response, string? OwnerSubject = null)
+{
+    /// <summary>Legacy receipts default to the file partition and its content-version semantics.</summary>
+    public int PartitionKind { get; init; }
+    public ExtendedId? AcceptedStorageIndex { get; init; }
+    public long LifecycleGeneration { get; init; } = 1;
+}
+
+/// <summary>An immutable publication. Access is always evaluated against the current document.</summary>
+public sealed record DocumentRevision(Guid ResourceId, long LifecycleGeneration, ulong RevisionNumber,
+    uint ContentVersion, DateTime CreatedUtc, SubjectIdentity Author, ContentHandle Content,
+    ImmutableArray<PartitionState> Partitions);
+public sealed record RestoreReceipt(long LifecycleGeneration, string OwnerSubject, string OperationKey,
+    string Digest, ulong RevisionNumber);
 
 /// <summary>One detached state version. Referenced content is immutable; reclamation requires quiescent maintenance.</summary>
 public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Path, string PathKey,
@@ -42,8 +56,24 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
     ImmutableArray<SaveReceipt> Receipts)
 {
     public const int CurrentFormat = 2;
+    /// <summary>Incarnation of a host path. Prepared mutations must retain and revalidate this value.</summary>
+    public long LifecycleGeneration { get; init; } = 1;
+    public bool IsDeleted { get; init; }
+    public long? DeletedFromStateVersion { get; init; }
+    public Guid? ReplacedBy { get; init; }
+    public ExternalPublicationState? Publication { get; init; }
     public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
+    public ImmutableArray<DocumentRevision> Revisions { get; init; } = [];
+    public ImmutableArray<string> RetiredPathKeys { get; init; } = [];
+    public ImmutableArray<RestoreReceipt> RestoreReceipts { get; init; } = [];
     public string Etag => $"\"{{{ResourceId.ToString("D").ToUpperInvariant()}}},{ContentVersion}\"";
+}
+
+/// <summary>Optional atomic rename capability. The callback uses the same coordination guarantees as TransitionAsync.</summary>
+public interface IAtomicDocumentRenameStore
+{
+    ValueTask<T> RenameAsync<T>(Guid resourceId, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Metadata only; listing does not fetch package or graph bytes.</summary>
