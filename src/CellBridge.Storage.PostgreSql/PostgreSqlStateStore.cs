@@ -5,7 +5,7 @@ using Npgsql;
 namespace CellBridge.Storage.PostgreSql;
 
 /// <summary>Versioned immutable snapshots, coordinated by a row for each document.</summary>
-public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLimits? limits = null) : IDocumentStateStore, IDocumentLifecycleStore, IStorageBudgetParticipant, IAtomicDocumentRenameStore
+public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLimits? limits = null) : IDocumentStateStore, IDocumentLifecycleStore, IStorageBudgetParticipant, IAtomicDocumentRenameStore, IProviderRecoveryStore
 {
     public object BudgetScope => dataSource;
     private readonly StorageLimits _limits = ValidateLimits(limits);
@@ -42,8 +42,9 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
         using var reader = new StreamReader(source);
         await using var command = new NpgsqlCommand(await reader.ReadToEndAsync(cancellationToken), connection, transaction);
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await InitializeRecoveryAsync(connection, transaction, cancellationToken);
         await ConfigureTransactionAsync(connection, transaction, cancellationToken);
-        await using (var configure = new NpgsqlCommand("UPDATE cellbridge_usage SET stored_bytes=COALESCE((SELECT SUM(length) FROM cellbridge_objects),0)+COALESCE((SELECT SUM(octet_length(state_json)) FROM cellbridge_states),0),document_count=(SELECT COUNT(*) FROM cellbridge_documents),max_stored_bytes=$1,max_documents=$2 WHERE singleton=true", connection, transaction))
+        await using (var configure = new NpgsqlCommand("UPDATE cellbridge_usage SET stored_bytes=COALESCE((SELECT SUM(length) FROM cellbridge_objects),0)+COALESCE((SELECT SUM(octet_length(state_json)) FROM cellbridge_states),0)+COALESCE((SELECT SUM(octet_length(receipt_json)) FROM cellbridge_recovery_receipts),0),document_count=(SELECT COUNT(*) FROM cellbridge_documents),max_stored_bytes=$1,max_documents=$2 WHERE singleton=true", connection, transaction))
         {
             configure.Parameters.Add(new NpgsqlParameter { Value = _limits.MaxStoredBytes });
             configure.Parameters.Add(new NpgsqlParameter { Value = _limits.MaxDocuments });

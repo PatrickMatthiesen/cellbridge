@@ -67,7 +67,9 @@ semantics; it does not make local content shared.
 
 Use one content configuration for each database. Changing providers requires
 an explicit data migration; changing settings alone does not move objects.
-Provider export/import and public version restoration are unimplemented.
+Use the [provider portability workflow](provider-portability.md) for validated exports
+and atomic recovery into an empty destination. [Revision restoration](revision-history.md)
+publishes an older retained version through the regular document service.
 
 ## Consume the packages
 
@@ -240,6 +242,12 @@ to it; its deletion/recreation and detached-reader behavior are covered by
 `HostLifecycleTests` and `HistoryLifecycleIntegrationTests`.
 
 ### Backup and recovery
+
+The [portable archive and recovery tool](provider-portability.md) preserves current
+heads, every retained provider snapshot, history, permissions and referenced content
+across supported content providers. It rejects incompatible policy/destination
+bindings and imports into an empty namespace only. Native database backups remain
+a separate environment-specific option.
 
 A PostgreSQL-only backup contains state and content. With filesystem content,
 preserve every object referenced by the database recovery point. Append-only

@@ -108,6 +108,7 @@ are opt-in.
 
 ## Documentation
 
+- [Provider export, migration and recovery](docs/provider-portability.md)
 - [Document library and desktop editing](docs/demo-library.md)
 - [Authentication and permissions](docs/authentication.md)
 - [Storage, hosting and provider authoring](docs/storage-providers.md)
