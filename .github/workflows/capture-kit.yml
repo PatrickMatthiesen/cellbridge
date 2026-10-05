@@ -16,11 +16,15 @@ on:
       - 'tools/CellBridge.Admin/**'
       - 'tools/CellBridge.Storage.*/**'
       - 'tools/verify_packages.py'
+      - 'tools/package_manifest.py'
+      - 'tools/check_release.py'
+      - 'tools/publish_packages.py'
       - 'tools/OfficeInspectors.Dump/**'
       - 'examples/**'
       - 'docs/package-readme.md'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
+      - '.github/workflows/publish-nuget.yml'
   push:
     branches: [main]
     paths:
@@ -38,11 +42,15 @@ on:
       - 'tools/CellBridge.Admin/**'
       - 'tools/CellBridge.Storage.*/**'
       - 'tools/verify_packages.py'
+      - 'tools/package_manifest.py'
+      - 'tools/check_release.py'
+      - 'tools/publish_packages.py'
       - 'tools/OfficeInspectors.Dump/**'
       - 'examples/**'
       - 'docs/package-readme.md'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
+      - '.github/workflows/publish-nuget.yml'
 permissions:
   contents: read
 jobs:

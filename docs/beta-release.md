@@ -46,10 +46,69 @@ metadata, readme and portable symbol packages.
    NuGet.org without the local feed. Upload matching symbol packages and create
    the release tag and notes for the source commit.
 
-CI's protocol job uploads `cellbridge-beta-packages`, containing the exact
-`.nupkg`/`.snupkg` files and manifest after successful verification. It does not
-publish automatically. Use that artifact or an equivalent verified release-commit
-build. NuGet publishing and GitHub release creation remain explicit release steps.
+## Trusted Publishing setup
+
+The NuGet organization is `CellBridge`; its administrator and policy creator is
+`Subjective`. Keep `NUGET_USER=Subjective` as a GitHub repository variable.
+The login action uses the individual policy creator's profile name. The policy's
+package owner is the organization. No permanent NuGet API key or GitHub secret
+is required.
+
+In [NuGet Trusted Publishing](https://www.nuget.org/account/trustedpublishing),
+create this policy while signed in as `Subjective`:
+
+| Field | Value |
+| --- | --- |
+| Policy name | `CellBridge GitHub releases` |
+| Package owner | `CellBridge` |
+| Repository owner | `PatrickMatthiesen` |
+| Repository | `cellbridge` |
+| Workflow file | `publish-nuget.yml`, filename only. |
+| Environment | `nuget` |
+| Package pattern | `CellBridge.*` |
+| Scopes | Publish new packages and publish new versions. |
+
+The GitHub `nuget` environment allows the `main` branch. The publishing job alone
+has `id-token: write`. [NuGet's setup guide](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing)
+describes the policy fields and temporary credential exchange.
+
+## Run the release workflow
+
+After merging reviewed changes and configuring the policy, open
+[Publish NuGet beta](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/publish-nuget.yml).
+Select `main`, enter the version in `Directory.Build.props` and leave `publish`
+unchecked for a validation run. The workflow tests protocol/storage and demo
+code against PostgreSQL, runs Python checks, packs the nine libraries and tests
+package consumption. It uploads `nuget-release-<commit>` containing the exact
+packages, symbols and manifest.
+
+For publication, run the same workflow on the intended unchanged `main` commit
+with `publish` checked. It builds and validates that run's artifacts, then
+validates the downloaded hashes, archive metadata, clean-source flag and commit
+again before obtaining temporary credentials. It publishes dependency packages
+before the host package, followed by symbols. Runs are serialized, and publication
+cannot run from a tag or feature branch.
+
+The existing protocol CI also uploads `cellbridge-beta-packages`. That is useful
+for evaluating a PR but is not automatically published. NuGet publication happens
+only through the explicit release workflow. Verify fresh NuGet.org restoration
+and create release notes/tag afterward; this workflow does not claim those steps
+are complete just because uploads succeeded.
+
+### Partial publication and retry
+
+NuGet publication is not atomic across nine packages. The workflow stops on the
+first upload failure or version conflict; it does not skip duplicates. Preserve
+the run artifact and determine exactly which package and symbol versions were
+accepted. Do not blindly rerun the full publish job after partial publication.
+
+A maintainer can recover by verifying accepted versions against the original
+release artifact/provenance and publishing only the remaining artifacts using
+appropriately scoped credentials. NuGet repository signing means an archive's
+remote byte hash need not equal the original `.nupkg` hash. If matching provenance
+cannot be established, choose a new beta version and run the full reviewed
+release process. A symbol failure after all primary uploads does not require
+republishing the primary packages.
 
 ## Integration qualification
 
