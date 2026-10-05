@@ -20,13 +20,12 @@ public static class AuthorizedDocumentCatalog
             if (candidates.Count == 0) break;
             foreach (var candidate in candidates)
             {
-                if (!candidate.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase) ||
-                    !candidate.Security.AccessFor(actor.Identity.Subject).HasFlag(DocumentAccess.Read)) continue;
-                // A custom host evaluator may restrict persisted grants further.
                 var state = await service.Provider.State.FindByResourceIdAsync(candidate.ResourceId, cancellationToken);
-                if (state is null || !service.Access(actor, state).HasFlag(DocumentAccess.Read)) continue;
+                if (state is null || !state.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase) ||
+                    !service.Access(actor, state).HasFlag(DocumentAccess.Read)) continue;
                 if (skipped++ < offset) continue;
-                visible.Add(candidate);
+                visible.Add(new(state.ResourceId, state.Path, state.Content.Length, state.ContentVersion,
+                    state.ModifiedUtc, state.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow)) { Security = state.Security });
                 if (visible.Count > limit) break;
             }
             physicalOffset += candidates.Count;

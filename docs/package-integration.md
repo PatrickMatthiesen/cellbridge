@@ -59,9 +59,10 @@ Explicit unknown or invalid ResourceIDs are never replaced with URL lookup.
 intersects it with `ICellBridgeAccessEvaluator.Evaluate`; `Write` includes `Read`.
 A ceiling for another resource grants no access. It cannot elevate the default
 stored ACL, bypass current-state permission checks, or grant creation permission.
-Resolve asynchronous host permissions before executing the request. Use a custom
-evaluator when the host, rather than CellBridge's stored ACL, owns authorization.
-Pass a ceiling on every externally authorized request in that arrangement.
+Resolve asynchronous request ceilings before executing the request. For host-owned
+authorization, use the [versioned policy contract](authentication.md#host-owned-policy)
+and its coordinated permission-update boundary. The source consumer demonstrates
+creation bindings, exact snapshots and revocation without mirrored grants.
 
 Evaluators run synchronously during coordinated operations. They must be bounded,
 perform no I/O and return consistent permissions for the supplied document state.
@@ -70,7 +71,10 @@ Do not depend on ambient HTTP state or require an `AccessLimit` to be present.
 Persist permission changes through versioned document/coordination updates that
 advance the affected editor graph knowledge; changing a mutable external
 permission cache alone can change graph bytes without changing their version.
-The default stored ACL evaluator remains available and denies access by default.
+The legacy evaluator remains available for unbound beta integrations. It does not
+replace the coordinated policy-update contract. The published `0.1.0-beta.1`
+packages predate this new source API; use project references until a release
+includes it.
 
 ## Accepted saves and external content
 

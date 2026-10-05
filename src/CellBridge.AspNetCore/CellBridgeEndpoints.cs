@@ -29,7 +29,7 @@ public static class CellBridgeEndpoints
         services.AddSingleton(options);
         services.AddSingleton(provider);
         services.AddAuthorization();
-        services.TryAddSingleton<ICellBridgeAccessEvaluator, StoredDocumentAccessEvaluator>();
+        services.TryAddSingleton<ICellBridgeAuthorizationPolicy, StoredGrantAuthorizationPolicy>();
         services.AddSingleton<CellBridgeDocumentService>();
         services.AddSingleton<CellBridgeRequestProcessor>();
         services.AddHealthChecks().AddCheck<CellBridgeStorageHealthCheck>("cellbridge-storage");

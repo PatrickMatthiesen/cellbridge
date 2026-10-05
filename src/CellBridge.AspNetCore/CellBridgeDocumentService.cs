@@ -20,16 +20,17 @@ public sealed record CellExecution(FsshttpbResponse Response, DocumentState Stat
 }
 
 /// <summary>Prepares file revisions outside coordination transactions and publishes them durably.</summary>
-public sealed partial class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null)
+public sealed partial class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null,
+    ICellBridgeAuthorizationPolicy? authorizationPolicy = null)
 {
-    private readonly ICellBridgeAccessEvaluator _access = accessEvaluator ?? new StoredDocumentAccessEvaluator();
+    private readonly ICellBridgeAccessEvaluator? _access = accessEvaluator;
+    private readonly ICellBridgeAuthorizationPolicy _policy = authorizationPolicy ?? new StoredGrantAuthorizationPolicy();
     public StorageProvider Provider => provider;
     public DocumentAccess Access(CellBridgeActor actor, DocumentState state)
     {
         if (state.IsDeleted) return DocumentAccess.None;
         if (actor.AccessLimit is { } limit && limit.ResourceId != state.ResourceId) return DocumentAccess.None;
-        var access = _access.Evaluate(actor, state);
-        if (access.HasFlag(DocumentAccess.Write)) access |= DocumentAccess.Read;
+        var access = SubjectAccess(actor, state);
         if (actor.AccessLimit is { } ceiling) access &= ceiling.Access;
         return access;
     }
@@ -101,6 +102,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         document.Security = security;
         var state = await document.CaptureAsync(provider.Content, cancellationToken: cancellationToken);
         if (resourceId is { } selectedId) state = state with { ResourceId = selectedId };
+        state = BindNewDocument(state);
         state = RevisionHistory.Initialize(state);
         provider.Limits.CheckDocument(state);
         return await provider.State.TryCreateAsync(state, cancellationToken) ? state : null;
