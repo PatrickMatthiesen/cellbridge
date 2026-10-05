@@ -65,6 +65,7 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
     public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
     public long LifecycleGeneration { get; init; } = 1;
     public ImmutableArray<DocumentRevision> Revisions { get; init; } = [];
+    public ImmutableArray<string> RetiredPathKeys { get; init; } = [];
     public ImmutableArray<RestoreReceipt> RestoreReceipts { get; init; } = [];
     public string Etag => $"\"{{{ResourceId.ToString("D").ToUpperInvariant()}}},{ContentVersion}\"";
 }

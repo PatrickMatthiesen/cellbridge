@@ -85,11 +85,13 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
     }
     public async ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default)
     {
+        DocumentPathReservations.ValidateCreate(state);
         try
         {
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await ConfigureTransactionAsync(connection, transaction, cancellationToken);
+            await PostgreSqlNamespaceLock.AcquireAsync(connection, transaction, cancellationToken);
             await using var insert = new NpgsqlCommand("INSERT INTO cellbridge_documents VALUES ($1,$2,0) ON CONFLICT DO NOTHING", connection, transaction);
             insert.Parameters.Add(new NpgsqlParameter { Value = state.ResourceId });
             insert.Parameters.Add(new NpgsqlParameter { Value = state.PathKey });
@@ -97,6 +99,7 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
             var next = state with { StateVersion = 0 };
             _limits.CheckDocument(next);
             await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, 0, 1, cancellationToken);
+            if (await IsPathReservedAsync(connection, transaction, state.PathKey, state.ResourceId, cancellationToken)) return false;
             await InsertStateAsync(connection, transaction, next, cancellationToken);
             // Publication has begun. Cancellation cannot be interpreted as rollback.
             await transaction.CommitAsync(CancellationToken.None);
@@ -116,6 +119,7 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await ConfigureTransactionAsync(connection, transaction, cancellationToken);
+            if (rename) await PostgreSqlNamespaceLock.AcquireAsync(connection, transaction, cancellationToken);
             long version;
             await using (var query = new NpgsqlCommand("SELECT state_version FROM cellbridge_documents WHERE resource_id=$1 FOR UPDATE", connection, transaction))
             {
@@ -137,7 +141,8 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
                 if (next.ResourceId != id || !rename && (next.PathKey != current.PathKey || next.Path != current.Path) ||
                     next.PathKey != next.Path.ToUpperInvariant())
                     throw new InvalidOperationException("A transition cannot change document identity or path.");
-                next = next with { StateVersion = checked(current.StateVersion + 1) };
+                next = next with { StateVersion = checked(current.StateVersion + 1),
+                    RetiredPathKeys = DocumentPathReservations.Capture(current, next, rename) };
                 _limits.CheckDocument(next);
                 // Content remains available to detached readers until quiescent maintenance.
                 // Metadata history is independent of file versions and includes lease-only writes.
@@ -149,6 +154,8 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
                     if (freed != 0) await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, -freed, 0, cancellationToken);
                 }
                 await InsertStateAsync(connection, transaction, next, cancellationToken);
+                if (rename && await IsPathReservedAsync(connection, transaction, next.PathKey, id, cancellationToken))
+                    throw new InvalidOperationException("The destination filename is reserved.");
                 await using var update = new NpgsqlCommand("UPDATE cellbridge_documents SET state_version=$2,path_key=$3 WHERE resource_id=$1", connection, transaction);
                 update.Parameters.Add(new NpgsqlParameter { Value = id });
                 update.Parameters.Add(new NpgsqlParameter { Value = next.StateVersion });
@@ -161,6 +168,16 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
         { throw new InvalidOperationException("The destination filename already exists.", ex); }
         catch (NpgsqlException ex) { throw new StorageUnavailableException("Document publication failed or its commit outcome is unknown.", ex); }
+    }
+    public static async Task<bool> IsPathReservedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        string pathKey, Guid resourceId, CancellationToken cancellationToken = default)
+    {
+        // Read complete current snapshots, including tombstones. Do not lock rows:
+        // namespace writers already hold the common guard before row/ledger locks.
+        await using var command = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM cellbridge_documents d JOIN cellbridge_states s USING(resource_id,state_version) WHERE d.resource_id<>$2 AND (d.path_key=$1 OR jsonb_exists(COALESCE(s.state_json::jsonb->'RetiredPathKeys','[]'::jsonb),$1)))", connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter { Value = pathKey });
+        command.Parameters.Add(new NpgsqlParameter { Value = resourceId });
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
     private static async Task InsertStateAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DocumentState state, CancellationToken cancellationToken)
     {

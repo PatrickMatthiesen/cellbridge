@@ -44,11 +44,13 @@ public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudge
     public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        DocumentPathReservations.ValidateCreate(state);
         lock (Budget.SyncRoot)
         {
             lock (_paths)
             {
-                if (_paths.ContainsKey(state.PathKey) || _documents.ContainsKey(state.ResourceId)) return ValueTask.FromResult(false);
+                if (_paths.ContainsKey(state.PathKey) || _documents.ContainsKey(state.ResourceId) ||
+                    _documents.Values.Any(s => s.RetiredPathKeys.Contains(state.PathKey))) return ValueTask.FromResult(false);
                 var next = state with { StateVersion = 0 };
                 Budget.Limits.CheckDocument(next);
                 Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength, 1);
@@ -76,7 +78,8 @@ public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudge
                 if (next.ResourceId != id || !rename && (next.PathKey != current.PathKey || next.Path != current.Path) ||
                     next.PathKey != next.Path.ToUpperInvariant())
                     throw new InvalidOperationException("A transition cannot change document identity or path.");
-                next = next with { StateVersion = checked(current.StateVersion + 1) };
+                next = next with { StateVersion = checked(current.StateVersion + 1),
+                    RetiredPathKeys = DocumentPathReservations.Capture(current, next, rename) };
                 Budget.Limits.CheckDocument(next);
                 lock (Budget.SyncRoot)
                 {
@@ -84,6 +87,9 @@ public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudge
                     {
                         if (_paths.TryGetValue(next.PathKey, out var owner) && owner != id)
                             throw new InvalidOperationException("The destination filename already exists.");
+                        if (_documents.Values.Any(s => s.ResourceId != id &&
+                            (s.PathKey == next.PathKey || s.RetiredPathKeys.Contains(next.PathKey))))
+                            throw new InvalidOperationException("The destination filename is reserved.");
                         Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
                         _paths.Remove(current.PathKey);
                         _paths[next.PathKey] = id;

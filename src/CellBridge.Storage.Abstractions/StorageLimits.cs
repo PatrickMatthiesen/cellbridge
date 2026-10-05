@@ -18,6 +18,7 @@ public sealed record StorageLimits
     public int MaxRetainedStateSnapshots { get; init; } = 64;
     public int MaxHistoryRevisions { get; init; } = 1_000;
     public int MaxRestoreReceipts { get; init; } = 1_000;
+    public int MaxRetiredPathKeys { get; init; } = 128;
 
     public void Validate()
     {
@@ -32,6 +33,7 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetainedStateSnapshots);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxHistoryRevisions);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRestoreReceipts);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetiredPathKeys);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalRevisions);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalBytes);
     }
@@ -52,6 +54,7 @@ public sealed record StorageLimits
         Check("save receipts", state.Receipts.Length, MaxSaveReceipts);
         Check("history revisions", state.Revisions.Length, MaxHistoryRevisions);
         Check("restore receipts", state.RestoreReceipts.Length, MaxRestoreReceipts);
+        Check("retired path keys", state.RetiredPathKeys.Length, MaxRetiredPathKeys);
         if (state.Publication is { } publication)
         {
             Check("pending external revisions", publication.Pending.Length, MaxPendingExternalRevisions);
