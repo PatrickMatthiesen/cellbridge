@@ -3,6 +3,7 @@ using Reference = Microsoft.Protocols.TestSuites.SharedAdapter;
 
 namespace CellBridge.Interop.Tests;
 
+[Collection("Allocation concurrency")]
 public sealed class GuidAllocationInteropTests
 {
     [MultiInstanceFact]
@@ -93,3 +94,8 @@ public sealed class GuidAllocationInteropTests
         Assert.Equal(Server.RequestTypes.AllocateExtendedGuidRange, Assert.Single(inspection.SubResponses).RequestType);
     }
 }
+
+// This test fills both hosts' request budgets. Other live collections must not
+// consume those slots while we assert successful concurrent allocations.
+[CollectionDefinition("Allocation concurrency", DisableParallelization = true)]
+public sealed class AllocationConcurrencyCollection;

@@ -35,4 +35,5 @@
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup><Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" /></ItemGroup>
 </Project>

@@ -16,7 +16,7 @@ operations.
 | Feature | Implementation |
 | --- | --- |
 | Read/write permissions | Binary `QueryAccess` reports the caller's access. |
-| Read file changes | `QueryChanges` returns file parts the client does not already have. It supports manifest/cell-change inclusion, filtered knowledge and whole-cell rounding. |
+| Read file changes | `QueryChanges` supports repeated file queries with independent knowledge/errors and one shared data package. Mapped cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
 | Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Save receipts identify retries so an accepted save is not published twice. |
 | Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
 | Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` reports the current version. |
@@ -31,10 +31,12 @@ SOAP dependencies determine which subsequent operations execute.
 - Uploads marked partial, uploads spanning multiple requests, alternate coherency
   modes and writes to non-file partitions are unsupported. Ordinary saves can
   still reuse unchanged file parts.
-- Historical-version queries, foreign cell scopes, waterline-only query controls
+- Historical-version queries, unmapped cell scopes, waterline-only query controls
   and some filters are unsupported. Optional unsupported filters fall back to
   more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
-- A binary request can contain only one `QueryChanges`; a second is rejected.
+- Repeated metadata/editor queries and independent binary routing across SOAP
+  partitions remain unsupported. Repeated file queries deduplicate immutable
+  elements; a later failure preserves earlier payloads and save acknowledgements.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
   and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
   outside the current normative four-operation inventory.
@@ -44,10 +46,11 @@ SOAP dependencies determine which subsequent operations execute.
 - Lock conversions and transition acknowledgement are implemented with persisted
   coauthor membership. Native desktop transition behavior still needs qualification.
 - The binary application-metadata stream is incomplete.
-- The standalone generic graph resolver handles cells, partitions, inherited
-  objects and BLOBs. Its server/persistence integration and OneNote notebook/page
-  synchronization remain unimplemented. File reconstruction follows the selected
-  revision's explicitly referenced object groups.
+- The generic graph resolver has durable capture/restore codecs. File saves can
+  resolve inherited objects and declared BLOBs by identity, keeping object
+  partitions and cells separate. General non-file publication, OneNote adapters
+  and notebook/page synchronization remain unimplemented. Reference captures for
+  the new graph shapes and scoped queries remain required.
 - Automatic graph pruning is disabled. The host retains graph and save identities
   and rejects growth at its [storage limits](storage-providers.md#limits-and-qualification).
 
@@ -63,6 +66,25 @@ subrequest routing across partitions remains part of scoped-query work. See the
 implementation evidence and remaining audit gates.
 
 SharePoint lists and search are outside the project's scope.
+
+Scoped multi-cell queries include the selected index/manifest, required ancestor
+records and current referenced cells, with bounded traversal that permits cell
+cycles. They exclude unrelated cells and detached history. Scoped knowledge
+uses waterline zero because it does not establish complete partition possession.
+The cell-dependency interpretation follows the [Cell ID filter model](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/65b2e89a-9c3f-4263-b8d2-99e59691b11e)
+and has synthetic coverage; specialization of the separate filter wire objects
+still uses the documented fallback. The obsolete in-memory root control is not
+a new serialized query argument.
+
+Self-contained legacy file graphs retain their existing reconstruction path.
+Strict scoped resolution can reject incomplete unused ancestry in those graphs;
+only that query receives an unsupported error. Storage corruption and I/O
+failures remain distinct. Each query's byte constraint applies before package
+union; the union also has a server byte budget. Unscoped/single-cell durable
+queries verify the selected index and manifest before reading unknown payloads,
+so fully known queries read these two scope records but no file/object/BLOB data.
+Explicit multi-cell scopes currently load the retained graph for validation even
+when client knowledge is complete. Reducing those reads is performance work #33.
 
 ## Client coverage
 

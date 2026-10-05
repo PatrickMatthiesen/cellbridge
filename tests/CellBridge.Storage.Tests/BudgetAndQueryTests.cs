@@ -276,7 +276,7 @@ public class BudgetAndQueryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task CurrentKnowledgeAvoidsReadingAnyContentAndSurvivesBinaryDecoding(bool round)
+    public async Task CurrentKnowledgeReadsOnlyScopeMetadataAndSurvivesBinaryDecoding(bool round)
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
@@ -289,12 +289,16 @@ public class BudgetAndQueryTests
                 RoundKnowledgeToWholeCellChanges = round, Knowledge = ClientKnowledge.Deserialize(new(BinaryKnowledgeBuilder.FromElements(
                     metadata, ExGuid.Null, 0, mappingSerials: state.Partitions.Single(p => p.Kind == 0).Elements
                         .SelectMany(e => e.MappingSerials).Select(s => new SerialNumber(s.Guid, s.Value))))), MaxDataElements = 1 } });
-        var withoutContent = new CellBridgeDocumentService(new(provider.State, new NoReads()));
+        var scopeContent = new ScopeMetadataReads(provider.Content, state.Partitions.Single(p => p.Kind == 0).Elements
+            .Where(e => e.Type is (uint)DataElementType.StorageIndexDataElementData or (uint)DataElementType.StorageManifestDataElementData)
+            .Select(e => e.Payload).ToHashSet());
+        var withoutContent = new CellBridgeDocumentService(new(provider.State, scopeContent));
         var result = await withoutContent.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, query, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(result.Response.SubResponses).Status);
         Assert.Empty(result.Response.DataElementPackage!.DataElements);
         Assert.Empty(FsshttpbResponseInspector.Inspect(result.Response.ToByteArray()).Issues);
         Assert.Equal(state.StateVersion, result.State.StateVersion);
+        Assert.Equal(2, scopeContent.Reads);
     }
 
     [PostgreSqlFact]
@@ -486,6 +490,20 @@ public class BudgetAndQueryTests
         {
             await using var drop = admin.CreateCommand($"DROP DATABASE {database} WITH (FORCE)");
             await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    private sealed class ScopeMetadataReads(IContentStore inner, HashSet<ContentHandle> allowed) : IContentStore
+    {
+        public int Reads { get; private set; }
+        public bool Durable => inner.Durable;
+        public bool Shared => inner.Shared;
+        public ValueTask<ContentHandle> WriteAsync(Stream source, CancellationToken cancellationToken = default) => throw new InvalidOperationException("Unexpected write.");
+        public ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default)
+        {
+            Assert.Contains(handle, allowed);
+            Reads++;
+            return inner.OpenReadAsync(handle, cancellationToken);
         }
     }
 

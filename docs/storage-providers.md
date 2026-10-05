@@ -244,6 +244,30 @@ GUIDs, timestamps and format versions. Path keys use normalized invariant
 uppercase with ordinal comparison; percent escapes are decoded once and Unicode
 normalization is not applied.
 
+### Generic graph persistence
+
+`DocumentPartition.CaptureGraphAsync` and `RestoreGraphAsync` preserve opaque
+graphs separately from application file reconstruction. They reuse document
+state format 2 and the existing graph-element records, with no database schema
+change. Existing file states retain their legacy reconstruction path. Generic
+restore is stricter about mapped revision closure; it rejects incomplete graphs
+rather than treating them as opaque file bytes.
+
+Every retained element, including separately referenced BLOBs, has an immutable
+verified content handle. Storage-index mapping serials are persisted and checked
+against payload bytes on restore. Capture rejects reused IDs with changed type,
+payload or conflicting non-null serials. Knowledge and unsigned identities
+round-trip unchanged. Existing provider reference enumeration includes these
+handles, so state snapshots protect them from orphan collection. Automatic
+graph pruning remains disabled.
+
+Capture stages content and returns a detached partition. Its caller owns
+authorization, document consistency and atomic publication. It does not update
+materialized document content or enable non-file protocol uploads. File
+publication uses the separate validated file adapter. Generic restoration
+enforces graph/object budgets, integrity and cancellation; permitted object/cell
+cycles are bounded separately from invalid revision-base cycles.
+
 ### Content and budget contracts
 
 `WriteAsync` completes durable publication before returning an immutable handle.

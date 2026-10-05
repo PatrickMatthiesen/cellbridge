@@ -9,10 +9,8 @@ public static class CellBinaryRequestExecutor
 {
     /// <summary>
     /// Builds one matching sub-response for each request. File PutChanges
-    /// validates and commits its retained object graph. The response model supports one
-    /// QueryChanges data-element package per response. A repeated QueryChanges
-    /// therefore receives RequestNotSupported until query filters can be
-    /// applied independently. EditorsTable queries require the SOAP-specific
+    /// validates and commits its retained object graph. Repeated file queries
+    /// share the union of their independently selected payloads. EditorsTable queries require the SOAP-specific
     /// response builder callback.
     /// </summary>
     public static FsshttpbResponse Execute(
@@ -20,7 +18,8 @@ public static class CellBinaryRequestExecutor
         DocumentPartition partition,
         FsshttpbCellRequest request,
         DocumentAccess access,
-        Func<ulong, FsshttpbResponse>? editorsTableQueryChanges = null)
+        Func<ulong, FsshttpbResponse>? editorsTableQueryChanges = null,
+        long maxResponseBytes = 512L * 1024 * 1024)
     {
         var response = new FsshttpbResponse();
         if (request.SubRequests.Count == 0)
@@ -34,6 +33,7 @@ public static class CellBinaryRequestExecutor
         }
 
         bool queryChangesAlreadyHandled = false;
+        var queries = new QueryChangesResponseAssembler(response, maxResponseBytes);
         foreach (var subRequest in request.SubRequests)
         {
             if (subRequest.RequestType != RequestTypes.QueryAccess &&
@@ -58,7 +58,8 @@ public static class CellBinaryRequestExecutor
                 response.SubResponses.Add(AllocateRange(subRequest));
                 continue;
             }
-            if (subRequest.RequestType == RequestTypes.QueryChanges && queryChangesAlreadyHandled)
+            if (subRequest.RequestType == RequestTypes.QueryChanges && queryChangesAlreadyHandled &&
+                partition.Kind != DocumentPartitionKind.FileContents)
             {
                 response.SubResponses.Add(UnsupportedSubResponse(subRequest.RequestId, subRequest.RequestType));
                 continue;
@@ -68,8 +69,7 @@ public static class CellBinaryRequestExecutor
             {
                 queryChangesAlreadyHandled = true;
                 var queryChanges = QueryChanges(document, partition, subRequest, editorsTableQueryChanges);
-                response.SubResponses.AddRange(queryChanges.SubResponses);
-                response.DataElementPackage = queryChanges.DataElementPackage;
+                queries.Append(queryChanges);
                 continue;
             }
 
@@ -159,10 +159,23 @@ public static class CellBinaryRequestExecutor
         lock (document)
         {
             var graph = partition.FileGraph;
-            if (!FileQueryResponseBuilder.Supports(request, partition.ProtocolIdentity.CellId))
+            var indexes = graph.StorageIndexes;
+            var currentIndex = indexes.Single(e => e.DataElementExtendedGuid.Equals(graph.StorageIndex));
+            var manifestId = PartitionGraphSnapshot.ReadStorageManifestId(currentIndex);
+            var manifest = graph.SelectElements(e => e.DataElementExtendedGuid.Equals(manifestId)).Single();
+            var cells = PartitionGraphSnapshot.ReadFileCells(currentIndex, manifest);
+            if (!FileQueryResponseBuilder.Supports(request, cells))
                 return FileQueryResponseBuilder.Unsupported(requestId);
+            var cell = FileQueryResponseBuilder.IsScoped(request) ? request!.CellId! : graph.FileCell;
+            IReadOnlySet<ExGuid>? scope = null;
+            if (FileQueryResponseBuilder.IsScoped(request) && cells.Count > 1)
+            {
+                try { scope = GenericPartitionGraphSnapshot.Create(graph.Elements, graph.StorageIndex).GetRequiredElements(cell).ToHashSet(); }
+                catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException)
+                { return FileQueryResponseBuilder.Unsupported(requestId); }
+            }
             var selected = FileQueryResponseBuilder.Select(graph.ElementMetadata, graph.StorageIndex,
-                partition.ProtocolIdentity.CellId, partition.KnowledgeSequence, request, graph.MappingSerials);
+                cell, partition.KnowledgeSequence, request, graph.MappingSerials, scope);
             return FileQueryResponseBuilder.Build(requestId, selected,
                 graph.SelectElements(e => selected.PayloadIds.Contains(e.DataElementExtendedGuid)), request);
         }

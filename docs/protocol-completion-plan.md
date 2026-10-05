@@ -35,18 +35,19 @@ unknown requests and operations outside the selected profile.
 The [requirements ledger](protocol-requirements.md) records current field-level
 status and profile decisions. GUID allocation, canonical version URLs, user-agent
 identity, matching binary partition selectors and lock transitions now have
-implementations and focused tests. The generic graph resolver is a standalone
-foundation; host/persistence integration and actual OneNote qualification remain.
+implementations and focused tests. The generic graph resolver now has durable
+codecs and file save/scoped query integration. General non-file publication and
+actual OneNote qualification remain.
 
 The identifiers in this table are stable references for implementation work.
 Acceptance criteria are expanded in the phases below.
 
 | ID | Area and current evidence | Class | Improvement and relative effort |
 | --- | --- | --- | --- |
-| G1 | `PartitionGraphSnapshot` uses one application schema/content root and selected cell; `ObjectGroupGraph` keys objects only by `ExGuid`, despite partition IDs in declarations. | Missing generic graph behavior | Multiple roots, cells and object partitions; essential for OneNote and broader graph compatibility. Large foundational change. |
-| G2 | Base revisions are retained, but materialization uses explicitly selected groups without general ancestor object resolution. | Missing graph behavior | Resolve inherited objects with revision/cell scope and precedence. Substantial correctness work. |
-| G3 | Object BLOB declarations/references are explicitly rejected; object bytes are interpreted using the file-stream materializer. | Missing graph behavior | Preserve opaque objects, cell references and separately stored BLOBs; keep Office ZIP reconstruction in its own adapter. Substantial graph/storage work. |
-| Q1 | Both execution paths reject repeated `QueryChanges`; file queries reject unsupported cell/root/version controls. | Missing query behavior | Independently scoped results sharing a correctly assembled response package. Medium to large change after G1–G3. |
+| G1 | Generic cells, roots and object partitions have durable codecs and file adapter integration. | Implemented foundation; non-file publication/reference qualification remains | Essential shared foundation for OneNote. Non-file protocol uploads still belong to U1. |
+| G2 | File materialization resolves inherited objects with revision/cell scope and nearest-definition precedence. | Implemented file behavior; reference qualification remains | Required ancestors remain retained. Strict generic resolution preserves explicit errors for incomplete graphs. |
+| G3 | File publication and generic codecs resolve declared BLOB IDs and preserve retained handles. | Implemented file behavior; non-file/reference qualification remains | BLOB integrity and closure have restart/provider tests; no largest-payload recovery. |
+| Q1 | Repeated file queries share one package, preserving each scope/knowledge/error. | Implemented subset; remaining query behavior | Repeated metadata/editors, cross-partition routing and applicable filters remain #23; version queries remain #7. |
 | Q2 | `QueryChangesVersioning` is rejected; `GetVersions` exposes the current entry with versioning disabled. Retained snapshots are not a public version repository. | Missing version/history capability | Real version tokens, version queries and coherent listing/restoration. Large storage and protocol change. |
 | Q3 | Byte budgets needing continuation return errors; `AllowFragments` is parsed without implementing fragmented delivery. | Missing continuation capability | Bounded synchronization for large graphs. Substantial transaction/state work. Fragment permission alone does not require every response to fragment. |
 | Q4 | `AllocateExtendedGuidRange` has typed codecs and authorized execution using fresh UUID namespaces. | Implemented operation | Exact count, exclusive upper bound and concurrent host decoding tests; no durable shared counter required. |

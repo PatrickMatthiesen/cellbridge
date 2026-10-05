@@ -33,6 +33,27 @@ public sealed class QueryChangesTests
 public sealed class LiveQueryChangesTests
 {
     [LiveInteropFact]
+    public async Task RepeatedQueriesShareOnePackageReadableByMicrosoftClient()
+    {
+        var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
+        using var http = LiveInteropHttp.Create();
+        var client = new CellStorageClient(http, endpoint);
+        var initial = (await client.SendCellAsync("/shared/test.docx", InteropRequestFactory.QueryChanges(1), partitionId: null, getFileProps: true)).ParseBinaryResponse();
+        var request = InteropRequestFactory.QueryChanges(11);
+        Assert.IsType<QueryChangesCellSubRequest>(request.SubRequests[0]).Knowledge =
+            Assert.IsType<QueryChangesSubResponseData>(initial.CellSubResponses[0].SubResponseData).Knowledge;
+        request.SubRequests.Add(InteropRequestFactory.QueryChanges(22).SubRequests[0]);
+        var response = await client.SendCellAsync("/shared/test.docx", request, partitionId: null, getFileProps: true);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        var parsed = response.ParseBinaryResponse();
+        Assert.False(parsed.Status);
+        Assert.Equal(2, parsed.CellSubResponses.Count);
+        Assert.All(parsed.CellSubResponses, s => Assert.False(s.Status));
+        Assert.Equal(initial.DataElementPackage.DataElements.Count, parsed.DataElementPackage.DataElements.Count);
+        Assert.All(parsed.CellSubResponses, s => Assert.IsType<QueryChangesSubResponseData>(s.SubResponseData));
+    }
+
+    [LiveInteropFact]
     public async Task FileKnowledgeProducedAndConsumedByMicrosoftClientReturnsNoKnownPayloads()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
