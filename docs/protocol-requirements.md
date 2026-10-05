@@ -1115,8 +1115,31 @@ uploads task (#27/#28) owns applied-index responses and application metadata
 publication; staged Partial/PartialLast identity, abort/expiry and a reference
 metadata notebook remain distinct gates. The external-host task (#44/#45/#46)
 owns destination CAS/durable deduplication, publication delivery, shared locks,
-authoritative lifecycle generation and migration/fencing. Its reviewed proposed
+authoritative lifecycle generation and migration/fencing. Its implementation in
+[PR #50](https://github.com/PatrickMatthiesen/cellbridge/pull/50), pinned at
+`c6d97d4ef727e924846881ad390c6bbdb7775cc2`, is pending main. The reviewed
 contract requires fresh ResourceId and matching SOAP ResourceId for recreated
-generations greater than one to prevent URL-only ABA. These reports are pending
-the owners' PRs and combined validation; no pending behavior is counted as beta
+generations greater than one to prevent URL-only ABA. Owner PRs and their
+combined validation remain separate gates; no pending behavior is counted as beta
 release evidence. Shared production interfaces are unchanged by this audit.
+
+The following rows record PR #50 owner evidence at that pinned commit. Its
+[feature guide](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/docs/external-host-reliability.md)
+distinguishes host contracts from wire requirements: delivery journals, lifecycle
+generations and destination CAS are implementation mechanisms, not additional
+protocol fields mandated by the specifications.
+
+| ID | Related normative obligation / host contract | Pinned implementation and evidence | Remaining gate |
+| --- | --- | --- | --- |
+| EH01 | [MS-FSSHTTPB 3.1.4.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/94a442bc-ce2f-4f25-a245-82976b0b063c) incorporates submitted changes and MUST reply. External delivery is opt-in; when enabled its host contract requires atomic destination revision CAS and durable fingerprint-validated operation receipts. | [ExternalPublication.Append](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/src/CellBridge.Storage.Abstractions/ExternalPublication.cs) journals changed saves inside the document-service transition and retains immutable content pins; [ExternalRevisionPublisher](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/src/CellBridge.AspNetCore/ExternalRevisionPublisher.cs) retries exact operations outside provider coordination. [ExternalPublicationTests](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/tests/CellBridge.Storage.Tests/ExternalPublicationTests.cs) cover lost/delayed acknowledgements, competing publishers, remote changes, missing content and capacity rejection; [owner acceptance](https://github.com/PatrickMatthiesen/cellbridge/issues/44#issuecomment-5995881059). | Pending main and combined integration. Real destination CAS/deduplication adoption, WopiHost integration and reference/client qualification #44. Unconditional writes cannot satisfy this contract. |
+| EH02 | [MS-FSSHTTP 3.1.4.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/918c3440-7d05-4c3a-8d51-0bad627bdb23) MUST release expired unrefreshed locks; [MS-WOPI base lock](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-wopi/e46e1f59-5781-4a35-8d8d-9df253b7c58a) has 30-minute expiry. Common provider authority and commit fencing are host contracts enforcing those boundaries. | [SharedDocumentLocks](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/src/CellBridge.AspNetCore/SharedDocumentLocks.cs) and [CoordinationFencing](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/src/CellBridge.Storage.Abstractions/CoordinationFencing.cs) check subject/token, lifecycle generation, authority epoch and provider-time expiry. [SharedHostLockTests](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/tests/CellBridge.Storage.Tests/SharedHostLockTests.cs) exercise mutual exclusion, turnover, expiry and prepared-write rejection; [owner acceptance](https://github.com/PatrickMatthiesen/cellbridge/issues/45#issuecomment-5995881423). | Pending main and combined integration, real host adoption and reference/client qualification #45. WOPI extended/shared locks and cross-protocol conversion remain unsupported. |
+| EH03 | [MS-OCPROTO Web Servers 2.1.2.1.2](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-ocproto/2d268a23-420b-4339-8c56-9e4f8a924171) describes access/discovery; [MS-FSSHTTP Request ResourceID](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/91fb9fd5-ef2d-4484-b57c-f0aedf7d0f00) supplies protocol identity. Conditional tombstone/recreation and local eviction are separate host lifecycle contracts. | [DocumentLifecycle](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/src/CellBridge.Storage.Abstractions/DocumentLifecycle.cs) retains retired IDs and content, compares generation/state version, and requires a fresh ResourceId for explicit recreation. SOAP Cell/mutations on recreated paths require matching explicit identity. [HostLifecycleTests](https://github.com/PatrickMatthiesen/cellbridge/blob/c6d97d4ef727e924846881ad390c6bbdb7775cc2/tests/CellBridge.Storage.Tests/HostLifecycleTests.cs) cover deletion/recreation races and retained pins; [owner acceptance](https://github.com/PatrickMatthiesen/cellbridge/issues/46#issuecomment-5995881737). | Pending main and combined namespace integration #46. JSON remains additive format 2; PostgreSQL explicitly migrates schema 3 to 4 with hosts stopped, and old writers fail closed. External deletion/adoption and reference/client qualification remain separate. |
+
+The owner reports Astra design and final approval and an isolated run at this
+commit of **693 .NET tests and 71 Python checks, with two platform skips**, under
+ignored `artifacts/host-reliability/full-3`. PR #50's three protocol/storage/capture
+CI checks independently passed at that head. This is distinct from this audit's
+683 .NET/71 Python isolated run. Pending scoped-receipt, opaque-metadata and
+namespace integration must be reviewed, rebased and jointly tested before merge.
+Neither run establishes OneNote, distinct-desktop or Office Online Server
+qualification. Issues #44/#45/#46 remain open for the listed external gates.
