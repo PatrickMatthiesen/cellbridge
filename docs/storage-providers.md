@@ -310,6 +310,7 @@ The sample binds positive `StorageLimits` from `Storage`:
 | `MaxRetainedStateSnapshots` | 64 | PostgreSQL metadata history per document. |
 | `MaxHistoryRevisions` | 1,000 | Immutable file/application-metadata publications per document; no automatic expiration. |
 | `MaxRestoreReceipts` | 1,000 | Durable keyed restore receipts per document; identities are not evicted. |
+| `MaxRetiredPathKeys` | 128 | Permanently reserved names per resource after rename; keys are not evicted. |
 
 
 Accounting includes reservations and charged orphans, but excludes database
