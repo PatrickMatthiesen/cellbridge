@@ -37,14 +37,25 @@ public static class CellBinaryRequestExecutor
         foreach (var subRequest in request.SubRequests)
         {
             if (subRequest.RequestType != RequestTypes.QueryAccess &&
-                !access.HasFlag(subRequest.RequestType == RequestTypes.PutChanges ? DocumentAccess.Write : DocumentAccess.Read))
+                !access.HasFlag(subRequest.RequestType is RequestTypes.PutChanges or RequestTypes.AllocateExtendedGuidRange
+                    ? DocumentAccess.Write : DocumentAccess.Read))
             {
                 response.SubResponses.Add(CellBridge.AspNetCore.CellBridgeAuthorization.Denied(subRequest));
+                continue;
+            }
+            if (!MatchesTarget(subRequest, partition.Kind))
+            {
+                response.SubResponses.Add(UnsupportedSubResponse(subRequest.RequestId, subRequest.RequestType));
                 continue;
             }
             if (subRequest.RequestType == RequestTypes.PutChanges)
             {
                 response.SubResponses.Add(FilePartitionSaveHandler.Apply(document, partition, subRequest, request.DataElementPackage));
+                continue;
+            }
+            if (subRequest.RequestType == RequestTypes.AllocateExtendedGuidRange)
+            {
+                response.SubResponses.Add(AllocateRange(subRequest));
                 continue;
             }
             if (subRequest.RequestType == RequestTypes.QueryChanges && queryChangesAlreadyHandled)
@@ -70,6 +81,9 @@ public static class CellBinaryRequestExecutor
         return response;
     }
 
+    internal static bool MatchesTarget(FsshttpbCellSubRequest request, DocumentPartitionKind kind) =>
+        request.TargetPartitionId is not { } target || CellPartitionSelector.TryResolve(target, out var selected) && selected == kind;
+
     private static FsshttpbSubResponse QueryAccessSubResponse(ulong requestId, DocumentAccess access) => new()
     {
         RequestId = requestId,
@@ -80,6 +94,29 @@ public static class CellBinaryRequestExecutor
             WriteAccessError = access.HasFlag(DocumentAccess.Write) ? null : CellBridge.AspNetCore.CellBridgeAuthorization.AccessError(),
         },
     };
+
+    private static FsshttpbSubResponse AllocateRange(FsshttpbCellSubRequest request)
+    {
+        if (request.Data is not AllocateExtendedGuidRangeSubRequestData data || data.RequestIdCount is 0 or > 100_000)
+            return new FsshttpbSubResponse
+            {
+                RequestId = request.RequestId, RequestType = request.RequestType, Status = true,
+                Error = new ResponseError(ErrorType.Protocol, (ulong)ProtocolErrorCode.RequestNotSupported,
+                    "Allocation requires a count from 1 through 100000."),
+            };
+        // A new UUID namespace per request avoids a shared/restarted integer
+        // counter. The integer zero is valid when the GUID component is non-null.
+        ulong maximum = Math.Max(1000UL, data.RequestIdCount);
+        return new FsshttpbSubResponse
+        {
+            RequestId = request.RequestId, RequestType = request.RequestType,
+            Data = new AllocateExtendedGuidRangeSubResponseData
+            {
+                GuidComponent = Guid.NewGuid(), IntegerRangeMin = maximum - data.RequestIdCount,
+                IntegerRangeMax = maximum,
+            },
+        };
+    }
 
     private static FsshttpbResponse QueryChanges(
         StoredDocument document,
@@ -136,7 +173,7 @@ public static class CellBinaryRequestExecutor
         SubResponses = { UnsupportedSubResponse(requestId, requestType) },
     };
 
-    private static FsshttpbSubResponse UnsupportedSubResponse(ulong requestId, RequestTypes requestType) => new()
+    internal static FsshttpbSubResponse UnsupportedSubResponse(ulong requestId, RequestTypes requestType) => new()
     {
         RequestId = requestId,
         RequestType = requestType,

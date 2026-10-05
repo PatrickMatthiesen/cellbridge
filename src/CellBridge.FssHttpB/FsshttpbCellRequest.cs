@@ -29,7 +29,7 @@ public sealed class FsshttpbCellRequest
         SubRequests = new List<FsshttpbCellSubRequest>();
     }
 
-    /// <summary>Protocol schema version (MUST be 12).</summary>
+    /// <summary>Protocol schema version, defined values 12, 13 and 14.</summary>
     public ushort ProtocolVersion { get; set; }
 
     /// <summary>Oldest compatible schema version (MUST be 11).</summary>
@@ -40,6 +40,9 @@ public sealed class FsshttpbCellRequest
 
     /// <summary>User agent GUID.</summary>
     public Guid UserAgentGuid { get; set; }
+
+    /// <summary>Optional client/platform identity, replacing the GUID when serialized.</summary>
+    public UserAgentClientAndPlatform? UserAgentClientAndPlatform { get; set; }
 
     /// <summary>User agent version.</summary>
     public uint UserAgentVersionValue { get; set; }
@@ -65,9 +68,14 @@ public sealed class FsshttpbCellRequest
         var userAgentStart = new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.UserAgent, 0);
         userAgentStart.Serialize(writer);
 
-        var userAgentGuidHeader = new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.UserAgentGUID, 16);
-        userAgentGuidHeader.Serialize(writer);
-        ExGuid.WriteGuid(writer, UserAgentGuid);
+        if (UserAgentClientAndPlatform is { } identity)
+            identity.Serialize(writer);
+        else
+        {
+            var userAgentGuidHeader = new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.UserAgentGUID, 16);
+            userAgentGuidHeader.Serialize(writer);
+            ExGuid.WriteGuid(writer, UserAgentGuid);
+        }
 
         var userAgentVersionHeader = new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.UserAgentVersion, 4);
         userAgentVersionHeader.Serialize(writer);
@@ -193,27 +201,35 @@ public sealed class FsshttpbCellRequest
             while (!IsHeaderEnd(reader))
             {
                 var header = StreamObjectHeaderStart.Parse(reader);
-                if (header.Type == StreamObjectTypeHeaderStart.UserAgentGUID && header.Length == 16)
+                if (header.Type == StreamObjectTypeHeaderStart.UserAgentGUID)
                 {
+                    if (hasUserAgentGuid || header.Length != 16 || header.Compound != 0)
+                        throw new InvalidDataException("Invalid or duplicate user agent GUID.");
                     request.UserAgentGuid = ExGuid.ReadGuid(reader);
                     hasUserAgentGuid = true;
                 }
-                else if (header.Type == StreamObjectTypeHeaderStart.UserAgentVersion && header.Length == 4)
+                else if (header.Type == StreamObjectTypeHeaderStart.UserAgentClientandPlatform)
                 {
+                    if (request.UserAgentClientAndPlatform is not null)
+                        throw new InvalidDataException("Duplicate user agent client and platform.");
+                    request.UserAgentClientAndPlatform = UserAgentClientAndPlatform.Deserialize(reader, header);
+                }
+                else if (header.Type == StreamObjectTypeHeaderStart.UserAgentVersion)
+                {
+                    if (hasUserAgentVersion || header.Length != 4 || header.Compound != 0)
+                        throw new InvalidDataException("Invalid or duplicate user agent version.");
                     request.UserAgentVersionValue = reader.ReadUInt32();
                     hasUserAgentVersion = true;
                 }
                 else
                 {
-                    // Word includes UserAgentClientandPlatform (0x8B), which is
-                    // not emitted by the minimal Interop-TestSuites serializer.
                     SkipObject(reader, header);
                 }
             }
 
-            if (!hasUserAgentGuid || !hasUserAgentVersion)
+            if ((!hasUserAgentGuid && request.UserAgentClientAndPlatform is null) || !hasUserAgentVersion)
             {
-                throw new InvalidDataException("UserAgent is missing its GUID or version field.");
+                throw new InvalidDataException("UserAgent is missing its identity or version field.");
             }
 
             SkipToCompoundEnd(reader, StreamObjectTypeHeaderEnd.UserAgent);
@@ -275,6 +291,9 @@ public sealed class FsshttpbCellSubRequest
     /// <summary>The sub-request priority (compact uint, typically 0).</summary>
     public ulong Priority { get; set; }
 
+    /// <summary>Optional partition selector preceding this operation's data.</summary>
+    public Guid? TargetPartitionId { get; set; }
+
     /// <summary>The sub-request data (type-specific payload).</summary>
     public ISubRequestData? Data { get; set; }
 
@@ -291,6 +310,11 @@ public sealed class FsshttpbCellSubRequest
         var start = new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.SubRequest, payload.Length);
         start.Serialize(writer);
         writer.WriteBytes(payload);
+        if (TargetPartitionId is { } target)
+        {
+            new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.TargetPartitionId, 16).Serialize(writer);
+            ExGuid.WriteGuid(writer, target);
+        }
         Data?.Serialize(writer);
 
         var end = new StreamObjectHeaderEnd16Bit(StreamObjectTypeHeaderEnd.SubRequest);
@@ -323,6 +347,21 @@ public sealed class FsshttpbCellSubRequest
                 $"SubRequest preamble consumed {reader.Position - preambleStart} bytes but declared {start.Length}.");
         }
 
+        Guid? targetPartition = null;
+        if (!IsHeaderEnd(reader))
+        {
+            int position = reader.Position;
+            var targetHeader = StreamObjectHeaderStart.Parse(reader);
+            if (targetHeader.Type == StreamObjectTypeHeaderStart.TargetPartitionId)
+            {
+                if (targetHeader.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                    targetHeader.Compound != 0 || targetHeader.Length != 16)
+                    throw new InvalidDataException("Target partition must contain one GUID in a 32-bit noncompound object.");
+                targetPartition = ExGuid.ReadGuid(reader);
+            }
+            else reader.Position = position;
+        }
+
         FsshttpbCellSubRequest subRequest = requestType switch
         {
             RequestTypes.QueryAccess => new FsshttpbCellSubRequest(requestType)
@@ -337,6 +376,12 @@ public sealed class FsshttpbCellSubRequest
                 Priority = priority,
                 Data = QueryChangesSubRequestData.Deserialize(reader),
             },
+            RequestTypes.AllocateExtendedGuidRange => new FsshttpbCellSubRequest(requestType)
+            {
+                RequestId = requestId,
+                Priority = priority,
+                Data = AllocateExtendedGuidRangeSubRequestData.Deserialize(reader),
+            },
             RequestTypes.PutChanges => new FsshttpbCellSubRequest(requestType)
             {
                 RequestId = requestId,
@@ -350,6 +395,7 @@ public sealed class FsshttpbCellSubRequest
             },
         };
 
+        subRequest.TargetPartitionId = targetPartition;
         SkipToSubRequestEnd(reader, subRequest);
 
         return subRequest;
@@ -360,6 +406,8 @@ public sealed class FsshttpbCellSubRequest
         while (!IsHeaderEnd(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
+            if (header.Type == StreamObjectTypeHeaderStart.TargetPartitionId)
+                throw new InvalidDataException("Duplicate or misplaced target partition.");
             if (header.Type == StreamObjectTypeHeaderStart.PutChangesLockId && subRequest.Data is PutChangesSubRequestData put)
             {
                 if (header.Length != 16 || header.Compound != 0)
@@ -536,6 +584,8 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
                 precedingUnsupportedFilter = false;
             switch (header.Type)
             {
+                case StreamObjectTypeHeaderStart.TargetPartitionId:
+                    throw new InvalidDataException("Target partition must precede the query data.");
                 case StreamObjectTypeHeaderStart.QueryChangesFilter:
                     // Returning the full set is the required fallback for unsupported
                     // filters unless the following flags request failure.

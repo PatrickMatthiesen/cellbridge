@@ -152,13 +152,14 @@ public sealed class FssHttpLockCoordinatorTests
     }
 
     [Fact]
-    public void AmIAloneRequiresTheCallerToBeAnActiveSession()
+    public void AmIAloneUsesTheFileTransitionIdentityAndCoauthorMembership()
     {
         var document = NewDocument();
         var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
         var owner = Guid.NewGuid();
         var stranger = Guid.NewGuid();
-        document.JoinSession(owner);
+        coordinator.ApplyCoauthSession(document, Request(("ClientID", owner.ToString()),
+            ("SchemaLockID", Guid.NewGuid().ToString()), ("CoauthRequestType", "JoinCoauthoring")), new());
 
         var alone = new FssHttpSubResponse();
         coordinator.ApplyAmIAlone(document, Request(("TransitionID", document.TransitionId.ToString())), alone);
@@ -170,7 +171,7 @@ public sealed class FssHttpLockCoordinatorTests
     }
 
     [Fact]
-    public void CoauthTransitionsAreExplicitlyUnsupportedUntilTransitionStateIsImplemented()
+    public void SchemaOwnerWithoutCoauthorMembershipCannotUseCoauthConversion()
     {
         var document = NewDocument();
         var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
@@ -182,10 +183,10 @@ public sealed class FssHttpLockCoordinatorTests
         var response = new FssHttpSubResponse();
         Assert.Equal(LockOperationResult.Granted, coordinator.ApplySchemaLock(request, response));
         var rejected = new FssHttpSubResponse();
-        Assert.Equal(LockOperationResult.NotSupported, coordinator.ApplyCoauthTransition(
+        Assert.Equal(LockOperationResult.Conflict, coordinator.ApplyCoauthTransition(
             Request(("ClientID", owner.ToString()), ("SchemaLockID", schemaId),
                 ("ExclusiveLockID", exclusiveId), ("CoauthRequestType", "ConvertToExclusive")), rejected));
-        Assert.Equal("NotSupported", rejected.ErrorCode);
+        Assert.Equal("InvalidCoauthSession", rejected.ErrorCode);
     }
 
     [Fact]

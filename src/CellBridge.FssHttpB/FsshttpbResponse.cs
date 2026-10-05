@@ -303,6 +303,7 @@ public static class SubResponseDataFactory
         RequestTypes.QueryAccess => QueryAccessSubResponseData.Deserialize(reader),
         RequestTypes.QueryChanges => QueryChangesSubResponseData.Deserialize(reader),
         RequestTypes.PutChanges => PutChangesSubResponseData.Deserialize(reader),
+        RequestTypes.AllocateExtendedGuidRange => AllocateExtendedGuidRangeSubResponseData.Deserialize(reader),
         _ => new UnknownSubResponseData(),
     };
 }

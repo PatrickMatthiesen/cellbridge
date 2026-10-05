@@ -16,7 +16,11 @@ public sealed record ObjectGroupObjectDeclaration(
     ulong PartitionId,
     ulong DataSize,
     ulong ObjectReferencesCount,
-    ulong CellReferencesCount);
+    ulong CellReferencesCount)
+{
+    /// <summary>The externally stored payload, when this is a BLOB declaration.</summary>
+    public ExGuid? BlobReference { get; init; }
+}
 
 /// <summary>The parsed FSSHTTPD node envelope, when an object contains one.</summary>
 public sealed record ObjectGroupNode(
@@ -67,7 +71,15 @@ public sealed class ObjectGroupDataElement
     /// Object-data BLOB references are rejected because resolving them needs
     /// the surrounding response's BLOB data elements.
     /// </summary>
-    public static ObjectGroupDataElement Parse(DataElement element)
+    public static ObjectGroupDataElement Parse(DataElement element) => Parse(element, interpretFileNodes: true);
+
+    /// <summary>Parses opaque object partitions without interpreting their user data as file nodes.</summary>
+    public static ObjectGroupDataElement ParseOpaque(DataElement element) => ParseOpaque(element, new(100_000, 1_000_000));
+
+    internal static ObjectGroupDataElement ParseOpaque(DataElement element, ObjectGroupParsingBudget budget) =>
+        Parse(element, interpretFileNodes: false, budget);
+
+    private static ObjectGroupDataElement Parse(DataElement element, bool interpretFileNodes, ObjectGroupParsingBudget? budget = null)
     {
         ArgumentNullException.ThrowIfNull(element);
         if (element.DataElementType != DataElementType.ObjectGroupDataElementData)
@@ -76,29 +88,35 @@ public sealed class ObjectGroupDataElement
             throw new InvalidDataException("The object group has no payload.");
 
         var reader = new BinaryReaderEx(element.Data);
-        RequireStart(reader, StreamObjectTypeHeaderStart.ObjectGroupDeclarations);
+        RequireStart(reader, StreamObjectTypeHeaderStart.ObjectGroupDeclarations, strict: !interpretFileNodes);
 
         var declarations = new List<ObjectGroupObjectDeclaration>();
         while (IsStart(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
-            if (header.Type != StreamObjectTypeHeaderStart.ObjectGroupObjectDeclare)
+            if (!interpretFileNodes && header.Compound != 0)
+                throw new InvalidDataException("Opaque object declarations must not be compound.");
+            bool blobDeclaration = header.Type == StreamObjectTypeHeaderStart.ObjectGroupObjectBLOBDataDeclaration;
+            if (header.Type != StreamObjectTypeHeaderStart.ObjectGroupObjectDeclare && !blobDeclaration)
             {
-                if (header.Type == StreamObjectTypeHeaderStart.ObjectGroupObjectBLOBDataDeclaration)
-                    throw new InvalidDataException("Object-data BLOB declarations are not supported by this reader.");
                 throw new InvalidDataException($"Unexpected {header.Type} in object-group declarations.");
             }
+            if (blobDeclaration && interpretFileNodes)
+                throw new InvalidDataException("Object-data BLOB declarations are not supported by the file-node reader.");
 
             if (declarations.Count >= 100_000)
                 throw new InvalidDataException("Object declaration count limit exceeded.");
+            budget?.Object();
             var body = ReadBody(reader, header, "object declaration");
             var bodyReader = new BinaryReaderEx(body);
+            var objectGuid = ExGuid.Deserialize(bodyReader);
+            var blobGuid = blobDeclaration ? ExGuid.Deserialize(bodyReader) : null;
             var declaration = new ObjectGroupObjectDeclaration(
-                ExGuid.Deserialize(bodyReader),
+                objectGuid,
                 Compact64bitInt.Deserialize(bodyReader).Value,
+                blobDeclaration ? 0 : Compact64bitInt.Deserialize(bodyReader).Value,
                 Compact64bitInt.Deserialize(bodyReader).Value,
-                Compact64bitInt.Deserialize(bodyReader).Value,
-                Compact64bitInt.Deserialize(bodyReader).Value);
+                Compact64bitInt.Deserialize(bodyReader).Value) { BlobReference = blobGuid };
             RequireEmpty(bodyReader, "object declaration");
             declarations.Add(declaration);
         }
@@ -110,34 +128,51 @@ public sealed class ObjectGroupDataElement
         if (IsStart(reader) && PeekStartType(reader) == StreamObjectTypeHeaderStart.ObjectGroupMetadataDeclarations)
             frequencies = ReadMetadataDeclarations(reader);
 
-        RequireStart(reader, StreamObjectTypeHeaderStart.ObjectGroupData);
+        RequireStart(reader, StreamObjectTypeHeaderStart.ObjectGroupData, strict: !interpretFileNodes);
         var objects = new List<ObjectGroupObject>(declarations.Count);
         while (IsStart(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
-            if (header.Type == StreamObjectTypeHeaderStart.ObjectGroupObjectDataBLOBReference)
-                throw new InvalidDataException("Object-data BLOB references are not supported by this reader.");
-            if (header.Type != StreamObjectTypeHeaderStart.ObjectGroupObjectData)
+            if (!interpretFileNodes && header.Compound != 0)
+                throw new InvalidDataException("Opaque object data records must not be compound.");
+            bool blobData = header.Type == StreamObjectTypeHeaderStart.ObjectGroupObjectDataBLOBReference;
+            if (header.Type != StreamObjectTypeHeaderStart.ObjectGroupObjectData && !blobData)
                 throw new InvalidDataException($"Unexpected {header.Type} in object-group data.");
+            if (blobData && interpretFileNodes)
+                throw new InvalidDataException("Object-data BLOB references are not supported by the file-node reader.");
 
             if (objects.Count == declarations.Count)
                 throw new InvalidDataException("Object group contains more data records than declarations.");
 
             var body = ReadBody(reader, header, "object data");
             var bodyReader = new BinaryReaderEx(body);
-            var objectReferences = ReadExtendedGuids(bodyReader, "object references");
-            var cellReferences = ReadCellIds(bodyReader);
+            var objectReferences = ReadExtendedGuids(bodyReader, "object references", budget);
+            var cellReferences = ReadCellIds(bodyReader, budget);
             var declaration = declarations[objects.Count];
+            if (blobData != (declaration.BlobReference is not null))
+                throw new InvalidDataException("Object data kind does not match its declaration.");
             if (declaration.ObjectReferencesCount != (ulong)objectReferences.Count ||
                 declaration.CellReferencesCount != (ulong)cellReferences.Count)
                 throw new InvalidDataException("Object reference counts do not match the declaration.");
-            var dataSize = Compact64bitInt.Deserialize(bodyReader).Value;
-            if (dataSize > int.MaxValue)
-                throw new InvalidDataException($"Object data size {dataSize} exceeds the supported buffer size.");
-            var content = bodyReader.ReadBytes((int)dataSize);
+            byte[] content;
+            if (blobData)
+            {
+                budget?.References(1);
+                var reference = ExGuid.Deserialize(bodyReader);
+                if (reference.IsNull || !reference.Equals(declaration.BlobReference))
+                    throw new InvalidDataException("Object BLOB reference does not match its declaration.");
+                content = [];
+            }
+            else
+            {
+                var dataSize = Compact64bitInt.Deserialize(bodyReader).Value;
+                if (dataSize > int.MaxValue)
+                    throw new InvalidDataException($"Object data size {dataSize} exceeds the supported buffer size.");
+                content = bodyReader.ReadBytes((int)dataSize);
+            }
             RequireEmpty(bodyReader, "object data");
 
-            var (payloadKind, node) = ParseNode(content);
+            var (payloadKind, node) = interpretFileNodes ? ParseNode(content) : (ObjectGroupPayloadKind.Raw, null);
             objects.Add(new ObjectGroupObject(
                 declarations[objects.Count],
                 objectReferences,
@@ -175,22 +210,24 @@ public sealed class ObjectGroupDataElement
         return frequencies;
     }
 
-    private static IReadOnlyList<ExGuid> ReadExtendedGuids(BinaryReaderEx reader, string field)
+    private static IReadOnlyList<ExGuid> ReadExtendedGuids(BinaryReaderEx reader, string field, ObjectGroupParsingBudget? budget)
     {
         var count = Compact64bitInt.Deserialize(reader).Value;
         if (count > 100_000 || count > (ulong)reader.Remaining)
             throw new InvalidDataException($"{field} count {count} exceeds the supported buffer size.");
+        budget?.References((int)count);
         var result = new List<ExGuid>();
         for (var i = 0; i < (int)count; i++)
             result.Add(ExGuid.Deserialize(reader));
         return result;
     }
 
-    private static IReadOnlyList<CellId> ReadCellIds(BinaryReaderEx reader)
+    private static IReadOnlyList<CellId> ReadCellIds(BinaryReaderEx reader, ObjectGroupParsingBudget? budget)
     {
         var count = Compact64bitInt.Deserialize(reader).Value;
         if (count > 100_000 || count > (ulong)reader.Remaining)
             throw new InvalidDataException($"Cell reference count {count} exceeds the supported buffer size.");
+        budget?.References((int)count);
         var result = new List<CellId>();
         for (var i = 0; i < (int)count; i++)
             result.Add(CellId.Deserialize(reader));
@@ -274,11 +311,13 @@ public sealed class ObjectGroupDataElement
         return reader.ReadMemory(header.Length);
     }
 
-    private static void RequireStart(BinaryReaderEx reader, StreamObjectTypeHeaderStart expected)
+    private static void RequireStart(BinaryReaderEx reader, StreamObjectTypeHeaderStart expected, bool strict = false)
     {
         var header = StreamObjectHeaderStart.Parse(reader);
         if (header.Type != expected)
             throw new InvalidDataException($"Expected {expected}, got {header.Type}.");
+        if (strict && (header.Compound != 1 || header.Length != 0))
+            throw new InvalidDataException("Opaque object containers must be compound with a zero fixed length.");
     }
 
     private static void RequireEnd(BinaryReaderEx reader, StreamObjectTypeHeaderEnd expected)
@@ -310,6 +349,19 @@ public sealed class ObjectGroupDataElement
         var value = reader.ReadByte() & 3;
         reader.Position = position;
         return value;
+    }
+}
+
+internal sealed class ObjectGroupParsingBudget(int objects, int references)
+{
+    public void Object()
+    {
+        if (objects-- <= 0) throw new InvalidDataException("Opaque object parsing budget exceeded.");
+    }
+    public void References(int count)
+    {
+        if (count > references) throw new InvalidDataException("Opaque reference parsing budget exceeded.");
+        references -= count;
     }
 }
 

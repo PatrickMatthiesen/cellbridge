@@ -33,21 +33,34 @@ SOAP dependencies determine which subsequent operations execute.
   still reuse unchanged file parts.
 - Historical-version queries, foreign cell scopes, waterline-only query controls
   and some filters are unsupported. Optional unsupported filters fall back to
-  more data unless `FailIfUnsupported` requires an error.
+  more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
 - A binary request can contain only one `QueryChanges`; a second is rejected.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
-  `QueryDiagnosticStoreInfo` and `AllocateExtendedGuidRange` are unsupported.
+  and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
+  outside the current normative four-operation inventory.
 - SOAP `FileOperation`, `Properties` and `Versioning`, historical downloads
   and version restoration are unimplemented. Internal storage snapshots are
   separate from Office version history.
-- Exclusive-lock conversion to a schema lock, with or without joining
-  coauthoring, is unsupported.
+- Lock conversions and transition acknowledgement are implemented with persisted
+  coauthor membership. Native desktop transition behavior still needs qualification.
 - The binary application-metadata stream is incomplete.
-- General ancestor-revision object lookup and OneNote notebook/page synchronization
-  are unimplemented. File reconstruction follows the selected revision's explicitly
-  referenced object groups.
+- The standalone generic graph resolver handles cells, partitions, inherited
+  objects and BLOBs. Its server/persistence integration and OneNote notebook/page
+  synchronization remain unimplemented. File reconstruction follows the selected
+  revision's explicitly referenced object groups.
 - Automatic graph pruning is disabled. The host retains graph and save identities
   and rejects growth at its [storage limits](storage-providers.md#limits-and-qualification).
+
+`AllocateExtendedGuidRange` is implemented for counts 1 through 100000 with a fresh
+UUID namespace per allocation. Concurrent hosts need no shared integer counter.
+Zero/oversized requests return an explicit unsupported error. Allocation requires
+write access and does not change content or retained graph state.
+
+Binary ClientAndPlatform identity is supported alongside GUID identity. Optional
+binary target selectors must match the selected SOAP partition; independent
+subrequest routing across partitions remains part of scoped-query work. See the
+[requirements ledger](protocol-requirements.md) for normative applicability,
+implementation evidence and remaining audit gates.
 
 SharePoint lists and search are outside the project's scope.
 

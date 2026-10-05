@@ -152,12 +152,15 @@ public sealed class AuthorizationTests
         });
         var before = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
         Assert.True(Assert.Single(before.Editors).AsEditor);
+        Assert.Equal(client.ToString(), Assert.Single(before.Coordination.CoauthorClients));
         await Grant(provider, state.ResourceId, Other.Identity.Subject, DocumentAccess.Read);
         var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
         Assert.False(Assert.Single(after.Editors).AsEditor);
         Assert.Equal(Other.Identity, Assert.Single(after.Editors).Owner);
         Assert.True(after.Partitions.Single(p => p.Kind == 2).Knowledge > before.Partitions.Single(p => p.Kind == 2).Knowledge);
         Assert.Empty(after.Coordination.SchemaOwners);
+        Assert.Empty(after.Coordination.CoauthorClients);
+        Assert.False(after.Coordination.CoauthorTransitionPending);
         Assert.Equal(before.Content, after.Content);
         var restored = JsonSerializer.Deserialize<DocumentState>(JsonSerializer.Serialize(after))!;
         Assert.Equal(Other.Identity, Assert.Single(restored.Editors).Owner);
