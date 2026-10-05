@@ -33,7 +33,7 @@ public sealed class RevisionHistoryTests
         var first = Assert.Single(original.Revisions);
         var saved = await Save(service, original, "second");
         Assert.Equal(2, saved.Revisions.Length);
-        Assert.Equal(first, saved.Revisions[0]);
+        Assert.Equal(JsonSerializer.Serialize(first), JsonSerializer.Serialize(saved.Revisions[0]));
         var restarted = new CellBridgeDocumentService(recreate?.Invoke() ?? provider);
         var restored = await restarted.RestoreRevisionAsync(original.ResourceId, first.RevisionNumber,
             RevisionHistory.Latest(saved), "restore-first", TestActor.Value);
@@ -50,7 +50,7 @@ public sealed class RevisionHistoryTests
         var replay = await restarted.RestoreRevisionAsync(original.ResourceId, first.RevisionNumber,
             RevisionHistory.Latest(saved), "restore-first", TestActor.Value);
         Assert.True(replay.IsReplay);
-        Assert.Equal(restored.Revision, replay.Revision);
+        Assert.Equal(JsonSerializer.Serialize(restored.Revision), JsonSerializer.Serialize(replay.Revision));
         Assert.Equal(later.ContentVersion, (await provider.State.FindByResourceIdAsync(original.ResourceId))!.ContentVersion);
         await Assert.ThrowsAsync<InvalidOperationException>(() => restarted.RestoreRevisionAsync(original.ResourceId,
             first.RevisionNumber, RevisionHistory.Latest(later), "restore-first", TestActor.Value).AsTask());

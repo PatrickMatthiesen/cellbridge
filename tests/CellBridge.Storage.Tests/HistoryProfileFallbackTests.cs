@@ -10,7 +10,7 @@ namespace CellBridge.Storage.Tests;
 public sealed class HistoryProfileFallbackTests
 {
     [Fact]
-    public async Task Schema13IgnoresVersioningExtensionAndReturnsCurrentGraphWithoutVersionTokens()
+    public async Task SharePointProfileIgnoresVersioningExtensionAndReturnsCurrentGraphWithoutVersionTokens()
     {
         var writer = new BinaryWriterEx();
         new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.QueryChangesRequest, 1).Serialize(writer);

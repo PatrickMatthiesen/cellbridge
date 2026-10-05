@@ -109,11 +109,12 @@ public sealed partial class CellBridgeDocumentService
                 var authority = CoordinationFencing.Capture(current.Coordination, coordinator.Capture());
                 if (authority.Generation != before.Coordination.Generation)
                     throw new DocumentOperationLockException("InvalidCoauthSession");
-                var next = document.CaptureCoordination(current, coordinator.Capture()) with
+                var captured = document.CaptureCoordination(current, coordinator.Capture());
+                var next = captured with
                 {
                     Content = selected.Content, ContentVersion = checked(current.ContentVersion + 1), ModifiedUtc = now,
                     Security = current.Security with { ModifiedBy = actor.Identity },
-                    Partitions = current.Partitions.Select(p => p.Kind == 2 ? p : partitions.Single(x => x.Kind == p.Kind)).ToImmutableArray(),
+                    Partitions = captured.Partitions.Select(p => p.Kind == 2 ? p : partitions.Single(x => x.Kind == p.Kind)).ToImmutableArray(),
                     Receipts = current.Receipts.Select(r => r with { Response = null }).ToImmutableArray(),
                     Coordination = authority,
                 };

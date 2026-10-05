@@ -94,6 +94,25 @@ public sealed class RestoreFencingTests
         Assert.Single((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Revisions);
     }
 
+    [Fact]
+    public async Task RestoreExpiresEditorsAndPublishesMatchingEditorTableKnowledge()
+    {
+        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/editors-expiry.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var document = await StoredDocument.RestoreAsync(state, provider.Content);
+        document.JoinSession(Guid.NewGuid(), "expired-editor");
+        var joined = document.CaptureCoordination(state, state.Coordination);
+        joined = joined with { Editors = joined.Editors.Select(e => e with { ExpiresUtc = DateTime.UtcNow.AddMinutes(-1) }).ToImmutableArray() };
+        await provider.State.TransitionAsync(state.ResourceId, (_, _) => new StateTransition<bool>(joined, true));
+        await service.RestoreRevisionAsync(state.ResourceId, 1, 1, "editor-expiry", TestActor.Value);
+        var restored = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.Empty(restored.Editors);
+        var before = joined.Partitions.Single(p => p.Kind == 2);
+        var after = restored.Partitions.Single(p => p.Kind == 2);
+        Assert.True(after.Knowledge > before.Knowledge);
+        Assert.NotEqual(before.InlineContent, after.InlineContent);
+    }
+
     private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
     private sealed class PausedRead(IContentStore inner) : IContentStore
     {

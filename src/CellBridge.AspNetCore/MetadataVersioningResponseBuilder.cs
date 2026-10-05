@@ -10,10 +10,9 @@ namespace CellBridge.AspNetCore;
 /// Builds the two metadata responses that Word requests when the server
 /// advertises FSSHTTP 1.1 or later.
 ///
-/// The store deliberately has no SharePoint list identity or version-history
-/// repository. These responses therefore expose only values derived from the
-/// current in-memory document. In particular, GetVersions returns the current
-/// version and does not invent historical versions or a list/settings URL.
+/// Durable state lists recoverable publications. The legacy detached-document
+/// overload reports only current state with versioning disabled. Neither invents
+/// SharePoint list identity or settings URLs.
 /// </summary>
 public static class MetadataVersioningResponseBuilder
 {
