@@ -9,7 +9,10 @@ namespace CellBridge.AspNetCore;
 
 /// <summary>A successful committed save receipt, including accepted no-ops. Replay does not republish content.</summary>
 public sealed record AcceptedSave(Guid ResourceId, uint ContentVersion, ContentHandle Content,
-    string OperationKey, bool IsReplay);
+    string OperationKey, bool IsReplay)
+{
+    public long LifecycleGeneration { get; init; } = 1;
+}
 
 public sealed record CellExecution(FsshttpbResponse Response, DocumentState State, string? LockError = null)
 {
@@ -276,6 +279,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             return await FailedAsync(id, operation.RequestId, CellErrorCode.RequestNotSupported, "Only complete file partition writes are supported.", cancellationToken);
         if ((put.Flags & ~0x79) != 0 || (put.AdditionalFlagsBits & 0x38) != 0)
             return await FailedAsync(id, operation.RequestId, CellErrorCode.RequestNotSupported, "This upload mode is unsupported.", cancellationToken);
+        var publicationOperationId = Guid.NewGuid();
         string key = $"{put.StorageIndex.Value}:{put.StorageIndex.Guid:D}";
         string digest;
         try { digest = Digest(put, package); }
@@ -284,8 +288,12 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         {
             var before = await CurrentAsync(id, cancellationToken);
             if (!Access(actor, before).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), before);
+            if (before.LifecycleGeneration != initial.LifecycleGeneration)
+                return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "The document incarnation changed."), before);
             if (before.Receipts.FirstOrDefault(r => r.OperationKey == key) is { } prior)
                 return await RepeatAsync(before, prior, digest, operation.RequestId, actor, cancellationToken);
+            if (before.Coordination.Generation != initial.Coordination.Generation)
+                return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "Write authority changed while preparing the save."), before);
             var document = StoredDocument.RestoreMetadata(before, DateTime.UtcNow);
             var currentGraph = await DocumentPartition.RestoreFileGraphAsync(before, provider.Content, provider.Limits, cancellationToken);
             StorageLimits.Check("save receipts", before.Receipts.Length + 1L, provider.Limits.MaxSaveReceipts);
@@ -336,14 +344,19 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 {
                     if (!Access(actor, current).HasFlag(DocumentAccess.Write))
                         return new StateTransition<PublishResult>(null, new(current, null, "FileUnauthorizedAccess", false));
+                    if (current.LifecycleGeneration != initial.LifecycleGeneration)
+                        return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
                     if (current.Receipts.FirstOrDefault(r => r.OperationKey == key) is { } accepted)
                         return new StateTransition<PublishResult>(null, new(current, accepted, null, false));
+                    if (current.Coordination.Generation != initial.Coordination.Generation)
+                        return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
                     if (current.ContentVersion != before.ContentVersion || current.Content != before.Content)
                         return new StateTransition<PublishResult>(null, new(current, null, null, true));
                     var metadata = StoredDocument.RestoreMetadata(current, now);
                     var coordinator = FssHttpLockCoordinator.Restore(metadata, current.Coordination, now, actor.Identity);
                     if (!coordinator.ExecuteCellWrite(attributes, () => true, out _, out var error, now))
                         return new StateTransition<PublishResult>(null, new(current, null, error, false));
+                    var currentMetadata = current.Partitions.Single(x => x.Kind == 1);
                     var state = metadata.CaptureCoordination(current, coordinator.Capture()) with
                     {
                         Security = current.Security with { ModifiedBy = candidate.ContentVersion == before.ContentVersion ? current.Security.ModifiedBy : actor.Identity },
@@ -359,17 +372,19 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                                 Knowledge = metadata.EditorsTablePartition.KnowledgeSequence,
                                 InlineContent = metadata.EditorsTablePartition.Content.ToImmutableArray()
                             }
-                            : p.Kind == 1 && candidate.ContentVersion != before.ContentVersion ? p with
+                            : p.Kind == 1 && candidate.ContentVersion != before.ContentVersion ? current.Partitions.Single(x => x.Kind == 1) with
                             {
-                                InlineContent = System.Text.Encoding.UTF8.GetBytes(
+                                Knowledge = unchecked(currentMetadata.Knowledge + 1),
+                                InlineContent = !currentMetadata.Elements.IsEmpty ? currentMetadata.InlineContent : System.Text.Encoding.UTF8.GetBytes(
                                 $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{now.Ticks}\" />").ToImmutableArray()
                             }
                             : p).ToImmutableArray(),
-                        Coordination = coordinator.Capture() with { Generation = checked(current.Coordination.Generation + 1) },
+                        Coordination = CoordinationFencing.Capture(current.Coordination, coordinator.Capture()),
                         // Superseded retries need their digest/version, never their response bytes.
                         Receipts = current.Receipts.Select(r => r.ContentVersion == candidate.ContentVersion
                             ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
+                    state = ExternalPublication.Append(current, state, publicationOperationId, provider.Limits);
                     provider.Limits.CheckDocument(state);
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
                 }, cancellationToken);
@@ -379,7 +394,8 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 // A lost commit response is not a rollback. Resolve the durable
                 // receipt before attempting to apply this operation again.
                 var current = await CurrentAsync(id, CancellationToken.None);
-                if (current.Receipts.FirstOrDefault(r => r.OperationKey == key) is not { } accepted) throw;
+                if (current.LifecycleGeneration != initial.LifecycleGeneration ||
+                    current.Receipts.FirstOrDefault(r => r.OperationKey == key) is not { } accepted) throw;
                 return await RepeatAsync(current, accepted, digest, operation.RequestId, actor, CancellationToken.None);
             }
             if (published.Receipt is { } duplicate)
@@ -390,7 +406,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             return Wrap(result, published.State) with
             {
                 AcceptedSaves =
-                [new(id, receipt.ContentVersion, published.State.Content, key, false)]
+                [new(id, receipt.ContentVersion, published.State.Content, key, false) { LifecycleGeneration = published.State.LifecycleGeneration }]
             };
         }
         return await FailedAsync(id, operation.RequestId, CellErrorCode.CoherencyFailure, "The document changed while preparing this save.", cancellationToken);
@@ -399,7 +415,11 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
     private async ValueTask<CellExecution> RepeatAsync(DocumentState state, SaveReceipt receipt, string digest,
         ulong requestId, CellBridgeActor actor, CancellationToken cancellationToken)
     {
+        var generation = state.LifecycleGeneration;
         state = await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<DocumentState>(null, current), cancellationToken);
+        if (state.LifecycleGeneration != generation || state.Receipts.FirstOrDefault(r => r.OperationKey == receipt.OperationKey) is not { } authoritative)
+            return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted operation is no longer current."), state);
+        receipt = authoritative;
         if (!Access(actor, state).HasFlag(DocumentAccess.Write) || receipt.OwnerSubject != actor.Identity.Subject)
             return Wrap(new FsshttpbSubResponse
             {
@@ -432,7 +452,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         return new(response, state)
         {
             AcceptedSaves =
-            [new(state.ResourceId, receipt.ContentVersion, state.Content, receipt.OperationKey, true)]
+            [new(state.ResourceId, receipt.ContentVersion, state.Content, receipt.OperationKey, true) { LifecycleGeneration = state.LifecycleGeneration }]
         };
     }
 
@@ -460,7 +480,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             var next = document.CaptureCoordination(current, current.Coordination) with
             {
                 StateVersion = checked(current.StateVersion + 1),
-                Coordination = current.Coordination with { Generation = checked(current.Coordination.Generation + 1) },
+                Coordination = current.Coordination,
             };
             return new StateTransition<(DocumentState, DateTime)>(next, (next, now));
         }, cancellationToken);

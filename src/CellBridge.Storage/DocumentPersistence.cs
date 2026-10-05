@@ -98,10 +98,17 @@ public sealed partial class StoredDocument
         var partitions = ImmutableArray.CreateBuilder<PartitionState>();
         foreach (var partition in new[] { FilePartition, MetadataPartition, EditorsTablePartition })
             partitions.Add(await partition.CaptureAsync(content, cancellationToken));
-        return new DocumentState(DocumentState.CurrentFormat, TransitionId, Url, StorageIds.PathKey(Url),
+        var captured = new DocumentState(DocumentState.CurrentFormat, TransitionId, Url, StorageIds.PathKey(Url),
             CreatedUtc, LastModifiedUtc, ContentVersion, 0, contentHandle, partitions.ToImmutable(),
             editors.ToImmutableArray(), coordination ?? CoordinationState.Empty, receipts.IsDefault ? [] : receipts)
             { Security = Security };
+        return _sourceState is null ? captured : _sourceState with
+        {
+            ContentVersion = captured.ContentVersion, Content = captured.Content, Partitions = captured.Partitions,
+            Editors = captured.Editors, ModifiedUtc = captured.ModifiedUtc, Security = Security,
+            Coordination = coordination ?? _sourceState.Coordination,
+            Receipts = receipts.IsDefault ? _sourceState.Receipts : receipts,
+        };
     }
 
     internal static async ValueTask<ContentHandle> WriteAsync(IContentStore content, byte[] bytes, CancellationToken cancellationToken,

@@ -21,6 +21,7 @@ public sealed class FssHttpLockCoordinator
     private readonly Dictionary<string, Lease> _schemaOwners = new(StringComparer.OrdinalIgnoreCase);
     private Lease? _exclusive;
     private long _generation;
+    private HostLease? _hostLock;
     private DateTime? _authoritativeNow;
     private SubjectIdentity? _actor;
 
@@ -29,6 +30,7 @@ public sealed class FssHttpLockCoordinator
         var coordinator = For(document, actor);
         coordinator._schemaLockId = state.SchemaId;
         coordinator._generation = state.Generation;
+        coordinator._hostLock = state.HostLock;
         coordinator._authoritativeNow = now;
         coordinator._schemaOwners.Clear();
         foreach (var owner in state.SchemaOwners)
@@ -51,6 +53,7 @@ public sealed class FssHttpLockCoordinator
             return new(_schemaLockId, _schemaOwners.Values.Select(CaptureLease).ToImmutableArray(),
                 _exclusive is null ? null : CaptureLease(_exclusive), _generation)
             {
+                HostLock = _hostLock,
                 CoauthorClients = _coauthors.Order(StringComparer.Ordinal).ToImmutableArray(),
                 CoauthorTransitionPending = _transitionPending,
             };
@@ -90,6 +93,7 @@ public sealed class FssHttpLockCoordinator
                 && existingOwner.ExpiresUtc > instant && existingOwner.OwnerSubject != _actor.Subject)
                 return Denied(response);
             ExpireLocked(instant);
+            if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             switch (operation)
             {
                 case "GetLock":
@@ -155,6 +159,7 @@ public sealed class FssHttpLockCoordinator
                 Same(active.Id, lockId) && active.OwnerSubject != _actor.Subject)
                 return Denied(response);
             ExpireLocked(instant);
+            if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             switch (operation)
             {
                 case "GetLock":
@@ -222,7 +227,12 @@ public sealed class FssHttpLockCoordinator
         lock (_gate)
         {
             ExpireLocked(now ?? _authoritativeNow ?? DateTime.UtcNow);
-            if (_exclusive is not null)
+            if (_hostLock is not null)
+            {
+                response.SubResponseDataAttributes["LockType"] = "2";
+                response.SubResponseDataAttributes["LockedBy"] = _hostLock.OwnerSubject;
+            }
+            else if (_exclusive is not null)
             {
                 response.SubResponseDataAttributes["LockType"] = "2";
                 response.SubResponseDataAttributes["LockID"] = _exclusive.Id;
@@ -271,6 +281,7 @@ public sealed class FssHttpLockCoordinator
                 owner.ExpiresUtc > instant && owner.OwnerSubject != _actor.Subject)
                 return Denied(response);
             ExpireLocked(instant);
+            if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             if (!Same(_schemaLockId, schemaId) || !_schemaOwners.ContainsKey(client) || !_coauthors.Contains(client))
                 return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
             if (operation == "MarkTransitionComplete")
@@ -306,6 +317,7 @@ public sealed class FssHttpLockCoordinator
                 document.GetSession(client) is { } existing && existing.Owner?.Subject != _actor.Subject)
                 return Denied(response);
             ExpireLocked(instant);
+            if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             switch (operation)
             {
                 case "JoinCoauthoring":
@@ -389,6 +401,7 @@ public sealed class FssHttpLockCoordinator
                     return RejectCellWrite(out result, out errorCode, "FileUnauthorizedAccess");
             }
             ExpireLocked(instant);
+            if (_hostLock is not null) return RejectCellWrite(out result, out errorCode, "FileAlreadyLockedOnServer");
             if (_exclusive is not null)
             {
                 if (!HasMatchingLockId(attrs, _exclusive.Id, "ExclusiveLockID"))
@@ -415,6 +428,9 @@ public sealed class FssHttpLockCoordinator
                         "InvalidCoauthSession");
             }
 
+            if (_exclusive is null && _schemaLockId is null &&
+                (TryRead(attrs, "ExclusiveLockID", out _) || TryRead(attrs, "SchemaLockID", out _)))
+                return RejectCellWrite(out result, out errorCode, "InvalidCoauthSession");
             result = operation();
             errorCode = null;
             return true;
@@ -454,6 +470,7 @@ public sealed class FssHttpLockCoordinator
 
     private void ExpireLocked(DateTime now)
     {
+        if (_hostLock is not null && _hostLock.ExpiresUtc <= now) _hostLock = null;
         foreach (var key in _schemaOwners.Where(pair => pair.Value.ExpiresUtc <= now).Select(pair => pair.Key).ToArray())
         {
             _schemaOwners.Remove(key);

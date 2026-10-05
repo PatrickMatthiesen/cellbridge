@@ -1,11 +1,17 @@
 -- Current development schema. Initialize a fresh database with the setup tool.
 CREATE TABLE IF NOT EXISTS cellbridge_schema (version integer PRIMARY KEY);
-INSERT INTO cellbridge_schema SELECT 3 WHERE NOT EXISTS (SELECT 1 FROM cellbridge_schema);
+INSERT INTO cellbridge_schema SELECT 4 WHERE NOT EXISTS (SELECT 1 FROM cellbridge_schema);
 CREATE TABLE IF NOT EXISTS cellbridge_documents (
     resource_id uuid PRIMARY KEY,
-    path_key text COLLATE "C" NOT NULL UNIQUE,
-    state_version bigint NOT NULL
+    path_key text COLLATE "C" NOT NULL,
+    state_version bigint NOT NULL,
+    is_deleted boolean NOT NULL DEFAULT false
 );
+-- Explicit initialization upgrades schema 3. Old hosts fail their version health check.
+ALTER TABLE cellbridge_documents ADD COLUMN IF NOT EXISTS is_deleted boolean NOT NULL DEFAULT false;
+ALTER TABLE cellbridge_documents DROP CONSTRAINT IF EXISTS cellbridge_documents_path_key_key;
+CREATE UNIQUE INDEX IF NOT EXISTS cellbridge_live_paths ON cellbridge_documents(path_key) WHERE NOT is_deleted;
+UPDATE cellbridge_schema SET version=4 WHERE version=3;
 CREATE TABLE IF NOT EXISTS cellbridge_states (
     resource_id uuid NOT NULL,
     state_version bigint NOT NULL,

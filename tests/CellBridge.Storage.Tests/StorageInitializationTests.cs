@@ -16,7 +16,7 @@ public sealed class StorageInitializationTests
     public Task Version2IsRejectedWithoutChangingDocuments() => RejectSchemaAsync(2);
 
     [PostgreSqlFact]
-    public Task FutureVersionIsRejectedWithoutChangingDocuments() => RejectSchemaAsync(4);
+    public Task FutureVersionIsRejectedWithoutChangingDocuments() => RejectSchemaAsync(5);
 
     private static Task RejectSchemaAsync(int schemaVersion) =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
@@ -50,7 +50,7 @@ public sealed class StorageInitializationTests
             var after = await states.FindByResourceIdAsync(document.ResourceId);
             Assert.Equal(JsonSerializer.Serialize(document), JsonSerializer.Serialize(after));
             await using var version = source.CreateCommand("SELECT version FROM cellbridge_schema");
-            Assert.Equal(3, await version.ExecuteScalarAsync());
+            Assert.Equal(4, await version.ExecuteScalarAsync());
         });
 
     [PostgreSqlFact]

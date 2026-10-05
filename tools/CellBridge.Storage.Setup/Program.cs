@@ -27,5 +27,5 @@ else
 {
     await new PostgreSqlStateStore(source, limits).InitializeAsync();
     await AuthenticationDatabase.InitializeAsync(connectionString);
-    Console.WriteLine("CellBridge storage schema version 3 and authentication schema version 1 are ready.");
+    Console.WriteLine("CellBridge storage schema version 4 and authentication schema version 1 are ready.");
 }

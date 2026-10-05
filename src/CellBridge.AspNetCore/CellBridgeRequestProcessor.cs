@@ -88,6 +88,13 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                             subResponse.HResult = "2147500037";
                             subResponse.EmitEmptySubResponseData = true;
                         }
+                        else if (initial!.LifecycleGeneration > 1 &&
+                            !(fileRequest.UseResourceId && Guid.TryParse(fileRequest.ResourceId, out var requestedId) && requestedId == initial.ResourceId) &&
+                            (subRequest.Type == SubRequestType.Cell || CellBridgeAuthorization.RequiredAccess(subRequest).HasFlag(DocumentAccess.Write)))
+                        {
+                            subResponse.ErrorCode = "InvalidCoauthSession";
+                            subResponse.HResult = "2147500037";
+                        }
                         else if (subRequest.Type == SubRequestType.Cell)
                         {
                             await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, actor, accepted, cancellationToken);
@@ -111,7 +118,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                                 var next = document.CaptureCoordination(current, coordinator.Capture());
                                 if (System.Text.Json.JsonSerializer.Serialize(next) == System.Text.Json.JsonSerializer.Serialize(current))
                                     return new StateTransition<bool>(null, true);
-                                next = next with { Coordination = next.Coordination with { Generation = checked(current.Coordination.Generation + 1) } };
+                                next = next with { Coordination = CoordinationFencing.Capture(current.Coordination, next.Coordination) };
                                 return new StateTransition<bool>(next, true);
                             }, cancellationToken);
                     }
