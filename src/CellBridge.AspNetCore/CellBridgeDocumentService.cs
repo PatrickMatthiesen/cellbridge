@@ -17,7 +17,7 @@ public sealed record CellExecution(FsshttpbResponse Response, DocumentState Stat
 }
 
 /// <summary>Prepares file revisions outside coordination transactions and publishes them durably.</summary>
-public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null)
+public sealed partial class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null)
 {
     private readonly ICellBridgeAccessEvaluator _access = accessEvaluator ?? new StoredDocumentAccessEvaluator();
     public StorageProvider Provider => provider;
@@ -97,6 +97,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         document.Security = security;
         var state = await document.CaptureAsync(provider.Content, cancellationToken: cancellationToken);
         if (resourceId is { } selectedId) state = state with { ResourceId = selectedId };
+        state = RevisionHistory.Initialize(state);
         provider.Limits.CheckDocument(state);
         return await provider.State.TryCreateAsync(state, cancellationToken) ? state : null;
     }
@@ -338,6 +339,8 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                         return new StateTransition<PublishResult>(null, new(current, null, "FileUnauthorizedAccess", false));
                     if (current.Receipts.FirstOrDefault(r => r.OperationKey == key) is { } accepted)
                         return new StateTransition<PublishResult>(null, new(current, accepted, null, false));
+                    if (current.LifecycleGeneration != initial.LifecycleGeneration)
+                        return new StateTransition<PublishResult>(null, new(current, null, "FileNotExistsOrCannotBeCreated", false));
                     if (current.ContentVersion != before.ContentVersion || current.Content != before.Content)
                         return new StateTransition<PublishResult>(null, new(current, null, null, true));
                     var metadata = StoredDocument.RestoreMetadata(current, now);
@@ -359,8 +362,12 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                                 Knowledge = metadata.EditorsTablePartition.KnowledgeSequence,
                                 InlineContent = metadata.EditorsTablePartition.Content.ToImmutableArray()
                             }
-                            : p.Kind == 1 && candidate.ContentVersion != before.ContentVersion ? p with
+                            : p.Kind == 1 && candidate.ContentVersion == before.ContentVersion ? current.Partitions.Single(x => x.Kind == 1)
+                            : p.Kind == 1 ? current.Partitions.Single(x => x.Kind == 1) with
                             {
+                                Knowledge = candidate.ContentVersion == before.ContentVersion
+                                    ? current.Partitions.Single(x => x.Kind == 1).Knowledge
+                                    : checked(current.Partitions.Single(x => x.Kind == 1).Knowledge + 1),
                                 InlineContent = System.Text.Encoding.UTF8.GetBytes(
                                 $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{now.Ticks}\" />").ToImmutableArray()
                             }
@@ -370,6 +377,11 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                         Receipts = current.Receipts.Select(r => r.ContentVersion == candidate.ContentVersion
                             ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
+                    state = state with { Partitions = state.Partitions.Select(p => p.Kind == 1 &&
+                        current.Partitions.Single(x => x.Kind == 1).StorageIndex is not null
+                        ? p with { InlineContent = current.Partitions.Single(x => x.Kind == 1).InlineContent } : p).ToImmutableArray() };
+                    if (candidate.ContentVersion != before.ContentVersion)
+                        state = RevisionHistory.Append(current, state, actor.Identity, now);
                     provider.Limits.CheckDocument(state);
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
                 }, cancellationToken);
