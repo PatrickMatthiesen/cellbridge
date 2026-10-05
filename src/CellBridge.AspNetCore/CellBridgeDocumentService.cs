@@ -88,6 +88,17 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         foreach (var operation in request.SubRequests)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (!CellBinaryRequestExecutor.MatchesTarget(operation, kind))
+            {
+                state = await CurrentAsync(id, cancellationToken);
+                var accessForTarget = Access(actor, state);
+                var requiredForTarget = operation.RequestType is RequestTypes.PutChanges or RequestTypes.AllocateExtendedGuidRange
+                    ? DocumentAccess.Write : DocumentAccess.Read;
+                response.SubResponses.Add(operation.RequestType != RequestTypes.QueryAccess && !accessForTarget.HasFlag(requiredForTarget)
+                    ? CellBridgeAuthorization.Denied(operation)
+                    : CellBinaryRequestExecutor.UnsupportedSubResponse(operation.RequestId, operation.RequestType));
+                continue;
+            }
             if (operation.RequestType == RequestTypes.PutChanges)
             {
                 CellExecution saved;
@@ -112,7 +123,9 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 continue;
             }
             var access = Access(actor, state);
-            if (operation.RequestType != RequestTypes.QueryAccess && !access.HasFlag(DocumentAccess.Read))
+            var requiredAccess = operation.RequestType == RequestTypes.AllocateExtendedGuidRange
+                ? DocumentAccess.Write : DocumentAccess.Read;
+            if (operation.RequestType != RequestTypes.QueryAccess && !access.HasFlag(requiredAccess))
             {
                 response.SubResponses.Add(CellBridgeAuthorization.Denied(operation));
                 continue;

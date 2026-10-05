@@ -12,6 +12,11 @@ public sealed class FssHttpLockCoordinator
 {
     private static readonly ConditionalWeakTable<StoredDocument, FssHttpLockCoordinator> States = new();
     private readonly object _gate = new();
+    private readonly StoredDocument _document;
+    private readonly HashSet<string> _coauthors = new(StringComparer.OrdinalIgnoreCase);
+    private bool _transitionPending;
+
+    private FssHttpLockCoordinator(StoredDocument document) => _document = document;
     private string? _schemaLockId;
     private readonly Dictionary<string, Lease> _schemaOwners = new(StringComparer.OrdinalIgnoreCase);
     private Lease? _exclusive;
@@ -32,19 +37,31 @@ public sealed class FssHttpLockCoordinator
             coordinator._schemaOwners.Add(lease.Client!, lease);
         }
         coordinator._exclusive = state.Exclusive is null ? null : RestoreLease(state.Exclusive);
+        coordinator._coauthors.Clear();
+        foreach (var client in state.CoauthorClients.IsDefault ? [] : state.CoauthorClients)
+            if (coordinator._schemaOwners.ContainsKey(CanonicalizeId(client)))
+                coordinator._coauthors.Add(CanonicalizeId(client));
+        coordinator._transitionPending = state.CoauthorTransitionPending && coordinator._coauthors.Count != 0;
         return coordinator;
     }
 
-    public CoordinationState Capture() => new(_schemaLockId,
-        _schemaOwners.Values.Select(CaptureLease).ToImmutableArray(),
-        _exclusive is null ? null : CaptureLease(_exclusive), _generation);
+    public CoordinationState Capture()
+    {
+        lock (_gate)
+            return new(_schemaLockId, _schemaOwners.Values.Select(CaptureLease).ToImmutableArray(),
+                _exclusive is null ? null : CaptureLease(_exclusive), _generation)
+            {
+                CoauthorClients = _coauthors.Order(StringComparer.Ordinal).ToImmutableArray(),
+                CoauthorTransitionPending = _transitionPending,
+            };
+    }
 
     private static Lease RestoreLease(LeaseState state) => new(state.Id, state.Client, state.ExpiresUtc, (LockKind)state.Kind, state.SchemaId, state.OwnerSubject);
     private static LeaseState CaptureLease(Lease state) => new(state.Id, state.Client, state.ExpiresUtc, (int)state.Kind, state.SchemaId, state.OwnerSubject);
 
     public static FssHttpLockCoordinator For(StoredDocument document, SubjectIdentity? actor = null)
     {
-        var coordinator = States.GetValue(document, static _ => new FssHttpLockCoordinator());
+        var coordinator = States.GetValue(document, static doc => new FssHttpLockCoordinator(doc));
         if (actor is not null) coordinator._actor = actor;
         return coordinator;
     }
@@ -100,6 +117,7 @@ public sealed class FssHttpLockCoordinator
                 case "ReleaseLock":
                     if (client is null || !Same(_schemaLockId, schemaId) || !_schemaOwners.Remove(client))
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    RemoveCoauthor(client);
                     if (_schemaOwners.Count == 0)
                         _schemaLockId = null;
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
@@ -147,8 +165,6 @@ public sealed class FssHttpLockCoordinator
                     var refreshed = _exclusive is not null;
                     _exclusive = new Lease(lockId, ReadClient(attrs),
                         instant.AddSeconds(ReadTimeout(attrs)), LockKind.Exclusive, OwnerSubject: _actor.Subject);
-                    response.SubResponseDataAttributes["CoauthStatus"] = "Alone";
-                    response.SubResponseDataAttributes["TransitionID"] = Guid.NewGuid().ToString("D");
                     return refreshed ? LockOperationResult.Refreshed : LockOperationResult.Granted;
 
                 case "RefreshLock":
@@ -170,11 +186,28 @@ public sealed class FssHttpLockCoordinator
 
                 case "ConvertToSchema":
                 case "ConvertToSchemaJoinCoauth":
-                    if (_exclusive is null || !Same(_exclusive.Id, lockId) ||
-                        !TryRead(attrs, "SchemaLockID", out var schemaId) || ReadClient(attrs) is not { } client)
-                        return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
-                    return Fail(response, LockOperationResult.NotSupported,
-                        "Exclusive lock conversion to schema is not implemented");
+                    if (!TryRead(attrs, "SchemaLockID", out var schemaId) || ReadClient(attrs) is not { } client ||
+                        !TryTransitionTimeout(attrs, coauth: false, out var timeout))
+                        return Fail(response, LockOperationResult.InvalidArgument, "SchemaLockID, ClientID and valid Timeout are required");
+                    if (_schemaOwners.Count != 0)
+                        return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    if (_exclusive is null)
+                        return Fail(response, LockOperationResult.Conflict, "FileNotLockedOnServer");
+                    if (!Same(_exclusive.Id, lockId))
+                        return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    if (operation == "ConvertToSchemaJoinCoauth" && Guid.TryParse(client, out var editorClient) &&
+                        _document.GetSession(editorClient) is { } editor && editor.Owner?.Subject != _actor.Subject)
+                        return Denied(response);
+                    _exclusive = null;
+                    _schemaLockId = schemaId;
+                    _schemaOwners[client] = new Lease(schemaId, client, instant.AddSeconds(timeout),
+                        LockKind.Schema, OwnerSubject: _actor.Subject);
+                    if (operation == "ConvertToSchemaJoinCoauth")
+                    {
+                        JoinCoauthor(client, timeout);
+                        SetCoauthStatus(response, includeTransition: true);
+                    }
+                    return LockOperationResult.Completed;
 
                 default:
                     return Fail(response, LockOperationResult.InvalidArgument,
@@ -216,23 +249,43 @@ public sealed class FssHttpLockCoordinator
         if (!TryRead(request.SubRequestDataAttributes, "TransitionID", out var transition) ||
             !Guid.TryParse(transition, out var id) || id != document.TransitionId)
             return Fail(response, LockOperationResult.InvalidArgument, "TransitionID is invalid");
-        response.SubResponseDataAttributes["AmIAlone"] = document.Sessions.Count == 1 ? "True" : "False";
-        return LockOperationResult.Observed;
+        lock (_gate)
+        {
+            ExpireLocked(_authoritativeNow ?? DateTime.UtcNow);
+            response.SubResponseDataAttributes["AmIAlone"] = !_transitionPending && _coauthors.Count == 1 ? "True" : "False";
+            return LockOperationResult.Observed;
+        }
     }
 
-    /// <summary>Applies only the stateful ConvertToExclusive and MarkTransitionComplete Coauth operations.</summary>
+    /// <summary>Applies conversion and acknowledgement using explicit coauthor membership.</summary>
     public LockOperationResult ApplyCoauthTransition(FssHttpSubRequest request, FssHttpSubResponse response, DateTime? now = null)
     {
         var attrs = request.SubRequestDataAttributes;
-        if (!TryRead(attrs, "CoauthRequestType", out var operation))
-            return Fail(response, LockOperationResult.InvalidArgument, "CoauthRequestType is required");
-        if (operation.Equals("ConvertToExclusive", StringComparison.OrdinalIgnoreCase) ||
-            operation.Equals("MarkTransitionComplete", StringComparison.OrdinalIgnoreCase))
-            return Fail(response, LockOperationResult.NotSupported,
-                $"Coauth transition '{operation}' is not implemented");
-
-        return Fail(response, LockOperationResult.InvalidArgument,
-            $"Unsupported CoauthRequestType '{operation}'");
+        if (!TryRead(attrs, "CoauthRequestType", out var operation) ||
+            !TryRead(attrs, "SchemaLockID", out var schemaId) || ReadClient(attrs) is not { } client)
+            return Fail(response, LockOperationResult.InvalidArgument, "CoauthRequestType, SchemaLockID and ClientID are required");
+        var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
+        lock (_gate)
+        {
+            if (_actor is null || _schemaOwners.TryGetValue(client, out var owner) &&
+                owner.ExpiresUtc > instant && owner.OwnerSubject != _actor.Subject)
+                return Denied(response);
+            ExpireLocked(instant);
+            if (!Same(_schemaLockId, schemaId) || !_schemaOwners.ContainsKey(client) || !_coauthors.Contains(client))
+                return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
+            if (operation == "MarkTransitionComplete")
+            {
+                _transitionPending = false;
+                return LockOperationResult.Completed;
+            }
+            if (operation != "ConvertToExclusive")
+                return Fail(response, LockOperationResult.InvalidArgument, "Unsupported CoauthRequestType");
+            if (!TryTransitionTimeout(attrs, coauth: true, out var timeout) ||
+                !TryBoolean(attrs, "ReleaseLockOnConversionToExclusiveFailure", required: true, out _) ||
+                !TryRead(attrs, "ExclusiveLockID", out _))
+                return Fail(response, LockOperationResult.InvalidArgument, "Conversion requires Timeout, ExclusiveLockID and a valid release flag");
+            return ConvertSchemaToExclusive(attrs, schemaId, instant, response, timeout);
+        }
     }
 
     /// <summary>Synchronizes Join, Refresh, Exit, and status operations with the shared schema lock.</summary>
@@ -241,7 +294,7 @@ public sealed class FssHttpLockCoordinator
     {
         var attrs = request.SubRequestDataAttributes;
         if (!TryRead(attrs, "CoauthRequestType", out var operation) ||
-            ReadClient(attrs) is not { } clientText || !Guid.TryParse(clientText, out var client) ||
+            ReadClient(attrs) is not { } clientText ||
             !TryRead(attrs, "SchemaLockID", out _))
             return Fail(response, LockOperationResult.InvalidArgument,
                 "CoauthRequestType, ClientID, and SchemaLockID are required");
@@ -249,52 +302,56 @@ public sealed class FssHttpLockCoordinator
         var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
-        if (_actor is null || document.GetSession(client) is { } existing && existing.Owner?.Subject != _actor.Subject)
-            return Denied(response);
-        switch (operation)
-        {
-            case "JoinCoauthoring":
+            if (_actor is null || Guid.TryParse(clientText, out var client) &&
+                document.GetSession(client) is { } existing && existing.Owner?.Subject != _actor.Subject)
+                return Denied(response);
+            ExpireLocked(instant);
+            switch (operation)
             {
-                var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "GetLock"), response, instant);
-                if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed))
+                case "JoinCoauthoring":
+                {
+                    var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "GetLock"), response, instant);
+                    if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed))
+                        return result;
+                    JoinCoauthor(clientText, ReadTimeout(attrs));
+                    response.SubResponseDataAttributes["LockType"] = "SchemaLock";
+                    SetCoauthStatus(response, includeTransition: true);
                     return result;
-                document.JoinEditingSession(client, ReadTimeout(attrs), asEditor: true, userName: _actor.Login, owner: _actor);
-                response.SubResponseDataAttributes["LockType"] = "SchemaLock";
-                response.SubResponseDataAttributes["CoauthStatus"] = document.Sessions.Count == 1 ? "Alone" : "Coauthoring";
-                response.SubResponseDataAttributes["TransitionID"] = document.TransitionId.ToString("D");
-                return result;
-            }
-            case "RefreshCoauthoring":
-            {
-                var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "RefreshLock"), response, instant);
-                if (result != LockOperationResult.Refreshed ||
-                    !document.RefreshEditingSession(client, ReadTimeout(attrs), asEditor: true))
-                    return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
-                response.SubResponseDataAttributes["LockType"] = "SchemaLock";
-                response.SubResponseDataAttributes["CoauthStatus"] = document.Sessions.Count == 1 ? "Alone" : "Coauthoring";
-                return result;
-            }
-            case "ExitCoauthoring":
-            {
-                var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "ReleaseLock"), response, instant);
-                if (result != LockOperationResult.Released)
+                }
+                case "RefreshCoauthoring":
+                {
+                    // An expired tracker entry refreshes through Join. Legacy states
+                    // acquire explicit membership only on this coauthoring request.
+                    _schemaOwners.TryGetValue(clientText, out var previous);
+                    var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "GetLock"), response, instant);
+                    if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed)) return result;
+                    if (previous is not null && previous.ExpiresUtc > _schemaOwners[clientText].ExpiresUtc)
+                        _schemaOwners[clientText] = _schemaOwners[clientText] with { ExpiresUtc = previous.ExpiresUtc };
+                    JoinCoauthor(clientText, Math.Max(ReadTimeout(attrs),
+                        (int)Math.Ceiling((_schemaOwners[clientText].ExpiresUtc - instant).TotalSeconds)));
+                    response.SubResponseDataAttributes["LockType"] = "SchemaLock";
+                    SetCoauthStatus(response, includeTransition: false);
                     return result;
-                document.LeaveSession(client);
-                return result;
+                }
+                case "ExitCoauthoring":
+                {
+                    var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "ReleaseLock"), response, instant);
+                    if (result != LockOperationResult.Released)
+                        return result;
+                    return result;
+                }
+                case "GetCoauthoringStatus":
+                    response.SubResponseDataAttributes["LockType"] = "SchemaLock";
+                    SetCoauthStatus(response, includeTransition: true);
+                    return LockOperationResult.Observed;
+                case "CheckLockAvailability":
+                    return ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "CheckLockAvailability"), response, instant);
+                case "ConvertToExclusive":
+                case "MarkTransitionComplete":
+                    return ApplyCoauthTransition(request, response, instant);
+                default:
+                    return Fail(response, LockOperationResult.InvalidArgument, $"Unsupported CoauthRequestType '{operation}'");
             }
-            case "GetCoauthoringStatus":
-                response.SubResponseDataAttributes["LockType"] = "SchemaLock";
-                response.SubResponseDataAttributes["CoauthStatus"] = document.Sessions.Count <= 1 ? "Alone" : "Coauthoring";
-                response.SubResponseDataAttributes["TransitionID"] = document.TransitionId.ToString("D");
-                return LockOperationResult.Observed;
-            case "CheckLockAvailability":
-                return ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "CheckLockAvailability"), response, instant);
-            case "ConvertToExclusive":
-            case "MarkTransitionComplete":
-                return ApplyCoauthTransition(request, response, instant);
-            default:
-                return Fail(response, LockOperationResult.InvalidArgument, $"Unsupported CoauthRequestType '{operation}'");
-        }
         }
     }
 
@@ -365,8 +422,10 @@ public sealed class FssHttpLockCoordinator
     }
 
     private LockOperationResult ConvertSchemaToExclusive(IReadOnlyDictionary<string, string> attrs,
-        string schemaId, DateTime instant, FssHttpSubResponse response)
+        string schemaId, DateTime instant, FssHttpSubResponse response, int? timeout = null)
     {
+        if (!TryBoolean(attrs, "ReleaseLockOnConversionToExclusiveFailure", required: false, out var release))
+            return Fail(response, LockOperationResult.InvalidArgument, "Invalid release flag");
         if (ReadClient(attrs) is not { } client || !TryRead(attrs, "ExclusiveLockID", out var exclusiveId))
             return Fail(response, LockOperationResult.InvalidArgument, "ClientID and ExclusiveLockID are required");
         if (_exclusive is not null && !Same(_exclusive.Id, exclusiveId))
@@ -375,17 +434,20 @@ public sealed class FssHttpLockCoordinator
             return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
         if (_schemaOwners.Keys.Any(x => !Same(x, client)))
         {
-            if (ReadBoolean(attrs, "ReleaseLockOnConversionToExclusiveFailure"))
+            if (release)
+            {
                 _schemaOwners.Remove(client);
+                RemoveCoauthor(client);
+            }
             return Fail(response, LockOperationResult.Conflict,
-                ReadBoolean(attrs, "ReleaseLockOnConversionToExclusiveFailure")
-                    ? "ExitCoauthSessionAsConvertToExclusiveFailed" : "FileAlreadyLockedOnServer");
+                release ? "ExitCoauthSessionAsConvertToExclusiveFailed" : "MultipleClientsInCoauthSession");
         }
 
         _schemaOwners.Clear();
         _schemaLockId = null;
+        RemoveCoauthor(client);
         _exclusive = new Lease(exclusiveId, client,
-            instant.AddSeconds(ReadTimeout(attrs)), LockKind.Exclusive, schemaId, _actor!.Subject);
+            instant.AddSeconds(timeout ?? ReadTimeout(attrs)), LockKind.Exclusive, schemaId, _actor!.Subject);
         response.SubResponseDataAttributes["LockType"] = "ExclusiveLock";
         return LockOperationResult.Completed;
     }
@@ -393,7 +455,11 @@ public sealed class FssHttpLockCoordinator
     private void ExpireLocked(DateTime now)
     {
         foreach (var key in _schemaOwners.Where(pair => pair.Value.ExpiresUtc <= now).Select(pair => pair.Key).ToArray())
+        {
             _schemaOwners.Remove(key);
+            _coauthors.Remove(key);
+        }
+        if (_coauthors.Count == 0) _transitionPending = false;
         if (_schemaOwners.Count == 0)
             _schemaLockId = null;
         if (_exclusive is not null && _exclusive.ExpiresUtc <= now)
@@ -405,6 +471,8 @@ public sealed class FssHttpLockCoordinator
         response.ErrorCode = message switch
         {
             "FileAlreadyLockedOnServer" => "FileAlreadyLockedOnServer",
+            "FileNotLockedOnServer" => "FileNotLockedOnServer",
+            "MultipleClientsInCoauthSession" => "MultipleClientsInCoauthSession",
             "InvalidCoauthSession" => "InvalidCoauthSession",
             "ExitCoauthSessionAsConvertToExclusiveFailed" => "ExitCoauthSessionAsConvertToExclusiveFailed",
             _ when result == LockOperationResult.NotSupported => "NotSupported",
@@ -454,8 +522,42 @@ public sealed class FssHttpLockCoordinator
     private static string CanonicalizeId(string value) =>
         Guid.TryParse(value, out var id) ? id.ToString("D") : value;
 
-    private static bool ReadBoolean(IReadOnlyDictionary<string, string> attrs, string key) =>
-        TryRead(attrs, key, out var value) && bool.TryParse(value, out var parsed) && parsed;
+    private static bool TryBoolean(IReadOnlyDictionary<string, string> attrs, string key, bool required, out bool result)
+    {
+        result = false;
+        if (!TryRead(attrs, key, out var value)) return !required;
+        if (value == "1" || value == "true") { result = true; return true; }
+        return value is "0" or "false";
+    }
+
+    private static bool TryTransitionTimeout(IReadOnlyDictionary<string, string> attrs, bool coauth, out int timeout)
+    {
+        timeout = 0;
+        if (!TryRead(attrs, "Timeout", out var value) || !int.TryParse(value, NumberStyles.None,
+            CultureInfo.InvariantCulture, out timeout) || timeout < 60 || timeout > 120000) return false;
+        if (coauth && timeout < 3600) timeout = CoauthSession.DefaultTimeoutSeconds;
+        return true;
+    }
+
+    private void JoinCoauthor(string client, int timeout)
+    {
+        int previous = _coauthors.Count;
+        if (_coauthors.Add(client) && previous == 1) _transitionPending = true;
+        if (Guid.TryParse(client, out var id))
+            _document.JoinEditingSession(id, timeout, asEditor: true, userName: _actor!.Login, owner: _actor);
+    }
+
+    private void RemoveCoauthor(string client)
+    {
+        if (_coauthors.Remove(client) && Guid.TryParse(client, out var id)) _document.LeaveSession(id);
+        if (_coauthors.Count == 0) _transitionPending = false;
+    }
+
+    private void SetCoauthStatus(FssHttpSubResponse response, bool includeTransition)
+    {
+        response.SubResponseDataAttributes["CoauthStatus"] = _coauthors.Count <= 1 ? "Alone" : "Coauthoring";
+        if (includeTransition) response.SubResponseDataAttributes["TransitionID"] = _document.TransitionId.ToString("D");
+    }
 
     private static int ReadTimeout(IReadOnlyDictionary<string, string> attrs) =>
         TryRead(attrs, "Timeout", out var value) && int.TryParse(value, NumberStyles.Integer,

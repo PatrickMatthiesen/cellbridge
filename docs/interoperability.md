@@ -33,21 +33,34 @@ SOAP dependencies determine which subsequent operations execute.
   still reuse unchanged file parts.
 - Historical-version queries, foreign cell scopes, waterline-only query controls
   and some filters are unsupported. Optional unsupported filters fall back to
-  more data unless `FailIfUnsupported` requires an error.
+  more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
 - A binary request can contain only one `QueryChanges`; a second is rejected.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
-  `QueryDiagnosticStoreInfo` and `AllocateExtendedGuidRange` are unsupported.
+  and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
+  outside the current normative four-operation inventory.
 - SOAP `FileOperation`, `Properties` and `Versioning`, historical downloads
   and version restoration are unimplemented. Internal storage snapshots are
   separate from Office version history.
-- Exclusive-lock conversion to a schema lock, with or without joining
-  coauthoring, is unsupported.
+- Lock conversions and transition acknowledgement are implemented with persisted
+  coauthor membership. Native desktop transition behavior still needs qualification.
 - The binary application-metadata stream is incomplete.
-- General ancestor-revision object lookup and OneNote notebook/page synchronization
-  are unimplemented. File reconstruction follows the selected revision's explicitly
-  referenced object groups.
+- The standalone generic graph resolver handles cells, partitions, inherited
+  objects and BLOBs. Its server/persistence integration and OneNote notebook/page
+  synchronization remain unimplemented. File reconstruction follows the selected
+  revision's explicitly referenced object groups.
 - Automatic graph pruning is disabled. The host retains graph and save identities
   and rejects growth at its [storage limits](storage-providers.md#limits-and-qualification).
+
+`AllocateExtendedGuidRange` is implemented for counts 1 through 100000 with a fresh
+UUID namespace per allocation. Concurrent hosts need no shared integer counter.
+Zero/oversized requests return an explicit unsupported error. Allocation requires
+write access and does not change content or retained graph state.
+
+Binary ClientAndPlatform identity is supported alongside GUID identity. Optional
+binary target selectors must match the selected SOAP partition; independent
+subrequest routing across partitions remains part of scoped-query work. See the
+[requirements ledger](protocol-requirements.md) for normative applicability,
+implementation evidence and remaining audit gates.
 
 SharePoint lists and search are outside the project's scope.
 
@@ -57,7 +70,7 @@ SharePoint lists and search are outside the project's scope.
 | --- | --- |
 | Word open, save and reopen | Remote saves and reopen tested, including repeated manual tests while signed in. |
 | Word permissions | Manual sign-in, writer saves, reader read-only open and Write revocation while editing tested. |
-| Excel saving | Desktop saves demonstrated before the storage-provider migration; repeat on the current durable host. Captured saves also run in automated replay. |
+| Excel save and reopen | Authenticated desktop saves and reopen tested on the current PostgreSQL host. Captured saves also run in automated replay. |
 | PowerPoint save and reopen | Manually tested, including complex Copilot-generated slides. |
 | Blank Office file creation | Automated package checks. |
 | Two service instances | Automated identity, shared lease and protocol routing checks against one database. |
@@ -74,6 +87,15 @@ A separate authenticated trial on the same date verified writer/reader access
 and revocation. Word required explicit forms-sign-in host approval. Repeated
 authenticated save/reopen and the complex PowerPoint test were confirmed by the
 project maintainer.
+
+On 2026-10-05, the maintainer created and edited `excel-test.xlsx` and
+`word-test.docx` through the authenticated Tailscale HTTPS host backed by
+PostgreSQL. Server captures recorded three successful Excel `PutChanges`
+operations and two successful Word `PutChanges` operations. The downloaded
+files had content versions 4 and 3 respectively; both passed ZIP integrity
+and XML parsing checks. The maintainer confirmed that edits remained in both
+documents after fully closing and reopening them from the library. This was
+a single-desktop test, with no coauthoring transition qualification.
 
 ## Automated checks
 

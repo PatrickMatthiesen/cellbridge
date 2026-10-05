@@ -31,7 +31,8 @@ has not been qualified.
 
 Version-history browsing/restoration, some advanced synchronization options and
 automatic graph pruning are unimplemented or disabled. See
-[protocol support and compatibility](docs/interoperability.md) for exact coverage.
+[protocol support and compatibility](docs/interoperability.md) and the
+[requirements ledger](docs/protocol-requirements.md) for exact coverage and open work.
 
 ## Try the demo
 

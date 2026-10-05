@@ -25,7 +25,19 @@ public static class DocumentPermissionUpdates
                 security.AccessFor(subject).HasFlag(DocumentAccess.Write) ? exclusive : null,
             Generation = checked(current.Coordination.Generation + 1),
         };
+        coordination = coordination with
+        {
+            CoauthorClients = (coordination.CoauthorClients.IsDefault ? [] : coordination.CoauthorClients)
+                .Where(client => coordination.SchemaOwners.Any(lease => SameClient(lease.Client, client)))
+                .ToImmutableArray(),
+        };
+        if (coordination.CoauthorClients.IsEmpty)
+            coordination = coordination with { CoauthorTransitionPending = false };
         if (coordination.SchemaOwners.IsEmpty) coordination = coordination with { SchemaId = null };
         return document.CaptureCoordination(current, coordination) with { Security = security };
     }
+
+    private static bool SameClient(string? left, string right) =>
+        Guid.TryParse(left, out var leftId) && Guid.TryParse(right, out var rightId)
+            ? leftId == rightId : string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 }

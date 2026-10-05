@@ -30,7 +30,13 @@ An enum member does not establish an implemented operation. A parser test does
 not establish desktop compatibility. Explicit rejection remains appropriate for
 unknown requests and operations outside the selected profile.
 
-## Known implementation gaps
+## Implementation tracking
+
+The [requirements ledger](protocol-requirements.md) records current field-level
+status and profile decisions. GUID allocation, canonical version URLs, user-agent
+identity, matching binary partition selectors and lock transitions now have
+implementations and focused tests. The generic graph resolver is a standalone
+foundation; host/persistence integration and actual OneNote qualification remain.
 
 The identifiers in this table are stable references for implementation work.
 Acceptance criteria are expanded in the phases below.
@@ -43,11 +49,11 @@ Acceptance criteria are expanded in the phases below.
 | Q1 | Both execution paths reject repeated `QueryChanges`; file queries reject unsupported cell/root/version controls. | Missing query behavior | Independently scoped results sharing a correctly assembled response package. Medium to large change after G1–G3. |
 | Q2 | `QueryChangesVersioning` is rejected; `GetVersions` exposes the current entry with versioning disabled. Retained snapshots are not a public version repository. | Missing version/history capability | Real version tokens, version queries and coherent listing/restoration. Large storage and protocol change. |
 | Q3 | Byte budgets needing continuation return errors; `AllowFragments` is parsed without implementing fragmented delivery. | Missing continuation capability | Bounded synchronization for large graphs. Substantial transaction/state work. Fragment permission alone does not require every response to fragment. |
-| Q4 | `AllocateExtendedGuidRange` exists in the enum without its typed codec and executor. | Missing operation, profile applicability to record | Durable, unique GUID-range allocation across hosts. Medium change. |
+| Q4 | `AllocateExtendedGuidRange` has typed codecs and authorized execution using fresh UUID namespaces. | Implemented operation | Exact count, exclusive upper bound and concurrent host decoding tests; no durable shared counter required. |
 | Q5 | File-hash requests are parsed without producing the requested hash; request/data-element hashing needs a profile audit. | Conditional requirement | Implement negotiated wire hashes with their specified ordering/schema. Storage SHA-256 is not a substitute. Medium change. |
 | W1 | Partial and multi-request uploads, non-file uploads and alternate coherency modes are explicitly unsupported. | Missing synchronization modes | Durable staging and correct commit/retry semantics for incremental graph changes. Large change. |
 | M1 | Metadata queries use a storage-index-only placeholder; application metadata writes are unsupported. | Missing partition behavior | Application metadata graphs and consistent read/write knowledge. Medium to large change. |
-| L1 | Exclusive-lock `ConvertToSchema`/`ConvertToSchemaJoinCoauth`, and Coauth `ConvertToExclusive`/`MarkTransitionComplete`, return unsupported. Schema-lock `ConvertToExclusive` already exists. | Missing coordination transitions | Correct transitions between supported editing modes. Medium state-machine change. |
+| L1 | Exclusive/schema conversions and coauthor transition acknowledgement use durable explicit membership. | Implemented server transitions; qualification remains | Provider/HTTP tests establish state behavior. Reference traffic and two-desktop transition qualification remain in #29/#5. |
 | S1 | Outer `FileOperation`, `Versioning` and `Properties` types exist but dispatch falls through to unsupported. | Missing outer operations, suboperations to inventory | Document management and property/version behavior within MS-FSSHTTP. Medium to large; exact scope follows the normative ledger. |
 | N1 | OneNote schemas, graph publication strategy and a qualified native desktop workflow are absent. | New requested compatibility target | Desktop OneNote open/edit/sync, using G1–G3 and synchronization work. Large milestone; the format adapter is only part of the work. |
 
@@ -162,7 +168,9 @@ ownership guarantees.
 Implement Q1, Q4 and the applicable Q5 behavior. Assemble shared response packages
 while preserving each query's scope, result, knowledge and errors. Add actual
 cell/root selection and the required filter semantics; document permitted full
-fallbacks. Allocate unique GUID ranges durably across hosts. Implement wire hashing
+fallbacks. Allocate unique GUID ranges across hosts and restart without a process-local counter.
+A fresh UUID namespace per request provides uniqueness without persistent allocator
+state; the integer interval follows the specified exclusive upper bound. Implement wire hashing
 only under the negotiated rules, including object ordering and excluded-data forms.
 
 The gate is independent decoding of mixed/repeated queries, no over-advertised

@@ -44,7 +44,8 @@ public static class FilePartitionSaveHandler
         FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null,
         PartitionGraphSnapshot? currentGraph = null)
     {
-        if (partition.Kind != DocumentPartitionKind.FileContents ||
+        if (!CellBinaryRequestExecutor.MatchesTarget(subRequest, partition.Kind) ||
+            partition.Kind != DocumentPartitionKind.FileContents ||
             subRequest.Data is not PutChangesSubRequestData put || package is null)
             return Reject(subRequest.RequestId, CellErrorCode.RequestNotSupported,
                 "A file partition PutChanges request requires a data element package.");

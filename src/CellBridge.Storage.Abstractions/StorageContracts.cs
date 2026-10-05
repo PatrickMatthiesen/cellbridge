@@ -27,6 +27,8 @@ public sealed record LeaseState(string Id, string? Client, DateTime ExpiresUtc, 
 public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseState> SchemaOwners,
     LeaseState? Exclusive, long Generation)
 {
+    public ImmutableArray<string> CoauthorClients { get; init; } = [];
+    public bool CoauthorTransitionPending { get; init; }
     public static CoordinationState Empty { get; } = new(null, [], null, 0);
 }
 public sealed record SaveReceipt(string OperationKey, string Digest, uint ContentVersion,

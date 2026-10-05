@@ -1,7 +1,9 @@
 # Protocol scope
 
 CellBridge implements MS-FSSHTTP and MS-FSSHTTPB together. MS-OCPROTO describes
-how Office discovers and uses these protocols. SharePoint lists, search and
+how Office discovers and uses these protocols. The
+[requirements ledger](protocol-requirements.md) distinguishes implemented rules
+from conditional facilities and the remaining audit. SharePoint lists, search and
 unrelated APIs are outside this project's scope.
 
 ## Outer SOAP protocol
@@ -60,8 +62,8 @@ all visible elements when any are unknown. Filtered knowledge excludes withheld
 elements unless the request includes them explicitly. Unknown knowledge
 specializations or more than 10,000 decoded entries fall back to a complete
 response after validating the exchange. Partial ranges never suppress payloads;
-malformed framing fails. Optional unsupported filters are ignored unless
-`FailIfUnsupported` requires an error. See the [Query Changes rules](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/5b8d1d29-0adf-4b29-b3d1-1a1fe8590642).
+malformed framing fails. Optional unsupported filters are ignored by default; CellBridge returns an error
+when `FailIfUnsupported` permits failure. See the [Query Changes rules](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/5b8d1d29-0adf-4b29-b3d1-1a1fe8590642).
 
 ## Graph retention
 

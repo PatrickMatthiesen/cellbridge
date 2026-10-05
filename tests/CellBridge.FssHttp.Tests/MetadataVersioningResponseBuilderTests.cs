@@ -89,8 +89,32 @@ public sealed class MetadataVersioningResponseBuilderTests
 
         var xml = XDocument.Parse(envelope);
         var result = xml.Descendants().Single(e => e.Name.LocalName == "result");
-        Assert.Equal("https://example.test/root/shared/a&b.docx", (string?)result.Attribute("url"));
+        Assert.Equal("https://example.test/root/shared/a%26b.docx", (string?)result.Attribute("url"));
         Assert.Equal("a&b", (string?)result.Attribute("createdBy"));
+    }
+
+    [Theory]
+    [InlineData("report%20name.docx", "report%20name.docx")]
+    [InlineData("literal%2520.docx", "literal%2520.docx")]
+    [InlineData("hash%23name.docx", "hash%23name.docx")]
+    [InlineData("query%3Fname.docx", "query%3Fname.docx")]
+    [InlineData("%C3%A6%C3%B8%C3%A5.docx", "%C3%A6%C3%B8%C3%A5.docx")]
+    public void GetVersions_UsesCanonicalUrlForResourceIdResolvedDocument(string input, string escaped)
+    {
+        var store = new DocumentStore();
+        var document = store.Put("https://example.test/shared/" + input, [1]);
+        var resolved = DocumentRequestResolver.Resolve(store, new FssHttpRequest
+        {
+            UseResourceId = true,
+            ResourceId = document.TransitionId.ToString(),
+            Url = "https://example.test/stale-name.docx",
+        });
+        Assert.Same(document, resolved);
+        var response = MetadataVersioningResponseBuilder.BuildGetVersions(resolved!, "https://example.test/root/");
+        var xml = XElement.Parse(response.SubResponseXml!);
+        var url = (string?)xml.Descendants("result").Single().Attribute("url");
+        Assert.Equal("https://example.test/root/shared/" + escaped, url);
+        Assert.Same(document, store.Get("https://example.test/shared/" + escaped));
     }
 
     private static string? PropertyValue(XElement props, string key) =>

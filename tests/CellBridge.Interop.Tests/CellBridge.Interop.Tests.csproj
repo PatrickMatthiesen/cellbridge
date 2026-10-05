@@ -34,6 +34,7 @@
     <Compile Include="QueryAccessTests.cs" />
     <Compile Include="QueryChangesTests.cs" />
     <Compile Include="PartitionResponseTests.cs" />
+    <Compile Include="GuidAllocationInteropTests.cs" />
     <Compile Include="MicrosoftProtocol\**\*.cs" />
     <Compile Remove="MicrosoftProtocol\FssHttpD\**\*.cs" />
     <ProjectReference Include="..\..\src\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />

@@ -69,7 +69,7 @@ public static class MetadataVersioningResponseBuilder
         ArgumentException.ThrowIfNullOrWhiteSpace(publicOrigin);
 
         string user = document.Security.ModifiedBy?.Login ?? userName ?? "unknown";
-        string documentUrl = BuildDocumentUrl(publicOrigin, document.Url);
+        string documentUrl = DocumentRequestResolver.CanonicalUrl(document, publicOrigin);
         string version = $"@{Math.Max(1, document.ContentVersion)}.0";
         string createdRaw = FormatProtocolDate(document.LastModifiedUtc);
         string created = document.LastModifiedUtc.ToString("M/d/yyyy h:mm tt", CultureInfo.InvariantCulture);
@@ -106,10 +106,4 @@ public static class MetadataVersioningResponseBuilder
     private static string FormatProtocolDate(DateTime value) =>
         value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
-    private static string BuildDocumentUrl(string publicOrigin, string path)
-    {
-        var origin = publicOrigin.TrimEnd('/');
-        var documentPath = path.StartsWith('/') ? path : "/" + path;
-        return origin + documentPath;
-    }
 }

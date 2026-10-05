@@ -12,6 +12,12 @@ public static class CellPartitionSelector
         // in Word's inline QueryAccess request. Explicit zero is also default.
         if (!attributes.TryGetValue("PartitionID", out var text)) return true;
         if (!Guid.TryParse(text, out var id)) return false;
+        return TryResolve(id, out kind);
+    }
+
+    public static bool TryResolve(Guid id, out DocumentPartitionKind kind)
+    {
+        kind = DocumentPartitionKind.FileContents;
         if (id == Guid.Empty) return true;
         if (id == StoredDocument.MetadataPartitionId)
         {
