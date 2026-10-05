@@ -375,14 +375,11 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                                 $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{now.Ticks}\" />").ToImmutableArray()
                             }
                             : p).ToImmutableArray(),
-                        Coordination = coordinator.Capture() with { Generation = checked(current.Coordination.Generation + 1) },
+                        Coordination = CoordinationFencing.Capture(current.Coordination, coordinator.Capture()),
                         // Superseded retries need their digest/version, never their response bytes.
                         Receipts = current.Receipts.Select(r => r.PartitionKind != 0 || r.ContentVersion == candidate.ContentVersion
                             ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
-                    state = state with { Partitions = state.Partitions.Select(p => p.Kind == 1 &&
-                        current.Partitions.Single(x => x.Kind == 1).StorageIndex is not null
-                        ? p with { InlineContent = current.Partitions.Single(x => x.Kind == 1).InlineContent } : p).ToImmutableArray() };
                     if (candidate.ContentVersion != before.ContentVersion)
                         state = RevisionHistory.Append(current, state, actor.Identity, now);
                     provider.Limits.CheckDocument(state);

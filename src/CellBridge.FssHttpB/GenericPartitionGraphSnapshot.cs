@@ -168,6 +168,8 @@ public sealed class GenericPartitionGraphSnapshot
     {
         var reader = Reader(element);
         ExGuid? manifest = null;
+        var cellKeys = new HashSet<CellId>();
+        var revisionKeys = new HashSet<ExGuid>();
         while (reader.Remaining > 0)
         {
             var header = StreamObjectHeaderStart.Parse(reader);
@@ -183,21 +185,28 @@ public sealed class GenericPartitionGraphSnapshot
                     var cell = CellId.Deserialize(body);
                     var cellElement = ExGuid.Deserialize(body);
                     _ = SerialNumber.Deserialize(body);
-                    if (!_cellMappings.TryAdd(cell, cellElement)) throw new InvalidDataException("Duplicate cell mapping.");
+                    if (!cellKeys.Add(cell)) throw new InvalidDataException("Duplicate cell mapping.");
+                    if (!cellElement.IsNull) _cellMappings.Add(cell, cellElement);
                     break;
                 case StreamObjectTypeHeaderStart.StorageIndexRevisionMapping:
                     var revision = ExGuid.Deserialize(body);
                     var revisionElement = ExGuid.Deserialize(body);
                     _ = SerialNumber.Deserialize(body);
-                    if (revision.IsNull || !_revisionMappings.TryAdd(revision, revisionElement))
+                    if (revision.IsNull || !revisionKeys.Add(revision))
                         throw new InvalidDataException("Null or duplicate revision mapping.");
+                    if (!revisionElement.IsNull) _revisionMappings.Add(revision, revisionElement);
                     break;
                 default: throw new InvalidDataException($"Unexpected index record {header.Type}.");
             }
             Empty(body);
             VisitReference();
         }
-        if (manifest is null || manifest.IsNull) throw new InvalidDataException("Missing storage manifest mapping.");
+        if (manifest is null || manifest.IsNull)
+        {
+            if (_cellMappings.Count != 0 || _revisionMappings.Count != 0)
+                throw new InvalidDataException("A nonempty graph requires a storage manifest mapping.");
+            return;
+        }
         _storageManifest = Copy(manifest);
         var manifestReader = Reader(Require(manifest, DataElementType.StorageManifestDataElementData));
         var schema = Body(manifestReader, StreamObjectTypeHeaderStart.StorageManifestSchemaGUID);

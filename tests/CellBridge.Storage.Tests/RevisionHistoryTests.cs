@@ -16,6 +16,43 @@ namespace CellBridge.Storage.Tests;
 public sealed class RevisionHistoryTests
 {
     [Fact]
+    public async Task RestoreEmptyMetadataIndexRetainsOldGraphAndDoesNotFabricateManifest()
+    {
+        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var initial = (await service.CreateAsync("/empty-history.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var emptyId = new ExGuid(1, Guid.NewGuid());
+        var empty = GenericPartitionGraphSnapshot.Create([
+            new DataElement(DataElementType.StorageIndexDataElementData, emptyId, new(Guid.NewGuid(), 1)) { Data = [] }
+        ], emptyId);
+        var emptyPartition = await DocumentPartition.CaptureGraphAsync(initial.Partitions.Single(p => p.Kind == 1),
+            empty, 2, provider.Content, provider.Limits);
+        var withEmpty = await PublishMetadata(emptyPartition);
+        var populated = await DocumentPartition.CaptureGraphAsync(emptyPartition, new GraphFixture([1, 2, 3]).Generic(),
+            3, provider.Content, provider.Limits);
+        var withGraph = await PublishMetadata(populated);
+        // File saves keep opaque metadata and its knowledge exactly unchanged.
+        var saved = await Save(service, withGraph, "file change");
+        Assert.Equal(JsonSerializer.Serialize(populated), JsonSerializer.Serialize(saved.Partitions.Single(p => p.Kind == 1)));
+        await service.RestoreRevisionAsync(initial.ResourceId, RevisionHistory.Latest(withEmpty),
+            RevisionHistory.Latest(saved), "empty-metadata", TestActor.Value);
+        var after = (await provider.State.FindByResourceIdAsync(initial.ResourceId))!;
+        var selected = after.Partitions.Single(p => p.Kind == 1);
+        var graph = await DocumentPartition.RestoreGraphAsync(selected, provider.Content, provider.Limits);
+        Assert.Empty(graph.Cells); Assert.Empty(graph.Roots);
+        Assert.NotEqual(emptyPartition.StorageIndex, selected.StorageIndex);
+        Assert.All(populated.Elements, e => Assert.Contains(selected.Elements, x => x.Id == e.Id && x.Payload == e.Payload));
+        Assert.Equal(withEmpty.Content, after.Content);
+
+        async Task<DocumentState> PublishMetadata(PartitionState partition) => await provider.State.TransitionAsync(initial.ResourceId,
+            (current, now) =>
+            {
+                var next = RevisionHistory.Append(current, current with
+                    { Partitions = current.Partitions.Select(p => p.Kind == 1 ? partition : p).ToImmutableArray() }, TestActor.Value.Identity, now);
+                return new StateTransition<DocumentState>(next, next);
+            });
+    }
+
+    [Fact]
     public Task SaveRestoreRetryAndMetadataHistory() => CheckHistory(Memory());
 
     [PostgreSqlFact]
