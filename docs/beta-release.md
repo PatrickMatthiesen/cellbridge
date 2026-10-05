@@ -1,14 +1,29 @@
 # Beta release checklist
 
 The [beta release tracker](https://github.com/PatrickMatthiesen/cellbridge/issues/43) covers publication.
-The first candidate is `0.1.0-beta.1`, targeting .NET 10. Its purpose is to let
+The published first beta is `0.1.0-beta.1`, targeting .NET 10. Its purpose is to let
 external hosts consume CellBridge without a sibling source checkout and reuse
 the supported SOAP execution, authorization and persistence APIs. Pre-release
 versions carry no stable API or storage-upgrade guarantee.
 
+## Published release
+
+Issue #43 is completed. All nine packages below and their matching `.snupkg`
+symbols are public on NuGet.org, owned by `CellBridge`. The release source is
+[`b22bc2d29ec0cff61cd212c7d41fc68a297b3003`](https://github.com/PatrickMatthiesen/cellbridge/commit/b22bc2d29ec0cff61cd212c7d41fc68a297b3003),
+and [tag `v0.1.0-beta.1`](https://github.com/PatrickMatthiesen/cellbridge/releases/tag/v0.1.0-beta.1)
+identifies that commit. Fresh consumption from NuGet.org passed all four
+CellBridge consumer tests and all 15 WopiHost PR #735 adapter tests pinned at
+`1b25dd232afb12f3962fe3d37c295f4f52e1aa2f`.
+
+Remote restoration, package execution and symbols are completed release gates.
+They do not qualify Office Online Server editing, OneNote synchronization or
+two-desktop coauthoring. The workflow instructions below apply to a future
+reviewed release. Do not republish the immutable `0.1.0-beta.1` version.
+
 ## Release contents
 
-Publish these nine packages at the same version, together with their symbols:
+These nine packages were published at the same version, together with their symbols:
 
 | Package | Purpose |
 | --- | --- |
@@ -119,7 +134,7 @@ republishing the primary packages.
 [WopiHost PR #735](https://github.com/petrsvihlik/WopiHost/pull/735#issuecomment-5993115599)
 identified the host APIs this batch addresses. The existing adapter at
 `1b25dd232afb12f3962fe3d37c295f4f52e1aa2f` passed its 15 tests against CellBridge
-source and the local beta packages after replacing only its two CellBridge source
+source, local beta packages and freshly restored public NuGet.org packages after replacing only its two CellBridge source
 references with package references and adding matching central package versions.
 No upstream WopiHost implementation change is included in this repository.
 Its tests do not qualify Office Online Server editing or exercise adoption of
