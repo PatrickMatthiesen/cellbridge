@@ -20,10 +20,10 @@ internal static class LoginPage
               <style>
                 * { box-sizing: border-box; }
                 html { background: #f4f1e9; }
-                body { margin: 0; color: #20231f; font: 16px/1.5 "Segoe UI", Arial, sans-serif; }
-                .sign-in { display: block; width: 100%; max-width: 440px; margin: 0 auto; padding: 36px 24px; }
+                body { margin: 0; color: #20231f; font: 18px/1.5 "Segoe UI", Arial, sans-serif; }
+                .sign-in { display: block; width: 100%; max-width: 520px; margin: 0 auto; padding: 36px 24px; }
                 h1 { margin: 0 0 26px; font-size: 32px; font-weight: 600; line-height: 1.2; letter-spacing: -.03em; }
-                label { display: block; margin-bottom: 7px; font-size: 14px; font-weight: 600; }
+                label { display: block; margin-bottom: 7px; font-size: 16px; font-weight: 600; }
                 .field { margin-bottom: 18px; }
                 input { display: block; width: 100%; min-height: 46px; padding: 11px 12px; border: 1px solid #aaa99e; border-radius: 6px; background: #fff; color: #20231f; font: inherit; }
                 input:focus { outline: 2px solid #527c62; outline-offset: 2px; border-color: #527c62; }
@@ -32,7 +32,7 @@ internal static class LoginPage
                 button:hover { background: #3b453b; }
                 button:focus { outline: 2px solid #527c62; outline-offset: 3px; }
                 .error { margin: 0 0 22px; padding: 12px 14px; border-left: 3px solid #b34c2b; background: #fbe9df; color: #7c301a; font-size: 14px; }
-                .note { margin: 26px 0 0; padding-top: 18px; border-top: 1px solid #d8d5ca; color: #5f655b; font-size: 13px; }
+                .note { margin: 26px 0 0; padding-top: 18px; border-top: 1px solid #d8d5ca; color: #5f655b; font-size: 14px; }
                 @media (max-width: 360px) { .sign-in { padding: 24px 18px; } h1 { font-size: 28px; } }
               </style>
             </head>
