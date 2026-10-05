@@ -294,29 +294,32 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         string digest;
         try { digest = Digest(put, package); }
         catch (InvalidDataException ex) { return await FailedAsync(id, operation.RequestId, CellErrorCode.InvalidObject, ex.Message, cancellationToken); }
-        var preparation = await provider.State.TransitionAsync<(CoordinationState Authority, string? Error)>(id, (current, now) =>
+        var preparation = await provider.State.TransitionAsync(id, (current, now) =>
         {
             if (!Access(actor, current).HasFlag(DocumentAccess.Write))
-                return new StateTransition<(CoordinationState Authority, string? Error)>(null, (current.Coordination, "FileUnauthorizedAccess"));
+                return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null,
+                    (current, current.Coordination, "FileUnauthorizedAccess"));
+            if (current.Receipts.Any(r => r.PartitionKind == 0 && r.OperationKey == key))
+                return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, current.Coordination, null));
             if (current.LifecycleGeneration != initial.LifecycleGeneration || current.Coordination.Generation != initial.Coordination.Generation)
-                return new StateTransition<(CoordinationState, string?)>(null, (current.Coordination, "InvalidCoauthSession"));
-            if (current.Receipts.Any(r => r.OperationKey == key && r.PartitionKind == 0))
-                return new StateTransition<(CoordinationState, string?)>(null, (current.Coordination, null));
+                return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, current.Coordination, "InvalidCoauthSession"));
             var metadata = StoredDocument.RestoreMetadata(current, now);
             var coordinator = FssHttpLockCoordinator.Restore(metadata, current.Coordination, now, actor.Identity);
             coordinator.ExecuteCellWrite(attributes, () => true, out _, out var error, now);
-            return new StateTransition<(CoordinationState, string?)>(null, (coordinator.Capture(), error));
+            return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, coordinator.Capture(), error));
         }, cancellationToken);
-        if (preparation.Error == "FileUnauthorizedAccess") return Wrap(CellBridgeAuthorization.Denied(operation), await CurrentAsync(id, cancellationToken));
-        if (preparation.Error is not null) return new(new(), await CurrentAsync(id, cancellationToken), preparation.Error);
+        if (preparation.Error == "FileUnauthorizedAccess") return Wrap(CellBridgeAuthorization.Denied(operation), preparation.State);
+        if (preparation.Error is not null) return new(new FsshttpbResponse(), preparation.State, preparation.Error);
         for (int attempt = 0; attempt < 4; attempt++)
         {
             var before = await CurrentAsync(id, cancellationToken);
             if (!Access(actor, before).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), before);
-            if (before.LifecycleGeneration != initial.LifecycleGeneration || before.Coordination.Generation != initial.Coordination.Generation)
-                return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "The document incarnation or lease epoch changed."), before);
-            if (before.Receipts.FirstOrDefault(r => r.OperationKey == key && r.PartitionKind == 0) is { } prior)
-                return await RepeatAsync(initial, prior, digest, operation.RequestId, actor, canAppend, cancellationToken);
+            if (before.LifecycleGeneration != initial.LifecycleGeneration)
+                return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "The document incarnation changed."), before);
+            if (before.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is { } prior)
+                return await RepeatAsync(before, prior, digest, operation.RequestId, actor, canAppend, cancellationToken);
+            if (before.Coordination.Generation != initial.Coordination.Generation)
+                return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "Write authority changed while preparing the save."), before);
             var document = StoredDocument.RestoreMetadata(before, DateTime.UtcNow);
             var currentGraph = await DocumentPartition.RestoreFileGraphAsync(before, provider.Content, provider.Limits, cancellationToken);
             StorageLimits.Check("save receipts", before.Receipts.Length + 1L, provider.Limits.MaxSaveReceipts);
@@ -365,7 +368,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             using var receiptStream = new MemoryStream(receiptBytes);
             var responseHandle = await provider.Content.WriteAsync(receiptStream, cancellationToken);
             var receipt = new SaveReceipt(key, digest, candidate.ContentVersion, responseHandle, actor.Identity.Subject)
-            { LifecycleGeneration = initial.LifecycleGeneration };
+                { LifecycleGeneration = initial.LifecycleGeneration };
             PublishResult published;
             try
             {
@@ -373,10 +376,12 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 {
                     if (!Access(actor, current).HasFlag(DocumentAccess.Write))
                         return new StateTransition<PublishResult>(null, new(current, null, "FileUnauthorizedAccess", false));
-                    if (current.LifecycleGeneration != initial.LifecycleGeneration || current.Coordination.Generation != initial.Coordination.Generation)
+                    if (current.LifecycleGeneration != initial.LifecycleGeneration)
                         return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
-                    if (current.Receipts.FirstOrDefault(r => r.OperationKey == key && r.PartitionKind == 0) is { } accepted)
+                    if (current.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is { } accepted)
                         return new StateTransition<PublishResult>(null, new(current, accepted, null, false));
+                    if (current.Coordination.Generation != initial.Coordination.Generation)
+                        return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
                     if (current.ContentVersion != before.ContentVersion || current.Content != before.Content)
                         return new StateTransition<PublishResult>(null, new(current, null, null, true));
                     var metadata = StoredDocument.RestoreMetadata(current, now);
@@ -385,6 +390,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         return new StateTransition<PublishResult>(null, new(current, null, error, false));
                     if (CoordinationFencing.Capture(preparation.Authority, coordinator.Capture()).Generation != preparation.Authority.Generation)
                         return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
+                    var currentMetadata = current.Partitions.Single(x => x.Kind == 1);
                     var state = metadata.CaptureCoordination(current, coordinator.Capture()) with
                     {
                         Security = current.Security with { ModifiedBy = candidate.ContentVersion == before.ContentVersion ? current.Security.ModifiedBy : actor.Identity },
@@ -401,13 +407,10 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                                 InlineContent = metadata.EditorsTablePartition.Content.ToImmutableArray()
                             }
                             : p.Kind == 1 && (candidate.ContentVersion == before.ContentVersion ||
-                                current.Partitions.Single(x => x.Kind == 1).StorageIndex is not null ||
-                                !current.Partitions.Single(x => x.Kind == 1).Elements.IsEmpty) ? current.Partitions.Single(x => x.Kind == 1)
-                            : p.Kind == 1 ? current.Partitions.Single(x => x.Kind == 1) with
+                                currentMetadata.StorageIndex is not null || !currentMetadata.Elements.IsEmpty) ? currentMetadata
+                            : p.Kind == 1 ? currentMetadata with
                             {
-                                Knowledge = candidate.ContentVersion == before.ContentVersion
-                                    ? current.Partitions.Single(x => x.Kind == 1).Knowledge
-                                    : checked(current.Partitions.Single(x => x.Kind == 1).Knowledge + 1),
+                                Knowledge = checked(currentMetadata.Knowledge + 1),
                                 InlineContent = System.Text.Encoding.UTF8.GetBytes(
                                 $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{now.Ticks}\" />").ToImmutableArray()
                             }
@@ -417,9 +420,9 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         Receipts = current.Receipts.Select(r => r.PartitionKind != 0 || r.ContentVersion == candidate.ContentVersion
                             ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
-                    state = ExternalPublication.Append(current, state, publicationOperationId, provider.Limits);
                     if (candidate.ContentVersion != before.ContentVersion)
                         state = RevisionHistory.Append(current, state, actor.Identity, now);
+                    state = ExternalPublication.Append(current, state, publicationOperationId, provider.Limits);
                     provider.Limits.CheckDocument(state);
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
                 }, cancellationToken);
@@ -429,8 +432,9 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 // A lost commit response is not a rollback. Resolve the durable
                 // receipt before attempting to apply this operation again.
                 var current = await CurrentAsync(id, CancellationToken.None);
-                if (current.Receipts.FirstOrDefault(r => r.OperationKey == key && r.PartitionKind == 0) is not { } accepted) throw;
-                return await RepeatAsync(initial, accepted, digest, operation.RequestId, actor, canAppend, CancellationToken.None);
+                if (current.LifecycleGeneration != initial.LifecycleGeneration ||
+                    current.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is not { } accepted) throw;
+                return await RepeatAsync(current, accepted, digest, operation.RequestId, actor, canAppend, CancellationToken.None);
             }
             if (published.Receipt is { } duplicate)
                 return await RepeatAsync(initial, duplicate, digest, operation.RequestId, actor, canAppend, cancellationToken);
@@ -450,10 +454,9 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         ulong requestId, CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
     {
         var generation = state.LifecycleGeneration;
-        var epoch = state.Coordination.Generation;
         state = await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<DocumentState>(null, current), cancellationToken);
-        if (state.LifecycleGeneration != generation || state.Coordination.Generation != epoch ||
-            state.Receipts.FirstOrDefault(r => r.OperationKey == receipt.OperationKey && r.PartitionKind == 0) is not { } authoritative)
+        if (state.LifecycleGeneration != generation || state.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == receipt.OperationKey) is not { } authoritative ||
+            authoritative.LifecycleGeneration != generation)
             return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted operation is no longer current."), state);
         receipt = authoritative;
         if (!Access(actor, state).HasFlag(DocumentAccess.Write) || receipt.OwnerSubject != actor.Identity.Subject)
@@ -485,12 +488,12 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             throw new StorageCorruptionException("The saved response receipt contains malformed binary data.", ex);
         }
         var expectedContent = state.Content;
-        state = await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<DocumentState>(null, current), cancellationToken);
-        if (!Access(actor, state).HasFlag(DocumentAccess.Write))
+        state = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+            new StateTransition<DocumentState>(null, current), cancellationToken);
+        if (!Access(actor, state).HasFlag(DocumentAccess.Write) || receipt.OwnerSubject != actor.Identity.Subject)
             return Wrap(CellBridgeAuthorization.Denied(new(RequestTypes.PutChanges) { RequestId = requestId }), state);
-        if (state.LifecycleGeneration != generation || state.Coordination.Generation != epoch ||
-            state.ContentVersion != receipt.ContentVersion || state.Content != expectedContent ||
-            state.Receipts.FirstOrDefault(r => r.OperationKey == receipt.OperationKey && r.PartitionKind == 0) != receipt)
+        if (state.LifecycleGeneration != generation || state.ContentVersion != receipt.ContentVersion || state.Content != expectedContent ||
+            state.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == receipt.OperationKey) != receipt)
             return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted revision changed during receipt loading."), state);
         response.SubResponses[0].RequestId = requestId;
         if (!canAppend(response.DataElementPackage))
@@ -527,6 +530,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             var next = document.CaptureCoordination(current, current.Coordination) with
             {
                 StateVersion = checked(current.StateVersion + 1),
+                Coordination = current.Coordination,
             };
             return new StateTransition<(DocumentState, DateTime)>(next, (next, now));
         }, cancellationToken);

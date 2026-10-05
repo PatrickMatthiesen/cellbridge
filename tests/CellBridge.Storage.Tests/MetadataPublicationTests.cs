@@ -209,6 +209,9 @@ public sealed class MetadataPublicationTests
         Assert.Equal(JsonSerializer.Serialize(full.Publication), JsonSerializer.Serialize(patched.State.Publication));
         Assert.Equal(full.ContentVersion, patched.State.ContentVersion);
         Assert.Equal(full.Revisions.Length + 1, patched.State.Revisions.Length);
+        // A replay acknowledges the committed revision even after a lease epoch changes.
+        await provider.State.TransitionAsync(before.ResourceId, (current, _) => new StateTransition<bool>(current with
+        { Coordination = current.Coordination with { Generation = current.Coordination.Generation + 1 } }, true));
         var replay = await service.ExecuteAsync(before.ResourceId, DocumentPartitionKind.FileContents, request, Attributes, TestActor.Value); Success(replay);
         Assert.Equal(file.Response.ToByteArray(), replay.Response.ToByteArray());
         Assert.Equal(patched.State.Revisions.Length, replay.State.Revisions.Length);
