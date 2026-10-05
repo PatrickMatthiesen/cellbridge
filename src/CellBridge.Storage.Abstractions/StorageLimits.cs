@@ -14,6 +14,8 @@ public sealed record StorageLimits
     public long MaxObjectBytes { get; init; } = 512L * 1024 * 1024;
     public int MaxSaveReceipts { get; init; } = 10_000;
     public int MaxRetainedStateSnapshots { get; init; } = 64;
+    public int MaxHistoryRevisions { get; init; } = 1_000;
+    public int MaxRestoreReceipts { get; init; } = 1_000;
 
     public void Validate()
     {
@@ -26,6 +28,8 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxObjectBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSaveReceipts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetainedStateSnapshots);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxHistoryRevisions);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRestoreReceipts);
     }
 
     public void CheckDocument(DocumentState state)
@@ -42,6 +46,8 @@ public sealed record StorageLimits
         Check("graph bytes", graphBytes, MaxGraphBytes);
         Check("graph elements", elements, MaxGraphElements);
         Check("save receipts", state.Receipts.Length, MaxSaveReceipts);
+        Check("history revisions", state.Revisions.Length, MaxHistoryRevisions);
+        Check("restore receipts", state.RestoreReceipts.Length, MaxRestoreReceipts);
         long stored = JsonSerializer.SerializeToUtf8Bytes(state).LongLength;
         foreach (var handle in StorageReferences.Handles(state).DistinctBy(h => h.Key))
             stored = checked(stored + handle.Length);
@@ -74,5 +80,14 @@ public static class StorageReferences
         }
         foreach (var receipt in state.Receipts)
             if (receipt.Response is not null) yield return receipt.Response;
+        foreach (var revision in state.Revisions)
+        {
+            yield return revision.Content;
+            foreach (var partition in revision.Partitions)
+            {
+                yield return partition.Content;
+                foreach (var element in partition.Elements) yield return element.Payload;
+            }
+        }
     }
 }
