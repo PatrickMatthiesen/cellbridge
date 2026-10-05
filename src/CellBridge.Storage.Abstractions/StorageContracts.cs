@@ -27,6 +27,7 @@ public sealed record LeaseState(string Id, string? Client, DateTime ExpiresUtc, 
 public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseState> SchemaOwners,
     LeaseState? Exclusive, long Generation)
 {
+    public HostLease? HostLock { get; init; }
     public ImmutableArray<string> CoauthorClients { get; init; } = [];
     public bool CoauthorTransitionPending { get; init; }
     public static CoordinationState Empty { get; } = new(null, [], null, 0);
@@ -44,6 +45,10 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
     public const int CurrentFormat = 2;
     /// <summary>Incarnation of a host path. Prepared mutations must retain and revalidate this value.</summary>
     public long LifecycleGeneration { get; init; } = 1;
+    public bool IsDeleted { get; init; }
+    public long? DeletedFromStateVersion { get; init; }
+    public Guid? ReplacedBy { get; init; }
+    public ExternalPublicationState? Publication { get; init; }
     public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
     public string Etag => $"\"{{{ResourceId.ToString("D").ToUpperInvariant()}}},{ContentVersion}\"";
 }

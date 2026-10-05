@@ -13,6 +13,8 @@ public sealed record StorageLimits
     public int MaxDocuments { get; init; } = 10_000;
     public long MaxObjectBytes { get; init; } = 512L * 1024 * 1024;
     public int MaxSaveReceipts { get; init; } = 10_000;
+    public int MaxPendingExternalRevisions { get; init; } = 128;
+    public long MaxPendingExternalBytes { get; init; } = 1024L * 1024 * 1024;
     public int MaxRetainedStateSnapshots { get; init; } = 64;
 
     public void Validate()
@@ -26,6 +28,8 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxObjectBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSaveReceipts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetainedStateSnapshots);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalRevisions);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalBytes);
     }
 
     public void CheckDocument(DocumentState state)
@@ -42,6 +46,11 @@ public sealed record StorageLimits
         Check("graph bytes", graphBytes, MaxGraphBytes);
         Check("graph elements", elements, MaxGraphElements);
         Check("save receipts", state.Receipts.Length, MaxSaveReceipts);
+        if (state.Publication is { } publication)
+        {
+            Check("pending external revisions", publication.Pending.Length, MaxPendingExternalRevisions);
+            Check("pending external bytes", publication.Pending.Sum(r => r.Content.Length), MaxPendingExternalBytes);
+        }
         long stored = JsonSerializer.SerializeToUtf8Bytes(state).LongLength;
         foreach (var handle in StorageReferences.Handles(state).DistinctBy(h => h.Key))
             stored = checked(stored + handle.Length);
@@ -67,6 +76,8 @@ public static class StorageReferences
     public static IEnumerable<ContentHandle> Handles(DocumentState state)
     {
         yield return state.Content;
+        if (state.Publication is { } publication)
+            foreach (var revision in publication.Pending) yield return revision.Content;
         foreach (var partition in state.Partitions)
         {
             yield return partition.Content;
