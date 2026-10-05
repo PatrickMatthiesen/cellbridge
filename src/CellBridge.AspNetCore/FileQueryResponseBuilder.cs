@@ -19,7 +19,7 @@ internal static class FileQueryResponseBuilder
     public static FileQuerySelection Select(IEnumerable<DataElement> elements, ExGuid index,
         CellId cell, ulong sequence, QueryChangesSubRequestData? request,
         IReadOnlyDictionary<ExGuid, IReadOnlyList<SerialNumber>>? mappingSerials = null,
-        IReadOnlySet<ExGuid>? scope = null)
+        IReadOnlySet<ExGuid>? scope = null, ExGuid? cellStorageId = null)
     {
         var metadata = elements.ToArray();
         mappingSerials ??= new Dictionary<ExGuid, IReadOnlyList<SerialNumber>>();
@@ -44,14 +44,15 @@ internal static class FileQueryResponseBuilder
         var advertised = request?.IncludeFilteredOutDataElementsInKnowledge == true ? scoped : visible;
         // A reduced filter scope does not establish complete waterline possession.
         ulong waterline = scope is null && advertised.Length == metadata.Length ? sequence : 0;
+        cellStorageId ??= cell.ShortId;
         return new(selected, new QueryChangesSubResponseData
         {
             StorageIndexExtendedGuid = index,
             CellKnowledgeCellGuid = cell.LongId.Guid,
             CellKnowledgeTo = sequence,
-            WaterlineCellStorageExtendedGuid = cell.ShortId,
+            WaterlineCellStorageExtendedGuid = cellStorageId,
             Waterline = waterline,
-            KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(advertised, cell.ShortId, waterline,
+            KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(advertised, cellStorageId, waterline,
                 mappingSerials: advertised.SelectMany(e => mappingSerials.GetValueOrDefault(e.DataElementExtendedGuid) ?? [])),
         });
     }

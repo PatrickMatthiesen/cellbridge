@@ -10,12 +10,25 @@ public static class FilePartitionSaveHandler
 {
     public static FsshttpbSubResponse Apply(StoredDocument document, DocumentPartition partition,
         FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null)
+        => ApplyResponse(document, partition, subRequest, package, limits).SubResponses[0];
+
+    /// <summary>Applies a complete save and returns its mandatory applied-index payload when requested.</summary>
+    public static FsshttpbResponse ApplyResponse(StoredDocument document, DocumentPartition partition,
+        FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null)
+        => ApplyResponse(document, partition, subRequest, package, limits, _ => true);
+
+    internal static FsshttpbResponse ApplyResponse(StoredDocument document, DocumentPartition partition,
+        FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits,
+        Func<DataElementPackage?, bool> canAppend)
     {
         limits ??= new StorageLimits();
         lock (document)
         {
             var prepared = Prepare(document, partition, subRequest, package, limits);
-            if (prepared.Graph is null) return prepared.Response;
+            if (prepared.Graph is null) return Wrap(prepared.Response);
+            if (!canAppend(prepared.ResponsePackage))
+                return Wrap(Failure(subRequest.RequestId, CellErrorCode.RequestNotSupported,
+                    "The mandatory save payload exceeds the response budget or conflicts with earlier results."));
             try
             {
                 byte[] bytes;
@@ -25,17 +38,21 @@ public static class FilePartitionSaveHandler
                 using var stream = new MemoryStream(bytes, writable: false);
                 ValidateDocument(stream, document.Url, limits.MaxDocumentBytes);
                 if (!prepared.Repeat) document.CommitFileRevision(prepared.Graph, bytes, prepared.KnowledgeSequence);
-                return prepared.Response;
+                return Wrap(prepared.Response, prepared.ResponsePackage);
             }
             catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
             {
-                return Failure(subRequest.RequestId, CellErrorCode.InvalidObject, ex.Message);
+                return Wrap(Failure(subRequest.RequestId, CellErrorCode.InvalidObject, ex.Message));
             }
         }
     }
 
     internal sealed record PreparedFileSave(FsshttpbSubResponse Response,
-        PartitionGraphSnapshot? Graph = null, ulong KnowledgeSequence = 0, bool Repeat = false);
+        PartitionGraphSnapshot? Graph = null, ulong KnowledgeSequence = 0, bool Repeat = false,
+        DataElementPackage? ResponsePackage = null);
+
+    private static FsshttpbResponse Wrap(FsshttpbSubResponse response, DataElementPackage? package = null)
+        => new() { SubResponses = { response }, DataElementPackage = package };
 
     private static PreparedFileSave Reject(ulong id, CellErrorCode code, string message)
         => new(Failure(id, code, message));
@@ -130,7 +147,13 @@ public static class FilePartitionSaveHandler
                         KnowledgeBytes = writer.ToArray(),
                     },
                 };
-                return new(result, next, sequence, repeat);
+                DataElementPackage? responsePackage = null;
+                if ((put.AdditionalFlagsBits & 1) != 0)
+                {
+                    responsePackage = new();
+                    responsePackage.DataElements.AddRange(next.SelectElements(e => e.DataElementExtendedGuid.Equals(next.StorageIndex)));
+                }
+                return new(result, next, sequence, repeat, responsePackage);
             }
             catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
             {
@@ -219,7 +242,7 @@ public static class FilePartitionSaveHandler
         }
     }
 
-    private static byte[] SerialReassignments(IEnumerable<DataElement> elements)
+    internal static byte[] SerialReassignments(IEnumerable<DataElement> elements)
     {
         var writer = new BinaryWriterEx();
         new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.PutChangesResponseSerialNumberReassignAll, 1).Serialize(writer);
