@@ -47,12 +47,12 @@ Acceptance criteria are expanded in the phases below.
 | G1 | Generic cells, roots and object partitions have durable codecs and file adapter integration. | Implemented foundation; non-file publication/reference qualification remains | Essential shared foundation for OneNote. Non-file protocol uploads still belong to U1. |
 | G2 | File materialization resolves inherited objects with revision/cell scope and nearest-definition precedence. | Implemented file behavior; reference qualification remains | Required ancestors remain retained. Strict generic resolution preserves explicit errors for incomplete graphs. |
 | G3 | File publication and generic codecs resolve declared BLOB IDs and preserve retained handles. | Implemented file behavior; non-file/reference qualification remains | BLOB integrity and closure have restart/provider tests; no largest-payload recovery. |
-| Q1 | Repeated file queries share one package, preserving each scope/knowledge/error. | Implemented subset; remaining query behavior | Repeated metadata/editors, cross-partition routing and applicable filters remain #23; version queries remain #7. |
+| Q1 | Mixed/repeated file, metadata and editor queries share one package, preserving each scope/knowledge/error. Known binary targets override the SOAP default per operation. | Implemented query assembly; qualification remains | Filter specialization and reference qualification remain #23; metadata graph remains #28 and version queries #7. |
 | Q2 | `QueryChangesVersioning` is rejected; `GetVersions` exposes the current entry with versioning disabled. Retained snapshots are not a public version repository. | Missing version/history capability | Real version tokens, version queries and coherent listing/restoration. Large storage and protocol change. |
 | Q3 | Byte budgets needing continuation return errors; `AllowFragments` is parsed without implementing fragmented delivery. | Missing continuation capability | Bounded synchronization for large graphs. Substantial transaction/state work. Fragment permission alone does not require every response to fragment. |
 | Q4 | `AllocateExtendedGuidRange` has typed codecs and authorized execution using fresh UUID namespaces. | Implemented operation | Exact count, exclusive upper bound and concurrent host decoding tests; no durable shared counter required. |
 | Q5 | File-hash requests are parsed without producing the requested hash; request/data-element hashing needs a profile audit. | Conditional requirement | Implement negotiated wire hashes with their specified ordering/schema. Storage SHA-256 is not a substitute. Medium change. |
-| W1 | Partial and multi-request uploads, non-file uploads and alternate coherency modes are explicitly unsupported. | Missing synchronization modes | Durable staging and correct commit/retry semantics for incremental graph changes. Large change. |
+| W1 | Partial/staged multi-request uploads, non-file uploads and alternate coherency modes are explicitly unsupported per operation. Complete saves accept the multi-request coalescing hint. | Missing synchronization modes | Durable staging and correct commit/retry semantics for incremental graph changes. The hint alone does not define a staged transaction. Large change. |
 | M1 | Metadata queries use a storage-index-only placeholder; application metadata writes are unsupported. | Missing partition behavior | Application metadata graphs and consistent read/write knowledge. Medium to large change. |
 | L1 | Exclusive/schema conversions and coauthor transition acknowledgement use durable explicit membership. | Implemented server transitions; qualification remains | Provider/HTTP tests establish state behavior. Reference traffic and two-desktop transition qualification remain in #29/#5. |
 | S1 | Outer `FileOperation`, `Versioning` and `Properties` types exist but dispatch falls through to unsupported. | Missing outer operations, suboperations to inventory | Document management and property/version behavior within MS-FSSHTTP. Medium to large; exact scope follows the normative ledger. |
@@ -194,6 +194,10 @@ without satisfying the new contract. Provider codecs/migrations need explicit
 backward-compatibility and upgrade tests.
 
 ### Phase 4 — Continuations and upload transactions
+
+Complete file saves already accept `MultiRequestPutHint` as a coalescing hint.
+It does not establish a staging key or a partial-upload transaction. True
+`Partial` and `PartialLast` uploads still fail independently of other operations.
 
 Implement Q3 and W1 on the generic graph. Define durable staging, fragment assembly,
 expiry/abort, quotas and retry identities before accepting partial data. Follow the

@@ -16,27 +16,30 @@ operations.
 | Feature | Implementation |
 | --- | --- |
 | Read/write permissions | Binary `QueryAccess` reports the caller's access. |
-| Read file changes | `QueryChanges` supports repeated file queries with independent knowledge/errors and one shared data package. Mapped cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
+| Read changes | `QueryChanges` supports repeated and mixed file, metadata and editor queries with independent knowledge/errors and one shared data package. Explicit binary targets override the SOAP default. Mapped file-cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
 | Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Save receipts identify retries so an accepted save is not published twice. |
 | Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
 | Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` reports the current version. |
 
 File content, application metadata and editor presence have separate synchronization
 partitions. File saves update the content partition. Editor queries return current
-participants; binary application-metadata queries return storage-index information.
+participants with immutable identities for each distinct editor stream;
+binary application-metadata queries return storage-index information.
 SOAP dependencies determine which subsequent operations execute.
 
 ### Known limitations
 
-- Uploads marked partial, uploads spanning multiple requests, alternate coherency
+- Uploads marked partial, staged uploads spanning multiple requests, alternate coherency
   modes and writes to non-file partitions are unsupported. Ordinary saves can
-  still reuse unchanged file parts.
+  still reuse unchanged file parts. Complete saves accept `MultiRequestPutHint`
+  as a coalescing hint. Unsupported partial operations do not cancel independent
+  operations in the same binary request.
 - Historical-version queries, unmapped cell scopes, waterline-only query controls
   and some filters are unsupported. Optional unsupported filters fall back to
   more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
-- Repeated metadata/editor queries and independent binary routing across SOAP
-  partitions remain unsupported. Repeated file queries deduplicate immutable
-  elements; a later failure preserves earlier payloads and save acknowledgements.
+- Mixed and repeated queries deduplicate immutable elements. A later failure
+  preserves earlier payloads and save acknowledgements. Metadata remains a
+  storage-index-only placeholder rather than a complete application metadata graph.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
   and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
   outside the current normative four-operation inventory.

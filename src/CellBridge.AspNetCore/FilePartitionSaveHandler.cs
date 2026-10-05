@@ -52,9 +52,9 @@ public static class FilePartitionSaveHandler
         // MS-FSSHTTPB 2.2.2.1.4: abort-on-failure and the legacy content-version
         // item are ignored. 2.2.2.1.4.1 also requires ignoring reserved bits.
         // Excel sets reserved bit 15; it does not request a partial upload.
-        if ((put.Flags & ~0x59) != 0 || (put.AdditionalFlagsBits & 0x38) != 0)
+        if ((put.Flags & ~0x79) != 0 || (put.AdditionalFlagsBits & 0x38) != 0)
             return Reject(subRequest.RequestId, CellErrorCode.RequestNotSupported,
-                "Partial, multi-request and alternate coherency modes are not implemented.");
+                "Partial uploads and alternate coherency modes are not implemented.");
 
         lock (document)
         {

@@ -21,7 +21,7 @@ has not been qualified.
 | Feature | Current support |
 | --- | --- |
 | Word editing | Open, edit, save and reopen documents, including while signed in. |
-| Excel editing | Desktop saves tested; the current durable host needs a repeat desktop check. |
+| Excel editing | Open, edit, save and reopen tested while signed in on the durable host. |
 | PowerPoint editing | Save and reopen presentations, including complex Copilot-generated slides. |
 | Document library | Create blank Office files, import existing documents and download saved files. |
 | Accounts and permissions | Local sign-in, document ownership, read-only/editing access and revocation. |

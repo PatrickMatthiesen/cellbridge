@@ -9,9 +9,10 @@ public static class CellBinaryRequestExecutor
 {
     /// <summary>
     /// Builds one matching sub-response for each request. File PutChanges
-    /// validates and commits its retained object graph. Repeated file queries
-    /// share the union of their independently selected payloads. EditorsTable queries require the SOAP-specific
-    /// response builder callback.
+    /// validates and commits its retained object graph. Explicit targets select
+    /// a known partition; absent targets inherit the SOAP partition. Queries
+    /// share the union of their independently selected payloads. EditorsTable
+    /// queries require a response builder callback.
     /// </summary>
     public static FsshttpbResponse Execute(
         StoredDocument document,
@@ -19,7 +20,8 @@ public static class CellBinaryRequestExecutor
         FsshttpbCellRequest request,
         DocumentAccess access,
         Func<ulong, FsshttpbResponse>? editorsTableQueryChanges = null,
-        long maxResponseBytes = 512L * 1024 * 1024)
+        long maxResponseBytes = 512L * 1024 * 1024,
+        Func<DocumentPartition, ulong, FsshttpbResponse>? partitionEditorsQueryChanges = null)
     {
         var response = new FsshttpbResponse();
         if (request.SubRequests.Count == 0)
@@ -32,7 +34,6 @@ public static class CellBinaryRequestExecutor
             return response;
         }
 
-        bool queryChangesAlreadyHandled = false;
         var queries = new QueryChangesResponseAssembler(response, maxResponseBytes);
         foreach (var subRequest in request.SubRequests)
         {
@@ -43,14 +44,15 @@ public static class CellBinaryRequestExecutor
                 response.SubResponses.Add(CellBridge.AspNetCore.CellBridgeAuthorization.Denied(subRequest));
                 continue;
             }
-            if (!MatchesTarget(subRequest, partition.Kind))
+            if (!TryResolveTarget(subRequest, partition.Kind, out var kind))
             {
                 response.SubResponses.Add(UnsupportedSubResponse(subRequest.RequestId, subRequest.RequestType));
                 continue;
             }
+            var selectedPartition = document.GetPartition(kind);
             if (subRequest.RequestType == RequestTypes.PutChanges)
             {
-                response.SubResponses.Add(FilePartitionSaveHandler.Apply(document, partition, subRequest, request.DataElementPackage));
+                response.SubResponses.Add(FilePartitionSaveHandler.Apply(document, selectedPartition, subRequest, request.DataElementPackage));
                 continue;
             }
             if (subRequest.RequestType == RequestTypes.AllocateExtendedGuidRange)
@@ -58,17 +60,12 @@ public static class CellBinaryRequestExecutor
                 response.SubResponses.Add(AllocateRange(subRequest));
                 continue;
             }
-            if (subRequest.RequestType == RequestTypes.QueryChanges && queryChangesAlreadyHandled &&
-                partition.Kind != DocumentPartitionKind.FileContents)
-            {
-                response.SubResponses.Add(UnsupportedSubResponse(subRequest.RequestId, subRequest.RequestType));
-                continue;
-            }
-
             if (subRequest.RequestType == RequestTypes.QueryChanges)
             {
-                queryChangesAlreadyHandled = true;
-                var queryChanges = QueryChanges(document, partition, subRequest, editorsTableQueryChanges);
+                Func<ulong, FsshttpbResponse>? editors = partitionEditorsQueryChanges is not null
+                    ? id => partitionEditorsQueryChanges(selectedPartition, id)
+                    : partition.Kind == DocumentPartitionKind.EditorsTable ? editorsTableQueryChanges : null;
+                var queryChanges = QueryChanges(document, selectedPartition, subRequest, editors);
                 queries.Append(queryChanges);
                 continue;
             }
@@ -83,6 +80,13 @@ public static class CellBinaryRequestExecutor
 
     internal static bool MatchesTarget(FsshttpbCellSubRequest request, DocumentPartitionKind kind) =>
         request.TargetPartitionId is not { } target || CellPartitionSelector.TryResolve(target, out var selected) && selected == kind;
+
+    internal static bool TryResolveTarget(FsshttpbCellSubRequest request, DocumentPartitionKind fallback,
+        out DocumentPartitionKind kind)
+    {
+        kind = fallback;
+        return request.TargetPartitionId is not { } target || CellPartitionSelector.TryResolve(target, out kind);
+    }
 
     private static FsshttpbSubResponse QueryAccessSubResponse(ulong requestId, DocumentAccess access) => new()
     {
@@ -125,32 +129,36 @@ public static class CellBinaryRequestExecutor
         Func<ulong, FsshttpbResponse>? editorsTableQueryChanges)
     {
         ulong requestId = subRequest.RequestId;
+        var controls = subRequest.Data as QueryChangesSubRequestData;
+        if (partition.Kind == DocumentPartitionKind.FileContents)
+            return FileQuery(document, partition, requestId, controls);
+        if (!FileQueryResponseBuilder.Supports(controls, partition.ProtocolIdentity.CellId))
+            return FileQueryResponseBuilder.Unsupported(requestId);
+        FsshttpbResponse response;
         if (partition.Kind == DocumentPartitionKind.EditorsTable)
         {
-            return editorsTableQueryChanges is not null
+            response = editorsTableQueryChanges is not null
                 ? editorsTableQueryChanges(requestId)
                 : Unsupported(requestId, RequestTypes.QueryChanges);
         }
-
-        // Word's FileContents query asks for both the storage manifest and
-        // cell changes. Returning only a StorageIndex makes the SOAP request
-        // technically successful but leaves Word without the revision/object
-        // graph and it falls back to a direct GET, losing the edit session.
-        // Metadata has a different application stream shape, so retain its
-        // validated StorageIndex response until that stream is modelled.
-        FsshttpbResponse response = partition.Kind == DocumentPartitionKind.FileContents
-            ? FileQuery(document, partition, requestId, subRequest.Data as QueryChangesSubRequestData)
-            : StorageManifestBuilder.BuildStorageIndexOnlyQueryChangesResponse(
+        else
+        {
+            // The application metadata stream remains an explicit placeholder.
+            response = StorageManifestBuilder.BuildStorageIndexOnlyQueryChangesResponse(
                 requestId,
-                partition.FssHttpBIdentity.CellId.LongId,
+                new ExGuid(1, partition.ProtocolIdentity.SerialGuid),
                 partition.KnowledgeSequence,
                 emitNullManifestMapping: true,
                 includeCellKnowledge: true,
                 waterlineCellStorage: partition.FssHttpBIdentity.CellId.ShortId);
-
-        if (partition.Kind != DocumentPartitionKind.FileContents)
-            QueryChangesResponseShaper.Apply(response, subRequest.Data as QueryChangesSubRequestData);
-        return response;
+        }
+        if (response.DataElementPackage is null || response.SubResponses.FirstOrDefault()?.Data is not QueryChangesSubResponseData data)
+            return response;
+        var elements = response.DataElementPackage.DataElements;
+        var selection = FileQueryResponseBuilder.Select(elements, data.StorageIndexExtendedGuid,
+            partition.ProtocolIdentity.CellId, data.CellKnowledgeTo, controls);
+        return FileQueryResponseBuilder.Build(requestId, selection,
+            elements.Where(e => selection.PayloadIds.Contains(e.DataElementExtendedGuid)), controls);
     }
 
     private static FsshttpbResponse FileQuery(StoredDocument document, DocumentPartition partition, ulong requestId,

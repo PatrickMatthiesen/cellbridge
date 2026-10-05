@@ -33,6 +33,44 @@ public sealed class QueryChangesTests
 public sealed class LiveQueryChangesTests
 {
     [LiveInteropFact]
+    public async Task MixedPartitionQueriesAndIndependentKnowledgePassMicrosoftMtomClient()
+    {
+        var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
+        using var http = LiveInteropHttp.Create();
+        var client = new CellStorageClient(http, endpoint);
+        Guid metadata = new("383ADC0B-E66E-4438-95E6-E39EF9720122");
+        Guid editors = new("7808F4DD-2385-49D6-B7CE-37ACA5E43602");
+        var request = InteropRequestFactory.QueryChanges(1);
+        var first = Assert.IsType<QueryChangesCellSubRequest>(request.SubRequests[0]);
+        first.IsPartitionIDGUIDUsed = true; first.PartitionIdGUID = Guid.Empty;
+        foreach (var (id, target) in new[] { (2UL, metadata), (3UL, editors), (4UL, metadata), (5UL, editors) })
+            request.SubRequests.Add(new QueryChangesCellSubRequest(id)
+            { IsPartitionIDGUIDUsed = true, PartitionIdGUID = target, IncludeStorageManifest = 1, IncludeCellChanges = 1 });
+        var call = await client.SendCellAsync("/shared/test.docx", request, metadata);
+        Assert.Equal(System.Net.HttpStatusCode.OK, call.StatusCode);
+        var parsed = call.ParseBinaryResponse();
+        Assert.Equal(5, parsed.CellSubResponses.Count);
+        Assert.All(parsed.CellSubResponses, s => Assert.False(s.Status));
+        var indexes = parsed.CellSubResponses.Select(s => s.GetSubResponseData<QueryChangesSubResponseData>().StorageIndexExtendedGUID).ToArray();
+        Assert.Equal(indexes[1].SerializeToByteList(), indexes[3].SerializeToByteList());
+        Assert.Equal(indexes[2].SerializeToByteList(), indexes[4].SerializeToByteList());
+        var ids = parsed.DataElementPackage.DataElements.Select(e => e.DataElementExtendedGUID.SerializeToByteList().ToArray()).ToArray();
+        Assert.Equal(ids.Length, ids.Select(Convert.ToHexString).Distinct().Count());
+        foreach (var index in indexes) Assert.Contains(ids, id => id.SequenceEqual(index.SerializeToByteList()));
+        var knownRequest = InteropRequestFactory.QueryChanges(6); knownRequest.SubRequests.Clear();
+        for (int i = 1; i <= 2; i++)
+            knownRequest.SubRequests.Add(new QueryChangesCellSubRequest((ulong)(6 + i))
+            { IsPartitionIDGUIDUsed = true, PartitionIdGUID = i == 1 ? metadata : editors,
+                IncludeStorageManifest = 1, IncludeCellChanges = 1,
+                Knowledge = parsed.CellSubResponses[i].GetSubResponseData<QueryChangesSubResponseData>().Knowledge });
+        var knownCall = await client.SendCellAsync("/shared/test.docx", knownRequest, Guid.Empty);
+        Assert.Equal(System.Net.HttpStatusCode.OK, knownCall.StatusCode);
+        var known = knownCall.ParseBinaryResponse();
+        Assert.All(known.CellSubResponses, s => Assert.False(s.Status));
+        Assert.Empty(known.DataElementPackage.DataElements);
+    }
+
+    [LiveInteropFact]
     public async Task RepeatedQueriesShareOnePackageReadableByMicrosoftClient()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
