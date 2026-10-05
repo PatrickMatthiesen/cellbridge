@@ -5,7 +5,7 @@ using Npgsql;
 namespace CellBridge.Storage.PostgreSql;
 
 /// <summary>Versioned immutable snapshots, coordinated by a row for each document.</summary>
-public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLimits? limits = null) : IDocumentStateStore, IStorageBudgetParticipant
+public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLimits? limits = null) : IDocumentStateStore, IStorageBudgetParticipant, IAtomicDocumentRenameStore
 {
     public object BudgetScope => dataSource;
     private readonly StorageLimits _limits = ValidateLimits(limits);
@@ -104,8 +104,12 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
         }
         catch (NpgsqlException ex) { throw new StorageUnavailableException("Document creation failed or its commit outcome is unknown.", ex); }
     }
-    public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
-        CancellationToken cancellationToken = default)
+    public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, false, cancellationToken);
+    public ValueTask<T> RenameAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, true, cancellationToken);
+    private async ValueTask<T> TransitionCoreAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        bool rename, CancellationToken cancellationToken)
     {
         try
         {
@@ -130,7 +134,8 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
             var result = transition(current, now);
             if (result.Next is { } next)
             {
-                if (next.ResourceId != id || next.PathKey != current.PathKey || next.Path != current.Path)
+                if (next.ResourceId != id || !rename && (next.PathKey != current.PathKey || next.Path != current.Path) ||
+                    next.PathKey != next.Path.ToUpperInvariant())
                     throw new InvalidOperationException("A transition cannot change document identity or path.");
                 next = next with { StateVersion = checked(current.StateVersion + 1) };
                 _limits.CheckDocument(next);
@@ -144,14 +149,17 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
                     if (freed != 0) await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, -freed, 0, cancellationToken);
                 }
                 await InsertStateAsync(connection, transaction, next, cancellationToken);
-                await using var update = new NpgsqlCommand("UPDATE cellbridge_documents SET state_version=$2 WHERE resource_id=$1", connection, transaction);
+                await using var update = new NpgsqlCommand("UPDATE cellbridge_documents SET state_version=$2,path_key=$3 WHERE resource_id=$1", connection, transaction);
                 update.Parameters.Add(new NpgsqlParameter { Value = id });
                 update.Parameters.Add(new NpgsqlParameter { Value = next.StateVersion });
+                update.Parameters.Add(new NpgsqlParameter { Value = next.PathKey });
                 await update.ExecuteNonQueryAsync(cancellationToken);
             }
             await transaction.CommitAsync(CancellationToken.None);
             return result.Result;
         }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+        { throw new InvalidOperationException("The destination filename already exists.", ex); }
         catch (NpgsqlException ex) { throw new StorageUnavailableException("Document publication failed or its commit outcome is unknown.", ex); }
     }
     private static async Task InsertStateAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DocumentState state, CancellationToken cancellationToken)
