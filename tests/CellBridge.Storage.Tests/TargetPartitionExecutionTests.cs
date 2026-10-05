@@ -13,15 +13,16 @@ public sealed class TargetPartitionExecutionTests
     [InlineData(DocumentPartitionKind.FileContents)]
     [InlineData(DocumentPartitionKind.Metadata)]
     [InlineData(DocumentPartitionKind.EditorsTable)]
-    public void MatchingSelectorsWorkAndForeignSelectorsFailInBufferedExecutor(DocumentPartitionKind kind)
+    public void KnownSelectorsWorkAcrossSoapPartitionsAndUnknownSelectorsFail(DocumentPartitionKind kind)
     {
         var document = new DocumentStore().Put("/selector.docx", [1]);
-        foreach (var target in new[] { Selector(kind), Guid.NewGuid() }.Distinct())
+        var unknown = Guid.NewGuid();
+        foreach (var target in new[] { Guid.Empty, StoredDocument.MetadataPartitionId, StoredDocument.EditorsTablePartitionId, unknown })
         {
             var request = Request(RequestTypes.AllocateExtendedGuidRange, target);
             var operation = Assert.Single(CellBinaryRequestExecutor.Execute(document, document.GetPartition(kind),
                 request, DocumentAccess.Read | DocumentAccess.Write).SubResponses);
-            Assert.Equal(target != Selector(kind), operation.Status);
+            Assert.Equal(target == unknown, operation.Status);
             if (!operation.Status) Assert.IsType<AllocateExtendedGuidRangeSubResponseData>(operation.Data);
             else
             {
@@ -40,7 +41,7 @@ public sealed class TargetPartitionExecutionTests
         var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/target.docx", MinimalDocx.Create(), TestActor.Value))!;
-        foreach (var target in new[] { StoredDocument.MetadataPartitionId, Guid.NewGuid() })
+        foreach (var target in new[] { Guid.NewGuid() })
         {
             var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
                 Request(type, target), new Dictionary<string, string>(), TestActor.Value);
@@ -52,17 +53,11 @@ public sealed class TargetPartitionExecutionTests
             Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
         }
         // Explicit zero means file, and does not inherit a metadata SOAP selector.
-        var mismatch = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
+        var explicitFile = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
             Request(RequestTypes.QueryAccess, Guid.Empty), new Dictionary<string, string>(), TestActor.Value);
-        Assert.True(Assert.Single(mismatch.Response.SubResponses).Status);
+        Assert.False(Assert.Single(explicitFile.Response.SubResponses).Status);
     }
 
-    private static Guid Selector(DocumentPartitionKind kind) => kind switch
-    {
-        DocumentPartitionKind.Metadata => StoredDocument.MetadataPartitionId,
-        DocumentPartitionKind.EditorsTable => StoredDocument.EditorsTablePartitionId,
-        _ => Guid.Empty,
-    };
     private static FsshttpbCellRequest Request(RequestTypes type, Guid target)
     {
         var request = new FsshttpbCellRequest();

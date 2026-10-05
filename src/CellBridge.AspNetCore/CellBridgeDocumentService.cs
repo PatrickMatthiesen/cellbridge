@@ -70,26 +70,18 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         ArgumentNullException.ThrowIfNull(actor);
         var response = new FsshttpbResponse();
         var state = await CurrentAsync(id, cancellationToken);
-        if (request.SubRequests.Any(s => s.Data is PutChangesSubRequestData p && (p.Flags & 0x26) != 0))
-        {
-            foreach (var operation in request.SubRequests)
-                response.SubResponses.Add(Failure(operation.RequestId, CellErrorCode.RequestNotSupported,
-                    "Partial and multi-request uploads are unsupported; no operation was published.", operation.RequestType));
-            return new(response, state);
-        }
         if (request.SubRequests.Count == 0)
         {
             var emptyDocument = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
             return new(CellBinaryRequestExecutor.Execute(emptyDocument, emptyDocument.GetPartition(kind), request, Access(actor, state)), state);
         }
-        // Each operation has its own publication boundary. File queries keep
+        // Each operation has its own publication boundary. Queries keep
         // their own knowledge/constraints and share a union of immutable payloads.
-        bool queried = false;
         var queries = new QueryChangesResponseAssembler(response, provider.Limits.MaxGraphBytes);
         foreach (var operation in request.SubRequests)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!CellBinaryRequestExecutor.MatchesTarget(operation, kind))
+            if (!CellBinaryRequestExecutor.TryResolveTarget(operation, kind, out var selectedKind))
             {
                 state = await CurrentAsync(id, cancellationToken);
                 var accessForTarget = Access(actor, state);
@@ -103,7 +95,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             if (operation.RequestType == RequestTypes.PutChanges)
             {
                 CellExecution saved;
-                try { saved = await SaveAsync(id, kind, operation, request.DataElementPackage, attributes, actor, cancellationToken); }
+                try { saved = await SaveAsync(id, selectedKind, operation, request.DataElementPackage, attributes, actor, cancellationToken); }
                 catch (StorageQuotaExceededException ex)
                 {
                     var rejected = new FsshttpbResponse();
@@ -118,11 +110,6 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 continue;
             }
             state = await CurrentAsync(id, cancellationToken);
-            if (operation.RequestType == RequestTypes.QueryChanges && queried && kind != DocumentPartitionKind.FileContents)
-            {
-                response.SubResponses.Add(Failure(operation.RequestId, CellErrorCode.RequestNotSupported, "Repeated queries are not supported.", operation.RequestType));
-                continue;
-            }
             var access = Access(actor, state);
             var requiredAccess = operation.RequestType == RequestTypes.AllocateExtendedGuidRange
                 ? DocumentAccess.Write : DocumentAccess.Read;
@@ -131,15 +118,14 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 response.SubResponses.Add(CellBridgeAuthorization.Denied(operation));
                 continue;
             }
-            if (kind == DocumentPartitionKind.FileContents && operation.RequestType == RequestTypes.QueryChanges)
+            if (selectedKind == DocumentPartitionKind.FileContents && operation.RequestType == RequestTypes.QueryChanges)
             {
                 var query = await FileQueryAsync(state, operation, cancellationToken);
                 queries.Append(query);
-                queried = true;
                 continue;
             }
             var observedNow = DateTime.UtcNow;
-            if (kind == DocumentPartitionKind.EditorsTable && operation.RequestType == RequestTypes.QueryChanges)
+            if (selectedKind == DocumentPartitionKind.EditorsTable && operation.RequestType == RequestTypes.QueryChanges)
             {
                 (state, observedNow) = await ExpireEditorsAsync(id, actor, cancellationToken);
                 access = Access(actor, state);
@@ -149,17 +135,15 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                     continue;
                 }
             }
-            var document = kind == DocumentPartitionKind.FileContents && operation.RequestType == RequestTypes.QueryChanges
-                ? await StoredDocument.RestoreAsync(state, provider.Content, cancellationToken)
-                : StoredDocument.RestoreMetadata(state, observedNow);
+            var document = StoredDocument.RestoreMetadata(state, observedNow);
             var single = new FsshttpbCellRequest { DataElementPackage = request.DataElementPackage };
             single.SubRequests.Add(operation);
-            var partition = document.GetPartition(kind);
+            var partition = document.GetPartition(selectedKind);
             var result = CellBinaryRequestExecutor.Execute(document, partition, single, access,
-                requestId => EditorsQuery(document, partition, requestId));
-            response.SubResponses.AddRange(result.SubResponses);
-            if (result.DataElementPackage is not null) response.DataElementPackage = result.DataElementPackage;
-            if (operation.RequestType == RequestTypes.QueryChanges) queried = true;
+                maxResponseBytes: provider.Limits.MaxGraphBytes,
+                partitionEditorsQueryChanges: (p, requestId) => EditorsQuery(document, p, requestId));
+            if (operation.RequestType == RequestTypes.QueryChanges) queries.Append(result);
+            else response.SubResponses.AddRange(result.SubResponses);
         }
         // MS-FSSHTTP GetFileProps describes the updated version after the Cell
         // operations. Capture its metadata here; the SOAP adapter never rereads it.
@@ -237,7 +221,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         if (!Access(actor, initial).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), initial);
         if (kind != DocumentPartitionKind.FileContents || operation.Data is not PutChangesSubRequestData put || package is null)
             return await FailedAsync(id, operation.RequestId, CellErrorCode.RequestNotSupported, "Only complete file partition writes are supported.", cancellationToken);
-        if ((put.Flags & ~0x59) != 0 || (put.AdditionalFlagsBits & 0x38) != 0)
+        if ((put.Flags & ~0x79) != 0 || (put.AdditionalFlagsBits & 0x38) != 0)
             return await FailedAsync(id, operation.RequestId, CellErrorCode.RequestNotSupported, "This upload mode is unsupported.", cancellationToken);
         string key = $"{put.StorageIndex.Value}:{put.StorageIndex.Guid:D}";
         string digest;

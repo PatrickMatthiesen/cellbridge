@@ -155,13 +155,32 @@ public sealed class FilePartitionSaveTests
     {
         var document = new DocumentStore().Put("/test.docx", MinimalDocx.Create());
         var request = Proposal(document, MinimalDocx.Create("saved"));
+        var existingIds = document.FilePartition.FileGraph.Elements.Select(e => e.DataElementExtendedGuid).ToHashSet();
+        var additions = request.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid)
+            .Where(id => !existingIds.Contains(id)).Distinct().ToArray();
         var first = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var version = document.ContentVersion;
+        var graph = document.FilePartition.FileGraph;
+        var content = document.Content.ToArray();
+        var knowledge = document.FilePartition.KnowledgeSequence;
         var second = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         Assert.False(first.SubResponses[0].Status);
         Assert.False(second.SubResponses[0].Status);
         Assert.Equal(version, document.ContentVersion);
-        Assert.Equal(first.ToByteArray(), second.ToByteArray());
+        Assert.Same(graph, document.FilePartition.FileGraph);
+        Assert.Equal(content, document.Content);
+        Assert.Equal(knowledge, document.FilePartition.KnowledgeSequence);
+        Assert.Equal(first.SubResponses[0].RequestId, second.SubResponses[0].RequestId);
+        Assert.Equal(first.SubResponses[0].RequestType, second.SubResponses[0].RequestType);
+        var original = Assert.IsType<PutChangesSubResponseData>(first.SubResponses[0].Data);
+        var repeat = Assert.IsType<PutChangesSubResponseData>(second.SubResponses[0].Data);
+        Assert.Equal(original.SerialNumberReassignAllBytes, repeat.SerialNumberReassignAllBytes);
+        Assert.Equal(original.KnowledgeBytes, repeat.KnowledgeBytes);
+        Assert.Equal(original.PutChangesResponse!.AppliedStorageIndexID, repeat.PutChangesResponse!.AppliedStorageIndexID);
+        Assert.NotEmpty(additions);
+        Assert.Equal(additions, original.PutChangesResponse.DataElementAdded);
+        // This buffered path has no durable receipt to replay: nothing new was admitted.
+        Assert.Empty(repeat.PutChangesResponse.DataElementAdded);
     }
 
     [Fact]

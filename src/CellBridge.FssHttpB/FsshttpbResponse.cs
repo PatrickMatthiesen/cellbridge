@@ -401,7 +401,10 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
     /// <summary>Whether to emit the optional CellKnowledge block.</summary>
     public bool IncludeCellKnowledge { get; set; } = true;
 
-    /// <summary>Optional complete Knowledge object to write verbatim.</summary>
+    /// <summary>
+    /// Complete Knowledge object retained on decode and written verbatim.
+    /// Clear this property to rebuild knowledge from the scalar summary fields.
+    /// </summary>
     public byte[]? KnowledgeBytes { get; set; }
 
     /// <summary>The cell storage identifier used by the Waterline entry.</summary>
@@ -493,6 +496,7 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
             throw new InvalidDataException($"QueryChangesResponse length {header.Length} does not match encoded payload length {payloadLength}.");
         }
 
+        int knowledgeStart = reader.Position;
         var knowledge = StreamObjectHeaderStart.Parse(reader);
         if (knowledge.Type != StreamObjectTypeHeaderStart.Knowledge)
         {
@@ -534,6 +538,9 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
             throw new InvalidDataException($"Expected Knowledge end, got {knowledgeEnd.Type}.");
         }
 
+        int knowledgeLength = reader.Position - knowledgeStart;
+        reader.Position = knowledgeStart;
+        data.KnowledgeBytes = reader.ReadBytes(knowledgeLength);
         return data;
     }
 

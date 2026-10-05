@@ -158,8 +158,11 @@ A lost commit reply triggers receipt lookup before reapplying the operation.
 Every retry requires its original writer and current Write access.
 
 Each supported `PutChanges` commits independently. A later failure does not undo
-an earlier accepted save. Unsupported partial/multi-request modes are rejected
-before any constituent operation publishes.
+an earlier accepted save. Unsupported partial uploads fail per operation, so
+independent queries and complete saves can still succeed. `MultiRequestPutHint`
+is a coalescing hint and is accepted for complete saves; it does not enable
+staged partial uploads. Explicit binary targets select the file, metadata or
+editors partition independently of the SOAP default. Unknown targets fail.
 
 Session and lease updates use the same transaction. Database time is read after
 lock acquisition, so waiting cannot preserve an expired lease. Restart does not

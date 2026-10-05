@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text;
+using System.Security.Cryptography;
 using System.Xml;
 
 namespace CellBridge.FssHttpB;
@@ -220,8 +221,13 @@ public static class EditorsTablePartitionBuilder
         Guid identityGuid)
     {
         ArgumentNullException.ThrowIfNull(cellId);
-        var guid = identityGuid == Guid.Empty ? Guid.NewGuid() : identityGuid;
         var stream = BuildEditorsTableStream(editors);
+        return BuildSharePointV13DataElements(stream, cellId, identityGuid);
+    }
+
+    private static IReadOnlyList<DataElement> BuildSharePointV13DataElements(byte[] stream, CellId cellId, Guid identityGuid)
+    {
+        var guid = identityGuid == Guid.Empty ? Guid.NewGuid() : identityGuid;
         var header = ZipStreamHeader.ToArray();
         var compressed = stream[ZipStreamHeader.Length..];
 
@@ -293,14 +299,22 @@ public static class EditorsTablePartitionBuilder
         Guid identityGuid,
         ulong knowledgeSequence)
     {
-        var storageIndex = new ExGuid(43, identityGuid);
+        ArgumentNullException.ThrowIfNull(cellId);
+        var stream = BuildEditorsTableStream(editors);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData("CellBridge editors snapshot v1"u8);
+        hash.AppendData((identityGuid == Guid.Empty ? Guid.NewGuid() : identityGuid).ToByteArray());
+        hash.AppendData(stream);
+        var snapshot = new Guid(hash.GetHashAndReset().AsSpan(0, 16));
+        var elements = BuildSharePointV13DataElements(stream, cellId, snapshot);
+        var storageIndex = new ExGuid(43, snapshot);
         return new FsshttpbResponse
         {
             ProtocolVersion = 13,
             MinimumVersion = 11,
             DataElementPackage = new DataElementPackage
             {
-                DataElements = [..BuildSharePointV13DataElements(editors, cellId, identityGuid)],
+                DataElements = [..elements],
             },
             SubResponses =
             {
@@ -313,7 +327,9 @@ public static class EditorsTablePartitionBuilder
                         StorageIndexExtendedGuid = storageIndex,
                         CellKnowledgeCellGuid = cellId.LongId.Guid,
                         CellKnowledgeTo = knowledgeSequence,
+                        WaterlineCellStorageExtendedGuid = cellId.ShortId,
                         Waterline = knowledgeSequence,
+                        KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(elements, cellId.ShortId, knowledgeSequence),
                     },
                 },
             },
