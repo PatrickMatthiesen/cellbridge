@@ -8,7 +8,7 @@ on:
         default: '0.1.0-beta.1'
         type: string
       publish:
-        description: 'Publish the validated packages to NuGet.org'
+        description: 'Upload packages after validation and login; false tests without uploading'
         required: true
         default: false
         type: boolean
@@ -73,7 +73,7 @@ jobs:
             artifacts/packages/manifest.json
           if-no-files-found: error
   publish:
-    if: github.ref == 'refs/heads/main' && inputs.publish
+    if: github.ref == 'refs/heads/main'
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -108,6 +108,7 @@ jobs:
         with:
           user: ${{ vars.NUGET_USER }}
       - name: Publish dependency packages, then the host, then symbols
+        if: inputs.publish
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: python tools/publish_packages.py --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
