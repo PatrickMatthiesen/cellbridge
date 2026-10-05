@@ -35,6 +35,13 @@ public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseSta
 public sealed record SaveReceipt(string OperationKey, string Digest, uint ContentVersion,
     ContentHandle? Response, string? OwnerSubject = null);
 
+/// <summary>An immutable publication. Access is always evaluated against the current document.</summary>
+public sealed record DocumentRevision(Guid ResourceId, long LifecycleGeneration, ulong RevisionNumber,
+    uint ContentVersion, DateTime CreatedUtc, SubjectIdentity Author, ContentHandle Content,
+    ImmutableArray<PartitionState> Partitions);
+public sealed record RestoreReceipt(long LifecycleGeneration, string OwnerSubject, string OperationKey,
+    string Digest, ulong RevisionNumber);
+
 /// <summary>One detached state version. Referenced content is immutable; reclamation requires quiescent maintenance.</summary>
 public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Path, string PathKey,
     DateTime CreatedUtc, DateTime ModifiedUtc, uint ContentVersion, long StateVersion,
@@ -50,7 +57,17 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
     public Guid? ReplacedBy { get; init; }
     public ExternalPublicationState? Publication { get; init; }
     public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
+    public long LifecycleGeneration { get; init; } = 1;
+    public ImmutableArray<DocumentRevision> Revisions { get; init; } = [];
+    public ImmutableArray<RestoreReceipt> RestoreReceipts { get; init; } = [];
     public string Etag => $"\"{{{ResourceId.ToString("D").ToUpperInvariant()}}},{ContentVersion}\"";
+}
+
+/// <summary>Optional atomic rename capability. The callback uses the same coordination guarantees as TransitionAsync.</summary>
+public interface IAtomicDocumentRenameStore
+{
+    ValueTask<T> RenameAsync<T>(Guid resourceId, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Metadata only; listing does not fetch package or graph bytes.</summary>

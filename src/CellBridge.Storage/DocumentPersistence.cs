@@ -104,8 +104,9 @@ public sealed partial class StoredDocument
             { Security = Security };
         return _sourceState is null ? captured : _sourceState with
         {
+            Path = captured.Path, PathKey = captured.PathKey, ModifiedUtc = captured.ModifiedUtc,
             ContentVersion = captured.ContentVersion, Content = captured.Content, Partitions = captured.Partitions,
-            Editors = captured.Editors, ModifiedUtc = captured.ModifiedUtc, Security = Security,
+            Editors = captured.Editors, Security = captured.Security,
             Coordination = coordination ?? _sourceState.Coordination,
             Receipts = receipts.IsDefault ? _sourceState.Receipts : receipts,
         };
