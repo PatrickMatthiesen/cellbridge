@@ -19,7 +19,7 @@ operations.
 | Read changes | `QueryChanges` supports repeated and mixed file, metadata and editor queries with independent knowledge/errors and one shared data package. Explicit binary targets override the SOAP default. Mapped file-cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
 | Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Complete application metadata graphs publish atomically with key-level coherency. Requested applied-index entries are returned and preserved in durable receipts. |
 | Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
-| Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` reports the current version. |
+| Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` and `Versioning/GetVersionList` report servable history. |
 
 File content, application metadata and editor presence have separate synchronization
 partitions. File saves update the content partition. Editor queries return current
@@ -44,9 +44,9 @@ SOAP dependencies determine which subsequent operations execute.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
   and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
   outside the current normative four-operation inventory.
-- SOAP `FileOperation`, `Properties` and `Versioning`, historical downloads
-  and version restoration are unimplemented. Internal storage snapshots are
-  separate from Office version history.
+- SOAP Rename, Properties enumeration/retrieval, history listing/download and
+  graph-aware restore are implemented. [Revision history](revision-history.md)
+  documents retention, retry guarantees and remaining reference/desktop gates.
 - Lock conversions and transition acknowledgement are implemented with persisted
   coauthor membership. Native desktop transition behavior still needs qualification.
 - The generic graph resolver has durable capture/restore codecs. File saves can

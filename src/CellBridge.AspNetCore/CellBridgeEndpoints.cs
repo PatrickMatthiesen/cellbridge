@@ -39,6 +39,31 @@ public static class CellBridgeEndpoints
     public static IEndpointRouteBuilder MapCellBridge(this IEndpointRouteBuilder app)
     {
         var routes = app.MapGroup("").RequireAuthorization();
+        routes.MapMethods("/_cellbridge/history/{resourceId:guid}/{generation:long}/{revisionNumber}", ["GET", "HEAD"],
+            async (Guid resourceId, long generation, string revisionNumber, HttpContext context, CellBridgeDocumentService service) =>
+            {
+                if (!ulong.TryParse(revisionNumber, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var number)) return Results.NotFound();
+                var actor = CellBridgeActor.FromPrincipal(context.User);
+                if (actor is null) return Results.Unauthorized();
+                DocumentRevision revision;
+                try { revision = await service.GetRevisionAsync(resourceId, number, actor, context.RequestAborted); }
+                catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+                catch (KeyNotFoundException) { return Results.NotFound(); }
+                if (revision.LifecycleGeneration != generation) return Results.NotFound();
+                context.Response.Headers.CacheControl = "private, no-store";
+                context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+                context.Response.ContentType = "application/octet-stream";
+                context.Response.ContentLength = revision.Content.Length;
+                context.Response.Headers.ETag = $"\"{resourceId:D}:{revision.LifecycleGeneration}:{number}\"";
+                context.Response.Headers.LastModified = revision.CreatedUtc.ToString("R");
+                if (!HttpMethods.IsHead(context.Request.Method))
+                {
+                    await using var source = await service.Provider.Content.OpenReadAsync(revision.Content, context.RequestAborted);
+                    await source.CopyToAsync(context.Response.Body, context.RequestAborted);
+                }
+                return Results.Empty;
+            });
         routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
         routes.MapMethods("/shared/{fileName}/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
         routes.MapMethods("/shared", ["OPTIONS"], (HttpContext context) =>

@@ -150,7 +150,7 @@ public sealed class HostIntegrationTests
         batch.Requests[0].SubRequests[0].SubRequestDataBinary = next.ToByteArray();
         var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(batch, "https://host.test", TestActor.Value);
         Assert.False(Assert.Single(result.AcceptedSaves).IsReplay);
-        Assert.Equal("NotSupported", result.Response.Responses[0].SubResponses[1].ErrorCode);
+        Assert.Equal("InvalidArgument", result.Response.Responses[0].SubResponses[1].ErrorCode);
         Assert.NotEqual(accepted.ContentVersion, result.AcceptedSaves[0].ContentVersion);
         Assert.NotEqual(accepted.Content, result.AcceptedSaves[0].Content);
         Assert.Equal(saved.State.Content, accepted.Content);

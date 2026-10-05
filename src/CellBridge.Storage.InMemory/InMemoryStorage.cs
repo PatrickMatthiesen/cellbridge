@@ -5,7 +5,7 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.InMemory;
 
-public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant
+public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore
 {
     public StorageBudget Budget { get; private set; }
     public InMemoryStateStore(StorageBudget? budget = null) => Budget = budget ?? new StorageBudget();
@@ -60,8 +60,12 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
             }
         }
     }
-    public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
-        CancellationToken cancellationToken = default)
+    public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, false, cancellationToken);
+    public ValueTask<T> RenameAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, true, cancellationToken);
+    private async ValueTask<T> TransitionCoreAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        bool rename, CancellationToken cancellationToken)
     {
         var gate = _gates.GetOrAdd(id, _ => new SemaphoreSlim(1));
         await gate.WaitAsync(cancellationToken);
@@ -71,14 +75,24 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
             var result = transition(current, DateTime.UtcNow);
             if (result.Next is { } next)
             {
-                DocumentLifecycle.ValidateTransition(current, next);
+                DocumentPathReservations.ValidateTransition(current, next, rename);
                 next = next with { StateVersion = checked(current.StateVersion + 1),
-                    RetiredPathKeys = DocumentPathReservations.Capture(current, next, false) };
+                    RetiredPathKeys = DocumentPathReservations.Capture(current, next, rename) };
                 Budget.Limits.CheckDocument(next);
                 lock (Budget.SyncRoot)
                 {
-                    Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
-                    _documents[id] = next;
+                    lock (_paths)
+                    {
+                        if (_paths.TryGetValue(next.PathKey, out var owner) && owner != id)
+                            throw new InvalidOperationException("The destination filename already exists.");
+                        if (next.PathKey != current.PathKey && _documents.Values.Any(s => s.ResourceId != id &&
+                            (s.PathKey == next.PathKey || s.RetiredPathKeys.Contains(next.PathKey))))
+                            throw new InvalidOperationException("The destination filename is reserved.");
+                        Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
+                        _paths.Remove(current.PathKey);
+                        _paths[next.PathKey] = id;
+                        _documents[id] = next;
+                    }
                 }
             }
             return result.Result;
