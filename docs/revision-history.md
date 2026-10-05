@@ -45,6 +45,8 @@ cells; cells added in later revisions are not selected. Retained current and inh
 records remain available. Restore preserves live security, editors and coordination,
 advances the file content version, appends a new history record and queues external
 delivery when the current document has a durable destination binding.
+An empty historical metadata index publishes a fresh empty index without inventing
+a storage manifest. A present storage manifest must still declare at least one root.
 
 The commit rechecks access, lifecycle and coordination generation, expected history
 revision and both selected partition generations. Concurrent save/restore operations
@@ -68,6 +70,17 @@ state and destination-path uniqueness atomically, including case-only rename.
 Other providers return `NotSupported`. Existing protocol locks remain authoritative.
 Paths use the same decoded storage convention as creation; public URLs escape each
 segment once.
+Released canonical path keys remain permanently reserved to that resource, including
+after deletion. Old-path lookup remains a miss; the same resource may rename back.
+Other resources cannot create or rename into a reserved name. Providers own these
+reservations and reject callbacks that remove them. The default cap is 128 keys per
+resource; admission fails without evicting names when the cap would be exceeded.
+PostgreSQL serializes namespace changes with one transaction advisory lock acquired
+before document/path locks. Its initial reservation lookup scans current state JSON,
+including tombstones, within document-count and metadata-byte budgets. Large catalogs
+can make this scan expensive. Lifecycle recreation must use the same namespace guard
+and preserve the old tombstone's reservations; rebase and combined validation with
+the lifecycle provider changes are required before merging.
 
 `Properties/PropertyEnumerate` lists the derived document property IDs.
 `Properties/PropertyGet` accepts `PropertyIds/PropertyId` elements with lowercase
@@ -90,6 +103,7 @@ snapshot metadata. Admission rejects a publication atomically when a limit would
 exceeded. Staged unreferenced objects can remain charged until existing quiescent
 maintenance reclaims them. History, current graphs, inherited records and pending
 external delivery all contribute references to content collection.
+Reservations cannot recover paths released before this feature was installed.
 
 Graph element, byte and revision-depth limits still apply. Restore explicitly fails
 for an incomplete graph or unsupported transition from legacy inline metadata to an

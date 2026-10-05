@@ -5,6 +5,25 @@ namespace CellBridge.FssHttpB.Tests;
 
 public sealed class HistoricalGraphRestorerTests
 {
+    [Fact]
+    public void EmptyHistoricalIndexPublishesFreshEmptySelectionAndRetainsCurrentObjects()
+    {
+        var current = new GraphFixture([1, 2, 3]).Generic();
+        var id = new ExGuid(1, Guid.NewGuid());
+        var empty = GenericPartitionGraphSnapshot.Create([
+            new DataElement(DataElementType.StorageIndexDataElementData, id, new(Guid.NewGuid(), 1)) { Data = [] }
+        ], id);
+        var restored = HistoricalGraphRestorer.Rebase(current, empty, Guid.NewGuid(), 9000);
+        Assert.NotEqual(id, restored.Graph.StorageIndex);
+        Assert.Empty(restored.Graph.Cells);
+        Assert.Empty(restored.Graph.Roots);
+        Assert.Empty(StorageIndexMappingSerials.ReadMappings(restored.Graph.Elements.Single(e =>
+            e.DataElementExtendedGuid.Equals(restored.Graph.StorageIndex)).Data!));
+        foreach (var element in current.Elements)
+            Assert.Contains(restored.Graph.Elements, e => e.DataElementExtendedGuid.Equals(element.DataElementExtendedGuid));
+        Assert.True(restored.Knowledge > 9000);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

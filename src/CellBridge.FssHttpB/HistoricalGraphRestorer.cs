@@ -38,10 +38,9 @@ public static class HistoricalGraphRestorer
 
         SerialNumber NextSerial() => new(serialNamespace, checked(++knowledge));
         ExGuid NextId() => new(1, Guid.NewGuid());
-        var mappings = new List<StorageIndexMapping>
-        {
-            selectedMappings.Single(m => m.Type == StreamObjectTypeHeaderStart.StorageIndexManifestMapping)
-        };
+        var mappings = new List<StorageIndexMapping>();
+        var manifest = selectedMappings.SingleOrDefault(m => m.Type == StreamObjectTypeHeaderStart.StorageIndexManifestMapping);
+        if (manifest is not null) mappings.Add(manifest);
         foreach (var cell in selected.Cells)
         {
             var revision = NextId();
@@ -62,7 +61,9 @@ public static class HistoricalGraphRestorer
             elements.Add(cellManifest.DataElementExtendedGuid, cellManifest);
             mappings.Add(new(StreamObjectTypeHeaderStart.StorageIndexCellMapping, null, cell, cellManifest.DataElementExtendedGuid, NextSerial()));
         }
-        mappings.AddRange(revisions.Values);
+        // An empty index selects no graph. Retained elements remain immutable,
+        // but selecting old revision mappings would fabricate a nonempty graph.
+        if (manifest is not null) mappings.AddRange(revisions.Values);
         var payload = new BinaryWriterEx();
         foreach (var mapping in mappings)
         {
