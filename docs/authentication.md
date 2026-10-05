@@ -142,10 +142,116 @@ the actor as owner and creator; trusted imports supply an owner and importer.
 NameIdentifier, email, ClientID and forwarded headers are not substitutes for
 the validated CellBridge subject.
 
-Stored grants drive catalog filtering, sessions and leases. A custom
-`ICellBridgeAccessEvaluator` can restrict those grants; it must be deterministic
-and perform no I/O within document transactions. Replacing stored grants with an
-external permission store requires integrating that store across these operations.
+The default `StoredGrantAuthorizationPolicy` uses document ownership and grants.
+Register `ICellBridgeAuthorizationPolicy` before `AddCellBridge` to replace it.
+The [host authorization consumer](../examples/HostAuthorization/README.md) runs
+JWT authentication, catalog/download checks and a coordinated revocation without
+Identity accounts or CellBridge grants.
+
+### Host-owned policy
+
+`ICellBridgeAuthorizationPolicy` selects a binding for every creation/import and
+resolves an immutable `ICellBridgeAuthorizationSnapshot` for existing state.
+It receives the final resource GUID, including host-selected GUIDs. Resolve each
+snapshot by resource ID and the complete persisted binding:
+
+```csharp
+public sealed record DocumentAuthorizationBinding(
+    string PolicyDomain, int ContractVersion, long Revision);
+// Stored at DocumentState.Security.AuthorizationPolicy, default null.
+```
+
+The external contract supports version `1` and positive, increasing revisions.
+`PolicyDomain` is an ordinal, authority-qualified trust namespace configured by the
+host, not a caller-selected value. A null binding selects stored grants only under
+the default policy. External-policy hosts reject unbound documents. Bound
+documents ignore owner/grants and fail closed under a default-policy host.
+`Owner`, `CreatedBy` and `ModifiedBy` remain attribution; creating a document
+does not grant its creator external access. Creation still requires the trusted
+actor's `CanCreate`. The host must provide an initial snapshot before publication.
+Failed binding/resolution publishes no document, though already staged content
+can remain charged until ordinary orphan collection.
+
+Snapshots evaluate stable subject strings, including owners already recorded in
+editor sessions, leases and accepted receipts. Display names, login names,
+request claims, client IDs and lock IDs do not grant permission. Undefined
+subjects return `None`; `Write` includes `Read`. Request `DocumentAccessLimit`
+continues to restrict access for its one resource.
+
+Policy members run synchronously inside coordinated operations. They must be
+bounded, immutable for each key and perform no I/O. Fetch permission data and
+populate local snapshots outside those operations. Never replace permissions
+under an installed resource/binding key. A missing snapshot, wrong resource,
+foreign domain, unsupported version, malformed binding, undefined flags or
+exception denies access. HTTP/SOAP/binary denials use the existing responses and
+omit protected document metadata. The catalog applies this same policy before
+counting visible offsets or returning rows.
+
+### Permission update boundary
+
+Prepare and install the next immutable snapshot, then call the trusted service
+operation:
+
+```csharp
+bool committed = await documents.UpdateAuthorizationAsync(
+    resourceId, expectedBinding, nextBinding, cancellationToken);
+```
+
+The operation compares the complete expected binding, requires an increasing
+revision in the same domain/version, and commits the new binding together with
+session/lease reconciliation. It increments the coordination generation so saves,
+metadata uploads, history restores and host write tokens prepared under the old
+revision cannot publish. Revoke then regrant also fences an old preparation.
+Existing receipts remain recorded; replay requires the original authenticated
+writer's current Write permission and rechecks after loading response content.
+
+The successful document transaction is the effective permission-change boundary.
+Installing a snapshot alone has no effect. A remote permission mutation that
+bypasses this operation does not revoke CellBridge access. Hosts must coordinate
+their permission source through this boundary, retry a failed/stale CAS using
+fresh state, and acknowledge revocation only after the committed binding is
+observed. Permission updates that cannot resolve the next snapshot fail without
+publishing. A throwing recorded-subject evaluation aborts the update transaction.
+If the commit outcome is unknown, read the durable binding before retrying.
+
+All instances use shared document state and the same policy domain. Distribute
+the exact new snapshot before or after committing it; a peer missing that
+revision denies access until it arrives. No instance may fall back to its cached
+old revision. Removing Read deletes sessions. Removing Write downgrades editors
+and removes schema, exclusive, coauthor and host leases in the same transaction.
+Editor partition knowledge advances when recorded sessions change. Existing
+read operations may finish from an already authorized snapshot; revocation does
+not recall bytes already sent. Prepared writes recheck at publication.
+
+Upgrade every host and reader before installing external bindings. The optional
+field preserves the current state encoding, but older binaries, including
+`0.1.0-beta.1`, ignore it and therefore cannot safely share or restore bound state.
+Do not downgrade such a store without a trusted policy migration. Structural
+format compatibility does not make older authorization behavior compatible.
+
+Permission administration is separate from document Write. This API is for
+trusted host integration, with no general permission-update HTTP endpoint.
+An expected null binding permits an explicit trusted conversion of a legacy
+document to the configured external domain. Binding removal or foreign-domain
+migration requires a separate trusted migration; this API rejects both.
+Stored-grant operator commands reject bound documents.
+
+Portable state preserves `DocumentSecurity.AuthorizationPolicy` exactly. Export
+only the binding, not arbitrary external policy data, tokens or secrets. Restored
+state requires explicit destination policy-domain equality and the exact trusted
+snapshot. Matching text alone does not establish authority. Unknown/foreign
+bindings stay denied; never clear them to null or grant implicit owner access.
+The host owns restoring its external permission source and explicit migration.
+
+### Legacy evaluator
+
+`ICellBridgeAccessEvaluator` retains its beta behavior on unbound documents under
+the default policy. It can replace stored-grant decisions there, but does not
+provide versioned external revocation or automatic lease reconciliation. Use the
+new policy contract for host-owned permissions. With an external policy, an
+explicit legacy evaluator is an additional ceiling and cannot bypass a missing
+binding/snapshot. Evaluators must also use stable subjects, be bounded and perform
+no I/O; mutable evaluator decisions are not a coordinated permission update.
 
 The sample authentication library is outside the reusable NuGet packages.
 Keep passwords, tokens, cookies and connection strings out of shared captures.

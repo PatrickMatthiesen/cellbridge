@@ -82,6 +82,8 @@ Follow the [hosting guide](docs/storage-providers.md#consume-the-packages) for
 provider setup and the [authentication guide](docs/authentication.md#reusable-hosts)
 for identity mapping. The [package consumer](examples/NuGetConsumer/README.md)
 provides a complete example with bearer authentication and in-memory storage.
+The [host authorization consumer](examples/HostAuthorization/README.md) uses
+host-owned permission revisions and coordinated revocation without local grants.
 The published `0.1.0-beta.1` packages add a reusable parsed-SOAP processor,
 host-selected resource GUIDs, request permission limits and accepted-save receipts.
 See [embedding in another host](docs/package-integration.md) and the

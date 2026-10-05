@@ -32,11 +32,13 @@ public sealed class AuthorizationEndpointTests
     }
 
     [Theory]
-    [InlineData("GET")]
-    [InlineData("HEAD")]
-    public async Task ReadPermissionControlsBytesAndHeaders(string method)
+    [InlineData("GET", false)]
+    [InlineData("HEAD", false)]
+    [InlineData("GET", true)]
+    [InlineData("HEAD", true)]
+    public async Task ReadPermissionControlsBytesAndHeaders(string method, bool externalPolicy)
     {
-        await using var fixture = await Fixture.Start();
+        await using var fixture = await Fixture.Start(externalPolicy: externalPolicy);
         foreach (var user in new[] { "reader", "other" })
         {
             using var request = new HttpRequestMessage(new(method), "/shared/secret.bin");
@@ -49,12 +51,15 @@ public sealed class AuthorizationEndpointTests
     }
 
     [Theory]
-    [InlineData("writer", true, true)]
-    [InlineData("reader", true, false)]
-    [InlineData("other", false, false)]
-    public async Task QueryAccessReportsIndependentPermissionsAndDoesNotLeakMetadata(string user, bool read, bool write)
+    [InlineData("writer", true, true, false)]
+    [InlineData("reader", true, false, false)]
+    [InlineData("other", false, false, false)]
+    [InlineData("writer", true, true, true)]
+    [InlineData("reader", true, false, true)]
+    [InlineData("other", false, false, true)]
+    public async Task QueryAccessReportsIndependentPermissionsAndDoesNotLeakMetadata(string user, bool read, bool write, bool externalPolicy)
     {
-        await using var fixture = await Fixture.Start();
+        await using var fixture = await Fixture.Start(externalPolicy: externalPolicy);
         var cell = new FsshttpbCellRequest();
         cell.SubRequests.Add(new(RequestTypes.QueryAccess) { RequestId = 7, Data = new QueryAccessSubRequestData() });
         var xml = await fixture.Send(user, new FssHttpSubRequest { Type = SubRequestType.Cell,
@@ -89,10 +94,12 @@ public sealed class AuthorizationEndpointTests
         Assert.Equal("test-writer", props["vti_modifiedby"]);
     }
 
-    [Fact]
-    public async Task AnotherWriterCannotJoinOrLeaveAnotherUsersEditorSession()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnotherWriterCannotJoinOrLeaveAnotherUsersEditorSession(bool externalPolicy)
     {
-        await using var fixture = await Fixture.Start(otherCanWrite: true);
+        await using var fixture = await Fixture.Start(otherCanWrite: true, externalPolicy: externalPolicy);
         var clientId = Guid.NewGuid();
         FssHttpSubRequest Request(string operation) => new()
         {
@@ -148,18 +155,19 @@ public sealed class AuthorizationEndpointTests
         public StorageProvider Provider => provider;
         public DocumentState State => state;
         public HttpClient Client => client;
-        public static async Task<Fixture> Start(bool otherCanWrite = false)
+        public static async Task<Fixture> Start(bool otherCanWrite = false, bool externalPolicy = false)
         {
             var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
             TestActor.Register(builder.Services);
+            if (externalPolicy) builder.Services.AddSingleton<ICellBridgeAuthorizationPolicy>(new ExternalPolicy(otherCanWrite));
             builder.Services.AddCellBridge(provider, requireDurability: false);
             var app = builder.Build();
             app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
             var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
             var state = (await service.CreateAsync("/shared/secret.bin", [1, 2, 3], TestActor.Value))!;
-            await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
+            if (!externalPolicy) await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
             { Security = current.Security with { Grants = current.Security.Grants.Add("tests:reader", DocumentAccess.Read)
                 .Add("tests:other", otherCanWrite ? DocumentAccess.Read | DocumentAccess.Write : DocumentAccess.None) } }, true));
             await app.StartAsync();
@@ -189,5 +197,22 @@ public sealed class AuthorizationEndpointTests
         }
 
         public async ValueTask DisposeAsync() { client.Dispose(); await app.DisposeAsync(); }
+    }
+
+    private sealed class ExternalPolicy(bool otherCanWrite) : ICellBridgeAuthorizationPolicy
+    {
+        public string PolicyDomain => "tests:endpoint-host";
+        public DocumentAuthorizationBinding BindNewDocument(Guid resourceId) => new(PolicyDomain, 1, 1);
+        public ICellBridgeAuthorizationSnapshot Resolve(DocumentState state) => new Snapshot(state.ResourceId, state.Security.AuthorizationPolicy!, otherCanWrite);
+        private sealed record Snapshot(Guid ResourceId, DocumentAuthorizationBinding Binding, bool OtherCanWrite) : ICellBridgeAuthorizationSnapshot
+        {
+            public DocumentAccess Evaluate(string subject) => subject switch
+            {
+                "tests:writer" => DocumentAccess.Write,
+                "tests:reader" => DocumentAccess.Read,
+                "tests:other" when OtherCanWrite => DocumentAccess.Write,
+                _ => DocumentAccess.None,
+            };
+        }
     }
 }

@@ -8,10 +8,19 @@ public static class DocumentPermissionUpdates
 {
     public static DocumentState Apply(DocumentState current, DateTime now, DocumentSecurity security)
     {
+        if (current.Security.AuthorizationPolicy is not null || security.AuthorizationPolicy is not null)
+            throw new InvalidOperationException("Bound documents require a host policy update.");
+        return ApplyPolicy(current, now, security, security.AccessFor);
+    }
+
+    /// <summary>Trusted coordinated update. Subject evaluation must be bounded, immutable and perform no I/O.</summary>
+    public static DocumentState ApplyPolicy(DocumentState current, DateTime now, DocumentSecurity security,
+        Func<string, DocumentAccess> accessFor)
+    {
         var document = StoredDocument.RestoreMetadata(current, now);
         foreach (var editor in current.Editors)
         {
-            var access = editor.Owner is null ? DocumentAccess.None : security.AccessFor(editor.Owner.Subject);
+            var access = editor.Owner is null ? DocumentAccess.None : accessFor(editor.Owner.Subject);
             if (!access.HasFlag(DocumentAccess.Read)) document.LeaveSession(editor.ClientId);
             else if (editor.AsEditor && !access.HasFlag(DocumentAccess.Write))
                 document.SetEditorPermission(editor.ClientId, false);
@@ -20,11 +29,11 @@ public static class DocumentPermissionUpdates
         var coordination = current.Coordination with
         {
             SchemaOwners = current.Coordination.SchemaOwners.Where(l => l.OwnerSubject is not null &&
-                security.AccessFor(l.OwnerSubject).HasFlag(DocumentAccess.Write)).ToImmutableArray(),
+                accessFor(l.OwnerSubject).HasFlag(DocumentAccess.Write)).ToImmutableArray(),
             Exclusive = current.Coordination.Exclusive is { OwnerSubject: { } subject } exclusive &&
-                security.AccessFor(subject).HasFlag(DocumentAccess.Write) ? exclusive : null,
+                accessFor(subject).HasFlag(DocumentAccess.Write) ? exclusive : null,
             HostLock = current.Coordination.HostLock is { } host &&
-                security.AccessFor(host.OwnerSubject).HasFlag(DocumentAccess.Write) ? host : null,
+                accessFor(host.OwnerSubject).HasFlag(DocumentAccess.Write) ? host : null,
             Generation = checked(current.Coordination.Generation + 1),
         };
         coordination = coordination with
