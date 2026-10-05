@@ -2,6 +2,8 @@ namespace CellBridge.AspNetCore;
 
 public sealed class CellBridgeOptions
 {
+    /// <summary>Wire-hash configuration, independent of stored-content integrity.</summary>
+    public CellBridge.FssHttpB.ProtocolHashingOptions Hashing { get; set; } = CellBridge.FssHttpB.ProtocolHashingOptions.Default;
     public long MaxRequestBytes { get; set; } = 128L * 1024 * 1024;
     public int MaxConcurrentRequests { get; set; } = 8;
     public int MaxMtomParts { get; set; } = 128;

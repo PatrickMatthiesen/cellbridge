@@ -21,20 +21,22 @@ public static class CellBinaryRequestExecutor
         DocumentAccess access,
         Func<ulong, FsshttpbResponse>? editorsTableQueryChanges = null,
         long maxResponseBytes = 512L * 1024 * 1024,
-        Func<DocumentPartition, ulong, FsshttpbResponse>? partitionEditorsQueryChanges = null)
+        Func<DocumentPartition, ulong, FsshttpbResponse>? partitionEditorsQueryChanges = null,
+        ProtocolHashingOptions? hashing = null)
     {
         var response = new FsshttpbResponse();
-        if (request.SubRequests.Count == 0)
+        if (request.SubRequests.Count == 0 || !request.HasValidEnvelope)
         {
             response.Status = true;
             response.Error = new ResponseError(
-                ErrorType.Protocol,
-                (ulong)ProtocolErrorCode.RequestStreamSchemaError,
-                "A cell request must contain at least one subrequest.");
+                ErrorType.Cell,
+                (ulong)(request.ProtocolVersion is not (12 or 13 or 14) || request.MinimumVersion != 11
+                    ? CellErrorCode.IncompatibleProtocolVersion : CellErrorCode.RequestStreamSchemaError),
+                "Invalid cell request envelope or hashing schema, or missing subrequests.");
             return response;
         }
 
-        var queries = new QueryChangesResponseAssembler(response, maxResponseBytes);
+        var queries = new QueryChangesResponseAssembler(response, maxResponseBytes, request.HashOptions, hashing);
         foreach (var subRequest in request.SubRequests)
         {
             if (subRequest.RequestType != RequestTypes.QueryAccess &&
@@ -67,7 +69,7 @@ public static class CellBinaryRequestExecutor
                     ? id => partitionEditorsQueryChanges(selectedPartition, id)
                     : partition.Kind == DocumentPartitionKind.EditorsTable ? editorsTableQueryChanges : null;
                 var queryChanges = QueryChanges(document, selectedPartition, subRequest, editors);
-                queries.Append(queryChanges);
+                queries.Append(queryChanges, subRequest.Data as QueryChangesSubRequestData);
                 continue;
             }
 

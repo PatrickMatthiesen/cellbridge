@@ -5,4 +5,5 @@
     <ProjectReference Include="../CellBridge.FssHttp/CellBridge.FssHttp.csproj" />
     <ProjectReference Include="../CellBridge.Storage/CellBridge.Storage.csproj" />
   </ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="CellBridge.FssHttp.Tests" /></ItemGroup>
 </Project>

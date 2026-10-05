@@ -36,4 +36,5 @@
   </ItemGroup>
 
   <ItemGroup><Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" /></ItemGroup>
+  <ItemGroup><None Include="../../testdata/protocol-hashing/vectors.json" Link="Fixtures/hash-vectors.json" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
 </Project>

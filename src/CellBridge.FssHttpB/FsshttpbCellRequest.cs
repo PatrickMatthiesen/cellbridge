@@ -47,6 +47,13 @@ public sealed class FsshttpbCellRequest
     /// <summary>User agent version.</summary>
     public uint UserAgentVersionValue { get; set; }
 
+    /// <summary>Optional request-wide schema-1 hash negotiation.</summary>
+    public RequestHashOptions? HashOptions { get; set; }
+
+    /// <summary>Checks the advertised request envelope before any operation executes.</summary>
+    public bool HasValidEnvelope => ProtocolVersion is 12 or 13 or 14 && MinimumVersion == 11 &&
+        Signature == RequestSignature && (HashOptions is null || HashOptions.Schema == 1);
+
     /// <summary>The sub-requests (MUST contain at least one).</summary>
     public List<FsshttpbCellSubRequest> SubRequests { get; set; }
 
@@ -83,6 +90,8 @@ public sealed class FsshttpbCellRequest
 
         var userAgentEnd = new StreamObjectHeaderEnd16Bit(StreamObjectTypeHeaderEnd.UserAgent);
         userAgentEnd.Serialize(writer);
+
+        HashOptions?.Serialize(writer);
 
         // Sub-requests.
         if (SubRequests.Count == 0)
@@ -183,6 +192,8 @@ public sealed class FsshttpbCellRequest
             throw new InvalidDataException(
                 $"Invalid request signature 0x{request.Signature:X16}; expected 0x{RequestSignature:X16}.");
         }
+        if (!request.HasValidEnvelope)
+            throw new InvalidDataException("Request version must be 12, 13 or 14 with minimum version 11.");
 
         // Request start header.
         var requestStart = StreamObjectHeaderStart.Parse(reader);
@@ -241,6 +252,7 @@ public sealed class FsshttpbCellRequest
 
         // Sub-requests until the Request end header.
         request.SubRequests = new List<FsshttpbCellSubRequest>();
+        bool hasRoundtripOptions = false;
         while (reader.Remaining > 0 && !IsHeaderEnd(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
@@ -253,6 +265,17 @@ public sealed class FsshttpbCellRequest
             {
                 reader.Position -= header.HeaderSize;
                 request.DataElementPackage = DataElementPackage.Deserialize(reader);
+            }
+            else if (header.Type == StreamObjectTypeHeaderStart.RequestHashOptions)
+            {
+                if (request.HashOptions is not null || hasRoundtripOptions || request.SubRequests.Count != 0 || request.DataElementPackage is not null)
+                    throw new InvalidDataException("Duplicate or misplaced Request Hashing Options.");
+                request.HashOptions = RequestHashOptions.Deserialize(reader, header);
+            }
+            else if (header.Type == StreamObjectTypeHeaderStart.CellRoundtripOptions)
+            {
+                hasRoundtripOptions = true;
+                SkipObject(reader, header);
             }
             else
             {

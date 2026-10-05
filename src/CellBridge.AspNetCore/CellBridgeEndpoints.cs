@@ -20,6 +20,7 @@ public static class CellBridgeEndpoints
         provider.Require(requireDurability, multipleInstances);
         var options = new CellBridgeOptions();
         configure?.Invoke(options);
+        ArgumentNullException.ThrowIfNull(options.Hashing);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxRequestBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequests);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomParts);
@@ -27,6 +28,7 @@ public static class CellBridgeEndpoints
         if (options.MaxRequestBytes > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(options.MaxRequestBytes));
         services.AddSingleton(new RequestAdmission(options.MaxConcurrentRequests));
         services.AddSingleton(options);
+        services.TryAddSingleton(options.Hashing);
         services.AddSingleton(provider);
         services.AddAuthorization();
         services.TryAddSingleton<ICellBridgeAccessEvaluator, StoredDocumentAccessEvaluator>();
