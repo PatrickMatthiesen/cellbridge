@@ -110,6 +110,8 @@ public sealed class OuterDocumentOperationTests
         var published = await service.RenameDocumentAsync(first.ResourceId, "FIRST.docx", TestActor.Value);
         var renamed = await provider.State.FindByPathKeyAsync(first.PathKey);
         Assert.Equal(renamed!.StateVersion, published.StateVersion);
+        var changedPath = await service.RenameDocumentAsync(first.ResourceId, "third.docx", TestActor.Value);
+        Assert.Equal((await provider.State.FindByResourceIdAsync(first.ResourceId))!.RetiredPathKeys.ToArray(), changedPath.RetiredPathKeys.ToArray());
         Assert.Equal(first.ResourceId, renamed!.ResourceId);
         Assert.Equal(folder + "FIRST.docx", renamed.Path);
         await service.CreateAsync(folder + "my%20file%20%C3%A6%25.docx", MinimalDocx.Create(), TestActor.Value);

@@ -141,7 +141,8 @@ public sealed partial class CellBridgeDocumentService
             if (path == current.Path) return new StateTransition<DocumentState>(null, current);
             var next = current with { Path = path, PathKey = StorageIds.PathKey(path),
                 StateVersion = checked(current.StateVersion + 1) };
-            return new StateTransition<DocumentState>(next, next);
+            return new StateTransition<DocumentState>(next, next with
+                { RetiredPathKeys = DocumentPathReservations.Capture(current, next, rename: true) });
         }, cancellationToken);
     }
 }

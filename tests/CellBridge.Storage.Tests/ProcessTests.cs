@@ -30,6 +30,8 @@ public class ProcessTests
         var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/process-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
+        Assert.True(await new ExternalRevisionPublisher(provider, new UnusedDestination()).BindAsync(initial.ResourceId,
+            initial.LifecycleGeneration, initial.StateVersion, Guid.NewGuid(), "process-destination", "baseline"));
         var first = StorageTests.Fixture("save-first");
         ((PutChangesSubRequestData)first.SubRequests.Single().Data!).ExpectedStorageIndex =
             (await StoredDocument.RestoreAsync(initial, provider.Content)).FilePartition.FileGraph.StorageIndex;
@@ -37,6 +39,7 @@ public class ProcessTests
         var beforeCommit = (await provider.State.FindByResourceIdAsync(initial.ResourceId))!;
         Assert.Equal(initial.ContentVersion, beforeCommit.ContentVersion);
         Assert.Empty(beforeCommit.Receipts);
+        Assert.Empty(beforeCommit.Publication!.Pending);
         await KillAtBoundary(initial.ResourceId, "after");
         // Acquire through a separately pooled instance after the writer process died.
         await using var restartedSource = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
@@ -46,12 +49,20 @@ public class ProcessTests
         Assert.False(Assert.Single(retry.Response.SubResponses).Status);
         Assert.Equal(initial.ContentVersion + 1, retry.State.ContentVersion);
         Assert.Single(retry.State.Receipts);
+        Assert.Single(retry.State.Publication!.Pending);
         var continued = await restarted.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
             StorageTests.Fixture("save-second"), new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(continued.Response.SubResponses).Status);
+        Assert.Equal(2, continued.State.Publication!.Pending.Length);
         var restored = await StoredDocument.RestoreAsync(continued.State, restartedProvider.Content);
         Assert.Equal(restored.Content, restored.FilePartition.FileGraph.Materialize());
         Assert.Equal(initial.ResourceId, restored.TransitionId);
+    }
+
+    private sealed class UnusedDestination : IExternalRevisionDestination
+    {
+        public ValueTask<ExternalDeliveryResult> CompareExchangeAsync(ExternalDeliveryRequest request, Stream content,
+            CancellationToken cancellationToken = default) => throw new InvalidOperationException("Crash probe must only queue content.");
     }
 
     private static async Task KillAtBoundary(Guid id, string phase)

@@ -94,6 +94,19 @@ public sealed class DocumentStore
         }
     }
 
+    /// <summary>Conditionally removes only this local cached instance. Durable state and detached readers are unaffected.</summary>
+    public bool TryEvict(StoredDocument expected, uint expectedContentVersion)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        lock (_documents)
+        lock (expected)
+        {
+            if (!_documents.TryGetValue(expected.Url, out var current) || !ReferenceEquals(current, expected) ||
+                current.ContentVersion != expectedContentVersion) return false;
+            return _documents.Remove(expected.Url);
+        }
+    }
+
     /// <summary>Whether a document exists.</summary>
     public bool Exists(string url)
     {

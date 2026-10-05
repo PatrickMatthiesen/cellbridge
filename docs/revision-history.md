@@ -79,9 +79,11 @@ resource; admission fails without evicting names when the cap would be exceeded.
 PostgreSQL serializes namespace changes with one transaction advisory lock acquired
 before document/path locks. Its initial reservation lookup scans current state JSON,
 including tombstones, within document-count and metadata-byte budgets. Large catalogs
-can make this scan expensive. Lifecycle recreation must use the same namespace guard
-and preserve the old tombstone's reservations; rebase and combined validation with
-the lifecycle provider changes are required before merging.
+can make this scan expensive. Lifecycle recreation uses the same namespace guard
+and preserves the old tombstone's reservations. A replacement accepts empty history
+or one coherent current snapshot for its new resource identity, with no copied
+restore receipts. Recreated resources require explicit matching `UseResourceID`
+for SOAP mutations. A case-only rename keeps the existing canonical path ownership.
 
 `Properties/PropertyEnumerate` lists the derived document property IDs.
 `Properties/PropertyGet` accepts `PropertyIds/PropertyId` elements with lowercase
@@ -125,6 +127,11 @@ keyed retries, lost commit replies, authority changes, quotas, codec round trips
 wire XML, inherited BLOBs/multiple cells and canonical history downloads.
 PostgreSQL tests recreate independent providers; `RevisionHistoryInteropTests`
 exercises history across two isolated HTTP hosts. These are synthetic server tests.
+`HistoryLifecycleIntegrationTests` exercises actual rename, deletion and recreation
+with the shared lifecycle providers, including old history retention, foreign alias
+reservation, clean replacement history and recreated SOAP mutation fencing.
+Joint publication and restore validation with the metadata implementation remains
+required before merging that combination.
 Independent SharePoint version/rename/property traces and desktop version restoration
 qualification remain open in [#7][history-issue] and [#30][outer-issue]. No OneNote or
 two-desktop coauthoring compatibility follows from these checks.

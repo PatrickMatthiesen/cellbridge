@@ -116,3 +116,7 @@ state deletion/eviction. Do not expose both write protocols concurrently unless
 the host coordinates them safely. Testing the existing WopiHost adapter against
 CellBridge packages establishes package compatibility, not Office Online Server
 editing qualification or that WopiHost has adopted these new APIs upstream.
+
+For external write-back, shared WOPI/FSSHTTP locks and conditional state deletion,
+follow [external host reliability](external-host-reliability.md). Accepted-save
+receipts alone do not provide recoverable external delivery.

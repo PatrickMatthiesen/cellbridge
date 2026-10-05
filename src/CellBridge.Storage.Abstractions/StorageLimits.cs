@@ -31,11 +31,11 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxObjectBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSaveReceipts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetainedStateSnapshots);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalRevisions);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxHistoryRevisions);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRestoreReceipts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetiredPathKeys);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalRevisions);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalBytes);
     }
 
     public void CheckDocument(DocumentState state)
@@ -52,14 +52,14 @@ public sealed record StorageLimits
         Check("graph bytes", graphBytes, MaxGraphBytes);
         Check("graph elements", elements, MaxGraphElements);
         Check("save receipts", state.Receipts.Length, MaxSaveReceipts);
-        Check("history revisions", state.Revisions.Length, MaxHistoryRevisions);
-        Check("restore receipts", state.RestoreReceipts.Length, MaxRestoreReceipts);
-        Check("retired path keys", state.RetiredPathKeys.Length, MaxRetiredPathKeys);
         if (state.Publication is { } publication)
         {
             Check("pending external revisions", publication.Pending.Length, MaxPendingExternalRevisions);
             Check("pending external bytes", publication.Pending.Sum(r => r.Content.Length), MaxPendingExternalBytes);
         }
+        Check("history revisions", state.Revisions.Length, MaxHistoryRevisions);
+        Check("restore receipts", state.RestoreReceipts.Length, MaxRestoreReceipts);
+        Check("retired path keys", state.RetiredPathKeys.Length, MaxRetiredPathKeys);
         long stored = JsonSerializer.SerializeToUtf8Bytes(state).LongLength;
         foreach (var handle in StorageReferences.Handles(state).DistinctBy(h => h.Key))
             stored = checked(stored + handle.Length);

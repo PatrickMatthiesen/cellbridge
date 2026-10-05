@@ -38,8 +38,9 @@ public sealed class PathRetirementTests
         await service.RenameDocumentAsync(state.ResourceId, "a.docx", TestActor.Value);
         Assert.Equal(state.ResourceId, (await provider.State.FindByPathKeyAsync(state.PathKey))!.ResourceId);
         Assert.Null(await service.CreateAsync(folder + "b.docx", MinimalDocx.Create(), TestActor.Value));
-        // Tombstones retain reservations even when a lifecycle provider moves its SQL name.
-        await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with { IsDeleted = true }, true));
+        var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.True(await ((IDocumentLifecycleStore)provider.State).TryDeleteAsync(state.ResourceId,
+            current.LifecycleGeneration, current.StateVersion));
         Assert.Null(await service.CreateAsync(folder + "b.docx", MinimalDocx.Create(), TestActor.Value));
     }
 

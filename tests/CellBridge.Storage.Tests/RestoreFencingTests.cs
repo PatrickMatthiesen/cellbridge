@@ -62,14 +62,20 @@ public sealed class RestoreFencingTests
         var preparing = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
             "fenced", TestActor.Value).AsTask();
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var changed = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+        DocumentState changed;
+        if (mutation == "lifecycle")
+        {
+            var lifecycle = (IDocumentLifecycleStore)provider.State;
+            Assert.True(await lifecycle.TryDeleteAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion));
+            changed = (await lifecycle.FindLifecycleAsync(state.ResourceId))!;
+        }
+        else changed = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
         {
             var next = mutation switch
             {
                 "permission" => current with { Security = current.Security with { Owner = "revoked" } },
                 "metadata" => current with { Partitions = current.Partitions.Select(p => p.Kind == 1
                     ? p with { Knowledge = p.Knowledge + 1, InlineContent = [42] } : p).ToImmutableArray() },
-                "lifecycle" => current with { LifecycleGeneration = current.LifecycleGeneration + 1 },
                 _ => current with { Coordination = current.Coordination with
                     { Exclusive = new("lock", null, DateTime.UtcNow.AddMinutes(1), 0, null, TestActor.Value.Identity.Subject) } },
             };
@@ -77,8 +83,9 @@ public sealed class RestoreFencingTests
         });
         gate.Resume.TrySetResult();
         if (mutation == "permission") await Assert.ThrowsAsync<UnauthorizedAccessException>(() => preparing);
+        else if (mutation == "lifecycle") await Assert.ThrowsAsync<KeyNotFoundException>(() => preparing);
         else await Assert.ThrowsAnyAsync<InvalidOperationException>(() => preparing);
-        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var after = (await ((IDocumentLifecycleStore)provider.State).FindLifecycleAsync(state.ResourceId))!;
         Assert.Equal(changed.ContentVersion, after.ContentVersion); Assert.Single(after.Revisions); Assert.Empty(after.RestoreReceipts);
         Assert.Equal(changed.Partitions, after.Partitions);
     }

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace CellBridge.Storage.Abstractions;
 
 /// <summary>Optional provider-wide lifecycle operations. Resource IDs are permanently retired on deletion.</summary>
@@ -27,8 +29,21 @@ public static class DocumentLifecycle
         replacement.Path == retired.Path && replacement.PathKey == retired.PathKey &&
         replacement.LifecycleGeneration == checked(generation + 1) && !replacement.IsDeleted &&
         replacement.DeletedFromStateVersion is null && replacement.ReplacedBy is null &&
-        replacement.Editors.IsEmpty && replacement.Receipts.IsEmpty && replacement.Publication is null &&
+        replacement.Editors.IsEmpty && replacement.Receipts.IsEmpty && replacement.RetiredPathKeys.IsEmpty && replacement.Publication is null &&
+        replacement.RestoreReceipts.IsEmpty && HasCoherentInitialHistory(replacement) &&
         replacement.Coordination == CoordinationState.Empty;
+
+    private static bool HasCoherentInitialHistory(DocumentState replacement)
+    {
+        if (replacement.Revisions.IsEmpty) return true;
+        if (replacement.Revisions.Length != 1) return false;
+        var revision = replacement.Revisions[0];
+        return revision.ResourceId == replacement.ResourceId && revision.LifecycleGeneration == replacement.LifecycleGeneration &&
+            revision.RevisionNumber == Math.Max(1UL, replacement.ContentVersion) && revision.ContentVersion == replacement.ContentVersion &&
+            revision.Content == replacement.Content && revision.CreatedUtc == replacement.ModifiedUtc &&
+            revision.Author == (replacement.Security.ModifiedBy ?? replacement.Security.CreatedBy ?? new("unknown", "unknown", "unknown")) &&
+            JsonSerializer.Serialize(revision.Partitions) == JsonSerializer.Serialize(replacement.Partitions.Where(p => p.Kind != 2));
+    }
 
     public static void ValidateTransition(DocumentState current, DocumentState next)
     {

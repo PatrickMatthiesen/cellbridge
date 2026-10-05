@@ -5,7 +5,7 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.InMemory;
 
-public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore
+public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore
 {
     public StorageBudget Budget { get; private set; }
     public InMemoryStateStore(StorageBudget? budget = null) => Budget = budget ?? new StorageBudget();
@@ -23,19 +23,19 @@ public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudge
     public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(_documents.GetValueOrDefault(id));
+        return ValueTask.FromResult(_documents.GetValueOrDefault(id) is { IsDeleted: false } state ? state : null);
     }
     public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        lock (_paths) return ValueTask.FromResult(_paths.TryGetValue(key, out var id) ? _documents[id] : null);
+        lock (_paths) return ValueTask.FromResult(_paths.TryGetValue(key, out var id) && !_documents[id].IsDeleted ? _documents[id] : null);
     }
     public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
-        IReadOnlyList<DocumentSummary> result = _documents.Values.OrderBy(x => x.PathKey, StringComparer.Ordinal)
+        IReadOnlyList<DocumentSummary> result = _documents.Values.Where(x => !x.IsDeleted).OrderBy(x => x.PathKey, StringComparer.Ordinal)
             .Skip(offset).Take(limit).Select(x => new DocumentSummary(x.ResourceId, x.Path, x.Content.Length,
                 x.ContentVersion, x.ModifiedUtc, x.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow))
                 { Security = x.Security }).ToArray();
@@ -71,13 +71,11 @@ public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudge
         await gate.WaitAsync(cancellationToken);
         try
         {
-            var current = _documents.GetValueOrDefault(id) ?? throw new KeyNotFoundException("Document does not exist.");
+            var current = _documents.GetValueOrDefault(id) is { IsDeleted: false } live ? live : throw new KeyNotFoundException("Document does not exist.");
             var result = transition(current, DateTime.UtcNow);
             if (result.Next is { } next)
             {
-                if (next.ResourceId != id || !rename && (next.PathKey != current.PathKey || next.Path != current.Path) ||
-                    next.PathKey != next.Path.ToUpperInvariant())
-                    throw new InvalidOperationException("A transition cannot change document identity or path.");
+                DocumentPathReservations.ValidateTransition(current, next, rename);
                 next = next with { StateVersion = checked(current.StateVersion + 1),
                     RetiredPathKeys = DocumentPathReservations.Capture(current, next, rename) };
                 Budget.Limits.CheckDocument(next);
@@ -85,19 +83,72 @@ public sealed class InMemoryStateStore : IDocumentStateStore, ILocalStorageBudge
                 {
                     lock (_paths)
                     {
-                        if (_paths.TryGetValue(next.PathKey, out var owner) && owner != id)
-                            throw new InvalidOperationException("The destination filename already exists.");
-                        if (_documents.Values.Any(s => s.ResourceId != id &&
+                        if (rename && next.PathKey != current.PathKey && _documents.Values.Any(s => s.ResourceId != id &&
                             (s.PathKey == next.PathKey || s.RetiredPathKeys.Contains(next.PathKey))))
                             throw new InvalidOperationException("The destination filename is reserved.");
                         Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
-                        _paths.Remove(current.PathKey);
-                        _paths[next.PathKey] = id;
+                        if (rename) { _paths.Remove(current.PathKey); _paths[next.PathKey] = id; }
                         _documents[id] = next;
                     }
                 }
             }
             return result.Result;
+        }
+        finally { gate.Release(); }
+    }
+    public ValueTask<DocumentState?> FindLifecycleAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(_documents.GetValueOrDefault(id));
+    }
+    public async ValueTask<bool> TryDeleteAsync(Guid id, long expectedGeneration, long expectedStateVersion,
+        CancellationToken cancellationToken = default)
+    {
+        var gate = _gates.GetOrAdd(id, _ => new SemaphoreSlim(1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            lock (Budget.SyncRoot)
+            {
+                if (!_documents.TryGetValue(id, out var current) ||
+                    DocumentLifecycle.Delete(current, expectedGeneration, expectedStateVersion) is not { } next) return false;
+                if (current.IsDeleted) return true;
+                next = next with { StateVersion = checked(current.StateVersion + 1) };
+                Budget.Limits.CheckDocument(next);
+                Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
+                _documents[id] = next;
+                return true;
+            }
+        }
+        finally { gate.Release(); }
+    }
+    public async ValueTask<bool> TryRecreateAsync(Guid id, long expectedGeneration, long expectedStateVersion,
+        DocumentState replacement, CancellationToken cancellationToken = default)
+    {
+        var gate = _gates.GetOrAdd(id, _ => new SemaphoreSlim(1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            lock (Budget.SyncRoot)
+            lock (_paths)
+            {
+                if (!_documents.TryGetValue(id, out var retired)) return false;
+                if (retired.ReplacedBy == replacement.ResourceId && retired.LifecycleGeneration == expectedGeneration &&
+                    retired.StateVersion == expectedStateVersion + 1) return true;
+                if (!DocumentLifecycle.CanRecreate(retired, expectedGeneration, expectedStateVersion, replacement) ||
+                    _documents.ContainsKey(replacement.ResourceId) || _paths[retired.PathKey] != id ||
+                    _documents.Values.Any(s => s.ResourceId != id && s.RetiredPathKeys.Contains(replacement.PathKey))) return false;
+                replacement = replacement with { StateVersion = 0 };
+                var next = retired with { ReplacedBy = replacement.ResourceId, StateVersion = checked(retired.StateVersion + 1) };
+                Budget.Limits.CheckDocument(replacement);
+                Budget.Limits.CheckDocument(next);
+                Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(replacement).LongLength +
+                    JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(retired).LongLength, 1);
+                _documents[id] = next;
+                _documents[replacement.ResourceId] = replacement;
+                _paths[retired.PathKey] = replacement.ResourceId;
+                return true;
+            }
         }
         finally { gate.Release(); }
     }
