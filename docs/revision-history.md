@@ -130,7 +130,7 @@ exercises history across two isolated HTTP hosts. These are synthetic server tes
 `HistoryLifecycleIntegrationTests` exercises actual rename, deletion and recreation
 with the shared lifecycle providers, including old history retention, foreign alias
 reservation, clean replacement history and recreated SOAP mutation fencing.
-`CombinedPublicationTests` checks metadata and file publication with external delivery,
+`CombinedPublicationTests` checks metadata and file publication with queued external publication,
 restoration, exact retries, atomic quota rejection and recreated resources on both providers.
 Independent SharePoint version/rename/property traces and desktop version restoration
 qualification remain open in [#7][history-issue] and [#30][outer-issue]. No OneNote or

@@ -53,6 +53,12 @@ identity/version/commit/clean-source flags.
 The package tests compare the reusable processor's response with the HTTP endpoint
 and exercise host-selected identities and read-only request limits.
 
+## Bounded protocol properties and differential checks
+
+[Bounded validation](bounded-protocol-validation.md) records fixed seeds, input
+limits, semantic assertions, parser provenance and reproduction commands for
+framing, graph budgets, persisted rejection and receipt retries.
+
 ## AppHost configuration
 
 Inputs use standard configuration. Aspire parameters can be overridden with

@@ -82,11 +82,14 @@ Follow the [hosting guide](docs/storage-providers.md#consume-the-packages) for
 provider setup and the [authentication guide](docs/authentication.md#reusable-hosts)
 for identity mapping. The [package consumer](examples/NuGetConsumer/README.md)
 provides a complete example with bearer authentication and in-memory storage.
-The `0.1.0-beta.1` package candidate adds a reusable parsed-SOAP processor,
+The published `0.1.0-beta.1` packages add a reusable parsed-SOAP processor,
 host-selected resource GUIDs, request permission limits and accepted-save receipts.
 See [embedding in another host](docs/package-integration.md) and the
-[beta release checklist](docs/beta-release.md). Packages are verified locally;
-publication is a separate release step.
+[beta release record and checklist](docs/beta-release.md). All nine packages and
+matching symbols are public on NuGet.org, owned by CellBridge. Fresh remote
+consumption passed four consumer tests and the 15 tests of the pinned WopiHost
+adapter. Those checks establish package integration, not Office Online Server
+or new desktop client qualification.
 
 ## Build and test
 

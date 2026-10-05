@@ -71,7 +71,9 @@ Provider export/import and public version restoration are unimplemented.
 
 ## Consume the packages
 
-The reusable packages target .NET 10 and are built locally. `CellBridge.AspNetCore`
+The reusable packages target .NET 10. Version `0.1.0-beta.1` and its matching symbols
+are public on NuGet.org under the CellBridge owner. See the
+[release evidence](beta-release.md#published-release). `CellBridge.AspNetCore`
 provides endpoint registration and save orchestration. Choose state and content
 stores from `.PostgreSql`, `.FileSystem` and `.InMemory`; filesystem storage
 supplies content only.
