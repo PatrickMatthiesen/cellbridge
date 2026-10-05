@@ -83,11 +83,14 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
                 {
                     lock (_paths)
                     {
-                        if (rename && next.PathKey != current.PathKey && _documents.Values.Any(s => s.ResourceId != id &&
+                        if (_paths.TryGetValue(next.PathKey, out var owner) && owner != id)
+                            throw new InvalidOperationException("The destination filename already exists.");
+                        if (next.PathKey != current.PathKey && _documents.Values.Any(s => s.ResourceId != id &&
                             (s.PathKey == next.PathKey || s.RetiredPathKeys.Contains(next.PathKey))))
                             throw new InvalidOperationException("The destination filename is reserved.");
                         Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
-                        if (rename) { _paths.Remove(current.PathKey); _paths[next.PathKey] = id; }
+                        _paths.Remove(current.PathKey);
+                        _paths[next.PathKey] = id;
                         _documents[id] = next;
                     }
                 }

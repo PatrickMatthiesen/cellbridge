@@ -52,7 +52,6 @@ public sealed class RestoreFencingTests
     [Theory]
     [InlineData("permission")]
     [InlineData("metadata")]
-    [InlineData("lifecycle")]
     [InlineData("lock")]
     public async Task PreparationCannotOverrideNewAuthorityOrMetadata(string mutation)
     {
@@ -62,14 +61,7 @@ public sealed class RestoreFencingTests
         var preparing = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
             "fenced", TestActor.Value).AsTask();
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        DocumentState changed;
-        if (mutation == "lifecycle")
-        {
-            var lifecycle = (IDocumentLifecycleStore)provider.State;
-            Assert.True(await lifecycle.TryDeleteAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion));
-            changed = (await lifecycle.FindLifecycleAsync(state.ResourceId))!;
-        }
-        else changed = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+        var changed = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
         {
             var next = mutation switch
             {
@@ -83,11 +75,30 @@ public sealed class RestoreFencingTests
         });
         gate.Resume.TrySetResult();
         if (mutation == "permission") await Assert.ThrowsAsync<UnauthorizedAccessException>(() => preparing);
-        else if (mutation == "lifecycle") await Assert.ThrowsAsync<KeyNotFoundException>(() => preparing);
         else await Assert.ThrowsAnyAsync<InvalidOperationException>(() => preparing);
-        var after = (await ((IDocumentLifecycleStore)provider.State).FindLifecycleAsync(state.ResourceId))!;
+        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
         Assert.Equal(changed.ContentVersion, after.ContentVersion); Assert.Single(after.Revisions); Assert.Empty(after.RestoreReceipts);
         Assert.Equal(changed.Partitions, after.Partitions);
+    }
+
+    [Fact]
+    public async Task DeletionDuringPreparationCannotRestoreRetiredResource()
+    {
+        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/retired-restore.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var gate = new PausedRead(provider.Content);
+        var preparing = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(
+            state.ResourceId, 1, 1, "retired", TestActor.Value).AsTask();
+        await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var lifecycle = (IDocumentLifecycleStore)provider.State;
+        Assert.True(await lifecycle.TryDeleteAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion));
+        gate.Resume.TrySetResult();
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => preparing);
+        var retired = (await lifecycle.FindLifecycleAsync(state.ResourceId))!;
+        Assert.True(retired.IsDeleted);
+        Assert.Equal(state.ContentVersion, retired.ContentVersion);
+        Assert.Single(retired.Revisions);
+        Assert.Empty(retired.RestoreReceipts);
     }
 
     [Fact]

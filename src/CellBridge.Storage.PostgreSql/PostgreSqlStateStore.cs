@@ -117,11 +117,11 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
         catch (NpgsqlException ex) { throw new StorageUnavailableException("Document creation failed or its commit outcome is unknown.", ex); }
     }
     public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
-        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, false, cancellationToken);
+        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, false, false, cancellationToken);
     public ValueTask<T> RenameAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
-        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, false, cancellationToken, rename: true);
+        CancellationToken cancellationToken = default) => TransitionCoreAsync(id, transition, false, true, cancellationToken);
     private async ValueTask<T> TransitionCoreAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
-        bool lifecycle, CancellationToken cancellationToken, bool rename = false)
+        bool lifecycle, bool rename, CancellationToken cancellationToken)
     {
         try
         {
@@ -190,7 +190,7 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
             {
                 var next = DocumentLifecycle.Delete(current, expectedGeneration, expectedStateVersion);
                 return new StateTransition<bool>(current.IsDeleted ? null : next, next is not null);
-            }, true, cancellationToken);
+            }, true, false, cancellationToken);
         }
         catch (KeyNotFoundException) { return false; }
     }

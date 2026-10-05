@@ -15,6 +15,15 @@ await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVaria
 var state = new PostgreSqlStateStore(source);
 var content = new PostgreSqlContentStore(source);
 var before = await state.FindByResourceIdAsync(id) ?? throw new InvalidOperationException("Probe document is missing.");
+if (args.Length > 3)
+{
+    var metadataRequest = FsshttpbCellRequest.Deserialize(new(await File.ReadAllBytesAsync(args[3])));
+    var metadataService = new CellBridgeDocumentService(new(new PausedStateStore(state, phase, signal), content));
+    var metadata = await metadataService.ExecuteAsync(id, DocumentPartitionKind.Metadata, metadataRequest,
+        new Dictionary<string, string>(), new CellBridgeActor(new SubjectIdentity("tests:writer", "test-writer", "Test writer"), CanCreate: true));
+    if (metadata.Response.SubResponses.Any(r => r.Status)) throw new InvalidOperationException("Probe metadata save failed.");
+    return;
+}
 using var fixture = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "save-first.json")));
 var request = fixture.RootElement.GetProperty("request");
 var parts = MtomMessageParser.Parse(Convert.FromBase64String(request.GetProperty("bodyBase64").GetString()!), request.GetProperty("contentType").GetString()!);

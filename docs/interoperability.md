@@ -17,20 +17,21 @@ operations.
 | --- | --- |
 | Read/write permissions | Binary `QueryAccess` reports the caller's access. |
 | Read changes | `QueryChanges` supports repeated and mixed file, metadata and editor queries with independent knowledge/errors and one shared data package. Explicit binary targets override the SOAP default. Mapped file-cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
-| Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Save receipts identify retries so an accepted save is not published twice. |
+| Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Complete application metadata graphs publish atomically with key-level coherency. Requested applied-index entries are returned and preserved in durable receipts. |
 | Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
 | Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` and `Versioning/GetVersionList` report servable history. |
 
 File content, application metadata and editor presence have separate synchronization
 partitions. File saves update the content partition. Editor queries return current
 participants with immutable identities for each distinct editor stream;
-binary application-metadata queries return storage-index information.
+binary application-metadata queries return persisted opaque graphs and scoped knowledge.
+See [complete uploads and metadata](application-metadata.md) for publication and retry rules.
 SOAP dependencies determine which subsequent operations execute.
 
 ### Known limitations
 
 - Uploads marked partial, staged uploads spanning multiple requests, alternate coherency
-  modes and writes to non-file partitions are unsupported. Ordinary saves can
+  modes and buffered or coalescing metadata writes are unsupported. Ordinary saves can
   still reuse unchanged file parts. Complete saves accept `MultiRequestPutHint`
   as a coalescing hint. Unsupported partial operations do not cancel independent
   operations in the same binary request.
@@ -38,8 +39,8 @@ SOAP dependencies determine which subsequent operations execute.
   and some filters are unsupported. Optional unsupported filters fall back to
   more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
 - Mixed and repeated queries deduplicate immutable elements. A later failure
-  preserves earlier payloads and save acknowledgements. Metadata remains a
-  storage-index-only placeholder rather than a complete application metadata graph.
+  preserves earlier payloads and save acknowledgements. Metadata starts as a
+  storage-index-only placeholder until a complete graph is uploaded.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
   and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
   outside the current normative four-operation inventory.
@@ -48,11 +49,10 @@ SOAP dependencies determine which subsequent operations execute.
   documents retention, retry guarantees and remaining reference/desktop gates.
 - Lock conversions and transition acknowledgement are implemented with persisted
   coauthor membership. Native desktop transition behavior still needs qualification.
-- The binary application-metadata stream is incomplete.
 - The generic graph resolver has durable capture/restore codecs. File saves can
   resolve inherited objects and declared BLOBs by identity, keeping object
-  partitions and cells separate. General non-file publication, OneNote adapters
-  and notebook/page synchronization remain unimplemented. Reference captures for
+  partitions and cells separate. Complete application metadata graphs have durable
+  publication. OneNote adapters and notebook/page synchronization remain unimplemented. Reference captures for
   the new graph shapes and scoped queries remain required.
 - Automatic graph pruning is disabled. The host retains graph and save identities
   and rejects growth at its [storage limits](storage-providers.md#limits-and-qualification).
