@@ -70,7 +70,7 @@ SharePoint lists and search are outside the project's scope.
 | --- | --- |
 | Word open, save and reopen | Remote saves and reopen tested, including repeated manual tests while signed in. |
 | Word permissions | Manual sign-in, writer saves, reader read-only open and Write revocation while editing tested. |
-| Excel saving | Desktop saves demonstrated before the storage-provider migration; repeat on the current durable host. Captured saves also run in automated replay. |
+| Excel save and reopen | Authenticated desktop saves and reopen tested on the current PostgreSQL host. Captured saves also run in automated replay. |
 | PowerPoint save and reopen | Manually tested, including complex Copilot-generated slides. |
 | Blank Office file creation | Automated package checks. |
 | Two service instances | Automated identity, shared lease and protocol routing checks against one database. |
@@ -87,6 +87,15 @@ A separate authenticated trial on the same date verified writer/reader access
 and revocation. Word required explicit forms-sign-in host approval. Repeated
 authenticated save/reopen and the complex PowerPoint test were confirmed by the
 project maintainer.
+
+On 2026-10-05, the maintainer created and edited `excel-test.xlsx` and
+`word-test.docx` through the authenticated Tailscale HTTPS host backed by
+PostgreSQL. Server captures recorded three successful Excel `PutChanges`
+operations and two successful Word `PutChanges` operations. The downloaded
+files had content versions 4 and 3 respectively; both passed ZIP integrity
+and XML parsing checks. The maintainer confirmed that edits remained in both
+documents after fully closing and reopening them from the library. This was
+a single-desktop test, with no coauthoring transition qualification.
 
 ## Automated checks
 

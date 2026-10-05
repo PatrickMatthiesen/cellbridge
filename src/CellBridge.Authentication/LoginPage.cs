@@ -21,7 +21,7 @@ internal static class LoginPage
                 * { box-sizing: border-box; }
                 html { background: #f4f1e9; }
                 body { margin: 0; color: #20231f; font: 16px/1.5 "Segoe UI", Arial, sans-serif; }
-                main { width: 100%; max-width: 440px; margin: 0 auto; padding: 36px 24px; }
+                .sign-in { display: block; width: 100%; max-width: 440px; margin: 0 auto; padding: 36px 24px; }
                 h1 { margin: 0 0 26px; font-size: 32px; font-weight: 600; line-height: 1.2; letter-spacing: -.03em; }
                 label { display: block; margin-bottom: 7px; font-size: 14px; font-weight: 600; }
                 .field { margin-bottom: 18px; }
@@ -33,11 +33,12 @@ internal static class LoginPage
                 button:focus { outline: 2px solid #527c62; outline-offset: 3px; }
                 .error { margin: 0 0 22px; padding: 12px 14px; border-left: 3px solid #b34c2b; background: #fbe9df; color: #7c301a; font-size: 14px; }
                 .note { margin: 26px 0 0; padding-top: 18px; border-top: 1px solid #d8d5ca; color: #5f655b; font-size: 13px; }
-                @media (max-width: 360px) { main { padding: 24px 18px; } h1 { font-size: 28px; } }
+                @media (max-width: 360px) { .sign-in { padding: 24px 18px; } h1 { font-size: 28px; } }
               </style>
             </head>
             <body>
-              <main>
+              <!-- Use a known block element in Office's legacy embedded sign-in browser. -->
+              <div class="sign-in" role="main">
                 <h1>Sign in to {{applicationName}}</h1>
                 {{(page.SignInFailed ? "<p class=\"error\" role=\"alert\">Sign-in failed. Check your credentials or try again later.</p>" : "")}}
                 <form method="post" action="/auth/login">
@@ -54,7 +55,7 @@ internal static class LoginPage
                   <button type="submit">Sign in</button>
                 </form>
                 <p class="note">Document access depends on your account permissions.</p>
-              </main>
+              </div>
             </body>
             </html>
             """;
