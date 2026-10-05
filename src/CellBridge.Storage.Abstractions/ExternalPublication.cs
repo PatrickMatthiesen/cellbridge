@@ -36,7 +36,10 @@ public static class ExternalPublication
     /// <summary>Call inside the same atomic transition that publishes the committed file content.</summary>
     public static DocumentState Append(DocumentState current, DocumentState next, Guid operationId, StorageLimits limits)
     {
+        if (next.Content != current.Content && next.ContentVersion != checked(current.ContentVersion + 1))
+            throw new InvalidOperationException("Changed external file bytes require the next content version.");
         if (current.Publication is not { } publication || next.ContentVersion == current.ContentVersion) return next;
+        if (operationId == Guid.Empty) throw new ArgumentException("A stable publication operation identity is required.", nameof(operationId));
         var entry = new ExternalRevision(operationId, next.ResourceId, next.LifecycleGeneration,
             publication.NextSequence, next.ContentVersion, next.Content);
         var pending = publication.Pending.Add(entry);

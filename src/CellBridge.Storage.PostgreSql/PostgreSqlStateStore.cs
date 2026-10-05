@@ -27,6 +27,9 @@ public sealed class PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLim
         await using (var existing = new NpgsqlCommand("SELECT to_regclass('cellbridge_schema')::text", connection, transaction))
             if (await existing.ExecuteScalarAsync(cancellationToken) is string)
             {
+                // Drain old writers that already passed their version guard and block new guards during migration.
+                await using (var schemaGate = new NpgsqlCommand("LOCK TABLE cellbridge_schema IN ACCESS EXCLUSIVE MODE", connection, transaction))
+                    await schemaGate.ExecuteNonQueryAsync(cancellationToken);
                 await using var version = new NpgsqlCommand("SELECT version FROM cellbridge_schema", connection, transaction);
                 await using var versions = await version.ExecuteReaderAsync(cancellationToken);
                 if (!await versions.ReadAsync(cancellationToken)) throw new StorageUnavailableException("Missing storage schema version.");

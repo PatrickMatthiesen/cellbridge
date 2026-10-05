@@ -23,13 +23,39 @@ public sealed class HostLifecycleTests
             new(new PostgreSqlStateStore(second), new PostgreSqlContentStore(second)));
     }
 
+    [PostgreSqlFact]
+    public Task PostgreSqlFileSystemLifecycleUsesTheSameAtomicStateRules() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var root = Path.Combine(Path.GetTempPath(), "cellbridge-lifecycle-" + Guid.NewGuid().ToString("N"));
+            try { await CheckLifecycle(new(new PostgreSqlStateStore(source), new PostgreSqlFileSystemContentStore(source, root, shared: true))); }
+            finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+        });
+
+    [Fact]
+    public void LocalEvictionCannotRemoveANewerAttachmentOrContent()
+    {
+        var cache = new DocumentStore();
+        var old = cache.Put("/cache.docx", MinimalDocx.Create());
+        var version = old.ContentVersion;
+        cache.Put("/cache.docx", MinimalDocx.Create("new"));
+        Assert.False(cache.TryEvict(old, version));
+        var newer = new DocumentStore().Put("/cache.docx", MinimalDocx.Create());
+        cache.Attach(newer);
+        Assert.False(cache.TryEvict(old, old.ContentVersion));
+        Assert.True(cache.TryEvict(newer, newer.ContentVersion));
+        Assert.Null(cache.Get("/cache.docx"));
+        Assert.NotEmpty(newer.Content);
+    }
+
     private static async Task CheckLifecycle(StorageProvider provider, StorageProvider? peer = null)
     {
         peer ??= provider;
         var lifecycle = (IDocumentLifecycleStore)provider.State;
         var peerLifecycle = (IDocumentLifecycleStore)peer.State;
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/lifecycle-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
+        var originalBytes = MinimalDocx.Create();
+        var state = (await service.CreateAsync("/lifecycle-" + Guid.NewGuid().ToString("N") + ".docx", originalBytes, TestActor.Value))!;
         await using var detached = await provider.Content.OpenReadAsync(state.Content);
         Assert.False(await lifecycle.TryDeleteAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion + 1));
         var deleted = await Task.WhenAll(Enumerable.Range(0, 2).Select(i => (i == 0 ? lifecycle : peerLifecycle)
@@ -44,12 +70,21 @@ public sealed class HostLifecycleTests
         Assert.Null(await service.CreateAsync(state.ResourceId, "/new-" + Guid.NewGuid() + ".docx", MinimalDocx.Create(), TestActor.Value));
         using var bytes = new MemoryStream();
         await detached.CopyToAsync(bytes);
-        Assert.Equal(MinimalDocx.Create(), bytes.ToArray());
+        Assert.Equal(originalBytes, bytes.ToArray());
         var tombstone = (await peerLifecycle.FindLifecycleAsync(state.ResourceId))!;
         var replacement = await new DocumentStore().Put(state.Path, MinimalDocx.Create("replacement")).CaptureAsync(provider.Content);
         replacement = replacement with { LifecycleGeneration = state.LifecycleGeneration + 1, Security = state.Security };
         Assert.False(await lifecycle.TryRecreateAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion, replacement));
-        Assert.True(await lifecycle.TryRecreateAsync(state.ResourceId, state.LifecycleGeneration, tombstone.StateVersion, replacement));
+        var proposals = await Task.WhenAll(
+            lifecycle.TryRecreateAsync(state.ResourceId, state.LifecycleGeneration, tombstone.StateVersion, replacement).AsTask(),
+            peerLifecycle.TryRecreateAsync(state.ResourceId, state.LifecycleGeneration, tombstone.StateVersion,
+                replacement with { ResourceId = Guid.NewGuid() }).AsTask());
+        Assert.NotEqual(proposals[0], proposals[1]);
+        if (!proposals[0])
+        {
+            var winner = (await peer.State.FindByPathKeyAsync(state.PathKey))!;
+            replacement = replacement with { ResourceId = winner.ResourceId };
+        }
         Assert.True(await peerLifecycle.TryRecreateAsync(state.ResourceId, state.LifecycleGeneration, tombstone.StateVersion, replacement));
         Assert.False(await peerLifecycle.TryRecreateAsync(state.ResourceId, state.LifecycleGeneration, tombstone.StateVersion,
             replacement with { ResourceId = Guid.NewGuid() }));

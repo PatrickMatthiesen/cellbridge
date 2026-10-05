@@ -65,19 +65,29 @@ public sealed class ExternalRevisionPublisher(StorageProvider provider, IExterna
             await BlockAsync(resourceId, request, result.Status == ExternalDeliveryStatus.Conflict ? "DestinationConflict" : "MissingReceipt");
             return PublicationAttempt.Conflict;
         }
-        return await provider.State.TransitionAsync(resourceId, (current, _) =>
+        try
         {
-            if (!Matches(current, request)) return new StateTransition<PublicationAttempt>(null, PublicationAttempt.Superseded);
-            var next = current with { Publication = current.Publication! with
-            { ExpectedRevision = result.Revision, Pending = current.Publication.Pending.RemoveAt(0), BlockedReason = null } };
-            return new StateTransition<PublicationAttempt>(next, PublicationAttempt.Delivered);
-        }, CancellationToken.None);
+            return await provider.State.TransitionAsync(resourceId, (current, _) =>
+            {
+                if (!Matches(current, request)) return new StateTransition<PublicationAttempt>(null, PublicationAttempt.Superseded);
+                var next = current with { Publication = current.Publication! with
+                { ExpectedRevision = result.Revision, Pending = current.Publication.Pending.RemoveAt(0), BlockedReason = null } };
+                return new StateTransition<PublicationAttempt>(next, PublicationAttempt.Delivered);
+            }, CancellationToken.None);
+        }
+        catch (KeyNotFoundException) { return PublicationAttempt.Superseded; }
     }
 
-    private ValueTask<bool> BlockAsync(Guid id, ExternalDeliveryRequest request, string reason) =>
-        provider.State.TransitionAsync(id, (current, _) => Matches(current, request)
-            ? new StateTransition<bool>(current with { Publication = current.Publication! with { BlockedReason = reason } }, true)
-            : new StateTransition<bool>(null, false), CancellationToken.None);
+    private async ValueTask<bool> BlockAsync(Guid id, ExternalDeliveryRequest request, string reason)
+    {
+        try
+        {
+            return await provider.State.TransitionAsync(id, (current, _) => Matches(current, request)
+                ? new StateTransition<bool>(current with { Publication = current.Publication! with { BlockedReason = reason } }, true)
+                : new StateTransition<bool>(null, false), CancellationToken.None);
+        }
+        catch (KeyNotFoundException) { return false; }
+    }
 
     private static bool Matches(DocumentState state, ExternalDeliveryRequest request) =>
         state.LifecycleGeneration == request.Revision.LifecycleGeneration && state.Publication is { Pending.IsEmpty: false } publication &&

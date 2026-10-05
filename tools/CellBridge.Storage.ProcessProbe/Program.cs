@@ -37,11 +37,28 @@ sealed class PausedStateStore(IDocumentStateStore inner, string phase, string si
     public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
     public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken ct = default)
     {
-        if (phase == "before") await Pause();
-        var result = await inner.TransitionAsync(id, transition, ct);
-        if (phase == "after") await Pause();
+        bool mutates = false;
+        T result;
+        try
+        {
+            result = await inner.TransitionAsync(id, (current, now) =>
+            {
+                var proposed = transition(current, now);
+                mutates = proposed.Next is not null;
+                if (mutates && phase == "before") throw new BeforePublication();
+                return proposed;
+            }, ct);
+        }
+        catch (BeforePublication)
+        {
+            // Pause after rollback. The deterministic callback did no I/O and no state was published.
+            await Pause();
+            throw;
+        }
+        if (mutates && phase == "after") await Pause();
         return result;
     }
+    private sealed class BeforePublication : Exception;
     private async Task Pause()
     {
         await File.WriteAllTextAsync(signal, "ready");

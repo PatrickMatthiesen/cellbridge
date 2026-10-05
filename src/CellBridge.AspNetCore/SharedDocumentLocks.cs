@@ -55,6 +55,7 @@ public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
                 return new StateTransition<bool>(null, false);
             var next = commit(current, now);
             DocumentLifecycle.ValidateTransition(current, next);
+            if (next.Coordination != current.Coordination) throw new InvalidOperationException("A prepared write cannot replace its authoritative lock state.");
             next = ExternalPublication.Append(current, next, operationId, service.Provider.Limits);
             return new StateTransition<bool>(next, true);
         }, cancellationToken);

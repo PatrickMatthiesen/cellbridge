@@ -23,9 +23,11 @@ to use the library. Removing the volume removes its persisted data.
 
 Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
 `ConnectionStrings__cellbridge` before starting the host. Initialization accepts
-a fresh database or storage schema version 3, sets authoritative byte/document
-limits and rejects older schemas without modifying them. Recreate outdated
-development databases. Existing data stays intact when a limit is reduced.
+a fresh database or storage schema version 4, and explicitly migrates version 3
+to 4 while preserving documents. Stop hosts using that database before migration;
+schema-3 writers fail closed afterward. Older schemas are rejected without
+modifying them. Initialization sets authoritative byte/document limits. Existing
+data stays intact when a limit is reduced. See [external host reliability](external-host-reliability.md#storage-compatibility-and-validation).
 
 ### Configuration
 

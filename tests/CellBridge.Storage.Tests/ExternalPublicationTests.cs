@@ -89,6 +89,25 @@ public sealed class ExternalPublicationTests
     }
 
     [Fact]
+    public async Task DelayedAcknowledgementAfterDeletionIsHarmless()
+    {
+        var provider = Memory();
+        var destination = MemoryDestination();
+        var (state, _, _) = await PrepareTwo(provider, destination);
+        var delayed = new AfterWritePause(destination);
+        var pending = new ExternalRevisionPublisher(provider, delayed).PublishNextAsync(state.ResourceId).AsTask();
+        await delayed.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var peer = new ExternalRevisionPublisher(provider, destination);
+        Assert.Equal(PublicationAttempt.Delivered, await peer.PublishNextAsync(state.ResourceId));
+        Assert.Equal(PublicationAttempt.Delivered, await peer.PublishNextAsync(state.ResourceId));
+        var delivered = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.True(await ((IDocumentLifecycleStore)provider.State).TryDeleteAsync(state.ResourceId, 1, delivered.StateVersion));
+        delayed.Continue.SetResult();
+        Assert.Equal(PublicationAttempt.Superseded, await pending);
+        Assert.Null(await provider.State.FindByResourceIdAsync(state.ResourceId));
+    }
+
+    [Fact]
     public async Task MissingContentBlocksWithoutCallingDestination()
     {
         var provider = Memory();
@@ -124,25 +143,25 @@ public sealed class ExternalPublicationTests
     }
 
     [PostgreSqlFact]
-    public async Task LeaseSnapshotsCannotPruneUndeliveredContentPins()
-    {
-        await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
-        var limits = new StorageLimits { MaxRetainedStateSnapshots = 2 };
-        var provider = new StorageProvider(new PostgreSqlStateStore(source, limits), new PostgreSqlContentStore(source), limits);
-        // Use stores' shared budget scope; per-document cap is sufficient here.
-        var destination = new TestDestination(Guid.NewGuid(), source);
-        await destination.InitializeAsync();
-        var (state, first, _) = await PrepareTwo(provider, destination);
-        for (var i = 0; i < 5; i++)
-            await provider.State.TransitionAsync(state.ResourceId, (c, _) => new StateTransition<bool>(c with
-            { Coordination = c.Coordination with { Generation = c.Coordination.Generation + 1 } }, true));
-        var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Contains(first.State.Content, StorageReferences.Handles(current));
-        Assert.Equal(first.State.Content.Sha256, Convert.ToHexStringLower(SHA256.HashData(await provider.Content.ReadVerifiedAsync(first.State.Content))));
-        var restored = await (await StoredDocument.RestoreAsync(current, provider.Content)).CaptureAsync(provider.Content);
-        Assert.Equal(current.Publication, restored.Publication);
-        Assert.Equal(current.LifecycleGeneration, restored.LifecycleGeneration);
-    }
+    public Task LeaseSnapshotsCannotPruneUndeliveredContentPins() =>
+        BudgetAndQueryTests.WithDatabase(new() { MaxRetainedStateSnapshots = 2 }, async source =>
+        {
+            var limits = new StorageLimits { MaxRetainedStateSnapshots = 2 };
+            var provider = new StorageProvider(new PostgreSqlStateStore(source, limits), new PostgreSqlContentStore(source), limits);
+            var destination = new TestDestination(Guid.NewGuid(), source);
+            await destination.InitializeAsync();
+            var (state, first, _) = await PrepareTwo(provider, destination);
+            for (var i = 0; i < 5; i++)
+                await provider.State.TransitionAsync(state.ResourceId, (c, _) => new StateTransition<bool>(c with
+                { Coordination = c.Coordination with { Generation = c.Coordination.Generation + 1 } }, true));
+            var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+            Assert.Contains(first.State.Content, StorageReferences.Handles(current));
+            await new StorageMaintenance(source).CollectOrphansAsync(apply: true, quiescent: true);
+            Assert.Equal(first.State.Content.Sha256, Convert.ToHexStringLower(SHA256.HashData(await provider.Content.ReadVerifiedAsync(first.State.Content))));
+            var restored = await (await StoredDocument.RestoreAsync(current, provider.Content)).CaptureAsync(provider.Content);
+            Assert.Equal(current.Publication, restored.Publication);
+            Assert.Equal(current.LifecycleGeneration, restored.LifecycleGeneration);
+        });
 
     private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
     private static TestDestination MemoryDestination() => new(Guid.NewGuid());
@@ -181,6 +200,18 @@ public sealed class ExternalPublicationTests
         {
             var result = await inner.CompareExchangeAsync(request, bytes, cancellationToken);
             if (Interlocked.Exchange(ref _failed, 1) == 0) throw new IOException("Acknowledgement lost after durable external commit.");
+            return result;
+        }
+    }
+    private sealed class AfterWritePause(IExternalRevisionDestination inner) : IExternalRevisionDestination
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask<ExternalDeliveryResult> CompareExchangeAsync(ExternalDeliveryRequest request, Stream bytes, CancellationToken cancellationToken = default)
+        {
+            var result = await inner.CompareExchangeAsync(request, bytes, cancellationToken);
+            Entered.SetResult();
+            await Continue.Task.WaitAsync(cancellationToken);
             return result;
         }
     }

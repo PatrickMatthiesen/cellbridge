@@ -122,6 +122,69 @@ public sealed class SharedHostLockTests
         Assert.Equal("InvalidCoauthSession", expired.LockError);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnclaimedSaveIsRejectedBeforeStagingUnderEitherLock(bool wopi)
+    {
+        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var state = (await new CellBridgeDocumentService(provider).CreateAsync("/preflight.docx", MinimalDocx.Create(), TestActor.Value))!;
+        if (wopi) Assert.True((await new SharedDocumentLocks(new(provider)).ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "host", TestActor.Value)).Success);
+        else Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        var request = StorageTests.Fixture("save-first");
+        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
+            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        var paused = new PausedWrites(provider.Content);
+        var result = await new CellBridgeDocumentService(new(provider.State, paused)).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
+        Assert.Equal("FileAlreadyLockedOnServer", result.LockError);
+        Assert.False(paused.Entered.Task.IsCompleted);
+        Assert.Equal(state.ContentVersion, result.State.ContentVersion);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReceiptReplayRechecksAuthorityAfterResponseContentRead(bool delete)
+    {
+        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/receipt-race.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var request = StorageTests.Fixture("save-first");
+        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
+            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        var accepted = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
+        var paused = new PausedReceiptRead(provider.Content, accepted.State.Receipts[0].Response!);
+        var replay = new CellBridgeDocumentService(new(provider.State, paused)).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value).AsTask();
+        await paused.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (delete) Assert.True(await ((IDocumentLifecycleStore)provider.State).TryDeleteAsync(state.ResourceId, 1, accepted.State.StateVersion));
+        else await provider.State.TransitionAsync(state.ResourceId, (c, now) => new StateTransition<bool>(
+            DocumentPermissionUpdates.Apply(c, now, c.Security with { Owner = "different" }), true));
+        paused.Continue.SetResult();
+        if (delete) await Assert.ThrowsAsync<KeyNotFoundException>(() => replay);
+        else
+        {
+            var result = await replay;
+            Assert.True(Assert.Single(result.Response.SubResponses).Status);
+            Assert.Empty(result.AcceptedSaves);
+        }
+    }
+
+    private sealed class PausedReceiptRead(IContentStore inner, ContentHandle receipt) : IContentStore
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool Durable => inner.Durable;
+        public bool Shared => inner.Shared;
+        public ValueTask<ContentHandle> WriteAsync(Stream source, CancellationToken cancellationToken = default) => inner.WriteAsync(source, cancellationToken);
+        public async ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default)
+        {
+            if (handle == receipt) { Entered.SetResult(); await Continue.Task.WaitAsync(cancellationToken); }
+            return await inner.OpenReadAsync(handle, cancellationToken);
+        }
+    }
+
     private static Task<string?> ApplyFss(StorageProvider provider, Guid id, string operation) => Apply(provider, id, new()
     {
         Type = SubRequestType.ExclusiveLock,

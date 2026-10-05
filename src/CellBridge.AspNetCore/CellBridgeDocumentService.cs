@@ -284,6 +284,17 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         string digest;
         try { digest = Digest(put, package); }
         catch (InvalidDataException ex) { return await FailedAsync(id, operation.RequestId, CellErrorCode.InvalidObject, ex.Message, cancellationToken); }
+        var preparation = await provider.State.TransitionAsync(id, (current, now) =>
+        {
+            if (current.Receipts.Any(r => r.OperationKey == key))
+                return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, current.Coordination, null));
+            var metadata = StoredDocument.RestoreMetadata(current, now);
+            var coordinator = FssHttpLockCoordinator.Restore(metadata, current.Coordination, now, actor.Identity);
+            coordinator.ExecuteCellWrite(attributes, () => true, out _, out var error, now);
+            return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, coordinator.Capture(), error));
+        }, cancellationToken);
+        initial = preparation.State;
+        if (preparation.Error is not null) return new(new FsshttpbResponse(), initial, preparation.Error);
         for (int attempt = 0; attempt < 4; attempt++)
         {
             var before = await CurrentAsync(id, cancellationToken);
@@ -356,6 +367,8 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                     var coordinator = FssHttpLockCoordinator.Restore(metadata, current.Coordination, now, actor.Identity);
                     if (!coordinator.ExecuteCellWrite(attributes, () => true, out _, out var error, now))
                         return new StateTransition<PublishResult>(null, new(current, null, error, false));
+                    if (CoordinationFencing.Capture(preparation.Authority, coordinator.Capture()).Generation != preparation.Authority.Generation)
+                        return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
                     var currentMetadata = current.Partitions.Single(x => x.Kind == 1);
                     var state = metadata.CaptureCoordination(current, coordinator.Capture()) with
                     {
@@ -448,6 +461,14 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         {
             throw new StorageCorruptionException("The saved response receipt contains malformed binary data.", ex);
         }
+        var expectedContent = state.Content;
+        state = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+            new StateTransition<DocumentState>(null, current), cancellationToken);
+        if (!Access(actor, state).HasFlag(DocumentAccess.Write) || receipt.OwnerSubject != actor.Identity.Subject)
+            return Wrap(CellBridgeAuthorization.Denied(new(RequestTypes.PutChanges) { RequestId = requestId }), state);
+        if (state.LifecycleGeneration != generation || state.ContentVersion != receipt.ContentVersion || state.Content != expectedContent ||
+            state.Receipts.FirstOrDefault(r => r.OperationKey == receipt.OperationKey) != receipt)
+            return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted revision changed during receipt loading."), state);
         response.SubResponses[0].RequestId = requestId;
         return new(response, state)
         {
