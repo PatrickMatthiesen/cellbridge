@@ -16,10 +16,15 @@ on:
       - 'tools/CellBridge.Admin/**'
       - 'tools/CellBridge.Storage.*/**'
       - 'tools/verify_packages.py'
+      - 'tools/package_manifest.py'
+      - 'tools/check_release.py'
+      - 'tools/publish_packages.py'
       - 'tools/OfficeInspectors.Dump/**'
       - 'examples/**'
+      - 'docs/package-readme.md'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
+      - '.github/workflows/publish-nuget.yml'
   push:
     branches: [main]
     paths:
@@ -37,10 +42,15 @@ on:
       - 'tools/CellBridge.Admin/**'
       - 'tools/CellBridge.Storage.*/**'
       - 'tools/verify_packages.py'
+      - 'tools/package_manifest.py'
+      - 'tools/check_release.py'
+      - 'tools/publish_packages.py'
       - 'tools/OfficeInspectors.Dump/**'
       - 'examples/**'
+      - 'docs/package-readme.md'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
+      - '.github/workflows/publish-nuget.yml'
 permissions:
   contents: read
 jobs:
@@ -57,6 +67,14 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/verify_packages.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cellbridge-beta-packages
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg
+            artifacts/packages/manifest.json
+          if-no-files-found: error
   storage:
     runs-on: ubuntu-latest
     services:

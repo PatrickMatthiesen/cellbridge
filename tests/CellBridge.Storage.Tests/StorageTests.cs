@@ -116,6 +116,10 @@ public class StorageTests
         var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(saved.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(state.ContentVersion + 1, (await inner.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
+        var receipt = Assert.Single(saved.AcceptedSaves);
+        Assert.True(receipt.IsReplay);
+        Assert.Equal(saved.State.Content, receipt.Content);
+        Assert.Equal(saved.State.ContentVersion, receipt.ContentVersion);
     }
 
     [Fact]

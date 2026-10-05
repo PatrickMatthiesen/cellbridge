@@ -7,6 +7,8 @@ namespace CellBridge.AspNetCore;
 
 public sealed record CellBridgeActor(SubjectIdentity Identity, bool CanCreate = false)
 {
+    /// <summary>Optional trusted-host ceiling for this request, restricted to one resource.</summary>
+    public DocumentAccessLimit? AccessLimit { get; init; }
     public const string SubjectClaim = "cellbridge:subject";
     public const string CreateClaim = "cellbridge:create";
     public const string DisplayNameClaim = "cellbridge:display-name";
@@ -18,6 +20,22 @@ public sealed record CellBridgeActor(SubjectIdentity Identity, bool CanCreate = 
         var login = identity!.Name ?? subject;
         return new(new(subject, login, identity.FindFirst(DisplayNameClaim)?.Value ?? login),
             identity.HasClaim(CreateClaim, "true"));
+    }
+}
+
+/// <summary>Immutable request permission ceiling. It restricts, rather than replaces, the access evaluator.</summary>
+public sealed class DocumentAccessLimit
+{
+    public Guid ResourceId { get; }
+    public DocumentAccess Access { get; }
+
+    public DocumentAccessLimit(Guid resourceId, DocumentAccess access)
+    {
+        if (resourceId == Guid.Empty) throw new ArgumentException("A resource identifier is required.", nameof(resourceId));
+        if ((access & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0)
+            throw new ArgumentOutOfRangeException(nameof(access));
+        ResourceId = resourceId;
+        Access = access.HasFlag(DocumentAccess.Write) ? access | DocumentAccess.Read : access;
     }
 }
 

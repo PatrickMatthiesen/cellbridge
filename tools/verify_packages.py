@@ -1,22 +1,35 @@
-"""Pack libraries, build the example and run tests using package references only."""
+"""Pack an exact library set and validate consumers using an isolated package feed."""
+import json
 import pathlib
-import subprocess
+from package_manifest import PROJECTS, build_manifest
 import shutil
+import subprocess
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 root = pathlib.Path(__file__).resolve().parents[1]
 output = root / "artifacts" / "packages"
-output.mkdir(parents=True, exist_ok=True)
-projects = ["FssHttpB", "Storage.Abstractions", "Storage", "FssHttp", "Storage.InMemory",
-            "Storage.PostgreSql", "Storage.FileSystem", "Storage.Conformance", "AspNetCore"]
-for name in projects:
+# Only this script-owned, ignored output is cleared; stale packages cannot mask a missing build.
+shutil.rmtree(output, ignore_errors=True)
+output.mkdir(parents=True)
+version = ET.parse(root / "Directory.Build.props").findtext(".//Version")
+if not version or "-beta." not in version:
+    raise RuntimeError("Package verification expects an explicit beta version.")
+source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+source_status = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)
+for name in PROJECTS:
     subprocess.run(["dotnet", "pack", str(root / "src" / ("CellBridge." + name)),
                     "-c", "Release", "-o", str(output), "--nologo", "--verbosity", "quiet"], check=True)
+if source_commit != subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip() or \
+        source_status != subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True):
+    raise RuntimeError("Source changed while packing; rebuild from an unchanged checkout.")
+manifest = build_manifest(output, version, source_commit, bool(source_status.strip()))
+(output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 consumer = root / "examples" / "NuGetConsumer" / "NuGetConsumer.csproj"
 tests = root / "tests" / "CellBridge.Packages.Tests" / "CellBridge.Packages.Tests.csproj"
 config = output / "NuGet.Config"
-shutil.rmtree(output / "consumer-cache", ignore_errors=True)
 config.write_text(f'''<configuration>
-  <packageSources><clear/><add key="local" value="{output}"/><add key="nuget" value="https://api.nuget.org/v3/index.json"/></packageSources>
+  <packageSources><clear/><add key="local" value="{escape(str(output), {'"': '&quot;'})}"/><add key="nuget" value="https://api.nuget.org/v3/index.json"/></packageSources>
   <packageSourceMapping><clear/><packageSource key="local"><package pattern="CellBridge.*"/></packageSource><packageSource key="nuget"><package pattern="*"/></packageSource></packageSourceMapping>
 </configuration>''')
 for project in (consumer, tests):
@@ -25,3 +38,4 @@ for project in (consumer, tests):
 subprocess.run(["dotnet", "build", str(consumer), "-c", "Release", "--no-restore", "--nologo"], check=True)
 subprocess.run(["dotnet", "test", str(tests), "-c", "Release", "--no-restore", "--nologo",
                 "--logger", "trx", "--results-directory", str(output / "test-results")], check=True)
+print(f"Verified {len(PROJECTS)} packages at {version}; manifest: {output / 'manifest.json'}")

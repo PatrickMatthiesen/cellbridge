@@ -30,7 +30,7 @@ recorded in [automated testing](automated-testing.md) and
 ## Outer operation inventory
 
 The [outer type enumeration][Otypes] lists fourteen operations. Dispatch is in
-[CellBridgeEndpoints](../src/CellBridge.AspNetCore/CellBridgeEndpoints.cs).
+[CellBridgeRequestProcessor](../src/CellBridge.AspNetCore/CellBridgeRequestProcessor.cs).
 This table inventories all fourteen; each operation's attribute/error audit is a
 separate completion gate.
 

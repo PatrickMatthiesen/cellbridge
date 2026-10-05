@@ -114,6 +114,9 @@ contract and the Office sign-in exchange.
 `CellBridgeDocumentService.CreateAsync` takes an authenticated actor with
 creation permission, sets ownership/authorship and returns null on a conflicting
 path or identity. `ImportAsync` takes an explicit owner and importer.
+The GUID-first overloads preserve a host's stable resource identity. See
+[embedding in another host](package-integration.md) for the parsed-SOAP processor,
+request permission limits and accepted-save receipts.
 `ResolveAsync` gives supplied ResourceIDs precedence; `ExecuteAsync` handles
 supported binary operations. The sample's catalog, Office file generation and
 Aspire setup live outside these packages.
