@@ -33,7 +33,13 @@ public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseSta
     public static CoordinationState Empty { get; } = new(null, [], null, 0);
 }
 public sealed record SaveReceipt(string OperationKey, string Digest, uint ContentVersion,
-    ContentHandle? Response, string? OwnerSubject = null);
+    ContentHandle? Response, string? OwnerSubject = null)
+{
+    /// <summary>Legacy receipts default to the file partition and its content-version semantics.</summary>
+    public int PartitionKind { get; init; }
+    public ExtendedId? AcceptedStorageIndex { get; init; }
+    public long LifecycleGeneration { get; init; } = 1;
+}
 
 /// <summary>An immutable publication. Access is always evaluated against the current document.</summary>
 public sealed record DocumentRevision(Guid ResourceId, long LifecycleGeneration, ulong RevisionNumber,
