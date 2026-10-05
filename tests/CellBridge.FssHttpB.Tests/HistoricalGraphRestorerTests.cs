@@ -5,13 +5,18 @@ namespace CellBridge.FssHttpB.Tests;
 
 public sealed class HistoricalGraphRestorerTests
 {
-    [Fact]
-    public void EmptyHistoricalIndexPublishesFreshEmptySelectionAndRetainsCurrentObjects()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EmptyHistoricalIndexPublishesFreshEmptySelectionAndRetainsCurrentObjects(bool nullManifest)
     {
         var current = new GraphFixture([1, 2, 3]).Generic();
         var id = new ExGuid(1, Guid.NewGuid());
+        var payload = new BinaryWriterEx();
+        if (nullManifest) GraphFixture.Record(payload, StreamObjectTypeHeaderStart.StorageIndexManifestMapping, b =>
+        { ExGuid.Null.Serialize(b); new SerialNumber(Guid.NewGuid(), 1).Serialize(b); });
         var empty = GenericPartitionGraphSnapshot.Create([
-            new DataElement(DataElementType.StorageIndexDataElementData, id, new(Guid.NewGuid(), 1)) { Data = [] }
+            new DataElement(DataElementType.StorageIndexDataElementData, id, new(Guid.NewGuid(), 1)) { Data = payload.ToArray() }
         ], id);
         var restored = HistoricalGraphRestorer.Rebase(current, empty, Guid.NewGuid(), 9000);
         Assert.NotEqual(id, restored.Graph.StorageIndex);

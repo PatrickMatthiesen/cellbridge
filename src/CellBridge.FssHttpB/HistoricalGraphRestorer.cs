@@ -40,7 +40,8 @@ public static class HistoricalGraphRestorer
         ExGuid NextId() => new(1, Guid.NewGuid());
         var mappings = new List<StorageIndexMapping>();
         var manifest = selectedMappings.SingleOrDefault(m => m.Type == StreamObjectTypeHeaderStart.StorageIndexManifestMapping);
-        if (manifest is not null) mappings.Add(manifest);
+        var selectsManifest = manifest is not null && !manifest.Target.IsNull;
+        if (selectsManifest) mappings.Add(manifest!);
         foreach (var cell in selected.Cells)
         {
             var revision = NextId();
@@ -63,7 +64,7 @@ public static class HistoricalGraphRestorer
         }
         // An empty index selects no graph. Retained elements remain immutable,
         // but selecting old revision mappings would fabricate a nonempty graph.
-        if (manifest is not null) mappings.AddRange(revisions.Values);
+        if (selectsManifest) mappings.AddRange(revisions.Values);
         var payload = new BinaryWriterEx();
         foreach (var mapping in mappings)
         {
