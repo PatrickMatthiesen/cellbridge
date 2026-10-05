@@ -42,6 +42,11 @@ its own identities and serials. File-partition PutChanges applies graph changes
 and validates coherency before publication. Unsupported upload modes return
 explicit protocol errors.
 
+Request-wide schema-1 hashing is implemented for selected complete inline query
+groups. The [hashing guide](protocol-hashing.md) records MS-PCCRC encoding,
+object ordering, excluded-data forms, full-data fallbacks and evidence limits.
+`ReturnFileHash` retains the distinct SP2010/2013 ignore decision.
+
 See [protocol support and compatibility](interoperability.md) for implemented
 operations and tested clients.
 

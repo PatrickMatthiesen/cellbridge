@@ -21,7 +21,7 @@ public sealed record CellExecution(FsshttpbResponse Response, DocumentState Stat
 
 /// <summary>Prepares file revisions outside coordination transactions and publishes them durably.</summary>
 public sealed partial class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null,
-    ICellBridgeAuthorizationPolicy? authorizationPolicy = null)
+    ICellBridgeAuthorizationPolicy? authorizationPolicy = null, ProtocolHashingOptions? hashing = null)
 {
     private readonly ICellBridgeAccessEvaluator? _access = accessEvaluator;
     private readonly ICellBridgeAuthorizationPolicy _policy = authorizationPolicy ?? new StoredGrantAuthorizationPolicy();
@@ -116,7 +116,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         var response = new FsshttpbResponse();
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
         var state = await CurrentAsync(id, cancellationToken);
-        if (request.SubRequests.Count == 0)
+        if (request.SubRequests.Count == 0 || !request.HasValidEnvelope)
         {
             var emptyDocument = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
             return new(CellBinaryRequestExecutor.Execute(emptyDocument, emptyDocument.GetPartition(kind), request, Access(actor, state)), state);
@@ -125,7 +125,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         {
             // Each operation has its own publication boundary. Queries keep
             // their own knowledge/constraints and share a union of immutable payloads.
-            var queries = new QueryChangesResponseAssembler(response, provider.Limits.MaxGraphBytes);
+            var queries = new QueryChangesResponseAssembler(response, provider.Limits.MaxGraphBytes, request.HashOptions, hashing);
             foreach (var operation in request.SubRequests)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -174,13 +174,13 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 if (selectedKind == DocumentPartitionKind.FileContents && operation.RequestType == RequestTypes.QueryChanges)
                 {
                     var query = await FileQueryAsync(state, operation, cancellationToken);
-                    queries.Append(query);
+                    queries.Append(query, operation.Data as QueryChangesSubRequestData);
                     continue;
                 }
                 if (selectedKind == DocumentPartitionKind.Metadata && operation.RequestType == RequestTypes.QueryChanges &&
                     state.Partitions.Single(p => p.Kind == 1).StorageIndex is not null)
                 {
-                    queries.Append(await MetadataQueryAsync(state, operation, cancellationToken));
+                    queries.Append(await MetadataQueryAsync(state, operation, cancellationToken), operation.Data as QueryChangesSubRequestData);
                     continue;
                 }
                 var observedNow = DateTime.UtcNow;
@@ -201,7 +201,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 var result = CellBinaryRequestExecutor.Execute(document, partition, single, access,
                     maxResponseBytes: provider.Limits.MaxGraphBytes,
                     partitionEditorsQueryChanges: (p, requestId) => EditorsQuery(document, p, requestId, state));
-                if (operation.RequestType == RequestTypes.QueryChanges) queries.Append(result);
+                if (operation.RequestType == RequestTypes.QueryChanges) queries.Append(result, operation.Data as QueryChangesSubRequestData);
                 else response.SubResponses.AddRange(result.SubResponses);
             }
             // MS-FSSHTTP GetFileProps describes the updated version after the Cell

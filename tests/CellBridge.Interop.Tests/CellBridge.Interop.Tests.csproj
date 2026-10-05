@@ -33,6 +33,7 @@
     <None Include="../../testdata/sharepoint/fixtures/save_reopen/*.json" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="QueryAccessTests.cs" />
     <Compile Include="QueryChangesTests.cs" />
+    <Compile Include="NegotiatedHashInteropTests.cs" />
     <Compile Include="PartitionResponseTests.cs" />
     <Compile Include="GuidAllocationInteropTests.cs" />
     <Compile Include="GraphUploadInteropTests.cs" />

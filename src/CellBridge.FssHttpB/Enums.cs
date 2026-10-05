@@ -141,6 +141,9 @@ public enum StreamObjectTypeHeaderStart
     /// <summary>Object group object BLOB data declaration.</summary>
     ObjectGroupObjectBLOBDataDeclaration = 0x05,
 
+    /// <summary>Object data size and references with cache bytes excluded.</summary>
+    ObjectGroupObjectExcludedData = 0x03,
+
     /// <summary>Data element hash.</summary>
     DataElementHash = 0x06,
 
