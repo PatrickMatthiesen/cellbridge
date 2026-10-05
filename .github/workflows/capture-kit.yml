@@ -18,6 +18,7 @@ on:
       - 'tools/verify_packages.py'
       - 'tools/OfficeInspectors.Dump/**'
       - 'examples/**'
+      - 'docs/package-readme.md'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
   push:
@@ -39,6 +40,7 @@ on:
       - 'tools/verify_packages.py'
       - 'tools/OfficeInspectors.Dump/**'
       - 'examples/**'
+      - 'docs/package-readme.md'
       - 'CellBridge.slnx'
       - '.github/workflows/capture-kit.yml'
 permissions:
@@ -57,6 +59,14 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/verify_packages.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cellbridge-beta-packages
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg
+            artifacts/packages/manifest.json
+          if-no-files-found: error
   storage:
     runs-on: ubuntu-latest
     services:

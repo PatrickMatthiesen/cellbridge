@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
+using CellBridge.FssHttp;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.Conformance;
 using CellBridge.Storage.InMemory;
@@ -75,7 +76,9 @@ public sealed class PackageConsumerTests
 
         var documents = app.Services.GetRequiredService<CellBridgeDocumentService>();
         byte[] bytes = [1, 2, 3, 4];
-        var document = await documents.CreateAsync("/shared/example.bin", bytes, TestActor.Value);
+        var id = Guid.NewGuid();
+        var document = await documents.CreateAsync(id, "/shared/example.bin", bytes, TestActor.Value);
+        Assert.Equal(id, document!.ResourceId);
         Assert.NotNull(document);
 
         using var client = app.GetTestClient();
@@ -94,7 +97,19 @@ public sealed class PackageConsumerTests
         using var request = new StringContent(CreateQueryAccessRequest(), Encoding.UTF8, "text/xml");
         using var response = await client.PostAsync("/_vti_bin/cellstorage.svc", request);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("ErrorCode=\"Success\"", await response.Content.ReadAsStringAsync());
+        var wire = await response.Content.ReadAsStringAsync();
+        Assert.Contains("ErrorCode=\"Success\"", wire);
+        var parsed = CellStorageRequestParser.Parse(CreateQueryAccessRequest());
+        var processor = app.Services.GetRequiredService<CellBridgeRequestProcessor>();
+        var direct = await processor.ExecuteAsync(parsed, "http://localhost", TestActor.Value);
+        Assert.Equal(direct.Response.ToSoapEnvelope(), wire);
+        Assert.Empty(direct.AcceptedSaves);
+        var readOnly = await processor.ExecuteAsync(parsed, "http://localhost", TestActor.Value with
+            { AccessLimit = new(id, DocumentAccess.Read) });
+        var binary = FsshttpbResponse.Deserialize(new BinaryReaderEx(readOnly.Response.Responses[0].SubResponses[0].SubResponseDataBase64!));
+        Assert.Null(Assert.IsType<QueryAccessSubResponseData>(binary.SubResponses[0].Data).ReadAccessError);
+        Assert.Equal(CellBridgeAuthorization.AccessDeniedHResult,
+            Assert.IsType<QueryAccessSubResponseData>(binary.SubResponses[0].Data).WriteAccessError!.ErrorCode);
 
         await app.StopAsync();
     }

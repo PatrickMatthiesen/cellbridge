@@ -6,9 +6,9 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="CellBridge.AspNetCore" Version="0.1.0" />
-    <PackageReference Include="CellBridge.Storage.InMemory" Version="0.1.0" />
-    <PackageReference Include="CellBridge.Storage.Conformance" Version="0.1.0" />
+    <PackageReference Include="CellBridge.AspNetCore" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Storage.InMemory" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Storage.Conformance" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />

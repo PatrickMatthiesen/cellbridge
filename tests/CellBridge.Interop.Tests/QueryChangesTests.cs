@@ -36,7 +36,14 @@ public sealed class LiveQueryChangesTests
     public async Task MixedPartitionQueriesAndIndependentKnowledgePassMicrosoftMtomClient()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
-        using var http = LiveInteropHttp.Create();
+        using var http = LiveInteropHttp.Create(endpoint);
+        // Captured Word replay joins editors on /shared/test.docx concurrently.
+        // Independent-knowledge assertions need a document that other tests do not mutate.
+        var name = "mixed-queries-" + Guid.NewGuid().ToString("N");
+        using var created = await System.Net.Http.Json.HttpClientJsonExtensions.PostAsJsonAsync(http,
+            "/api/documents", new { name, type = "docx" });
+        created.EnsureSuccessStatusCode();
+        var path = "/shared/" + name + ".docx";
         var client = new CellStorageClient(http, endpoint);
         Guid metadata = new("383ADC0B-E66E-4438-95E6-E39EF9720122");
         Guid editors = new("7808F4DD-2385-49D6-B7CE-37ACA5E43602");
@@ -46,7 +53,7 @@ public sealed class LiveQueryChangesTests
         foreach (var (id, target) in new[] { (2UL, metadata), (3UL, editors), (4UL, metadata), (5UL, editors) })
             request.SubRequests.Add(new QueryChangesCellSubRequest(id)
             { IsPartitionIDGUIDUsed = true, PartitionIdGUID = target, IncludeStorageManifest = 1, IncludeCellChanges = 1 });
-        var call = await client.SendCellAsync("/shared/test.docx", request, metadata);
+        var call = await client.SendCellAsync(path, request, metadata);
         Assert.Equal(System.Net.HttpStatusCode.OK, call.StatusCode);
         var parsed = call.ParseBinaryResponse();
         Assert.Equal(5, parsed.CellSubResponses.Count);
@@ -63,7 +70,7 @@ public sealed class LiveQueryChangesTests
             { IsPartitionIDGUIDUsed = true, PartitionIdGUID = i == 1 ? metadata : editors,
                 IncludeStorageManifest = 1, IncludeCellChanges = 1,
                 Knowledge = parsed.CellSubResponses[i].GetSubResponseData<QueryChangesSubResponseData>().Knowledge });
-        var knownCall = await client.SendCellAsync("/shared/test.docx", knownRequest, Guid.Empty);
+        var knownCall = await client.SendCellAsync(path, knownRequest, Guid.Empty);
         Assert.Equal(System.Net.HttpStatusCode.OK, knownCall.StatusCode);
         var known = knownCall.ParseBinaryResponse();
         Assert.All(known.CellSubResponses, s => Assert.False(s.Status));

@@ -81,7 +81,11 @@ Follow the [hosting guide](docs/storage-providers.md#consume-the-packages) for
 provider setup and the [authentication guide](docs/authentication.md#reusable-hosts)
 for identity mapping. The [package consumer](examples/NuGetConsumer/README.md)
 provides a complete example with bearer authentication and in-memory storage.
-Packages are built locally; no published NuGet release is assumed.
+The `0.1.0-beta.1` package candidate adds a reusable parsed-SOAP processor,
+host-selected resource GUIDs, request permission limits and accepted-save receipts.
+See [embedding in another host](docs/package-integration.md) and the
+[beta release checklist](docs/beta-release.md). Packages are verified locally;
+publication is a separate release step.
 
 ## Build and test
 

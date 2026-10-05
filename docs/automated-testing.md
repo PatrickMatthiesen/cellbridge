@@ -43,7 +43,11 @@ python3 tools/verify_packages.py
 
 This packs the libraries, builds the [consumer example](../examples/NuGetConsumer/README.md)
 and runs [package tests](../tests/CellBridge.Packages.Tests/README.md) using an
-isolated local feed/cache.
+isolated local feed/cache. Verification clears its own package output, checks
+all nine beta packages and symbol packages, validates embedded readmes, license,
+repository metadata and internal versions, and writes `artifacts/packages/manifest.json`.
+The package tests compare the reusable processor's response with the HTTP endpoint
+and exercise host-selected identities and read-only request limits.
 
 ## AppHost configuration
 
