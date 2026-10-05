@@ -86,7 +86,7 @@ Additional legacy enum values in `Enums.cs` do not establish a current requireme
 | ID | Wire requirement/applicability | Current behavior and evidence | Classification and next acceptance |
 | --- | --- | --- | --- |
 | B01 | QueryAccess, type 1 | Reports read/write permission separately. `QueryAccessTests`, `AuthorizationTests`. | Implemented. |
-| B02 | QueryChanges, type 2 | One query package per response; file knowledge filtering and editors-table payloads. `QueryChangesTests`, `BudgetAndQueryTests`. | Repeated/scoped queries missing #23; metadata incomplete #28. |
+| B02 | QueryChanges, type 2 | Repeated file queries share a deduplicated package with independent knowledge/errors, per-query and aggregate budgets. `RepeatedQueryTests`, Microsoft-decoded `LiveQueryChangesTests`. | File subset implemented #23; repeated metadata/editors and cross-partition routing remain. Metadata incomplete #28. |
 | B03 | PutChanges, type 5 | Graph-aware file save with coherency, content validation, durable publication and receipts. `FilePartitionSaveTests`, `CapturedSaveTests`, `PublicationTests`. | Staging/non-file modes missing #27. |
 | B04 | AllocateExtendedGuidRange, type 11 | Typed request/response codecs; fresh UUID namespace and exact count for 1..100000, with exclusive upper bound in 1000..100000. Requires write access; does not mutate content/state. `GuidAllocationTests`, independently decoded `GuidAllocationInteropTests`. [Allocation rules][Ballocate], [response bounds][Ballocresponse]. | Implemented #25; oversized/zero counts are an explicit local rejection policy. UUID namespaces avoid a persisted global counter; uniqueness has normal UUID collision probability. |
 | B05 | Enum-only QueryKnowledge / QueryRawStorage / PutRawStorage / QueryDiagnosticStoreInfo | Explicitly unsupported. Not listed in the current normative four-operation enumeration. | No new required method inferred. Historic-profile applicability still needs audit #18. |
@@ -110,7 +110,7 @@ Code is in `QueryChangesSubRequestData`, `FileQueryResponseBuilder`,
 | Q03 | RoundKnowledgeToWholeCellChanges | Whole cell retransmission when requested and any visible element is unknown. Knowledge tests. | Implemented. |
 | Q04 | ReturnFileHash | Parsed; not emitted. SharePoint 2013 product behavior ignores this control. | Conditional #26; distinguish this profile exception from newer profile expectations. |
 | Q05 | UserContentEquivalentVersionOk / response equivalent-version bit | No equivalence-version model. | Profile/product audit #18; version behavior #7. |
-| Q06 | IncludeStorageManifest / IncludeCellChanges / CellId | File graph and manifest selection; foreign cell/root controls rejected. `CellBinaryRequestExecutorTests`. | Other cells/roots missing #20/#23. |
+| Q06 | IncludeStorageManifest / IncludeCellChanges / CellId | Actual mapped file cells selected from the index/manifest; multi-cell scopes use bounded current dependency closure, per-scope knowledge and waterline zero. `RepeatedQueryTests`, `InheritedFileGraphTests`. | Supported file scope subset #23; filter specialization and reference qualification remain. No invented wire root control. |
 | Q07 | Data constraint | Exact serialized byte budgeting; no continuation when too small. `QueryChangesResponseShaperTests`. | Budget behavior implemented; continuation #24. Length measurement without temporary serialization is performance #33. |
 | Q08 | QueryChangesVersioning | Unsupported rather than treating legacy Waterline as a version token. | Missing selected history capability #7; SharePoint 2013 ignores the extension. |
 | Q09 | All / type / index-reference / cell / custom / ID / hierarchy filters | Parser skips specialization; full response by default; CellBridge returns an error when FailIfUnsupported permits failure. Filtered query tests. | Permitted full fallback; specialization is optional traffic reduction until a target client needs it. #23/#33. |
@@ -143,14 +143,14 @@ acceptance is in `FilePartitionSaveHandler`, not just the deserializer.
 
 [The abstract data model][Badm] defines cell-scoped objects, partitions and inherited
 revisions. A schema adapter decides how opaque bytes become a usable application
-file. The server's existing file adapter remains unchanged.
+file. The file adapter still validates its schema/root and reconstructed package.
 
 | ID | Requirement | Current behavior and evidence | Classification / gate |
 | --- | --- | --- | --- |
-| G01 | Multiple roots, cells and object partitions | New immutable `GenericPartitionGraphSnapshot` preserves scope and ordered roots; byte/object/reference/depth budgets. `GenericPartitionGraphTests`. | Library foundation only #20; provider/host integration and reference fixtures remain. |
-| G02 | Nearest definitions through base revisions | Generic resolver validates all mapped revision chains, including detached history, missing/cyclic bases and revision identity. | Library foundation #21; server publication/query integration remains. |
-| G03 | Opaque objects, BLOB and cell references | Generic resolver preserves opaque bytes and resolves BLOBs by declared identity. Object/cell cycles are allowed and traversal bounded. | Library foundation #22; complete persistence reference closure and server BLOB flow remain. |
-| G04 | File reconstruction | Existing `PartitionGraphSnapshot`/`FilePartitionSaveHandler` preserve ZIP/content validation and graph identity; never largest-BLOB recovery. File/replay tests. | Supported existing file graph; generic-to-file adapter integration belongs to #20. |
+| G01 | Multiple roots, cells and object partitions | Immutable generic graph plus format-2 durable capture/restore; file saves and scoped queries preserve cell/partition identity. `GenericGraphPersistenceTests`, `RepeatedQueryTests`. | File host integration implemented #20; general non-file publication and independent graph reference fixtures remain. |
+| G02 | Nearest definitions through base revisions | Generic resolver supplies inherited file objects with nearest-definition precedence. Missing/cyclic required ancestry fails before publication; legacy self-contained file path retained. `InheritedFileGraphTests`. | File save/reopen and scoped query integration implemented #21; reference qualification remains. |
+| G03 | Opaque objects, BLOB and cell references | Capture/restore retains immutable payload handles, mapping serials and BLOB closure. File publication resolves declared BLOBs by identity; scoped queries follow effective cell references and allow bounded cycles. `GenericGraphPersistenceTests`. | File flow and generic codec implemented #22; non-file publication and reference qualification remain. Automatic pruning stays disabled. |
+| G04 | File reconstruction | `PartitionGraphSnapshot` adapts resolved partition-1 objects through `FilePartitionSaveHandler` with ZIP/content validation and graph identity. Metadata partitions cannot satisfy file references; never largest-BLOB recovery. File/replay tests. | Supported file adapter integration #20; no OneNote adapter implied. |
 | G05 | Hash-prefixed/excluded-data object groups | Not supported by the new opaque parser. | Conditional negotiated hashing #26. |
 | G06 | Application metadata | Existing index placeholder; no complete application metadata graph read/write. | Missing #28. |
 | G07 | Native OneNote synchronization | No qualified discovery/open/edit/sync workflow or server adapter. Synthetic generic graph tests establish no client compatibility. | Missing target #19/#31, depends on graph, query and staging work. |

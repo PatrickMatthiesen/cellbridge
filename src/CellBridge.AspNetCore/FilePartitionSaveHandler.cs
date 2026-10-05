@@ -136,12 +136,12 @@ public static class FilePartitionSaveHandler
         PartitionGraphSnapshot graph, ulong sequence) => new()
     {
         StorageIndexExtendedGuid = graph.StorageIndex,
-        CellKnowledgeCellGuid = partition.ProtocolIdentity.CellId.LongId.Guid,
+        CellKnowledgeCellGuid = graph.FileCell.LongId.Guid,
         CellKnowledgeTo = sequence,
-        WaterlineCellStorageExtendedGuid = partition.ProtocolIdentity.CellId.ShortId,
+        WaterlineCellStorageExtendedGuid = graph.FileCell.ShortId,
         Waterline = sequence,
         KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(graph.ElementMetadata,
-            partition.ProtocolIdentity.CellId.ShortId, sequence,
+            graph.FileCell.ShortId, sequence,
             mappingSerials: graph.MappingSerials.Values.SelectMany(s => s)),
     };
 

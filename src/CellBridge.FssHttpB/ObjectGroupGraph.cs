@@ -234,7 +234,7 @@ public sealed class ObjectGroupDataElement
         return result;
     }
 
-    private static (ObjectGroupPayloadKind Kind, ObjectGroupNode? Node) ParseNode(byte[] content)
+    internal static (ObjectGroupPayloadKind Kind, ObjectGroupNode? Node) ParseNode(byte[] content)
     {
         if (content.Length == 0)
             return (ObjectGroupPayloadKind.Raw, null);
@@ -375,6 +375,18 @@ public sealed class ObjectGroupGraph
     private readonly Dictionary<ExGuid, ObjectGroupObject> _objects = new();
 
     public IReadOnlyDictionary<ExGuid, ObjectGroupObject> Objects => _objects;
+
+    /// <summary>Adapts resolved file-data partitions without treating application metadata as file bytes.</summary>
+    internal static ObjectGroupGraph FromOpaqueObjects(IEnumerable<ObjectGroupObject> objects)
+    {
+        var graph = new ObjectGroupGraph();
+        foreach (var obj in objects.Where(o => o.Declaration.PartitionId == 1))
+        {
+            var (kind, node) = ObjectGroupDataElement.ParseNode(obj.Content);
+            graph.AddObject(obj with { PayloadKind = kind, Node = node });
+        }
+        return graph;
+    }
 
     public static ObjectGroupGraph FromDataElements(IEnumerable<DataElement> elements)
     {

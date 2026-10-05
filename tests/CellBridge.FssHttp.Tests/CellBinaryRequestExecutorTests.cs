@@ -78,7 +78,7 @@ public sealed class CellBinaryRequestExecutorTests
     }
 
     [Fact]
-    public void EmptyRequestFailsAndRepeatedQueryChangesIsExplicitlyRejected()
+    public void EmptyRequestFailsAndRepeatedFileQueriesShareOnePackage()
     {
         var store = new DocumentStore();
         var document = store.Put("/test.docx", [1]);
@@ -95,8 +95,9 @@ public sealed class CellBinaryRequestExecutorTests
 
         Assert.Equal(new ulong[] { 12, 34 }, response.SubResponses.Select(x => x.RequestId));
         Assert.False(response.SubResponses[0].Status);
-        Assert.True(response.SubResponses[1].Status);
-        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, response.SubResponses[1].Error?.ErrorCode);
+        Assert.False(response.SubResponses[1].Status);
+        Assert.Equal(response.DataElementPackage!.DataElements.Count,
+            response.DataElementPackage.DataElements.Select(e => e.DataElementExtendedGuid).Distinct().Count());
     }
 
     [Fact]

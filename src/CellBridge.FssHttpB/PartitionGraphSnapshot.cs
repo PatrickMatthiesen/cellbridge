@@ -12,22 +12,47 @@ public sealed partial class PartitionGraphSnapshot
     private readonly ExGuid? _rootObject;
     private readonly ExGuid? _revision;
     private readonly ExGuid[] _objectGroups;
+    private readonly CellId _cell;
 
     private PartitionGraphSnapshot(
         Dictionary<ExGuid, DataElement> elements,
         ExGuid storageIndex,
         ExGuid? rootObject,
-        ExGuid? revision, IEnumerable<ExGuid> objectGroups)
+        ExGuid? revision, IEnumerable<ExGuid> objectGroups, CellId cell)
     {
         _elements = elements;
         _storageIndex = Clone(storageIndex);
         _rootObject = rootObject is null ? null : Clone(rootObject);
         _revision = revision is null ? null : Clone(revision);
         _objectGroups = objectGroups.Select(Clone).ToArray();
+        _cell = new(Clone(cell.LongId), Clone(cell.ShortId));
     }
 
     /// <summary>The storage-index data-element identifier selected by this snapshot.</summary>
     public ExGuid StorageIndex => Clone(_storageIndex);
+    public CellId FileCell => new(Clone(_cell.LongId), Clone(_cell.ShortId));
+
+    /// <summary>Reads only the selected index and manifest for application file-cell routing.</summary>
+    public static ExGuid ReadStorageManifestId(DataElement index)
+    {
+        if (index.DataElementType != DataElementType.StorageIndexDataElementData)
+            throw new InvalidDataException("Expected a storage index.");
+        return Clone(ParseStorageIndex(index).ManifestMapping?.Guid ??
+            throw new InvalidDataException("Storage index has no storage manifest mapping."));
+    }
+
+    public static IReadOnlyCollection<CellId> ReadFileCells(DataElement index, DataElement manifest)
+    {
+        if (manifest.DataElementType != DataElementType.StorageManifestDataElementData ||
+            !ReadStorageManifestId(index).Equals(manifest.DataElementExtendedGuid))
+            throw new InvalidDataException("Selected index does not map this storage manifest.");
+        var cells = ParseStorageIndex(index).CellMappings.Select(c => c.CellId).ToArray();
+        var file = ParseStorageManifest(manifest).CellId;
+        if (!cells.Contains(file)) throw new InvalidDataException("Selected index does not map its file root cell.");
+        // Put the file root first; remaining cells keep their index order.
+        return new[] { file }.Concat(cells.Where(c => !c.Equals(file)))
+            .Select(c => new CellId(Clone(c.LongId), Clone(c.ShortId))).ToArray();
+    }
 
     /// <summary>The retained data elements, keyed by extended GUID.</summary>
     public IReadOnlyCollection<DataElement> Elements => _elements.Values.Select(Clone).ToArray();
@@ -146,10 +171,18 @@ public sealed partial class PartitionGraphSnapshot
         if (_rootObject is null)
             throw new InvalidDataException("The partition has no revision-manifest root object.");
 
-        // Historical groups remain available for delta saves, but only the
-        // selected revision's groups define the objects of this revision.
-        return ObjectGroupGraph.FromDataElements(
-            _objectGroups.Select(id => _elements[id]));
+        var groups = _objectGroups.Select(id => _elements[id]).ToArray();
+        var objects = groups.SelectMany(e => ObjectGroupDataElement.ParseOpaque(e).Objects).ToArray();
+        var local = objects.Where(o => o.Declaration.PartitionId == 1).Select(o => o.ObjectGuid).ToHashSet();
+        // Self-contained legacy file revisions need not map unused ancestors.
+        // General resolution is required for inherited or BLOB-backed data and
+        // for mixed object partitions, which must never be concatenated as files.
+        bool needsResolution = objects.Any(o => o.Declaration.BlobReference is not null || o.Declaration.PartitionId != 1) ||
+            !local.Contains(_rootObject) || objects.Where(o => o.Declaration.PartitionId == 1)
+                .Any(o => o.ObjectReferences.Any(id => !local.Contains(id)));
+        if (!needsResolution) return ObjectGroupGraph.FromDataElements(groups);
+        var resolved = GenericPartitionGraphSnapshot.Create(_elements.Values, _storageIndex);
+        return ObjectGroupGraph.FromOpaqueObjects(resolved.GetObjects(_cell));
     }
 
     /// <summary>Checks the expected values for the keys updated by a Put Changes request.</summary>
@@ -233,7 +266,7 @@ public sealed partial class PartitionGraphSnapshot
         }
 
         return new PartitionGraphSnapshot(elements, storageIndex,
-            revision.ObjectGuid, currentRevision, revision.ObjectGroups);
+            revision.ObjectGuid, currentRevision, revision.ObjectGroups, manifest.CellId);
     }
 
     private static DataElement RequireElement(

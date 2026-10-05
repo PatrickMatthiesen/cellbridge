@@ -82,9 +82,10 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             var emptyDocument = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
             return new(CellBinaryRequestExecutor.Execute(emptyDocument, emptyDocument.GetPartition(kind), request, Access(actor, state)), state);
         }
-        // Each operation has its own publication boundary. QueryChanges continues
-        // to permit only one returned data package, matching the existing executor.
+        // Each operation has its own publication boundary. File queries keep
+        // their own knowledge/constraints and share a union of immutable payloads.
         bool queried = false;
+        var queries = new QueryChangesResponseAssembler(response, provider.Limits.MaxGraphBytes);
         foreach (var operation in request.SubRequests)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -117,7 +118,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 continue;
             }
             state = await CurrentAsync(id, cancellationToken);
-            if (operation.RequestType == RequestTypes.QueryChanges && queried)
+            if (operation.RequestType == RequestTypes.QueryChanges && queried && kind != DocumentPartitionKind.FileContents)
             {
                 response.SubResponses.Add(Failure(operation.RequestId, CellErrorCode.RequestNotSupported, "Repeated queries are not supported.", operation.RequestType));
                 continue;
@@ -133,8 +134,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             if (kind == DocumentPartitionKind.FileContents && operation.RequestType == RequestTypes.QueryChanges)
             {
                 var query = await FileQueryAsync(state, operation, cancellationToken);
-                response.SubResponses.AddRange(query.SubResponses);
-                response.DataElementPackage = query.DataElementPackage;
+                queries.Append(query);
                 queried = true;
                 continue;
             }
@@ -170,13 +170,28 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         FsshttpbCellSubRequest operation, CancellationToken cancellationToken)
     {
         var partition = state.Partitions.Single(p => p.Kind == 0);
-        var cell = new CellId(StorageIds.Restore(partition.Identity.CellLong), StorageIds.Restore(partition.Identity.CellShort));
         var request = operation.Data as QueryChangesSubRequestData;
-        if (!FileQueryResponseBuilder.Supports(request, cell)) return FileQueryResponseBuilder.Unsupported(operation.RequestId);
         var metadata = partition.Elements.Select(e => new DataElement((DataElementType)e.Type,
             StorageIds.Restore(e.Id), new SerialNumber(e.Serial.Guid, e.Serial.Value))).ToArray();
         _ = ContentStoreReader.UniqueHandles(partition.Elements.Select(e => e.Payload));
         var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var indexId = partition.StorageIndex ?? throw new StorageCorruptionException("Missing file storage index.");
+        var selectedIndex = await ReadElementAsync(indexId);
+        var manifest = await ReadElementAsync(StorageIds.Capture(PartitionGraphSnapshot.ReadStorageManifestId(selectedIndex)));
+        var cells = PartitionGraphSnapshot.ReadFileCells(selectedIndex, manifest);
+        if (!FileQueryResponseBuilder.Supports(request, cells)) return FileQueryResponseBuilder.Unsupported(operation.RequestId);
+        var cell = FileQueryResponseBuilder.IsScoped(request) ? request!.CellId! : cells.First();
+        IReadOnlySet<ExGuid>? scope = null;
+        if (FileQueryResponseBuilder.IsScoped(request) && cells.Count > 1)
+        {
+            try
+            {
+                var graph = await DocumentPartition.RestoreGraphAsync(partition, provider.Content, provider.Limits, cancellationToken);
+                scope = graph.GetRequiredElements(cell).ToHashSet();
+            }
+            catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException)
+            { return FileQueryResponseBuilder.Unsupported(operation.RequestId); }
+        }
         var mappingSerials = new Dictionary<ExGuid, IReadOnlyList<SerialNumber>>();
         foreach (var stored in partition.Elements.Where(e => e.Type == (uint)DataElementType.StorageIndexDataElementData))
         {
@@ -187,7 +202,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         }
         var selection = FileQueryResponseBuilder.Select(metadata,
             StorageIds.Restore(partition.StorageIndex ?? throw new StorageCorruptionException("Missing file storage index.")),
-            cell, partition.Knowledge, request, mappingSerials);
+            cell, partition.Knowledge, request, mappingSerials, scope);
         var elements = new List<DataElement>();
         foreach (var stored in partition.Elements.Where(e => selection.PayloadIds.Contains(StorageIds.Restore(e.Id))))
         {
@@ -196,6 +211,14 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 new SerialNumber(stored.Serial.Guid, stored.Serial.Value)) { Data = bytes });
         }
         return FileQueryResponseBuilder.Build(operation.RequestId, selection, elements, request);
+
+        async ValueTask<DataElement> ReadElementAsync(ExtendedId elementId)
+        {
+            var stored = partition.Elements.SingleOrDefault(e => e.Id == elementId)
+                ?? throw new StorageCorruptionException("Missing selected graph element.");
+            return new DataElement((DataElementType)stored.Type, StorageIds.Restore(stored.Id),
+                new SerialNumber(stored.Serial.Guid, stored.Serial.Value)) { Data = await ReadPayloadAsync(stored.Payload) };
+        }
 
         async ValueTask<byte[]> ReadPayloadAsync(ContentHandle handle)
         {

@@ -23,6 +23,7 @@ public sealed class GenericPartitionGraphSnapshot
     private readonly HashSet<ExGuid> _required = new();
     private readonly List<StorageRootReference> _roots = new();
     private readonly ExGuid _storageIndex;
+    private ExGuid _storageManifest = ExGuid.Null;
     private readonly GenericGraphLimits _limits;
     private readonly ObjectGroupParsingBudget _parsingBudget;
     private int _objectVisits;
@@ -84,8 +85,67 @@ public sealed class GenericPartitionGraphSnapshot
     public IReadOnlyList<StorageRootReference> Roots => _roots.Select(r => new StorageRootReference(Copy(r.Root), Copy(r.Cell))).ToArray();
     public IReadOnlyCollection<CellId> Cells => _cells.Keys.Select(Copy).ToArray();
     public IReadOnlyCollection<DataElement> Elements => _elements.Values.Select(Copy).ToArray();
+    public IReadOnlyDictionary<ExGuid, IReadOnlyList<SerialNumber>> MappingSerials => _elements.Values
+        .Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData)
+        .ToDictionary(e => Copy(e.DataElementExtendedGuid), e => StorageIndexMappingSerials.Read(e.Data ?? []));
+
+    /// <summary>Visits immutable payload streams without exposing the snapshot's buffers.</summary>
+    public async ValueTask VisitElementsAsync(Func<DataElement, Stream, ValueTask> visit)
+    {
+        ArgumentNullException.ThrowIfNull(visit);
+        foreach (var element in _elements.Values)
+        {
+            var metadata = new DataElement(element.DataElementType, Copy(element.DataElementExtendedGuid),
+                new SerialNumber(element.SerialNumber.Guid, element.SerialNumber.Value));
+            using var stream = new MemoryStream(element.Data ?? [], writable: false);
+            await visit(metadata, stream);
+        }
+    }
     /// <summary>Conservative reference closure of all mappings in the selected index.</summary>
     public IReadOnlyCollection<ExGuid> RequiredElements => _required.Select(Copy).ToArray();
+
+    /// <summary>Cell dependency closure, including contextual index/manifest records and referenced cells.</summary>
+    public IReadOnlyCollection<ExGuid> GetRequiredElements(CellId cell)
+    {
+        _ = Cell(cell);
+        var required = new HashSet<ExGuid> { _storageIndex, _storageManifest };
+        var visited = new HashSet<CellId>();
+        var pending = new Queue<CellId>();
+        pending.Enqueue(cell);
+        int visits = 0;
+        while (pending.TryDequeue(out var current))
+        {
+            Visit();
+            if (!visited.Add(current)) continue;
+            if (!_cells.TryGetValue(current, out var info)) throw new InvalidDataException("Unresolved scoped cell reference.");
+            required.Add(_cellMappings[current]);
+            var revision = info.Revision;
+            while (!revision.IsNull)
+            {
+                Visit();
+                var data = _revisions[revision];
+                required.Add(_revisionMappings[revision]);
+                foreach (var group in data.Groups) { Visit(); required.Add(group); }
+                foreach (var obj in data.Objects.Values)
+                {
+                    Visit();
+                    if (obj.Declaration.BlobReference is { } blob) required.Add(blob);
+                }
+                revision = data.BaseRevision;
+            }
+            foreach (var obj in info.Objects.Values)
+            {
+                Visit();
+                foreach (var reference in obj.CellReferences) { Visit(); pending.Enqueue(reference); }
+            }
+        }
+        return required.Select(Copy).ToArray();
+
+        void Visit()
+        {
+            if (++visits > _limits.MaxReferenceVisits) throw new InvalidDataException("Scoped graph traversal budget exceeded.");
+        }
+    }
 
     public ExGuid GetCurrentRevision(CellId cell) => Copy(Cell(cell).Revision);
     public IReadOnlyList<RevisionRootReference> GetRevisionRoots(CellId cell) => Cell(cell).Roots
@@ -138,6 +198,7 @@ public sealed class GenericPartitionGraphSnapshot
             VisitReference();
         }
         if (manifest is null || manifest.IsNull) throw new InvalidDataException("Missing storage manifest mapping.");
+        _storageManifest = Copy(manifest);
         var manifestReader = Reader(Require(manifest, DataElementType.StorageManifestDataElementData));
         var schema = Body(manifestReader, StreamObjectTypeHeaderStart.StorageManifestSchemaGUID);
         SchemaGuid = ExGuid.ReadGuid(schema);
@@ -169,6 +230,7 @@ public sealed class GenericPartitionGraphSnapshot
         var roots = new List<RevisionRootReference>();
         var rootIds = new HashSet<ExGuid>();
         var objects = new Dictionary<ObjectKey, ObjectGroupObject>();
+        var groups = new List<ExGuid>();
         while (reader.Remaining > 0)
         {
             var header = StreamObjectHeaderStart.Parse(reader);
@@ -183,6 +245,7 @@ public sealed class GenericPartitionGraphSnapshot
                     break;
                 case StreamObjectTypeHeaderStart.RevisionManifestObjectGroupReferences:
                     var groupId = ExGuid.Deserialize(body);
+                    groups.Add(groupId);
                     if (!_groups.TryGetValue(groupId, out var group))
                     {
                         group = ObjectGroupDataElement.ParseOpaque(Require(groupId, DataElementType.ObjectGroupDataElementData), _parsingBudget).Objects;
@@ -203,7 +266,7 @@ public sealed class GenericPartitionGraphSnapshot
             Empty(body);
             VisitReference();
         }
-        var result = new RevisionInfo(actual, baseRevision, roots, objects);
+        var result = new RevisionInfo(actual, baseRevision, roots, objects, groups);
         _revisions.Add(id, result);
         return result;
     }
@@ -341,7 +404,7 @@ public sealed class GenericPartitionGraphSnapshot
         new SerialNumber(element.SerialNumber.Guid, element.SerialNumber.Value)) { Data = element.Data?.ToArray() };
     private readonly record struct ObjectKey(uint Value, Guid Guid, ulong Partition);
     private sealed record RevisionInfo(ExGuid Revision, ExGuid BaseRevision, IReadOnlyList<RevisionRootReference> Roots,
-        Dictionary<ObjectKey, ObjectGroupObject> Objects);
+        Dictionary<ObjectKey, ObjectGroupObject> Objects, IReadOnlyList<ExGuid> Groups);
     private sealed record CellInfo(ExGuid Revision, IReadOnlyList<RevisionRootReference> Roots,
         Dictionary<ObjectKey, ObjectGroupObject> Objects);
 }
