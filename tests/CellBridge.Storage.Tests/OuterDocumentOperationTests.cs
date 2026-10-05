@@ -50,6 +50,9 @@ public sealed class OuterDocumentOperationTests
         Assert.Equal(HttpStatusCode.OK, renamedDownload.StatusCode);
         var oldUrl = new Uri((string)results[1].Attribute("url")!);
         Assert.Equal(originalBytes, await client.GetByteArrayAsync(oldUrl.PathAndQuery));
+        var wrongGeneration = oldUrl.PathAndQuery.Replace("/1/1", "/2/1", StringComparison.Ordinal);
+        using var wrong = await client.GetAsync(wrongGeneration);
+        Assert.Equal(HttpStatusCode.NotFound, wrong.StatusCode);
         await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
             { Security = current.Security with { Owner = "revoked" } }, true));
         using var revoked = await client.GetAsync(oldUrl.PathAndQuery);
@@ -80,6 +83,8 @@ public sealed class OuterDocumentOperationTests
             ("VersioningRequestType", "RestoreVersion"), ("Version", "999.0"))).ErrorCode);
         Assert.Equal("InvalidArgument", (await Call(processor, state.ResourceId, SubRequestType.Versioning,
             ("VersioningRequestType", "RestoreVersion"), ("Version", "@1.0"))).ErrorCode);
+        Assert.Equal("VersionNotFound", (await Call(processor, state.ResourceId, SubRequestType.Versioning,
+            ("VersioningRequestType", "RestoreVersion"), ("Version", "1.1"))).ErrorCode);
         Assert.Equal("Success", (await Call(processor, state.ResourceId, SubRequestType.Versioning,
             ("VersioningRequestType", "RestoreVersion"), ("Version", "1.0"))).ErrorCode);
         Assert.Equal(2, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.Revisions.Length);

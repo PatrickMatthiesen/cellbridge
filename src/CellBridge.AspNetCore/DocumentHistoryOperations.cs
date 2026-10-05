@@ -35,13 +35,26 @@ public sealed partial class CellBridgeDocumentService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationKey);
         if (operationKey.Length > 256) throw new ArgumentException("The restore key exceeds 256 characters.", nameof(operationKey));
-        var before = await CurrentAsync(resourceId, cancellationToken);
-        Demand(actor, before, DocumentAccess.Write);
+        var before = await provider.State.TransitionAsync(resourceId, (current, now) =>
+        {
+            Demand(actor, current, DocumentAccess.Write);
+            if (current.RestoreReceipts.Any(r => r.LifecycleGeneration == current.LifecycleGeneration &&
+                r.OwnerSubject == actor.Identity.Subject && r.OperationKey == operationKey))
+                return new StateTransition<DocumentState>(null, current);
+            var document = StoredDocument.RestoreMetadata(current, now);
+            var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, actor.Identity);
+            if (!coordinator.ExecuteCellWrite(lockAttributes ?? ImmutableDictionary<string, string>.Empty,
+                () => true, out _, out var error, now))
+                throw new DocumentOperationLockException(error ?? "FileLockConflict");
+            return new StateTransition<DocumentState>(null, current with
+                { Coordination = CoordinationFencing.Capture(current.Coordination, coordinator.Capture()) });
+        }, cancellationToken);
         string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             string.Create(CultureInfo.InvariantCulture, $"{revisionNumber}:{expectedRevision}"))));
         if (Replay(before) is { } replay) return replay;
         if (RevisionHistory.Latest(before) != expectedRevision) throw new InvalidOperationException("The current revision changed.");
         var selected = FindRevision(before, revisionNumber);
+        await VerifyHistoricalContentAsync(selected.Content, cancellationToken);
         var partitions = ImmutableArray.CreateBuilder<PartitionState>();
         var operationId = Guid.NewGuid();
         foreach (var historical in selected.Partitions)
@@ -83,6 +96,7 @@ public sealed partial class CellBridgeDocumentService
                     throw new InvalidOperationException("The document lifecycle changed.");
                 if (Replay(current) is { } accepted) return new StateTransition<RestoreRevisionResult>(null, accepted);
                 if (RevisionHistory.Latest(current) != expectedRevision ||
+                    current.Content != before.Content || current.ContentVersion != before.ContentVersion ||
                     before.Partitions.Where(p => p.Kind != 2).Any(p =>
                         current.Partitions.Single(x => x.Kind == p.Kind) is var latest &&
                         (latest.StorageIndex != p.StorageIndex || latest.Knowledge != p.Knowledge)))
@@ -92,13 +106,16 @@ public sealed partial class CellBridgeDocumentService
                 if (!coordinator.ExecuteCellWrite(lockAttributes ?? ImmutableDictionary<string, string>.Empty,
                     () => true, out _, out var error, now))
                     throw new DocumentOperationLockException(error ?? "FileLockConflict");
+                var authority = CoordinationFencing.Capture(current.Coordination, coordinator.Capture());
+                if (authority.Generation != before.Coordination.Generation)
+                    throw new DocumentOperationLockException("InvalidCoauthSession");
                 var next = document.CaptureCoordination(current, coordinator.Capture()) with
                 {
                     Content = selected.Content, ContentVersion = checked(current.ContentVersion + 1), ModifiedUtc = now,
                     Security = current.Security with { ModifiedBy = actor.Identity },
                     Partitions = current.Partitions.Select(p => p.Kind == 2 ? p : partitions.Single(x => x.Kind == p.Kind)).ToImmutableArray(),
                     Receipts = current.Receipts.Select(r => r with { Response = null }).ToImmutableArray(),
-                    Coordination = CoordinationFencing.Capture(current.Coordination, coordinator.Capture()),
+                    Coordination = authority,
                 };
                 next = RevisionHistory.Append(current, next, actor.Identity, now);
                 next = ExternalPublication.Append(current, next, operationId, provider.Limits);
@@ -129,6 +146,24 @@ public sealed partial class CellBridgeDocumentService
     private void Demand(CellBridgeActor actor, DocumentState state, DocumentAccess required)
     {
         if (!Access(actor, state).HasFlag(required)) throw new UnauthorizedAccessException("Document access denied.");
+    }
+
+    private async ValueTask VerifyHistoricalContentAsync(ContentHandle handle, CancellationToken cancellationToken)
+    {
+        StorageLimits.Check("historical document bytes", handle.Length, provider.Limits.MaxDocumentBytes);
+        await using var source = await provider.Content.OpenReadAsync(handle, cancellationToken);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[65536];
+        long length = 0;
+        int read;
+        while ((read = await source.ReadAsync(buffer, cancellationToken)) != 0)
+        {
+            length = checked(length + read);
+            if (length > handle.Length) throw new StorageCorruptionException("Historical content exceeds its declared length.");
+            hash.AppendData(buffer, 0, read);
+        }
+        if (length != handle.Length || Convert.ToHexStringLower(hash.GetHashAndReset()) != handle.Sha256)
+            throw new StorageCorruptionException("Historical content failed integrity verification.");
     }
 
     private static DocumentRevision FindRevision(DocumentState state, ulong number) =>

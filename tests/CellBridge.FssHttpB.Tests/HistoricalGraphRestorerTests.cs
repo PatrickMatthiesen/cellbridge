@@ -64,4 +64,16 @@ public sealed class HistoricalGraphRestorerTests
         Assert.Throws<InvalidDataException>(() => HistoricalGraphRestorer.Rebase(original, fixture.Generic(), Guid.NewGuid(), 0));
         Assert.Equal(new byte[] { 1, 2 }, PartitionGraphSnapshot.Create(original.Elements, original.StorageIndex).Materialize());
     }
+
+    [Fact]
+    public void FreshSerialsExceedRetainedMappingWatermark()
+    {
+        var fixture = new GraphFixture([1]); var graph = fixture.Generic();
+        var ns = GraphFixture.Mapping(fixture.Manifest).Guid;
+        var watermark = graph.MappingSerials.Values.SelectMany(s => s).Max(s => s.Value);
+        var result = HistoricalGraphRestorer.Rebase(graph, graph, ns, 0);
+        var fresh = result.Graph.Elements.Where(e => !graph.Elements.Any(old => old.DataElementExtendedGuid.Equals(e.DataElementExtendedGuid)));
+        Assert.All(fresh, e => Assert.True(e.SerialNumber.Value > watermark));
+        Assert.True(result.Knowledge > watermark);
+    }
 }

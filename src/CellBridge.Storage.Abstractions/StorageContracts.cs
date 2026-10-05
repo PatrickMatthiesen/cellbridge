@@ -57,6 +57,7 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
 {
     public const int CurrentFormat = 2;
     /// <summary>Incarnation of a host path. Prepared mutations must retain and revalidate this value.</summary>
+    public long LifecycleGeneration { get; init; } = 1;
     public bool IsDeleted { get; init; }
     public long? DeletedFromStateVersion { get; init; }
     public Guid? ReplacedBy { get; init; }
