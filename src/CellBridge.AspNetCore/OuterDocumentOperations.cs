@@ -139,7 +139,8 @@ public sealed partial class CellBridgeDocumentService
                 throw new DocumentOperationLockException(error ?? "FileLockConflict");
             var path = current.Path[..(current.Path.LastIndexOf('/') + 1)] + newFileName;
             if (path == current.Path) return new StateTransition<DocumentState>(null, current);
-            var next = current with { Path = path, PathKey = StorageIds.PathKey(path) };
+            var next = current with { Path = path, PathKey = StorageIds.PathKey(path),
+                StateVersion = checked(current.StateVersion + 1) };
             return new StateTransition<DocumentState>(next, next);
         }, cancellationToken);
     }

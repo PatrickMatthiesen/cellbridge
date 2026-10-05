@@ -21,6 +21,7 @@ public sealed class FssHttpLockCoordinator
     private readonly Dictionary<string, Lease> _schemaOwners = new(StringComparer.OrdinalIgnoreCase);
     private Lease? _exclusive;
     private long _generation;
+    private HostLease? _hostLock;
     private DateTime? _authoritativeNow;
     private SubjectIdentity? _actor;
 
@@ -29,6 +30,7 @@ public sealed class FssHttpLockCoordinator
         var coordinator = For(document, actor);
         coordinator._schemaLockId = state.SchemaId;
         coordinator._generation = state.Generation;
+        coordinator._hostLock = state.HostLock;
         coordinator._authoritativeNow = now;
         coordinator._schemaOwners.Clear();
         foreach (var owner in state.SchemaOwners)
@@ -51,6 +53,7 @@ public sealed class FssHttpLockCoordinator
             return new(_schemaLockId, _schemaOwners.Values.Select(CaptureLease).ToImmutableArray(),
                 _exclusive is null ? null : CaptureLease(_exclusive), _generation)
             {
+                HostLock = _hostLock,
                 CoauthorClients = _coauthors.Order(StringComparer.Ordinal).ToImmutableArray(),
                 CoauthorTransitionPending = _transitionPending,
             };
@@ -389,6 +392,7 @@ public sealed class FssHttpLockCoordinator
                     return RejectCellWrite(out result, out errorCode, "FileUnauthorizedAccess");
             }
             ExpireLocked(instant);
+            if (_hostLock is not null) return RejectCellWrite(out result, out errorCode, "FileAlreadyLockedOnServer");
             if (_exclusive is not null)
             {
                 if (!HasMatchingLockId(attrs, _exclusive.Id, "ExclusiveLockID"))
@@ -454,6 +458,7 @@ public sealed class FssHttpLockCoordinator
 
     private void ExpireLocked(DateTime now)
     {
+        if (_hostLock is not null && _hostLock.ExpiresUtc <= now) _hostLock = null;
         foreach (var key in _schemaOwners.Where(pair => pair.Value.ExpiresUtc <= now).Select(pair => pair.Key).ToArray())
         {
             _schemaOwners.Remove(key);

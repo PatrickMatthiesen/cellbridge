@@ -20,7 +20,7 @@ public sealed class DependencyTests
               <s:Body><ExecuteCellStorageRequest xmlns="http://schemas.microsoft.com/sharepoint/soap/">
                 <RequestVersion Version="2" MinorVersion="2" />
                 <RequestCollection><Request Url="{url}" RequestToken="1">
-                  <SubRequest Type="Properties" SubRequestToken="1"><SubRequestData /></SubRequest>
+                  <SubRequest Type="FileOperation" SubRequestToken="1"><SubRequestData FileOperation="Delete" /></SubRequest>
                   <SubRequest Type="WhoAmI" SubRequestToken="2" DependsOn="1" DependencyType="OnNotSupported"><SubRequestData /></SubRequest>
                   <SubRequest Type="WhoAmI" SubRequestToken="3" DependsOn="1" DependencyType="OnSuccessOrNotSupported"><SubRequestData /></SubRequest>
                   <SubRequest Type="WhoAmI" SubRequestToken="4" DependsOn="1" DependencyType="OnSuccess"><SubRequestData /></SubRequest>

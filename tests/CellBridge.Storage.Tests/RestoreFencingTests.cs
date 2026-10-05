@@ -10,6 +10,28 @@ namespace CellBridge.Storage.Tests;
 public sealed class RestoreFencingTests
 {
     [Fact]
+    public async Task SharedHostLeaseSurvivesCaptureAndBlocksRestoreAndRename()
+    {
+        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/host-lock.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var lease = new HostLease("host-token", TestActor.Value.Identity.Subject, DateTime.UtcNow.AddMinutes(1));
+        state = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+        {
+            var next = current with { Coordination = current.Coordination with { HostLock = lease } };
+            return new StateTransition<DocumentState>(next, next);
+        });
+        state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var document = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
+        Assert.Equal(lease, FssHttpLockCoordinator.Restore(document, state.Coordination).Capture().HostLock);
+        var denied = await Assert.ThrowsAsync<DocumentOperationLockException>(() => service.RestoreRevisionAsync(
+            state.ResourceId, 1, 1, "host-locked", TestActor.Value).AsTask());
+        Assert.Equal("FileAlreadyLockedOnServer", denied.ErrorCode);
+        await Assert.ThrowsAsync<DocumentOperationLockException>(() => service.RenameDocumentAsync(state.ResourceId,
+            "renamed.docx", TestActor.Value).AsTask());
+        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+    }
+
+    [Fact]
     public async Task LostCommitReplyResolvesExactReceiptAndPinsExternalRevision()
     {
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);

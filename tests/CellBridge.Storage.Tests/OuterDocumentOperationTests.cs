@@ -107,8 +107,9 @@ public sealed class OuterDocumentOperationTests
         await service.CreateAsync(folder + "second.docx", MinimalDocx.Create(), TestActor.Value);
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.RenameDocumentAsync(first.ResourceId, "second.docx", TestActor.Value).AsTask());
         await Assert.ThrowsAsync<ArgumentException>(() => service.RenameDocumentAsync(first.ResourceId, "../other.docx", TestActor.Value).AsTask());
-        await service.RenameDocumentAsync(first.ResourceId, "FIRST.docx", TestActor.Value);
+        var published = await service.RenameDocumentAsync(first.ResourceId, "FIRST.docx", TestActor.Value);
         var renamed = await provider.State.FindByPathKeyAsync(first.PathKey);
+        Assert.Equal(renamed!.StateVersion, published.StateVersion);
         Assert.Equal(first.ResourceId, renamed!.ResourceId);
         Assert.Equal(folder + "FIRST.docx", renamed.Path);
         await service.CreateAsync(folder + "my%20file%20%C3%A6%25.docx", MinimalDocx.Create(), TestActor.Value);
