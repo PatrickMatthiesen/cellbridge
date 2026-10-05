@@ -252,9 +252,11 @@ public sealed class HostAuthorizationTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task RevocationDuringSaveFencesBothRevokedAndRegrantedWriters(bool regrant)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task RevocationDuringSaveFencesBothRevokedAndRegrantedWriters(bool regrant, bool negotiatedSoap)
     {
         var hook = new HookContent(new InMemoryContentStore());
         var (provider, policy, service, state) = await Create(hook);
@@ -269,9 +271,34 @@ public sealed class HostAuthorizationTests
                 Assert.True(await peer.UpdateAuthorizationAsync(state.ResourceId, policy.Binding(2), policy.Binding(3)));
             }
         };
-        var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Save(state), Attributes, Writer);
-        Assert.True(saved.Response.SubResponses.Count == 0 || saved.Response.SubResponses[0].Status);
-        Assert.Empty(saved.AcceptedSaves);
+        if (negotiatedSoap)
+        {
+            var hashingService = new CellBridgeDocumentService(provider, authorizationPolicy: policy,
+                hashing: new ProtocolHashingOptions(new byte[32]));
+            var binary = Save(state);
+            binary.HashOptions = new(IncludeHashes: true);
+            binary.SubRequests.Insert(0, new(RequestTypes.QueryChanges) { RequestId = 99,
+                Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } });
+            var soap = HostIntegrationTests.File(state.ResourceId, SubRequestType.Cell);
+            soap.SubRequests[0].SubRequestDataBinary = binary.ToByteArray();
+            var result = await new CellBridgeRequestProcessor(hashingService).ExecuteAsync(
+                new() { Requests = { soap } }, "https://host.test", Writer);
+            var response = result.Response.Responses[0].SubResponses[0];
+            if (response.SubResponseDataBase64 is { Length: > 0 } payload)
+            {
+                var decoded = FsshttpbResponse.Deserialize(new BinaryReaderEx(payload));
+                Assert.False(decoded.SubResponses[0].Status);
+                Assert.True(decoded.SubResponses[1].Status);
+            }
+            else Assert.Equal("InvalidCoauthSession", response.ErrorCode);
+            Assert.Empty(result.AcceptedSaves);
+        }
+        else
+        {
+            var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Save(state), Attributes, Writer);
+            Assert.True(saved.Response.SubResponses.Count == 0 || saved.Response.SubResponses[0].Status);
+            Assert.Empty(saved.AcceptedSaves);
+        }
         var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
         Assert.Equal(state.Content, current.Content); Assert.Equal(state.ContentVersion, current.ContentVersion);
         Assert.Empty(current.Receipts);

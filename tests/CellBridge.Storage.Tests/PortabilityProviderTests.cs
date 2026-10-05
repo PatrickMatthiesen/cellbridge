@@ -49,6 +49,11 @@ public sealed class PortabilityProviderTests
             var reopened = new StorageProvider(new PostgreSqlStateStore(restoredDb), new PostgreSqlContentStore(restoredDb));
             Assert.Equal(receipt, await portable.ImportAsync(reopened, files.Path("filesystem.zip"), context));
             await new PostgreSqlStateStore(restoredDb).InitializeAsync();
+            await using (var orphan = new MemoryStream([91, 92, 93]))
+                await target.Content.WriteAsync(orphan);
+            var collected = await new StorageMaintenance(restoredDb).CollectOrphansAsync(apply: true, quiescent: true);
+            Assert.True(collected.OrphanObjects > 0);
+            Assert.Equal(receipt, await portable.ImportAsync(reopened, files.Path("filesystem.zip"), context));
             await using var usage = restoredDb.CreateCommand("""
                 SELECT (SELECT stored_bytes FROM cellbridge_usage) =
                     (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
