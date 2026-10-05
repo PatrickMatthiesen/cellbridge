@@ -60,13 +60,13 @@ keys. Recover those separately and verify the same stable subjects before servin
 
 Version 1 supports stored-grants authorization contract 1. External-policy modes,
 unknown context versions and unknown persisted fields fail closed. Arbitrary
-external permission systems cannot be serialized by this workflow. A future
-host-policy binding needs its own supported version and coordinated policy recovery
-point; matching subject names alone is insufficient.
-The parallel host-policy contract uses `DocumentSecurity.AuthorizationPolicy` with
+external permission systems cannot be serialized by this workflow. Supporting
+host-policy recovery requires a coordinated policy recovery point and an explicit
+recovery contract; matching subject names alone is insufficient.
+The host-policy contract uses `DocumentSecurity.AuthorizationPolicy` with
 `DocumentAuthorizationBinding.PolicyDomain`, `ContractVersion` and `Revision`.
-A non-null binding rejects portable recovery, including after that field becomes
-known to the state codec. This workflow does not define another permission schema.
+A non-null binding rejects portable recovery in current and retained snapshots.
+This workflow does not define another permission schema.
 
 For every external delivery binding, including a binding with no queued revisions,
 both context files must contain the same entry:

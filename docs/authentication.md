@@ -236,12 +236,13 @@ document to the configured external domain. Binding removal or foreign-domain
 migration requires a separate trusted migration; this API rejects both.
 Stored-grant operator commands reject bound documents.
 
-Portable state preserves `DocumentSecurity.AuthorizationPolicy` exactly. Export
-only the binding, not arbitrary external policy data, tokens or secrets. Restored
-state requires explicit destination policy-domain equality and the exact trusted
-snapshot. Matching text alone does not establish authority. Unknown/foreign
-bindings stay denied; never clear them to null or grant implicit owner access.
-The host owns restoring its external permission source and explicit migration.
+[Portable recovery version 1](provider-portability.md#authorization-and-external-destinations)
+supports stored grants and rejects any non-null `DocumentSecurity.AuthorizationPolicy`
+in current or retained snapshots. Recovering host-bound documents requires a future
+supported workflow that coordinates the external permission source with the exact
+trusted policy snapshots and destination domain. Matching subject or domain text
+alone does not establish authority. Never clear a binding to null or grant implicit
+owner access to bypass recovery validation.
 
 ### Legacy evaluator
 
