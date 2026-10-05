@@ -42,6 +42,8 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
     ImmutableArray<SaveReceipt> Receipts)
 {
     public const int CurrentFormat = 2;
+    /// <summary>Incarnation of a host path. Prepared mutations must retain and revalidate this value.</summary>
+    public long LifecycleGeneration { get; init; } = 1;
     public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
     public string Etag => $"\"{{{ResourceId.ToString("D").ToUpperInvariant()}}},{ContentVersion}\"";
 }
