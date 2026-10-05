@@ -27,6 +27,7 @@ public sealed class CapturedSaveTests
         var fileUrl = new Uri(endpoint, "/shared/" + Uri.EscapeDataString(name + "." + type)).AbsoluteUri;
         var initial = await Send(Query());
         var index = ((QueryChangesSubResponseData)initial.SubResponses[0].Data!).StorageIndexExtendedGuid;
+        var knownIds = initial.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet();
         byte[]? first = null;
         foreach (var fixtureName in saves)
         {
@@ -44,7 +45,16 @@ public sealed class CapturedSaveTests
             ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex = index;
             var saved = await Send(request);
             Assert.False(saved.SubResponses[0].Status, saved.SubResponses[0].Error?.ErrorMessage);
+            var acknowledgement = Assert.IsType<PutChangesSubResponseData>(saved.SubResponses[0].Data);
+            Assert.True(acknowledgement.PutChangesResponse!.AppliedStorageIndexID.IsNull);
+            var addedIds = request.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid)
+                .Where(id => !knownIds.Contains(id)).Distinct().ToArray();
+            Assert.NotEmpty(addedIds);
+            Assert.Equal(addedIds, acknowledgement.PutChangesResponse.DataElementAdded);
+            var retry = await Send(request);
+            Assert.Equal(saved.ToByteArray(), retry.ToByteArray());
             var reopened = await Send(Query());
+            knownIds = reopened.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet();
             index = ((QueryChangesSubResponseData)reopened.SubResponses[0].Data!).StorageIndexExtendedGuid;
             var graph = PartitionGraphSnapshot.Create(reopened.DataElementPackage!.DataElements, index);
             var downloaded = await http.GetByteArrayAsync(fileUrl);
@@ -76,7 +86,18 @@ public sealed class CapturedSaveTests
             var bytes = Convert.FromBase64String(sub.Elements().Single(x => x.Name.LocalName == "SubResponseData").Value);
             var independent = Microsoft.Protocols.TestSuites.SharedAdapter.FsshttpbResponse.DeserializeResponseFromByteArray(bytes, 0);
             Assert.False(independent.Status);
-            return FsshttpbResponse.Deserialize(new BinaryReaderEx(bytes));
+            var decoded = FsshttpbResponse.Deserialize(new BinaryReaderEx(bytes));
+            if (request.SubRequests[0].Data is PutChangesSubRequestData)
+            {
+                var put = Assert.IsType<Microsoft.Protocols.TestSuites.SharedAdapter.PutChangesSubResponseData>(
+                    Assert.Single(independent.CellSubResponses).SubResponseData);
+                Assert.Equal(0u, put.PutChangesResponse.AppliedStorageIndexID.Type);
+                var added = put.PutChangesResponse.DataElementAdded.Content.Select(id => new ExGuid(id.Value, id.GUID));
+                Assert.Equal(Assert.IsType<PutChangesSubResponseData>(decoded.SubResponses[0].Data)
+                    .PutChangesResponse!.DataElementAdded, added);
+                Assert.NotNull(put.Knowledge);
+            }
+            return decoded;
         }
     }
 

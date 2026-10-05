@@ -71,6 +71,9 @@ public static class FilePartitionSaveHandler
                 limits ??= new StorageLimits();
                 var additions = package.DataElements.Where(e => !existing.ContainsKey(e.DataElementExtendedGuid))
                     .DistinctBy(e => e.DataElementExtendedGuid).ToArray();
+                if (repeat && additions.Length != 0)
+                    return Reject(subRequest.RequestId, CellErrorCode.InvalidObject,
+                        "An accepted storage index cannot introduce new data elements.");
                 StorageLimits.Check("graph elements", existing.Count + (long)additions.Length, limits.MaxGraphElements);
                 StorageLimits.Check("graph bytes", current.PayloadBytes + additions.Sum(e => (long)(e.Data?.Length ?? 0)), limits.MaxGraphBytes);
                 foreach (var element in package.DataElements)
@@ -108,10 +111,14 @@ public static class FilePartitionSaveHandler
                 var knowledge = CreateQueryData(partition, next, sequence);
                 var writer = new BinaryWriterEx();
                 knowledge.SerializeKnowledge(writer);
-                var applied = new PutChangesResponse { AppliedStorageIndexID = next.StorageIndex };
-                if ((put.AdditionalFlagsBits & 0x02) != 0)
-                    applied.DataElementAdded.AddRange(accepted.Where(x => !existing.ContainsKey(x.DataElementExtendedGuid))
-                        .Select(x => x.DataElementExtendedGuid));
+                var applied = new PutChangesResponse
+                {
+                    AppliedStorageIndexID = (put.AdditionalFlagsBits & 0x01) != 0 ? next.StorageIndex : ExGuid.Null,
+                };
+                // SharePoint's captured Word saves return added IDs even with bit B
+                // clear. Report only newly admitted, unique IDs, including for that
+                // profile; accepted also contains retained or duplicated elements.
+                applied.DataElementAdded.AddRange(additions.Select(x => x.DataElementExtendedGuid));
                 var result = new FsshttpbSubResponse
                 {
                     RequestId = subRequest.RequestId,
