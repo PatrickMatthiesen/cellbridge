@@ -46,7 +46,8 @@ records remain available. Restore preserves live security, editors and coordinat
 advances the file content version, appends a new history record and queues external
 delivery when the current document has a durable destination binding.
 An empty historical metadata index publishes a fresh empty index without inventing
-a storage manifest. A present storage manifest must still declare at least one root.
+a storage manifest. [Storage index mappings are optional][index]. A present
+[storage manifest must declare at least one root][storage-manifest].
 
 The commit rechecks access, lifecycle and coordination generation, expected history
 revision and both selected partition generations. Concurrent save/restore operations
@@ -129,6 +130,8 @@ qualification remain open in [#7][history-issue] and [#30][outer-issue]. No OneN
 two-desktop coauthoring compatibility follows from these checks.
 
 [products]: https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/d006ebd9-c3df-4ef5-8be0-1c1db78c6d2c
+[index]: https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/f5724986-bd0f-488d-9b85-7d5f954d8e9a
+[storage-manifest]: https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/a681199b-45f3-4378-b929-fb13e674ac5c
 [history-issue]: https://github.com/PatrickMatthiesen/cellbridge/issues/7
 [outer-issue]: https://github.com/PatrickMatthiesen/cellbridge/issues/30
 
