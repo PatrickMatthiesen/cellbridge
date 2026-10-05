@@ -111,7 +111,8 @@ Reservations cannot recover paths released before this feature was installed.
 Graph element, byte and revision-depth limits still apply. Restore explicitly fails
 for an incomplete graph or unsupported transition from legacy inline metadata to an
 opaque application-metadata graph. It does not recover by guessing BLOBs. Live graph
-pruning, provider export/import and migration tooling remain separate work.
+pruning remains separate work. The [provider recovery tool](provider-portability.md)
+exports/imports retained history and provides an operator restore-version command.
 
 The JSON state codec remains format 2 with additive defaults. New binaries read
 old state and preserve history/lifecycle/publication fields through detached capture.

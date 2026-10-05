@@ -5,14 +5,14 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.InMemory;
 
-public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore
+public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore, IProviderRecoveryStore
 {
     public StorageBudget Budget { get; private set; }
     public InMemoryStateStore(StorageBudget? budget = null) => Budget = budget ?? new StorageBudget();
     public void UseBudget(StorageBudget budget)
     {
         if (ReferenceEquals(Budget, budget)) return;
-        if (!_documents.IsEmpty) throw new InvalidOperationException("Compose storage budgets before creating documents.");
+        if (!_documents.IsEmpty || _recoveryReceipts.Count != 0) throw new InvalidOperationException("Compose storage budgets before creating documents or recovering state.");
         Budget = budget;
     }
     private readonly ConcurrentDictionary<Guid, DocumentState> _documents = new();
@@ -23,23 +23,26 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
     public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(_documents.GetValueOrDefault(id) is { IsDeleted: false } state ? state : null);
+        lock (Budget.SyncRoot) return ValueTask.FromResult(_documents.GetValueOrDefault(id) is { IsDeleted: false } state ? state : null);
     }
     public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        lock (_paths) return ValueTask.FromResult(_paths.TryGetValue(key, out var id) && !_documents[id].IsDeleted ? _documents[id] : null);
+        lock (Budget.SyncRoot) lock (_paths) return ValueTask.FromResult(_paths.TryGetValue(key, out var id) && !_documents[id].IsDeleted ? _documents[id] : null);
     }
     public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
-        IReadOnlyList<DocumentSummary> result = _documents.Values.Where(x => !x.IsDeleted).OrderBy(x => x.PathKey, StringComparer.Ordinal)
-            .Skip(offset).Take(limit).Select(x => new DocumentSummary(x.ResourceId, x.Path, x.Content.Length,
-                x.ContentVersion, x.ModifiedUtc, x.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow))
-                { Security = x.Security }).ToArray();
-        return ValueTask.FromResult(result);
+        lock (Budget.SyncRoot)
+        {
+            IReadOnlyList<DocumentSummary> result = _documents.Values.Where(x => !x.IsDeleted).OrderBy(x => x.PathKey, StringComparer.Ordinal)
+                .Skip(offset).Take(limit).Select(x => new DocumentSummary(x.ResourceId, x.Path, x.Content.Length,
+                    x.ContentVersion, x.ModifiedUtc, x.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow))
+                    { Security = x.Security }).ToArray();
+            return ValueTask.FromResult(result);
+        }
     }
     public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default)
     {
@@ -71,7 +74,9 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
         await gate.WaitAsync(cancellationToken);
         try
         {
-            var current = _documents.GetValueOrDefault(id) is { IsDeleted: false } live ? live : throw new KeyNotFoundException("Document does not exist.");
+            DocumentState current;
+            lock (Budget.SyncRoot)
+                current = _documents.GetValueOrDefault(id) is { IsDeleted: false } live ? live : throw new KeyNotFoundException("Document does not exist.");
             var result = transition(current, DateTime.UtcNow);
             if (result.Next is { } next)
             {
@@ -88,7 +93,7 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
                         if (next.PathKey != current.PathKey && _documents.Values.Any(s => s.ResourceId != id &&
                             (s.PathKey == next.PathKey || s.RetiredPathKeys.Contains(next.PathKey))))
                             throw new InvalidOperationException("The destination filename is reserved.");
-                        Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
+                        AdjustRecoveryTransition(current, next);
                         _paths.Remove(current.PathKey);
                         _paths[next.PathKey] = id;
                         _documents[id] = next;
@@ -102,7 +107,7 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
     public ValueTask<DocumentState?> FindLifecycleAsync(Guid id, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(_documents.GetValueOrDefault(id));
+        lock (Budget.SyncRoot) return ValueTask.FromResult(_documents.GetValueOrDefault(id));
     }
     public async ValueTask<bool> TryDeleteAsync(Guid id, long expectedGeneration, long expectedStateVersion,
         CancellationToken cancellationToken = default)
@@ -118,7 +123,7 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
                 if (current.IsDeleted) return true;
                 next = next with { StateVersion = checked(current.StateVersion + 1) };
                 Budget.Limits.CheckDocument(next);
-                Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(current).LongLength);
+                AdjustRecoveryTransition(current, next);
                 _documents[id] = next;
                 return true;
             }
@@ -145,8 +150,7 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
                 var next = retired with { ReplacedBy = replacement.ResourceId, StateVersion = checked(retired.StateVersion + 1) };
                 Budget.Limits.CheckDocument(replacement);
                 Budget.Limits.CheckDocument(next);
-                Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(replacement).LongLength +
-                    JsonSerializer.SerializeToUtf8Bytes(next).LongLength - JsonSerializer.SerializeToUtf8Bytes(retired).LongLength, 1);
+                AdjustRecoveryTransition(retired, next, replacement);
                 _documents[id] = next;
                 _documents[replacement.ResourceId] = replacement;
                 _paths[retired.PathKey] = replacement.ResourceId;

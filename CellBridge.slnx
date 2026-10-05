@@ -27,5 +27,6 @@
     <Project Path="tools/CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />
     <Project Path="tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj" />
     <Project Path="tools/CellBridge.Storage.ProcessProbe/CellBridge.Storage.ProcessProbe.csproj" />
+    <Project Path="tools/CellBridge.Storage.Portability/CellBridge.Storage.Portability.csproj" />
   </Folder>
 </Solution>
