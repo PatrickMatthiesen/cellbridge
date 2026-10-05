@@ -92,6 +92,9 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         {
                             await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, actor, accepted, cancellationToken);
                         }
+                        else if (OuterDocumentOperations.Handles(subRequest.Type))
+                            await OuterDocumentOperations.ExecuteAsync(service, doc.TransitionId, subRequest, subResponse,
+                                publicOrigin, actor, cancellationToken);
                         else
                             await service.Provider.State.TransitionAsync(doc.TransitionId, (current, now) =>
                             {
@@ -131,6 +134,9 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                     fileResponse.SubResponses.Add(subResponse);
                 }
 
+                if (await service.Provider.State.FindByResourceIdAsync(doc.TransitionId, cancellationToken) is { } latest &&
+                    service.Access(actor, latest).HasFlag(DocumentAccess.Read))
+                    fileResponse.Url = DocumentRequestResolver.CanonicalUrl(StoredDocument.RestoreMetadata(latest, DateTime.UtcNow), publicOrigin);
                 response.Responses.Add(fileResponse);
             }
 

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Xml.Linq;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
+using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.AspNetCore;
 
@@ -16,6 +17,25 @@ namespace CellBridge.AspNetCore;
 /// </summary>
 public static class MetadataVersioningResponseBuilder
 {
+    /// <summary>Lists exactly the resource revisions available through the authorized history route.</summary>
+    public static FssHttpSubResponse BuildGetVersions(DocumentState state, string publicOrigin)
+    {
+        var revisions = RevisionHistory.Initialize(state).Revisions.Reverse().ToArray();
+        var results = new XElement("results", new XElement("versioning", new XAttribute("enabled", state.Revisions.IsEmpty ? "0" : "1")));
+        for (int i = 0; i < revisions.Length; i++)
+        {
+            var revision = revisions[i];
+            results.Add(new XElement("result",
+                new XAttribute("version", (i == 0 ? "@" : "") + OuterDocumentOperations.Version(revision.RevisionNumber)),
+                new XAttribute("url", OuterDocumentOperations.HistoricalUrl(state.ResourceId, revision.LifecycleGeneration, revision.RevisionNumber, publicOrigin)),
+                new XAttribute("created", revision.CreatedUtc.ToString("M/d/yyyy h:mm tt", CultureInfo.InvariantCulture)),
+                new XAttribute("createdRaw", FormatProtocolDate(revision.CreatedUtc)),
+                new XAttribute("createdBy", revision.Author.Login), new XAttribute("createdByName", revision.Author.DisplayName),
+                new XAttribute("size", revision.Content.Length), new XAttribute("comments", "")));
+        }
+        return new() { Type = SubRequestType.GetVersions, ErrorCode = "Success", HResult = "0",
+            SubResponseXml = new XElement("GetVersionsResponse", new XElement("GetVersionsResult", results)).ToString(SaveOptions.DisableFormatting) };
+    }
 
     // These are the values observed repeatedly in the SharePoint capture for
     // Document.docx (20260925T084814Z-session-f088f59e). They describe the

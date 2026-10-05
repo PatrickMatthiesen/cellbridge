@@ -23,6 +23,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
     public StorageProvider Provider => provider;
     public DocumentAccess Access(CellBridgeActor actor, DocumentState state)
     {
+        if (state.IsDeleted) return DocumentAccess.None;
         if (actor.AccessLimit is { } limit && limit.ResourceId != state.ResourceId) return DocumentAccess.None;
         var access = _access.Evaluate(actor, state);
         if (access.HasFlag(DocumentAccess.Write)) access |= DocumentAccess.Read;
@@ -362,7 +363,9 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                                 Knowledge = metadata.EditorsTablePartition.KnowledgeSequence,
                                 InlineContent = metadata.EditorsTablePartition.Content.ToImmutableArray()
                             }
-                            : p.Kind == 1 && candidate.ContentVersion == before.ContentVersion ? current.Partitions.Single(x => x.Kind == 1)
+                            : p.Kind == 1 && (candidate.ContentVersion == before.ContentVersion ||
+                                current.Partitions.Single(x => x.Kind == 1).StorageIndex is not null ||
+                                !current.Partitions.Single(x => x.Kind == 1).Elements.IsEmpty) ? current.Partitions.Single(x => x.Kind == 1)
                             : p.Kind == 1 ? current.Partitions.Single(x => x.Kind == 1) with
                             {
                                 Knowledge = candidate.ContentVersion == before.ContentVersion
@@ -374,7 +377,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                             : p).ToImmutableArray(),
                         Coordination = coordinator.Capture() with { Generation = checked(current.Coordination.Generation + 1) },
                         // Superseded retries need their digest/version, never their response bytes.
-                        Receipts = current.Receipts.Select(r => r.ContentVersion == candidate.ContentVersion
+                        Receipts = current.Receipts.Select(r => r.PartitionKind != 0 || r.ContentVersion == candidate.ContentVersion
                             ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
                     state = state with { Partitions = state.Partitions.Select(p => p.Kind == 1 &&

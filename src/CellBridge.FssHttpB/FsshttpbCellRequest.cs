@@ -499,6 +499,8 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
     public bool IncludeFilteredOutDataElementsInKnowledge { get; set; }
     public bool RoundKnowledgeToWholeCellChanges { get; set; }
     public bool HasUnsupportedQueryControls { get; private set; }
+    /// <summary>The schema-13 SharePoint profile ignores this extension; it never selects a historical revision.</summary>
+    public bool IgnoredQueryChangesVersioning { get; private set; }
     /// <summary>Whether the response should include the storage manifest.</summary>
     public bool IncludeStorageManifest { get; set; }
 
@@ -628,7 +630,9 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
                 }
 
                 case StreamObjectTypeHeaderStart.QueryChangesVersioning:
-                    data.HasUnsupportedQueryControls = true;
+                    // MS-FSSHTTPB product behavior note 17: SharePoint 2010/2013
+                    // ignore this field. This server returns the schema-13 profile.
+                    data.IgnoredQueryChangesVersioning = true;
                     SkipObject(reader, header);
                     break;
 

@@ -43,6 +43,7 @@ public sealed partial class CellBridgeDocumentService
         if (RevisionHistory.Latest(before) != expectedRevision) throw new InvalidOperationException("The current revision changed.");
         var selected = FindRevision(before, revisionNumber);
         var partitions = ImmutableArray.CreateBuilder<PartitionState>();
+        var operationId = Guid.NewGuid();
         foreach (var historical in selected.Partitions)
         {
             var current = before.Partitions.Single(p => p.Kind == historical.Kind);
@@ -97,9 +98,10 @@ public sealed partial class CellBridgeDocumentService
                     Security = current.Security with { ModifiedBy = actor.Identity },
                     Partitions = current.Partitions.Select(p => p.Kind == 2 ? p : partitions.Single(x => x.Kind == p.Kind)).ToImmutableArray(),
                     Receipts = current.Receipts.Select(r => r with { Response = null }).ToImmutableArray(),
-                    Coordination = coordinator.Capture() with { Generation = checked(current.Coordination.Generation + 1) },
+                    Coordination = CoordinationFencing.Capture(current.Coordination, coordinator.Capture()),
                 };
                 next = RevisionHistory.Append(current, next, actor.Identity, now);
+                next = ExternalPublication.Append(current, next, operationId, provider.Limits);
                 next = next with { RestoreReceipts = current.RestoreReceipts.Add(new(current.LifecycleGeneration,
                     actor.Identity.Subject, operationKey, digest, RevisionHistory.Latest(next))) };
                 provider.Limits.CheckDocument(next);
