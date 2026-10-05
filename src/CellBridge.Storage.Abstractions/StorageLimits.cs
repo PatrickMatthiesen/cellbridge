@@ -18,6 +18,7 @@ public sealed record StorageLimits
     public int MaxRetainedStateSnapshots { get; init; } = 64;
     public int MaxHistoryRevisions { get; init; } = 1_000;
     public int MaxRestoreReceipts { get; init; } = 1_000;
+    public int MaxRetiredPathKeys { get; init; } = 128;
 
     public void Validate()
     {
@@ -34,6 +35,7 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxHistoryRevisions);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRestoreReceipts);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetiredPathKeys);
     }
 
     public void CheckDocument(DocumentState state)
@@ -57,6 +59,7 @@ public sealed record StorageLimits
         }
         Check("history revisions", state.Revisions.Length, MaxHistoryRevisions);
         Check("restore receipts", state.RestoreReceipts.Length, MaxRestoreReceipts);
+        Check("retired path keys", state.RetiredPathKeys.Length, MaxRetiredPathKeys);
         long stored = JsonSerializer.SerializeToUtf8Bytes(state).LongLength;
         foreach (var handle in StorageReferences.Handles(state).DistinctBy(h => h.Key))
             stored = checked(stored + handle.Length);

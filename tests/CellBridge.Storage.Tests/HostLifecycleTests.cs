@@ -101,7 +101,102 @@ public sealed class HostLifecycleTests
         Assert.Equal(recreated.StateVersion, (await peer.State.FindByResourceIdAsync(recreated.ResourceId))!.StateVersion);
         Assert.True(await peerLifecycle.TryDeleteAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion));
         Assert.NotNull(await peer.State.FindByResourceIdAsync(recreated.ResourceId));
+        ((CellBridge.FssHttpB.PutChangesSubRequestData)oldRequest.SubRequests[0].Data!).ExpectedStorageIndex =
+            (await StoredDocument.RestoreAsync(recreated, peer.Content)).FilePartition.FileGraph.StorageIndex;
+        var peerService = new CellBridgeDocumentService(peer);
+        var saved = await peerService.ExecuteAsync(recreated.ResourceId, DocumentPartitionKind.FileContents,
+            oldRequest, new Dictionary<string, string>(), TestActor.Value);
+        Assert.False(Assert.Single(saved.Response.SubResponses).Status);
+        Assert.Equal(2, Assert.Single(saved.State.Receipts).LifecycleGeneration);
+        var replay = await peerService.ExecuteAsync(recreated.ResourceId, DocumentPartitionKind.FileContents,
+            oldRequest, new Dictionary<string, string>(), TestActor.Value);
+        Assert.True(Assert.Single(replay.AcceptedSaves).IsReplay);
+        Assert.Equal(2, replay.AcceptedSaves[0].LifecycleGeneration);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => peer.State.TransitionAsync(recreated.ResourceId,
+            (current, _) => new StateTransition<bool>(current with { RetiredPathKeys = ["/FORGED.DOCX"] }, true)).AsTask());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => peer.State.TryCreateAsync(recreated with
+            { ResourceId = Guid.NewGuid(), Path = "/forged.docx", PathKey = "/FORGED.DOCX", RetiredPathKeys = [state.PathKey] }).AsTask());
+        Assert.True(await peerLifecycle.TryDeleteAsync(recreated.ResourceId, 2, replay.State.StateVersion));
+        var secondTombstone = (await peerLifecycle.FindLifecycleAsync(recreated.ResourceId))!;
+        var third = await new DocumentStore().Put(state.Path, MinimalDocx.Create("third")).CaptureAsync(peer.Content);
+        third = third with { LifecycleGeneration = 3, Security = state.Security };
+        Assert.False(await peerLifecycle.TryRecreateAsync(recreated.ResourceId, 2, secondTombstone.StateVersion,
+            third with { RetiredPathKeys = ["/FORGED.DOCX"] }));
+        Assert.True(await peerLifecycle.TryRecreateAsync(recreated.ResourceId, 2, secondTombstone.StateVersion, third));
+        Assert.Equal(third.ResourceId, (await peer.State.FindByPathKeyAsync(state.PathKey))!.ResourceId);
+        Assert.False(await peerLifecycle.TryRecreateAsync(state.ResourceId, 1, tombstone.StateVersion, third with { LifecycleGeneration = 2 }));
+        Assert.Equal(3, (await peer.State.FindByResourceIdAsync(third.ResourceId))!.LifecycleGeneration);
     }
+
+    [PostgreSqlFact]
+    public Task TombstonesKeepRetiredAliasesAndForeignReservationsBlockRecreation() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
+            var service = new CellBridgeDocumentService(provider);
+            var first = (await service.CreateAsync("/renamed.docx", MinimalDocx.Create(), TestActor.Value))!;
+            // Seed a persisted reservation from the separately owned atomic rename capability.
+            await SeedReservation(source, first, "/OLD.DOCX");
+            first = (await provider.State.FindByResourceIdAsync(first.ResourceId))!;
+            Assert.Null(await service.CreateAsync("/old.docx", MinimalDocx.Create(), TestActor.Value));
+            var lifecycle = (IDocumentLifecycleStore)provider.State;
+            Assert.True(await lifecycle.TryDeleteAsync(first.ResourceId, 1, first.StateVersion));
+            Assert.Null(await service.CreateAsync("/old.docx", MinimalDocx.Create(), TestActor.Value));
+            var retired = (await lifecycle.FindLifecycleAsync(first.ResourceId))!;
+            Assert.Equal(first.RetiredPathKeys.ToArray(), retired.RetiredPathKeys.ToArray());
+            var other = (await service.CreateAsync("/other.docx", MinimalDocx.Create(), TestActor.Value))!;
+            await SeedReservation(source, other, first.PathKey);
+            Assert.True(await lifecycle.TryDeleteAsync(other.ResourceId, 1, other.StateVersion));
+            var replacement = await new DocumentStore().Put(first.Path, MinimalDocx.Create()).CaptureAsync(provider.Content);
+            replacement = replacement with { LifecycleGeneration = 2, Security = first.Security };
+            Assert.False(await lifecycle.TryRecreateAsync(first.ResourceId, 1, retired.StateVersion, replacement));
+            Assert.Null(await provider.State.FindByResourceIdAsync(replacement.ResourceId));
+            Assert.Null((await lifecycle.FindLifecycleAsync(first.ResourceId))!.ReplacedBy);
+        });
+
+    private static async Task SeedReservation(NpgsqlDataSource source, DocumentState state, string key)
+    {
+        await using var command = source.CreateCommand("UPDATE cellbridge_states SET state_json=$3 WHERE resource_id=$1 AND state_version=$2");
+        command.Parameters.Add(new NpgsqlParameter { Value = state.ResourceId });
+        command.Parameters.Add(new NpgsqlParameter { Value = state.StateVersion });
+        command.Parameters.Add(new NpgsqlParameter { Value = System.Text.Json.JsonSerializer.Serialize(state with { RetiredPathKeys = [key] }) });
+        Assert.Equal(1, await command.ExecuteNonQueryAsync());
+    }
+
+    [PostgreSqlFact]
+    public Task RecreationWaitsForNamespaceBeforeLockingTheRetiredRow() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
+            var state = (await new CellBridgeDocumentService(provider).CreateAsync("/namespace.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var lifecycle = (IDocumentLifecycleStore)provider.State;
+            Assert.True(await lifecycle.TryDeleteAsync(state.ResourceId, 1, state.StateVersion));
+            var retired = (await lifecycle.FindLifecycleAsync(state.ResourceId))!;
+            var replacement = await new DocumentStore().Put(state.Path, MinimalDocx.Create()).CaptureAsync(provider.Content);
+            replacement = replacement with { LifecycleGeneration = 2, Security = state.Security };
+            await using var guardConnection = await source.OpenConnectionAsync();
+            await using var guardTransaction = await guardConnection.BeginTransactionAsync();
+            await PostgreSqlNamespaceLock.AcquireAsync(guardConnection, guardTransaction);
+            using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var recreate = lifecycle.TryRecreateAsync(state.ResourceId, 1, retired.StateVersion, replacement, cancel.Token).AsTask();
+            var until = DateTime.UtcNow.AddSeconds(5);
+            while (true)
+            {
+                await using var waiting = source.CreateCommand("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=748219352 AND NOT granted)");
+                if ((bool)(await waiting.ExecuteScalarAsync(cancel.Token))!) break;
+                Assert.True(DateTime.UtcNow < until, "Recreation did not wait for the namespace guard.");
+                await Task.Delay(20, cancel.Token);
+            }
+            await using (var connection = await source.OpenConnectionAsync())
+            await using (var transaction = await connection.BeginTransactionAsync())
+            {
+                await using var row = new NpgsqlCommand("SELECT state_version FROM cellbridge_documents WHERE resource_id=$1 FOR UPDATE NOWAIT", connection, transaction);
+                row.Parameters.Add(new NpgsqlParameter { Value = state.ResourceId });
+                Assert.Equal(retired.StateVersion, await row.ExecuteScalarAsync());
+            }
+            await guardTransaction.RollbackAsync();
+            Assert.True(await recreate);
+        });
 
     [Fact]
     public async Task DeleteRacingSaveHasOnlyOneWinner()

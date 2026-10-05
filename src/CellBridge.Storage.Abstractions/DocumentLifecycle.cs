@@ -27,7 +27,7 @@ public static class DocumentLifecycle
         replacement.Path == retired.Path && replacement.PathKey == retired.PathKey &&
         replacement.LifecycleGeneration == checked(generation + 1) && !replacement.IsDeleted &&
         replacement.DeletedFromStateVersion is null && replacement.ReplacedBy is null &&
-        replacement.Editors.IsEmpty && replacement.Receipts.IsEmpty && replacement.Publication is null &&
+        replacement.Editors.IsEmpty && replacement.Receipts.IsEmpty && replacement.RetiredPathKeys.IsEmpty && replacement.Publication is null &&
         replacement.Coordination == CoordinationState.Empty;
 
     public static void ValidateTransition(DocumentState current, DocumentState next)

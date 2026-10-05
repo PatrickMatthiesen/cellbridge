@@ -44,11 +44,13 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
     public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        DocumentPathReservations.ValidateCreate(state);
         lock (Budget.SyncRoot)
         {
             lock (_paths)
             {
-                if (_paths.ContainsKey(state.PathKey) || _documents.ContainsKey(state.ResourceId)) return ValueTask.FromResult(false);
+                if (_paths.ContainsKey(state.PathKey) || _documents.ContainsKey(state.ResourceId) ||
+                    _documents.Values.Any(s => s.RetiredPathKeys.Contains(state.PathKey))) return ValueTask.FromResult(false);
                 var next = state with { StateVersion = 0 };
                 Budget.Limits.CheckDocument(next);
                 Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength, 1);
@@ -70,7 +72,8 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
             if (result.Next is { } next)
             {
                 DocumentLifecycle.ValidateTransition(current, next);
-                next = next with { StateVersion = checked(current.StateVersion + 1) };
+                next = next with { StateVersion = checked(current.StateVersion + 1),
+                    RetiredPathKeys = DocumentPathReservations.Capture(current, next, false) };
                 Budget.Limits.CheckDocument(next);
                 lock (Budget.SyncRoot)
                 {
@@ -122,7 +125,8 @@ public sealed class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycle
                 if (retired.ReplacedBy == replacement.ResourceId && retired.LifecycleGeneration == expectedGeneration &&
                     retired.StateVersion == expectedStateVersion + 1) return true;
                 if (!DocumentLifecycle.CanRecreate(retired, expectedGeneration, expectedStateVersion, replacement) ||
-                    _documents.ContainsKey(replacement.ResourceId) || _paths[retired.PathKey] != id) return false;
+                    _documents.ContainsKey(replacement.ResourceId) || _paths[retired.PathKey] != id ||
+                    _documents.Values.Any(s => s.ResourceId != id && s.RetiredPathKeys.Contains(replacement.PathKey))) return false;
                 replacement = replacement with { StateVersion = 0 };
                 var next = retired with { ReplacedBy = replacement.ResourceId, StateVersion = checked(retired.StateVersion + 1) };
                 Budget.Limits.CheckDocument(replacement);

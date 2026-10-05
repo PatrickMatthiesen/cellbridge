@@ -149,11 +149,19 @@ content. No online graph/content reclamation is introduced.
 Ordinary creation never reuses a retired GUID or path. `TryRecreateAsync` is an
 explicit conditional provider operation. Prepare a clean `DocumentState` with a
 fresh resource GUID, the same canonical path, generation exactly one greater,
-empty coordination/sessions/receipts and no external publication binding. Supply
+empty coordination/sessions/receipts/retired-path reservations and no external publication binding. Supply
 the retired tombstone's expected generation and state version. The provider
 atomically records its `ReplacedBy` GUID and creates the replacement. Retry an
 uncertain outcome with the same proposed replacement GUID. Another proposed
 GUID conflicts. The old GUID remains permanently retired.
+
+Provider-owned `RetiredPathKeys` survive deletion and recreation on the old
+tombstone. Creation cannot claim these aliases, and recreation rejects foreign
+retired aliases. Repeated recreation at the exact canonical path remains valid
+when earlier generations have tombstones at that path. PostgreSQL namespace
+writers acquire the shared transaction advisory guard before path or document
+row locks. Reservation checks read current snapshots after the budget guard.
+The separately owned rename implementation must use that same namespace guard.
 
 The host may map the same opaque external file ID to the new protocol resource.
 The new GUID prevents reuse of old ETags and receipts. SOAP Cell subrequests and
