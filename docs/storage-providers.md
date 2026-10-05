@@ -221,6 +221,24 @@ Database locks cannot protect detached readers or outstanding filesystem writers
 Collection deletes orphan content and releases its charge; it does not prune
 the live graph. Filesystem deletion requires Linux directory synchronization.
 
+This collector applies to PostgreSQL state with PostgreSQL content or
+PostgreSQL-inventoried filesystem content. It scans every retained state snapshot,
+including deletion tombstones and the old resource after explicit recreation.
+Current replacement content, historical revisions, retained graph payloads and
+receipt responses remain roots. Pending external publications also retain their
+content; deletion refuses a document with undelivered entries. See
+[conditional deletion and recreation](external-host-reliability.md#deletion-recreation-and-local-eviction).
+
+`LifecycleCollectionTests` runs collection after deletion and again after
+recreation for both durable content backends. Each sweep removes an unrelated
+orphan and verifies retained bytes using fresh provider connections. The tests
+also preserve a separate live publication queue. Its saved content has history
+references too, so these cases do not establish an exclusive publication pin.
+The in-memory provider retains lifecycle state only for the process lifetime and
+has no persistent orphan collector. Persistent garbage collection is inapplicable
+to it; its deletion/recreation and detached-reader behavior are covered by
+`HostLifecycleTests` and `HistoryLifecycleIntegrationTests`.
+
 ### Backup and recovery
 
 A PostgreSQL-only backup contains state and content. With filesystem content,

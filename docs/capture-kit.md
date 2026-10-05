@@ -20,6 +20,82 @@ Copy the `tools/capture` source directory to another client and run setup there.
 Virtual environments, captures and generated certificate authorities stay local.
 Setup does not alter proxy settings or certificate trust.
 
+## Capture the CellBridge server
+
+Server capture records the SOAP/MTOM bodies handled by
+`/_vti_bin/cellstorage.svc`. It is separate from the SharePoint proxy below.
+Capture is off by default. The sample host reads `Protocol:CaptureDirectory`;
+an absent, empty or whitespace-only value disables recording. For a host
+configuration file, use an absolute directory:
+
+```json
+{
+  "Protocol": {
+    "CaptureDirectory": "/absolute/path/to/CellBridge/artifacts/office-wire"
+  }
+}
+```
+
+The equivalent host environment variable is `Protocol__CaptureDirectory`.
+Aspire wires its `WireCaptureDirectory` parameter into that variable for `web`:
+
+```sh
+export Parameters__WireCaptureDirectory="$PWD/artifacts/office-wire"
+aspire start --isolated --apphost aspire/apphost.cs --non-interactive
+```
+
+The Aspire parameter defaults to empty. For an existing app, finish outstanding
+requests and restart only that app after changing configuration. To disable
+capture, remove the setting or set it to empty, then restart. Configuration is
+read at startup; changing the file does not switch capture on or off in a
+running host. Existing recordings remain on disk. Reusable hosts set
+`CellBridgeOptions.CaptureDirectory` through the `AddCellBridge` configure
+callback; they must bind configuration themselves.
+
+Normal logs retain request URLs/tokens, operation types, sizes, response IDs
+and error diagnostics without full SOAP envelopes or base64 document chunks.
+Debug response inspection records graph identifiers, lengths and hashes.
+These diagnostics remain available with capture disabled. URLs and identifiers
+can still be sensitive. The response log's `id` matches the capture filename
+prefix; individual request diagnostic lines do not all carry that ID.
+
+A completed SOAP/MTOM exchange normally writes five files under one generated
+ID:
+
+| Suffix | Contents |
+| --- | --- |
+| `.request.bin` | Raw request body, including inline or attached document bytes |
+| `.request.content-type.txt` | Request Content-Type for parsing SOAP or MIME |
+| `.response.bin` | SOAP or MTOM response body |
+| `.response.content-type.txt` | Response Content-Type, including the MIME boundary |
+| `.summary.json` | Decoded operation outcomes used by the Office evidence verifier |
+
+Malformed, cancelled or failed requests can leave incomplete sets. File creation
+does not prove that the response reached Office or that a save succeeded.
+Server output has no mitmproxy manifest and is not a run directory for
+`inspect_capture.py validate` or `extract`. Use the
+[server save verifier](automated-testing.md#verify-the-server-save) for desktop
+save evidence. For binary inspection, parse SOAP/MTOM using the body files and
+their Content-Type companions, then pass the extracted Cell response payloads to
+the [binary dump tools](office-inspectors.md#run-the-checks). Follow the
+[replay fixture workflow](automated-testing.md#turn-a-desktop-run-into-replay-fixtures)
+when preparing automated cases.
+
+The operator owns access and retention. Before enabling capture, create the
+directory with permissions or an ACL limited to the host identity and authorized
+investigators. Keep it outside the web root and in ignored `artifacts/` or other
+local output. The host creates missing directories using OS defaults; it does
+not install a private ACL. Raw bodies can contain document contents and embedded
+identity metadata. Restrict backups and copies as well as the original files.
+
+Server capture has no automatic rotation, expiration or total-disk quota.
+Choose a retention period and monitor free space. After disabling capture and
+finishing outstanding requests, manually remove expired evidence sets by their
+common ID or remove a completed trial's directory. Sanitize decoded content
+before retaining reviewed fixtures in `testdata/`; keep raw files out of source
+control and CI uploads. See [files and privacy](#files-and-privacy) for the
+separate proxy output and its manual-retention rules.
+
 ## Reverse capture with the existing Aspire certificate
 
 Set `Parameters__CaptureUpstream` to your test farm's HTTP or HTTPS origin.
