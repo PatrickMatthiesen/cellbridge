@@ -52,7 +52,8 @@ public static class CellBinaryRequestExecutor
             var selectedPartition = document.GetPartition(kind);
             if (subRequest.RequestType == RequestTypes.PutChanges)
             {
-                response.SubResponses.Add(FilePartitionSaveHandler.Apply(document, selectedPartition, subRequest, request.DataElementPackage));
+                queries.AppendSave(FilePartitionSaveHandler.ApplyResponse(document, selectedPartition, subRequest,
+                    request.DataElementPackage, null, queries.CanAppend));
                 continue;
             }
             if (subRequest.RequestType == RequestTypes.AllocateExtendedGuidRange)

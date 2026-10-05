@@ -62,7 +62,8 @@ public static class CellBridgeAuthorization
         return request.Type switch
         {
             SubRequestType.WhoAmI or SubRequestType.ServerTime or SubRequestType.GetDocMetaInfo or SubRequestType.GetVersions
-                or SubRequestType.LockStatus or SubRequestType.AmIAlone => DocumentAccess.Read,
+                or SubRequestType.LockStatus or SubRequestType.AmIAlone or SubRequestType.Properties => DocumentAccess.Read,
+            SubRequestType.Versioning => a.GetValueOrDefault("VersioningRequestType") == "GetVersionList" ? DocumentAccess.Read : DocumentAccess.Write,
             SubRequestType.EditorsTable => a.GetValueOrDefault("EditorsTableRequestType") switch
             {
                 "LeaveEditingSession" or "UpdateEditorMetadata" or "RemoveEditorMetadata" => DocumentAccess.Read,

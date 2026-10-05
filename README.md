@@ -26,11 +26,12 @@ has not been qualified.
 | Document library | Create blank Office files, import existing documents and download saved files. |
 | Accounts and permissions | Local sign-in, document ownership, read-only/editing access and revocation. |
 | Persistent storage | PostgreSQL document state with PostgreSQL or filesystem file content. |
+| Revision history | Authorized version listing/download and graph-aware restore through SOAP and reusable APIs. |
 | Incremental transfers | Reuse stored file parts and send parts the client does not already have. |
 | Coauthoring | Editor sessions and locks are implemented; two-desktop editing remains unverified. |
 
-Version-history browsing/restoration, some advanced synchronization options and
-automatic graph pruning are unimplemented or disabled. See
+Some advanced synchronization options and automatic graph pruning remain
+unimplemented or disabled. See [revision history](docs/revision-history.md),
 [protocol support and compatibility](docs/interoperability.md) and the
 [requirements ledger](docs/protocol-requirements.md) for exact coverage and open work.
 

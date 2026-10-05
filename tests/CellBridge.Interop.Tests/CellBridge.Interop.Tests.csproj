@@ -35,6 +35,7 @@
     <Compile Include="QueryChangesTests.cs" />
     <Compile Include="PartitionResponseTests.cs" />
     <Compile Include="GuidAllocationInteropTests.cs" />
+    <Compile Include="GraphUploadInteropTests.cs" />
     <Compile Include="BoundedDifferentialGraphTests.cs" />
     <Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" />
     <Compile Include="MicrosoftProtocol\**\*.cs" />

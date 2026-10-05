@@ -48,6 +48,32 @@ public sealed class GraphFixture
             w => Record(w, StreamObjectTypeHeaderStart.ObjectDataBLOB, b => b.WriteBytes(bytes))));
     }
 
+    public FsshttpbCellRequest CreatePatch(DataElement expected, bool other)
+    {
+        var space = Guid.NewGuid(); ExGuid Id(uint value) => new(value, space);
+        var cell = other ? this.OtherCell : this.Cell; var root = other ? this.OtherRoot : this.Root;
+        var obj = other ? this.Child : this.RootObject; var parent = other ? this.OtherRevision : this.Revision;
+        var group = this.Elements.Single(e => e.DataElementExtendedGuid.Equals(other ? this.OtherGroup : this.CurrentGroup));
+        var index = GraphFixture.Element(DataElementType.StorageIndexDataElementData, Id(1), w =>
+        {
+            GraphFixture.Record(w, StreamObjectTypeHeaderStart.StorageIndexCellMapping, b => { cell.Serialize(b); Id(2).Serialize(b); new SerialNumber(space, 12).Serialize(b); });
+            GraphFixture.Record(w, StreamObjectTypeHeaderStart.StorageIndexRevisionMapping, b => { Id(3).Serialize(b); Id(4).Serialize(b); new SerialNumber(space, 14).Serialize(b); });
+        });
+        var request = new FsshttpbCellRequest { DataElementPackage = new() { DataElements = { index } }, SubRequests = { new(RequestTypes.PutChanges) { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = index.DataElementExtendedGuid, ExpectedStorageIndex = expected.DataElementExtendedGuid, HasAdditionalFlags = true, AdditionalFlagsBits = 1 } } } };
+        request.DataElementPackage!.DataElements.AddRange([
+            expected,
+            GraphFixture.Element(DataElementType.CellManifestDataElementData, Id(2), w => GraphFixture.Record(w, StreamObjectTypeHeaderStart.CellManifestCurrentRevision, Id(3).Serialize)),
+            GraphFixture.Element(DataElementType.RevisionManifestDataElementData, Id(4), w =>
+            {
+                GraphFixture.Record(w, StreamObjectTypeHeaderStart.RevisionManifest, b => { Id(3).Serialize(b); parent.Serialize(b); });
+                GraphFixture.Record(w, StreamObjectTypeHeaderStart.RevisionManifestRootDeclare, b => { root.Serialize(b); obj.Serialize(b); });
+                GraphFixture.Record(w, StreamObjectTypeHeaderStart.RevisionManifestObjectGroupReferences, Id(5).Serialize);
+            }),
+            new DataElement(group.DataElementType, Id(5), SerialNumber.Null) { Data = group.Data!.ToArray() },
+        ]);
+        return request;
+    }
+
     public GenericPartitionGraphSnapshot Generic() => GenericPartitionGraphSnapshot.Create(Elements, Index);
     public PartitionGraphSnapshot File() => PartitionGraphSnapshot.Create(Elements, Index);
     public void Replace(DataElement replacement) => Elements[Elements.FindIndex(e => e.DataElementExtendedGuid.Equals(replacement.DataElementExtendedGuid))] = replacement;

@@ -5,6 +5,14 @@ namespace CellBridge.Storage.Abstractions;
 /// <summary>Provider-owned namespace reservations; released names never bind a different resource.</summary>
 public static class DocumentPathReservations
 {
+    public static void ValidateTransition(DocumentState current, DocumentState next, bool rename)
+    {
+        DocumentLifecycle.ValidateTransition(current, rename
+            ? next with { Path = current.Path, PathKey = current.PathKey } : next);
+        if (next.PathKey != next.Path.ToUpperInvariant())
+            throw new InvalidOperationException("A document path key must be canonical.");
+    }
+
     public static void ValidateCreate(DocumentState state)
     {
         if (!state.RetiredPathKeys.IsEmpty)

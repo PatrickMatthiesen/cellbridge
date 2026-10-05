@@ -1107,7 +1107,11 @@ child issues. Allowed profile fallbacks, optional performance facilities and
 operational capabilities are not all missing mandatory implementations.
 
 
-### Owner implementation and integration evidence
+### Owner implementation review snapshots
+
+These rows retain owner evidence at pinned heads before combined integration.
+Pending-main and merge-gate labels describe those snapshots. The final section
+records combined validation and the remaining qualification gates.
 
 The history task (#7/#30) owns immutable revision snapshots, independent revision
 numbers and the selected SP2010/2013 QueryChangesVersioning ignore fallback. The
@@ -1239,3 +1243,32 @@ stopped successfully. This run includes merged host behavior and the audit
 suites, but excludes pending PR #51 uploads and PR #52 historical restoration.
 It supplements the earlier release-base audit run and does not establish
 all-owner combined validation or new desktop qualification.
+
+
+### Combined implementation validation
+
+PRs [#50](https://github.com/PatrickMatthiesen/cellbridge/pull/50),
+[#51](https://github.com/PatrickMatthiesen/cellbridge/pull/51) and
+[#52](https://github.com/PatrickMatthiesen/cellbridge/pull/52) have completed
+combined implementation validation. The full isolated runner passed 789 .NET tests and 71 Python
+checks, with two Python platform skips. This includes PostgreSQL, provider
+recreation, process-death recovery and two-host HTTP checks. The reviewed tree
+includes the audit tests in PR #49; raw results remain ignored under
+`artifacts/testing/parallel-integration-final-3`.
+
+`CombinedPublicationTests` verifies complete metadata uploads, file saves, historical
+restoration and queued external publication share coherent publication boundaries. It checks
+partition-scoped exact retry acknowledgements, preservation of opaque metadata,
+history/outbox deduplication, content pins, quota rollback and deletion/recreation
+followed by saves and case-only rename on both providers.
+`HistoryLifecycleIntegrationTests` checks clean replacement history, retired aliases
+and matching resource identity for recreated SOAP mutations. These checks resolve
+the combined implementation merge gates recorded in the owner snapshots above.
+
+The source changes are separate from the published `0.1.0-beta.1` packages. True
+Partial/PartialLast staging, continuation #24, applicable negotiated hashing #26,
+live graph pruning #3 and provider portability/migration tooling #32 remain open.
+Legacy inline-metadata restoration over a later opaque metadata graph remains
+explicitly unsupported. Independent SharePoint metadata/history/rename/property
+traces, real WopiHost destination-contract adoption, native OneNote, two-desktop
+coauthoring and Office Online Server qualification remain open.

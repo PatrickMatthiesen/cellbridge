@@ -312,6 +312,9 @@ The sample binds positive `StorageLimits` from `Storage`:
 | `MaxObjectBytes` | 512 MiB | One content object while streaming. |
 | `MaxSaveReceipts` | 10,000 | Receipt identities per document; identities are not evicted. |
 | `MaxRetainedStateSnapshots` | 64 | PostgreSQL metadata history per document. |
+| `MaxHistoryRevisions` | 1,000 | Immutable file/application-metadata publications per document; no automatic expiration. |
+| `MaxRestoreReceipts` | 1,000 | Durable keyed restore receipts per document; identities are not evicted. |
+| `MaxRetiredPathKeys` | 128 | Permanently reserved names per resource after rename; keys are not evicted. |
 
 
 Accounting includes reservations and charged orphans, but excludes database
