@@ -286,22 +286,23 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         catch (InvalidDataException ex) { return await FailedAsync(id, operation.RequestId, CellErrorCode.InvalidObject, ex.Message, cancellationToken); }
         var preparation = await provider.State.TransitionAsync(id, (current, now) =>
         {
-            if (current.Receipts.Any(r => r.OperationKey == key))
+            if (current.Receipts.Any(r => r.PartitionKind == 0 && r.OperationKey == key))
                 return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, current.Coordination, null));
+            if (current.LifecycleGeneration != initial.LifecycleGeneration || current.Coordination.Generation != initial.Coordination.Generation)
+                return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, current.Coordination, "InvalidCoauthSession"));
             var metadata = StoredDocument.RestoreMetadata(current, now);
             var coordinator = FssHttpLockCoordinator.Restore(metadata, current.Coordination, now, actor.Identity);
             coordinator.ExecuteCellWrite(attributes, () => true, out _, out var error, now);
             return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, coordinator.Capture(), error));
         }, cancellationToken);
-        initial = preparation.State;
-        if (preparation.Error is not null) return new(new FsshttpbResponse(), initial, preparation.Error);
+        if (preparation.Error is not null) return new(new FsshttpbResponse(), preparation.State, preparation.Error);
         for (int attempt = 0; attempt < 4; attempt++)
         {
             var before = await CurrentAsync(id, cancellationToken);
             if (!Access(actor, before).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), before);
             if (before.LifecycleGeneration != initial.LifecycleGeneration)
                 return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "The document incarnation changed."), before);
-            if (before.Receipts.FirstOrDefault(r => r.OperationKey == key) is { } prior)
+            if (before.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is { } prior)
                 return await RepeatAsync(before, prior, digest, operation.RequestId, actor, cancellationToken);
             if (before.Coordination.Generation != initial.Coordination.Generation)
                 return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "Write authority changed while preparing the save."), before);
@@ -345,9 +346,12 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
             }
             var receiptResponse = new FsshttpbResponse();
             receiptResponse.SubResponses.Add(result);
-            using var receiptStream = new MemoryStream(receiptResponse.ToByteArray());
+            var receiptBytes = receiptResponse.ToByteArray();
+            StorageLimits.Check("save receipt bytes", receiptBytes.LongLength, provider.Limits.MaxObjectBytes);
+            using var receiptStream = new MemoryStream(receiptBytes);
             var responseHandle = await provider.Content.WriteAsync(receiptStream, cancellationToken);
-            var receipt = new SaveReceipt(key, digest, candidate.ContentVersion, responseHandle, actor.Identity.Subject);
+            var receipt = new SaveReceipt(key, digest, candidate.ContentVersion, responseHandle, actor.Identity.Subject)
+                { LifecycleGeneration = initial.LifecycleGeneration };
             PublishResult published;
             try
             {
@@ -357,7 +361,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                         return new StateTransition<PublishResult>(null, new(current, null, "FileUnauthorizedAccess", false));
                     if (current.LifecycleGeneration != initial.LifecycleGeneration)
                         return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
-                    if (current.Receipts.FirstOrDefault(r => r.OperationKey == key) is { } accepted)
+                    if (current.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is { } accepted)
                         return new StateTransition<PublishResult>(null, new(current, accepted, null, false));
                     if (current.Coordination.Generation != initial.Coordination.Generation)
                         return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
@@ -385,16 +389,18 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                                 Knowledge = metadata.EditorsTablePartition.KnowledgeSequence,
                                 InlineContent = metadata.EditorsTablePartition.Content.ToImmutableArray()
                             }
-                            : p.Kind == 1 && candidate.ContentVersion != before.ContentVersion ? current.Partitions.Single(x => x.Kind == 1) with
+                            : p.Kind == 1 && (candidate.ContentVersion == before.ContentVersion ||
+                                currentMetadata.StorageIndex is not null || !currentMetadata.Elements.IsEmpty) ? currentMetadata
+                            : p.Kind == 1 ? currentMetadata with
                             {
                                 Knowledge = unchecked(currentMetadata.Knowledge + 1),
-                                InlineContent = !currentMetadata.Elements.IsEmpty ? currentMetadata.InlineContent : System.Text.Encoding.UTF8.GetBytes(
+                                InlineContent = System.Text.Encoding.UTF8.GetBytes(
                                 $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{now.Ticks}\" />").ToImmutableArray()
                             }
                             : p).ToImmutableArray(),
                         Coordination = CoordinationFencing.Capture(current.Coordination, coordinator.Capture()),
                         // Superseded retries need their digest/version, never their response bytes.
-                        Receipts = current.Receipts.Select(r => r.ContentVersion == candidate.ContentVersion
+                        Receipts = current.Receipts.Select(r => r.PartitionKind != 0 || r.ContentVersion == candidate.ContentVersion
                             ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
                     state = ExternalPublication.Append(current, state, publicationOperationId, provider.Limits);
@@ -408,7 +414,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
                 // receipt before attempting to apply this operation again.
                 var current = await CurrentAsync(id, CancellationToken.None);
                 if (current.LifecycleGeneration != initial.LifecycleGeneration ||
-                    current.Receipts.FirstOrDefault(r => r.OperationKey == key) is not { } accepted) throw;
+                    current.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is not { } accepted) throw;
                 return await RepeatAsync(current, accepted, digest, operation.RequestId, actor, CancellationToken.None);
             }
             if (published.Receipt is { } duplicate)
@@ -430,7 +436,8 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
     {
         var generation = state.LifecycleGeneration;
         state = await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<DocumentState>(null, current), cancellationToken);
-        if (state.LifecycleGeneration != generation || state.Receipts.FirstOrDefault(r => r.OperationKey == receipt.OperationKey) is not { } authoritative)
+        if (state.LifecycleGeneration != generation || state.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == receipt.OperationKey) is not { } authoritative ||
+            authoritative.LifecycleGeneration != generation)
             return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted operation is no longer current."), state);
         receipt = authoritative;
         if (!Access(actor, state).HasFlag(DocumentAccess.Write) || receipt.OwnerSubject != actor.Identity.Subject)
@@ -467,7 +474,7 @@ public sealed class CellBridgeDocumentService(StorageProvider provider, ICellBri
         if (!Access(actor, state).HasFlag(DocumentAccess.Write) || receipt.OwnerSubject != actor.Identity.Subject)
             return Wrap(CellBridgeAuthorization.Denied(new(RequestTypes.PutChanges) { RequestId = requestId }), state);
         if (state.LifecycleGeneration != generation || state.ContentVersion != receipt.ContentVersion || state.Content != expectedContent ||
-            state.Receipts.FirstOrDefault(r => r.OperationKey == receipt.OperationKey) != receipt)
+            state.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == receipt.OperationKey) != receipt)
             return Wrap(Failure(requestId, CellErrorCode.CoherencyFailure, "The accepted revision changed during receipt loading."), state);
         response.SubResponses[0].RequestId = requestId;
         return new(response, state)

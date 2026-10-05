@@ -142,6 +142,52 @@ public sealed class SharedHostLockTests
         Assert.Equal(state.ContentVersion, result.State.ContentVersion);
     }
 
+    [Fact]
+    public async Task SameTokenReacquisitionBeforePreflightCannotReplaceTheOriginalFence()
+    {
+        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var state = (await new CellBridgeDocumentService(provider).CreateAsync("/first-fence.docx", MinimalDocx.Create(), TestActor.Value))!;
+        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        var request = StorageTests.Fixture("save-first");
+        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
+            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        var reads = new PausedSaveRead(provider.State);
+        var writes = new PausedWrites(provider.Content);
+        var save = new CellBridgeDocumentService(new(reads, writes)).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents, request, new Dictionary<string, string> { ["ExclusiveLockID"] = "fss" }, TestActor.Value).AsTask();
+        await reads.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "ReleaseLock"));
+        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        reads.Continue.SetResult();
+        Assert.Equal("InvalidCoauthSession", (await save).LockError);
+        Assert.False(writes.Entered.Task.IsCompleted);
+        Assert.Equal(state.ContentVersion, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
+    }
+
+    private sealed class PausedSaveRead(IDocumentStateStore inner) : IDocumentStateStore
+    {
+        private int _reads;
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool Durable => inner.Durable;
+        public bool Shared => inner.Shared;
+        public async ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var state = await inner.FindByResourceIdAsync(id, cancellationToken);
+            if (Interlocked.Increment(ref _reads) == 2)
+            {
+                Entered.SetResult();
+                await Continue.Task.WaitAsync(cancellationToken);
+            }
+            return state;
+        }
+        public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken cancellationToken = default) => inner.FindByPathKeyAsync(key, cancellationToken);
+        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken cancellationToken = default) => inner.ListAsync(offset, limit, cancellationToken);
+        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default) => inner.TryCreateAsync(state, cancellationToken);
+        public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken cancellationToken = default) => inner.TransitionAsync(id, transition, cancellationToken);
+        public ValueTask CheckHealthAsync(CancellationToken cancellationToken = default) => inner.CheckHealthAsync(cancellationToken);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
