@@ -19,8 +19,8 @@ public sealed class ProxyOriginTests
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
               <s:Body><ExecuteCellStorageRequest xmlns="http://schemas.microsoft.com/sharepoint/soap/">
                 <RequestVersion Version="2" MinorVersion="2" />
-                <RequestCollection><Request Url="{fileUrl}" RequestToken="1">
-                  <SubRequest Type="WhoAmI" SubRequestToken="1"><SubRequestData /></SubRequest>
+                <RequestCollection CorrelationId="{Guid.NewGuid():D}"><Request Url="{fileUrl}" RequestToken="1">
+                  <SubRequest Type="WhoAmI" SubRequestToken="1" />
                 </Request></RequestCollection>
               </ExecuteCellStorageRequest></s:Body>
             </s:Envelope>

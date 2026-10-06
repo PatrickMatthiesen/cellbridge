@@ -8,6 +8,21 @@ namespace CellBridge.FssHttp.Tests;
 public sealed class FssHttpLockCoordinatorTests
 {
     [Fact]
+    public void LockExecutionAcceptsXmlSchemaIntegerWhitespaceAndLeadingPlus()
+    {
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
+        var response = new FssHttpSubResponse();
+
+        var result = coordinator.ApplyExclusiveLock(Request(
+            ("ExclusiveLockID", Guid.NewGuid().ToString("D")),
+            ("ExclusiveLockRequestType", "GetLock"),
+            ("Timeout", " +60 ")), response);
+
+        Assert.Equal(LockOperationResult.Granted, result);
+        Assert.Null(response.ErrorCode);
+    }
+
+    [Fact]
     public void CoauthorLifecycleSharesLockAndReleasesItAfterLastExit()
     {
         var document = NewDocument();

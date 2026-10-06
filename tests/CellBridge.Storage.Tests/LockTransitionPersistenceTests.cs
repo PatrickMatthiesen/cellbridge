@@ -91,7 +91,7 @@ public sealed class LockTransitionPersistenceTests
         SubRequestDataAttributes =
         {
             [key] = operation, ["ClientID"] = client, ["SchemaLockID"] = schema, ["Timeout"] = "3600",
-            ["ExclusiveLockID"] = "exclusive", ["ReleaseLockOnConversionToExclusiveFailure"] = "false",
+            ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["ReleaseLockOnConversionToExclusiveFailure"] = "false",
         },
     };
 }

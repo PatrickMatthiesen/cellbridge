@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
     <None Include="../../testdata/sharepoint/fixtures/save_reopen/save-first.json" Link="save-first.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

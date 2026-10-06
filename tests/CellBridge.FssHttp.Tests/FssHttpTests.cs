@@ -17,8 +17,8 @@ public class CellStorageRequestParserTests
                 <Request Url="https://example.com/shared/test.docx"
                          RequestToken="1"
                          UserAgent="E731B87E-DD45-44AA-AB80-0C75FBD1530E">
-                  <SubRequest Type="Cell">
-                    <SubRequestData ContentVersion="0" CoauthID="6B29FC40-CA47-1067-B31D-00DD010662DB" />
+                  <SubRequest Type="Cell" SubRequestToken="0">
+                    <SubRequestData ContentVersion="0" CoauthID="6B29FC40-CA47-1067-B31D-00DD010662DB" BinaryDataSize="1">AA==</SubRequestData>
                   </SubRequest>
                 </Request>
               </RequestCollection>
@@ -43,6 +43,7 @@ public class CellStorageRequestParserTests
 
         var subRequest = Assert.Single(fileRequest.SubRequests);
         Assert.Equal(SubRequestType.Cell, subRequest.Type);
+        Assert.Equal(0UL, subRequest.SubRequestToken);
         Assert.Equal("0", subRequest.SubRequestDataAttributes["ContentVersion"]);
         Assert.Equal("6B29FC40-CA47-1067-B31D-00DD010662DB", subRequest.SubRequestDataAttributes["CoauthID"]);
     }
@@ -65,8 +66,95 @@ public class CellStorageRequestParserTests
     public void Parses_AllSubRequestTypes(string typeName, SubRequestType expected)
     {
         string envelope = SampleQueryAccessEnvelope.Replace("Type=\"Cell\"", $"Type=\"{typeName}\"");
+        if (expected is SubRequestType.WhoAmI or SubRequestType.ServerTime or SubRequestType.GetDocMetaInfo or
+            SubRequestType.GetVersions or SubRequestType.LockStatus)
+            envelope = envelope.Replace("<SubRequestData ContentVersion=\"0\" CoauthID=\"6B29FC40-CA47-1067-B31D-00DD010662DB\" BinaryDataSize=\"1\">AA==</SubRequestData>", string.Empty);
+        else if (expected != SubRequestType.Cell)
+            envelope = envelope.Replace("<SubRequestData ContentVersion=\"0\" CoauthID=\"6B29FC40-CA47-1067-B31D-00DD010662DB\" BinaryDataSize=\"1\">AA==</SubRequestData>", "<SubRequestData />");
         var request = CellStorageRequestParser.Parse(envelope);
         Assert.Equal(expected, request.Requests[0].SubRequests[0].Type);
+    }
+
+    [Theory]
+    [InlineData("Version=\"2\"")]
+    [InlineData("MinorVersion=\"0\"")]
+    [InlineData("CorrelationId=\"6B29FC40-CA47-1067-B31D-00DD010662DA\"")]
+    [InlineData("RequestToken=\"1\"")]
+    [InlineData("SubRequestToken=\"0\"")]
+    public void MissingRequiredScalar_Throws(string attribute)
+    {
+        Assert.Throws<InvalidDataException>(() => CellStorageRequestParser.Parse(
+            SampleQueryAccessEnvelope.Replace(attribute, string.Empty)));
+    }
+
+    [Fact]
+    public void UnsupportedButSyntacticallyValidVersion_ParsesForVersionErrorResponse()
+    {
+        var request = CellStorageRequestParser.Parse(SampleQueryAccessEnvelope.Replace("Version=\"2\"", "Version=\"3\""));
+
+        Assert.Equal(3u, request.Version);
+        Assert.Equal(0u, request.MinorVersion);
+    }
+
+    [Fact]
+    public void ReservedMinorVersion_IsPreserved()
+    {
+        var request = CellStorageRequestParser.Parse(SampleQueryAccessEnvelope.Replace("MinorVersion=\"0\"", "MinorVersion=\"65535\""));
+
+        Assert.Equal(65535u, request.MinorVersion);
+    }
+
+    [Fact]
+    public void XmlSchemaScalarLexicalForms_AreAcceptedAndValuesArePreserved()
+    {
+        string envelope = SampleQueryAccessEnvelope
+            .Replace("Version=\"2\"", "Version=\" +2 \"")
+            .Replace("MinorVersion=\"0\"", "MinorVersion=\" -0 \"")
+            .Replace("RequestToken=\"1\"", "RequestToken=\" +1 \" UseResourceID=\" 0 \"")
+            .Replace("SubRequestToken=\"0\"", "SubRequestToken=\" -0 \"")
+            .Replace("BinaryDataSize=\"1\"",
+                "BinaryDataSize=\" +1 \" GetFileProps=\" 1 \" ExclusiveLockID=\"6B29FC40-CA47-1067-B31D-00DD010662DC\" Timeout=\" +60 \" LastModifiedTime=\" +0 \"");
+
+        var request = CellStorageRequestParser.Parse(envelope);
+        var fileRequest = Assert.Single(request.Requests);
+        var subRequest = Assert.Single(fileRequest.SubRequests);
+
+        Assert.Equal(2u, request.Version);
+        Assert.Equal(0u, request.MinorVersion);
+        Assert.Equal(1UL, fileRequest.RequestToken);
+        Assert.False(fileRequest.UseResourceId);
+        Assert.Equal(0UL, subRequest.SubRequestToken);
+        Assert.Equal(" +1 ", subRequest.SubRequestDataAttributes["BinaryDataSize"]);
+        Assert.True(CellSubRequestDataValidation.TryGetBoolean(
+            subRequest.SubRequestDataAttributes, "GetFileProps", out bool getFileProps));
+        Assert.True(getFileProps);
+        Assert.True(CellSubRequestDataValidation.TryGetLastModifiedTime(
+            subRequest.SubRequestDataAttributes, out DateTime lastModified));
+        Assert.Equal(DateTime.FromFileTimeUtc(0), lastModified);
+    }
+
+    [Theory]
+    [InlineData("BinaryDataSize=\"1\"", "BinaryDataSize=\"0\"")]
+    [InlineData("BinaryDataSize=\"1\"", "BinaryDataSize=\"1\" GetFileProps=\"True\"")]
+    [InlineData("BinaryDataSize=\"1\"", "BinaryDataSize=\"1\" ExclusiveLockID=\"bad\" Timeout=\"60\"")]
+    [InlineData("BinaryDataSize=\"1\"", "BinaryDataSize=\"1\" ExclusiveLockID=\"6B29FC40-CA47-1067-B31D-00DD010662DC\" Timeout=\"59\"")]
+    [InlineData("BinaryDataSize=\"1\"", "BinaryDataSize=\"1\" LastModifiedTime=\"-1\"")]
+    public void MalformedCellScalars_AreRejectedBeforeExecution(string original, string replacement)
+    {
+        Assert.Throws<InvalidDataException>(() => CellStorageRequestParser.Parse(
+            SampleQueryAccessEnvelope.Replace(original, replacement)));
+    }
+
+    [Fact]
+    public void DuplicateRequestAndSubRequestTokens_Throw()
+    {
+        string duplicateRequest = SampleQueryAccessEnvelope.Replace("</RequestCollection>",
+            SampleQueryAccessEnvelope[(SampleQueryAccessEnvelope.IndexOf("<Request Url=", StringComparison.Ordinal))..SampleQueryAccessEnvelope.IndexOf("</Request>", StringComparison.Ordinal)] + "</Request></RequestCollection>");
+        Assert.Throws<InvalidDataException>(() => CellStorageRequestParser.Parse(duplicateRequest));
+
+        string duplicateSubRequest = SampleQueryAccessEnvelope.Replace("</Request>",
+            "<SubRequest Type=\"WhoAmI\" SubRequestToken=\"0\" /></Request>");
+        Assert.Throws<InvalidDataException>(() => CellStorageRequestParser.Parse(duplicateSubRequest));
     }
 
     [Fact]
@@ -246,5 +334,21 @@ public class CellStorageResponseTests
         Assert.Contains("ResourceID=\"596881b0cdb74e3ab5f242a58db5c60a\"", envelope);
         Assert.Contains("<SubResponse SubRequestToken=\"8\" ErrorCode=\"Success\" HResult=\"0\">", envelope);
         Assert.DoesNotContain("<SubResponse Type=", envelope);
+    }
+
+    [Fact]
+    public void ToSoapEnvelope_EmitsRequiredResponseErrorMessageAndVersionErrorDetail()
+    {
+        var response = new CellStorageResponse
+        {
+            VersionErrorCode = "IncompatibleVersion",
+            VersionErrorMessage = "Only version 2 is supported.",
+            Responses = { new FssHttpResponse { ErrorCode = "InvalidArgument" } },
+        };
+
+        string envelope = response.ToSoapEnvelope();
+
+        Assert.Contains("ErrorCode=\"IncompatibleVersion\" ErrorMessage=\"Only version 2 is supported.\"", envelope);
+        Assert.Contains("ErrorCode=\"InvalidArgument\" ErrorMessage=\"InvalidArgument\"", envelope);
     }
 }

@@ -68,6 +68,35 @@ public sealed class BoundedProtocolMutationTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void DuplicateRequestIdsAndOperationPayloadsAreRejectedOnTheWire()
+    {
+        var duplicateIds = new FsshttpbCellRequest
+        {
+            SubRequests =
+            {
+                new(RequestTypes.QueryAccess) { RequestId = 0 },
+                new(RequestTypes.QueryAccess) { RequestId = 0 },
+            },
+        };
+        Assert.Throws<InvalidDataException>(() => FsshttpbCellRequest.Deserialize(new(duplicateIds.ToByteArray())));
+
+        var request = new FsshttpbCellRequest
+        {
+            SubRequests = { new(RequestTypes.QueryChanges) { RequestId = 1, Data = new DuplicateQueryChangesData() } },
+        };
+        Assert.Throws<InvalidDataException>(() => FsshttpbCellRequest.Deserialize(new(request.ToByteArray())));
+    }
+
+    private sealed class DuplicateQueryChangesData : ISubRequestData
+    {
+        public void Serialize(BinaryWriterEx writer)
+        {
+            new QueryChangesSubRequestData().Serialize(writer);
+            new QueryChangesSubRequestData().Serialize(writer);
+        }
+    }
+
+    [Fact]
     public void GeneratedResponsesRejectEveryTruncatedPrefixAndPreserveIgnoredReservedBits()
     {
         for (int sample = 0; sample < 16; sample++)

@@ -13,7 +13,9 @@ var signal = args[2];
 await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")
     ?? throw new InvalidOperationException("A disposable PostgreSQL database is required."));
 var state = new PostgreSqlStateStore(source);
-var content = new PostgreSqlContentStore(source);
+IContentStore content = Environment.GetEnvironmentVariable("CELLBRIDGE_PROCESS_CONTENT_ROOT") is { Length: > 0 } root
+    ? new PostgreSqlFileSystemContentStore(source, root)
+    : new PostgreSqlContentStore(source);
 var before = await state.FindByResourceIdAsync(id) ?? throw new InvalidOperationException("Probe document is missing.");
 if (args.Length > 3)
 {
@@ -54,6 +56,13 @@ sealed class PausedStateStore(IDocumentStateStore inner, string phase, string si
             {
                 var proposed = transition(current, now);
                 mutates = proposed.Next is not null;
+                if (mutates && phase == "during")
+                {
+                    // Fault-injection only: hold the real provider transaction
+                    // open until the parent terminates this process.
+                    File.WriteAllText(signal, "ready");
+                    Thread.Sleep(Timeout.Infinite);
+                }
                 if (mutates && phase == "before") throw new BeforePublication();
                 return proposed;
             }, ct);

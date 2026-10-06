@@ -27,15 +27,29 @@ manifest = build_manifest(output, version, source_commit, bool(source_status.str
 (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 consumer = root / "examples" / "NuGetConsumer" / "NuGetConsumer.csproj"
 tests = root / "tests" / "CellBridge.Packages.Tests" / "CellBridge.Packages.Tests.csproj"
+library = root / "examples" / "DocumentLibrary" / "CellBridge.DocumentLibrary.csproj"
+library_setup = library.parent / "Setup" / "CellBridge.DocumentLibrary.Setup.csproj"
+library_tests = root / "tests" / "CellBridge.DocumentLibrary.Tests" / "CellBridge.DocumentLibrary.Tests.csproj"
+# The application and its test/probe projects may reference each other, but no
+# project may bypass the packed libraries through a source project reference.
+for directory in (library.parent, library_tests.parent):
+    for project in directory.rglob("*.csproj"):
+        for reference in ET.parse(project).iter("ProjectReference"):
+            target = (project.parent / reference.attrib["Include"]).resolve()
+            if target.is_relative_to(root / "src"):
+                raise RuntimeError(f"Package consumer has a source reference: {project.relative_to(root)}")
 config = output / "NuGet.Config"
 config.write_text(f'''<configuration>
   <packageSources><clear/><add key="local" value="{escape(str(output), {'"': '&quot;'})}"/><add key="nuget" value="https://api.nuget.org/v3/index.json"/></packageSources>
   <packageSourceMapping><clear/><packageSource key="local"><package pattern="CellBridge.*"/></packageSource><packageSource key="nuget"><package pattern="*"/></packageSource></packageSourceMapping>
 </configuration>''')
-for project in (consumer, tests):
+for project in (consumer, tests, library, library_setup, library_tests):
     subprocess.run(["dotnet", "restore", str(project), "--configfile", str(config),
                     "--force", "--no-cache", "--packages", str(output / "consumer-cache")], check=True)
 subprocess.run(["dotnet", "build", str(consumer), "-c", "Release", "--no-restore", "--nologo"], check=True)
+subprocess.run(["dotnet", "build", str(library_setup), "-c", "Release", "--no-restore", "--nologo"], check=True)
 subprocess.run(["dotnet", "test", str(tests), "-c", "Release", "--no-restore", "--nologo",
                 "--logger", "trx", "--results-directory", str(output / "test-results")], check=True)
+subprocess.run(["dotnet", "test", str(library_tests), "-c", "Release", "--no-restore", "--nologo",
+                "--logger", "trx", "--results-directory", str(output / "document-library-tests")], check=True)
 print(f"Verified {len(PROJECTS)} packages at {version}; manifest: {output / 'manifest.json'}")

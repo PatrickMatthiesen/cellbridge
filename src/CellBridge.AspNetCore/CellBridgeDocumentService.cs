@@ -116,11 +116,15 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         var response = new FsshttpbResponse();
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
         var state = await CurrentAsync(id, cancellationToken);
-        if (request.SubRequests.Count == 0 || !request.HasValidEnvelope)
+        if (request.TryGetValidationError(out _, out _))
         {
             var emptyDocument = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
             return new(CellBinaryRequestExecutor.Execute(emptyDocument, emptyDocument.GetPartition(kind), request, Access(actor, state)), state);
         }
+        if (!CellSubRequestDataValidation.TryValidate(attributes, requireBinaryDataSize: false, out _))
+            return new(response, state, "InvalidArgument");
+        if (!request.SubRequests.Any(x => x.RequestType == RequestTypes.PutChanges) && !MatchesEtag(attributes, state))
+            return new(response, state, "CellRequestFail");
         try
         {
             // Each operation has its own publication boundary. Queries keep
@@ -382,6 +386,8 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
                     if (current.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is { } accepted)
                         return new StateTransition<PublishResult>(null, new(current, accepted, null, false));
+                    if (!MatchesEtag(attributes, current))
+                        return new StateTransition<PublishResult>(null, new(current, null, "CellRequestFail", false));
                     if (current.Coordination.Generation != initial.Coordination.Generation)
                         return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
                     if (current.ContentVersion != before.ContentVersion || current.Content != before.Content)
@@ -392,14 +398,18 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         return new StateTransition<PublishResult>(null, new(current, null, error, false));
                     if (CoordinationFencing.Capture(preparation.Authority, coordinator.Capture()).Generation != preparation.Authority.Generation)
                         return new StateTransition<PublishResult>(null, new(current, null, "InvalidCoauthSession", false));
+                    bool isNewCommit = candidate.ContentVersion != before.ContentVersion;
+                    DateTime modifiedUtc = now;
+                    if (isNewCommit && !TryResolveLastModifiedTime(attributes, now, out modifiedUtc))
+                        return new StateTransition<PublishResult>(null, new(current, null, "InvalidArgument", false));
                     var currentMetadata = current.Partitions.Single(x => x.Kind == 1);
                     var state = metadata.CaptureCoordination(current, coordinator.Capture()) with
                     {
-                        Security = current.Security with { ModifiedBy = candidate.ContentVersion == before.ContentVersion ? current.Security.ModifiedBy : actor.Identity },
+                        Security = current.Security with { ModifiedBy = isNewCommit ? actor.Identity : current.Security.ModifiedBy },
                         Content = candidate.Content,
                         StateVersion = checked(current.StateVersion + 1),
                         ContentVersion = candidate.ContentVersion,
-                        ModifiedUtc = candidate.ContentVersion == before.ContentVersion ? current.ModifiedUtc : now,
+                        ModifiedUtc = isNewCommit ? modifiedUtc : current.ModifiedUtc,
                         // Keep the authoritative editors partition, including updates
                         // made while file materialization/staging was in progress.
                         Partitions = candidate.Partitions.Select(p => p.Kind == 2
@@ -408,13 +418,13 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                                 Knowledge = metadata.EditorsTablePartition.KnowledgeSequence,
                                 InlineContent = metadata.EditorsTablePartition.Content.ToImmutableArray()
                             }
-                            : p.Kind == 1 && (candidate.ContentVersion == before.ContentVersion ||
+                            : p.Kind == 1 && (!isNewCommit ||
                                 currentMetadata.StorageIndex is not null || !currentMetadata.Elements.IsEmpty) ? currentMetadata
                             : p.Kind == 1 ? currentMetadata with
                             {
                                 Knowledge = checked(currentMetadata.Knowledge + 1),
                                 InlineContent = System.Text.Encoding.UTF8.GetBytes(
-                                $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{now.Ticks}\" />").ToImmutableArray()
+                                $"<Metadata ContentVersion=\"{candidate.ContentVersion}\" Modified=\"{modifiedUtc.Ticks}\" />").ToImmutableArray()
                             }
                             : p).ToImmutableArray(),
                         Coordination = CoordinationFencing.Capture(current.Coordination, coordinator.Capture()),
@@ -422,8 +432,8 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         Receipts = current.Receipts.Select(r => r.PartitionKind != 0 || r.ContentVersion == candidate.ContentVersion
                             ? r : r with { Response = null }).Append(receipt).ToImmutableArray(),
                     };
-                    if (candidate.ContentVersion != before.ContentVersion)
-                        state = RevisionHistory.Append(current, state, actor.Identity, now);
+                    if (isNewCommit)
+                        state = RevisionHistory.Append(current, state, actor.Identity, modifiedUtc);
                     state = ExternalPublication.Append(current, state, publicationOperationId, provider.Limits);
                     provider.Limits.CheckDocument(state);
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
@@ -523,6 +533,17 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         return new FileStream(Path.Combine(Path.GetTempPath(), "cellbridge-save-" + Guid.NewGuid().ToString("N") + ".tmp"), options);
     }
+
+    private static bool TryResolveLastModifiedTime(IReadOnlyDictionary<string, string> attributes, DateTime fallback,
+        out DateTime modifiedUtc)
+    {
+        modifiedUtc = fallback;
+        if (!attributes.ContainsKey("LastModifiedTime")) return true;
+        return CellSubRequestDataValidation.TryGetLastModifiedTime(attributes, out modifiedUtc);
+    }
+
+    private static bool MatchesEtag(IReadOnlyDictionary<string, string> attributes, DocumentState state) =>
+        !attributes.TryGetValue("Etag", out string? supplied) || string.Equals(supplied, state.Etag, StringComparison.Ordinal);
     private ValueTask<(DocumentState State, DateTime Now)> ExpireEditorsAsync(Guid id, CellBridgeActor actor, CancellationToken cancellationToken) =>
         provider.State.TransitionAsync(id, (current, now) =>
         {

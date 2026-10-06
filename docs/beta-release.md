@@ -146,12 +146,20 @@ and compare its response with the mapped HTTP endpoint.
 Desktop Word and Excel evidence remains scoped to the sessions recorded in
 [interoperability](interoperability.md). OneNote desktop synchronization,
 two-desktop coauthoring and Office Online Server editing remain unqualified.
-True partial and non-file uploads fail explicitly. There is no stable storage
-migration/export workflow or automatic live-graph pruning.
+True partial and unsupported non-file uploads fail explicitly. Current source
+has an explicit [provider recovery workflow](provider-portability.md), with
+authorization and destination-context restrictions. Automatic live-graph pruning
+remains unavailable. These later source changes are not part of beta.1.
 
-External hosting also needs [recoverable content write-back with destination CAS](https://github.com/PatrickMatthiesen/cellbridge/issues/44),
-[shared WOPI/FSSHTTP leases](https://github.com/PatrickMatthiesen/cellbridge/issues/45)
-and [conditional document deletion/eviction](https://github.com/PatrickMatthiesen/cellbridge/issues/46)
-that cannot resurrect stale state. Accepted-save
-receipts report known commits and do not replace those mechanisms. These are
-integration limits, not prerequisites for an honestly scoped experimental beta.
+Current source implements the opt-in publication, shared-lock and conditional
+lifecycle contracts described in [external host reliability](external-host-reliability.md).
+External applications still need to adopt and qualify those contracts.
+Accepted-save receipts report known commits and do not replace destination CAS,
+durable delivery receipts or coordinated permissions.
+
+## Next candidate
+
+The next candidate is `0.1.0-beta.2`. Follow the [beta.1 upgrade guide](beta-2-upgrade.md).
+Publication remains blocked on candidate validation and documented outstanding
+client gates. This section does not record a published release or successful
+desktop retest.

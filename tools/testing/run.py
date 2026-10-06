@@ -75,6 +75,7 @@ def create_test_documents(origin, cookie, csrf):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--performance", action="store_true", help="Also measure durable synthetic saves/downloads.")
+    parser.add_argument("--packages", action="store_true", help="Also verify packages and durable external-consumer recovery.")
     parser.add_argument("--sizes", default="1,10", help="DOCX sizes in MiB for the performance run.")
     parser.add_argument("--clients", default="1,8")
     parser.add_argument("--iterations", type=int, default=3)
@@ -99,9 +100,13 @@ def main():
         env.pop(key, None)
     password = secrets.token_urlsafe(24) + "Aa1!"
     env.update(Testing__Enabled="true", Parameters__TestPassword=password,
-               Parameters__WireCaptureDirectory=str(output / "wire"))
+               Parameters__WireCaptureDirectory=str(output / "wire"),
+               CELLBRIDGE_QUALIFICATION_DIRECTORY=str(output / "recovery"))
     summary = {"startedUtc": stamp, "platform": platform.platform(), "processors": os.cpu_count(),
                "scope": "Protocol replay and synthetic HTTP/storage checks, not desktop Office", "checks": [], "passed": False}
+    summary["sourceCommit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    summary["sourceDirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
+    summary["dotnetSdk"] = subprocess.check_output(["dotnet", "--version"], cwd=ROOT, text=True).strip()
     start_attempted = False
 
     def run(name, command, timeout=1200):
@@ -116,14 +121,20 @@ def main():
             check["seconds"] = round(time.monotonic() - started, 3)
 
     try:
+        if args.packages:
+            run("packages", [sys.executable, "tools/verify_packages.py"])
         run("build", ["dotnet", "build", "CellBridge.slnx", "-c", "Release", "--nologo", "-v", "minimal"])
         run("demo-build", ["dotnet", "build", "demo/CellBridge.Demo.slnx", "-c", "Release", "--nologo", "-v", "minimal"])
         start_attempted = True
         run("aspire-start", ["aspire", "start", "--apphost", str(APPHOST), "--isolated", "--non-interactive"], 600)
-        for resource in ("test-account", "web-peer"):
-            run(f"start-{resource}", ["aspire", "resource", resource, "start", "--apphost", str(APPHOST),
-                "--non-interactive"], 180)
-        for resource in ("web", "web-peer", "demo"):
+        run("start-test-account", ["aspire", "resource", "test-account", "start", "--apphost", str(APPHOST),
+            "--non-interactive"], 180)
+        # Both hosts build the same project. Let the first finish its startup
+        # build before starting the peer against the same output directory.
+        run("ready-web", ["aspire", "wait", "web", "--apphost", str(APPHOST), "--non-interactive"], 180)
+        run("start-web-peer", ["aspire", "resource", "web-peer", "start", "--apphost", str(APPHOST),
+            "--non-interactive"], 180)
+        for resource in ("web-peer", "demo"):
             run(f"ready-{resource}", ["aspire", "wait", resource, "--apphost", str(APPHOST), "--non-interactive"], 180)
         description = cli_json(["aspire", "describe", "--apphost", str(APPHOST), "--non-interactive", "--format", "Json"])
         web = next(r for r in description["resources"] if r.get("displayName") == "web")
@@ -165,6 +176,11 @@ def main():
         venv = ROOT / "tools/capture/.venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         run("capture", [str(venv) if venv.exists() else sys.executable, "-m", "pytest", "tools/capture", "-q"])
         run("office-evidence-gates", [str(venv) if venv.exists() else sys.executable, "-m", "pytest", "tools/testing", "-q"])
+        if args.packages:
+            run("durable-package-consumer", ["dotnet", "test", "tests/CellBridge.DocumentLibrary.Tests",
+                "-c", "Release", "--no-build", "--no-restore", "--nologo", "-v", "minimal",
+                "--filter", "FullyQualifiedName~PostgreSqlTests", "--logger", "trx",
+                "--results-directory", str(output / "tests" / "package-consumer")])
         if args.performance:
             dll = ROOT / "tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll"
             for backend in ("postgresql", "filesystem"):

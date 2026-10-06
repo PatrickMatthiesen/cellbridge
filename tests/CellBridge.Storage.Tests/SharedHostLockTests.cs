@@ -107,7 +107,7 @@ public sealed class SharedHostLockTests
             (await StoredDocument.RestoreAsync(before, content)).FilePartition.FileGraph.StorageIndex;
         var paused = new PausedWrites(content);
         var saved = new CellBridgeDocumentService(new(stateStore, paused)).ExecuteAsync(state.ResourceId,
-            DocumentPartitionKind.FileContents, request, new Dictionary<string, string> { ["ExclusiveLockID"] = "fss" }, TestActor.Value).AsTask();
+            DocumentPartitionKind.FileContents, request, CellLock(), TestActor.Value).AsTask();
         await paused.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "ReleaseLock"));
         Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
@@ -118,7 +118,7 @@ public sealed class SharedHostLockTests
         await stateStore.TransitionAsync(state.ResourceId, (c, now) => new StateTransition<bool>(c with
         { Coordination = c.Coordination with { Exclusive = c.Coordination.Exclusive! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
         var expired = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            request, new Dictionary<string, string> { ["ExclusiveLockID"] = "fss" }, TestActor.Value);
+            request, CellLock(), TestActor.Value);
         Assert.Equal("InvalidCoauthSession", expired.LockError);
     }
 
@@ -154,7 +154,7 @@ public sealed class SharedHostLockTests
         var reads = new PausedSaveRead(provider.State);
         var writes = new PausedWrites(provider.Content);
         var save = new CellBridgeDocumentService(new(reads, writes)).ExecuteAsync(state.ResourceId,
-            DocumentPartitionKind.FileContents, request, new Dictionary<string, string> { ["ExclusiveLockID"] = "fss" }, TestActor.Value).AsTask();
+            DocumentPartitionKind.FileContents, request, CellLock(), TestActor.Value).AsTask();
         await reads.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "ReleaseLock"));
         Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
@@ -234,21 +234,31 @@ public sealed class SharedHostLockTests
     private static Task<string?> ApplyFss(StorageProvider provider, Guid id, string operation) => Apply(provider, id, new()
     {
         Type = SubRequestType.ExclusiveLock,
-        SubRequestDataAttributes = { ["ExclusiveLockRequestType"] = operation, ["ExclusiveLockID"] = "fss",
-            ["SchemaLockID"] = "schema", ["ClientID"] = "client", ["Timeout"] = "3600" },
+        SubRequestToken = 1,
+        SubRequestDataXml = "<SubRequestData />",
+        SubRequestDataAttributes = { ["ExclusiveLockRequestType"] = operation, ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111",
+            ["SchemaLockID"] = "22222222-2222-2222-2222-222222222222", ["ClientID"] = "client", ["Timeout"] = "3600" },
     });
     private static Task<string?> ApplySchema(StorageProvider provider, Guid id, string operation) => Apply(provider, id, new()
     {
         Type = SubRequestType.SchemaLock,
-        SubRequestDataAttributes = { ["SchemaLockRequestType"] = operation, ["SchemaLockID"] = "schema", ["ClientID"] = "client",
-            ["ExclusiveLockID"] = "fss", ["Timeout"] = "3600" },
+        SubRequestToken = 1,
+        SubRequestDataXml = "<SubRequestData />",
+        SubRequestDataAttributes = { ["SchemaLockRequestType"] = operation, ["SchemaLockID"] = "22222222-2222-2222-2222-222222222222", ["ClientID"] = "client",
+            ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" },
     });
     private static async Task<string?> Apply(StorageProvider provider, Guid id, FssHttpSubRequest request)
     {
         var response = await new CellBridgeRequestProcessor(new(provider)).ExecuteAsync(new() { Requests =
-            { new FssHttpRequest { UseResourceId = true, ResourceId = id.ToString(), SubRequests = { request } } } }, "https://host.test", TestActor.Value);
+            { new FssHttpRequest { UseResourceId = true, ResourceId = id.ToString(), Url = "https://host.test/lock.docx",
+                RequestToken = 1, SubRequests = { request } } } }, "https://host.test", TestActor.Value);
         return response.Response.Responses[0].SubResponses[0].ErrorCode;
     }
+    private static Dictionary<string, string> CellLock() => new()
+    {
+        ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111",
+        ["Timeout"] = "3600",
+    };
     private sealed class PausedWrites(IContentStore inner) : IContentStore
     {
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

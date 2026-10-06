@@ -87,6 +87,7 @@ public sealed class HostIntegrationTests
             File(first.ResourceId, SubRequestType.GetDocMetaInfo, SubRequestType.SchemaLock),
             File(second.ResourceId, SubRequestType.GetDocMetaInfo),
         } };
+        request.Requests[1].RequestToken = 2;
         request.Requests[0].SubRequests[1].SubRequestDataAttributes["SchemaLockRequestType"] = "GetLock";
         var response = (await new CellBridgeRequestProcessor(service).ExecuteAsync(request, "https://host.test", actor)).Response;
         Assert.Equal("Success", response.Responses[0].SubResponses[0].ErrorCode);
@@ -147,7 +148,7 @@ public sealed class HostIntegrationTests
         Assert.Equal(accepted with { IsReplay = true }, Assert.Single(retry.AcceptedSaves));
         var next = StorageTests.Fixture("save-second");
         var batch = new CellStorageRequest { Requests = { File(state.ResourceId, SubRequestType.Cell, SubRequestType.Properties) } };
-        batch.Requests[0].SubRequests[0].SubRequestDataBinary = next.ToByteArray();
+        SetBinary(batch.Requests[0].SubRequests[0], next.ToByteArray());
         var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(batch, "https://host.test", TestActor.Value);
         Assert.False(Assert.Single(result.AcceptedSaves).IsReplay);
         Assert.Equal("InvalidArgument", result.Response.Responses[0].SubResponses[1].ErrorCode);
@@ -166,7 +167,7 @@ public sealed class HostIntegrationTests
         binary.SubRequests.Insert(0, new(RequestTypes.QueryAccess)
             { RequestId = 99, Data = new QueryAccessSubRequestData() });
         var request = File(state.ResourceId, SubRequestType.Cell);
-        request.SubRequests[0].SubRequestDataBinary = binary.ToByteArray();
+        SetBinary(request.SubRequests[0], binary.ToByteArray());
         var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(new() { Requests = { request } }, "https://host.test", actor);
         var response = FsshttpbResponse.Deserialize(new BinaryReaderEx(result.Response.Responses[0].SubResponses[0].SubResponseDataBase64!));
         var access = Assert.IsType<QueryAccessSubResponseData>(response.SubResponses[0].Data);
@@ -206,7 +207,7 @@ public sealed class HostIntegrationTests
         if (useSoap)
         {
             var request = File(state.ResourceId, SubRequestType.Cell);
-            request.SubRequests[0].SubRequestDataBinary = binary.ToByteArray();
+            SetBinary(request.SubRequests[0], binary.ToByteArray());
             var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(new() { Requests = { request } }, "https://host.test", TestActor.Value);
             Assert.Equal("CellRequestFail", result.Response.Responses[0].SubResponses[0].ErrorCode);
             receipt = Assert.Single(result.AcceptedSaves);
@@ -234,9 +235,11 @@ public sealed class HostIntegrationTests
         var first = File(state.ResourceId, SubRequestType.Cell);
         var binary = StorageTests.Fixture("save-first");
         Assert.IsType<PutChangesSubRequestData>(binary.SubRequests[0].Data).ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!);
-        first.SubRequests[0].SubRequestDataBinary = binary.ToByteArray();
+        SetBinary(first.SubRequests[0], binary.ToByteArray());
+        var second = File(later, SubRequestType.GetDocMetaInfo);
+        second.RequestToken = 2;
         var error = await Assert.ThrowsAsync<AcceptedSaveException>(() => new CellBridgeRequestProcessor(service)
-            .ExecuteAsync(new() { Requests = { first, File(later, SubRequestType.GetDocMetaInfo) } }, "https://host.test", TestActor.Value));
+            .ExecuteAsync(new() { Requests = { first, second } }, "https://host.test", TestActor.Value));
         Assert.IsType<IOException>(error.InnerException);
         Assert.Equal((await memory.State.FindByResourceIdAsync(state.ResourceId))!.Content, Assert.Single(error.AcceptedSaves).Content);
     }
@@ -258,8 +261,20 @@ public sealed class HostIntegrationTests
     internal static FssHttpRequest File(Guid id, params SubRequestType[] types) => new()
     {
         UseResourceId = true, ResourceId = id.ToString("D"), Url = "https://host.test/unused.docx", RequestToken = 1,
-        SubRequests = types.Select((type, i) => new FssHttpSubRequest { Type = type, SubRequestToken = (ulong)i + 1 }).ToList(),
+        SubRequests = types.Select((type, i) => new FssHttpSubRequest
+        {
+            Type = type,
+            SubRequestToken = (ulong)i + 1,
+            SubRequestDataXml = type is SubRequestType.Cell or SubRequestType.WhoAmI or SubRequestType.ServerTime or
+                SubRequestType.GetDocMetaInfo or SubRequestType.GetVersions or SubRequestType.LockStatus
+                ? null : "<SubRequestData />",
+        }).ToList(),
     };
+    internal static void SetBinary(FssHttpSubRequest request, byte[] bytes)
+    {
+        request.SubRequestDataBinary = bytes;
+        request.SubRequestDataAttributes["BinaryDataSize"] = bytes.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
     private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
     private sealed class HostAccess(DocumentAccess access = DocumentAccess.Read | DocumentAccess.Write) : ICellBridgeAccessEvaluator
     { public DocumentAccess Evaluate(CellBridgeActor actor, DocumentState state) => access; }

@@ -1,5 +1,8 @@
 # Storage providers and reusable hosting
 
+See [tested environments and recovery limits](supported-environments.md) and the
+[beta.1 upgrade procedure](beta-2-upgrade.md) before upgrading a durable host.
+
 CellBridge stores document state separately from file content. PostgreSQL holds
 document identities, current revisions, synchronization graphs, save receipts,
 sessions and leases. Content uses PostgreSQL chunks or immutable filesystem

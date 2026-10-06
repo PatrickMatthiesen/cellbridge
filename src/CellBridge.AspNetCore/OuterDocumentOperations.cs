@@ -33,7 +33,7 @@ internal static class OuterDocumentOperations
             if (request.Type == SubRequestType.FileOperation)
             {
                 if (attributes.GetValueOrDefault("FileOperation") != "Rename")
-                { response.ErrorCode = attributes.ContainsKey("FileOperation") ? "NotSupported" : "InvalidArgument"; return; }
+                { response.ErrorCode = attributes.ContainsKey("FileOperation") ? "RequestNotSupported" : "InvalidArgument"; return; }
                 await service.RenameDocumentAsync(resourceId, attributes.GetValueOrDefault("NewFileName") ?? "", actor, attributes, cancellationToken);
                 return;
             }
@@ -47,7 +47,7 @@ internal static class OuterDocumentOperations
                         break;
                     case SubRequestType.Versioning:
                         if (attributes.GetValueOrDefault("VersioningRequestType") != "GetVersionList")
-                        { response.ErrorCode = attributes.ContainsKey("VersioningRequestType") ? "NotSupported" : "InvalidArgument"; break; }
+                        { response.ErrorCode = attributes.ContainsKey("VersioningRequestType") ? "RequestNotSupported" : "InvalidArgument"; break; }
                         var revisions = RevisionHistory.Initialize(state).Revisions.Reverse().ToArray();
                         var users = revisions.Select(r => r.Author).DistinctBy(u => u.Subject).ToArray();
                         var xml = new XElement("SubResponseData",
@@ -70,7 +70,7 @@ internal static class OuterDocumentOperations
         catch (UnauthorizedAccessException) { response.ErrorCode = "FileUnauthorizedAccess"; response.HResult = "2147942405"; }
         catch (KeyNotFoundException) { response.ErrorCode = request.Type == SubRequestType.Versioning ? "VersionNotFound" : "FileNotExistsOrCannotBeCreated"; }
         catch (ArgumentException) { response.ErrorCode = "InvalidArgument"; }
-        catch (NotSupportedException) { response.ErrorCode = "NotSupported"; }
+        catch (NotSupportedException) { response.ErrorCode = "RequestNotSupported"; }
         catch (DocumentOperationLockException ex) { response.ErrorCode = ex.ErrorCode; }
         catch (InvalidOperationException) { response.ErrorCode = "SubRequestFail"; }
     }
@@ -115,7 +115,7 @@ internal static class OuterDocumentOperations
                     .Select(id => new XElement("PropertyValue", new XAttribute("id", id), new XAttribute("value", props[id]))));
                 break;
             default:
-                response.ErrorCode = request.SubRequestDataAttributes.ContainsKey("Properties") ? "NotSupported" : "InvalidArgument"; return;
+                response.ErrorCode = request.SubRequestDataAttributes.ContainsKey("Properties") ? "RequestNotSupported" : "InvalidArgument"; return;
         }
         response.SubResponseDataXml = result.ToString(SaveOptions.DisableFormatting);
     }

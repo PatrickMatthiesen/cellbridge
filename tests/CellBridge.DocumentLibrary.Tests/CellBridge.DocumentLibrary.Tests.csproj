@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <CellBridgePackageVersion Condition="'$(CellBridgePackageVersion)' == ''">0.1.0-beta.2</CellBridgePackageVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CellBridge.AspNetCore" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.FssHttpB" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Storage.InMemory" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Storage.PostgreSql" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <ProjectReference Include="../../examples/DocumentLibrary/CellBridge.DocumentLibrary.csproj" />
+    <ProjectReference Include="Probe/CellBridge.DocumentLibrary.Probe.csproj" ReferenceOutputAssembly="false" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Probe/**" />
+    <Content Remove="Probe/**" />
+    <None Remove="Probe/**" />
+  </ItemGroup>
+  <Target Name="CopyDocumentLibraryProbe" AfterTargets="Build">
+    <ItemGroup><ProbeFiles Include="Probe/bin/$(Configuration)/net10.0/**/*" /></ItemGroup>
+    <Copy SourceFiles="@(ProbeFiles)" DestinationFiles="@(ProbeFiles->'$(OutDir)Probe/%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

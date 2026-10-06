@@ -95,7 +95,9 @@ public sealed class HostLifecycleTests
         Assert.Null(await peer.State.FindByResourceIdAsync(state.ResourceId));
         var oldRequest = StorageTests.Fixture("save-first");
         var soap = new CellStorageRequest { Requests = { new FssHttpRequest { Url = state.Path,
-            SubRequests = { new FssHttpSubRequest { Type = SubRequestType.Cell, SubRequestToken = 1, SubRequestDataBinary = oldRequest.ToByteArray() } } } } };
+            SubRequests = { new FssHttpSubRequest { Type = SubRequestType.Cell, SubRequestToken = 1,
+                SubRequestDataBinary = oldRequest.ToByteArray(),
+                SubRequestDataAttributes = { ["BinaryDataSize"] = oldRequest.ToByteArray().Length.ToString() } } } } } };
         var response = await new CellBridgeRequestProcessor(new(peer)).ExecuteAsync(soap, "https://host.test", TestActor.Value);
         Assert.Equal("InvalidCoauthSession", response.Response.Responses[0].SubResponses[0].ErrorCode);
         Assert.Equal(recreated.StateVersion, (await peer.State.FindByResourceIdAsync(recreated.ResourceId))!.StateVersion);

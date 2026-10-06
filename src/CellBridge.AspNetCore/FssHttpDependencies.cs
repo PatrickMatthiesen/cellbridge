@@ -9,10 +9,13 @@ public static class FssHttpDependencies
     {
         if (request.DependsOn is null)
             return request.DependencyType is null ? null : "InvalidRequestDependencyType";
-        var previous = prior.SingleOrDefault(r => r.SubRequestToken == request.DependsOn);
+        if (request.DependencyType is null) return "InvalidRequestDependencyType";
+        var matches = prior.Where(r => r.SubRequestToken == request.DependsOn).Take(2).ToArray();
+        if (matches.Length > 1) return "InvalidRequestDependencyType";
+        var previous = matches.SingleOrDefault();
         if (previous is null) return "DependentRequestNotExecuted";
         bool success = previous.ErrorCode == "Success";
-        bool unsupported = previous.ErrorCode is "NotSupported" or "SubRequestNotSupported";
+        bool unsupported = previous.ErrorCode is "RequestNotSupported" or "NotSupported" or "SubRequestNotSupported";
         // MS-FSSHTTP 2.2.5.3 excludes only failed OnSuccess/OnFail/OnExecute
         // dependencies from OnExecute. An evaluated OnNotSupported fallback
         // must allow continuation, as in the Word open examples in 4.6.1/4.6.2.

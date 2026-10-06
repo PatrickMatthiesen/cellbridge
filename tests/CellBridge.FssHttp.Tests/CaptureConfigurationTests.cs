@@ -47,11 +47,13 @@ public sealed class CaptureConfigurationTests
                 { RequestId = 1, Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } } } };
             XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
             XNamespace protocol = CellStorageRequest.Namespace;
+            var bytes = query.ToByteArray();
             var xml = new XElement(soap + "Envelope", new XElement(soap + "Body",
-                new XElement(protocol + "RequestCollection", new XElement(protocol + "Request",
+                new XElement(protocol + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
+                new XElement(protocol + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), new XElement(protocol + "Request",
                     new XAttribute("Url", "http://localhost" + state.Path), new XAttribute("RequestToken", 1),
                     new XElement(protocol + "SubRequest", new XAttribute("Type", "Cell"), new XAttribute("SubRequestToken", 1),
-                        new XElement(protocol + "SubRequestData", Convert.ToBase64String(query.ToByteArray())))))))
+                        new XElement(protocol + "SubRequestData", new XAttribute("BinaryDataSize", bytes.Length), Convert.ToBase64String(bytes)))))))
                 .ToString(SaveOptions.DisableFormatting);
             using var client = app.GetTestClient();
             using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")

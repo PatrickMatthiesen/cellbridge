@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
@@ -31,7 +32,7 @@ public sealed partial class CellBridgeDocumentService
     {
         if (operation.Data is not PutChangesSubRequestData put || package is null || put.StorageIndex.IsNull ||
             (put.Flags & ~0x79) != 0 || (put.AdditionalFlagsBits & 0x38) != 0 ||
-            attributes.TryGetValue("Coalesce", out var coalesce) && coalesce is "true" or "1")
+            CellSubRequestDataValidation.TryGetBoolean(attributes, "Coalesce", out bool coalesce) && coalesce)
             return Wrap(Failure(operation.RequestId, CellErrorCode.RequestNotSupported,
                 "Only complete, non-coalescing application metadata uploads are supported."), initial);
         var key = $"metadata:{put.StorageIndex.Value}:{put.StorageIndex.Guid:D}";
@@ -98,6 +99,8 @@ public sealed partial class CellBridgeDocumentService
                         return new StateTransition<PublishResult>(null, new(current, null, "MetadataEpochChanged", false));
                     if (current.Receipts.FirstOrDefault(r => r.OperationKey == key && r.PartitionKind == 1) is { } prior)
                         return new StateTransition<PublishResult>(null, new(current, prior, null, false));
+                    if (!MatchesEtag(attributes, current))
+                        return new StateTransition<PublishResult>(null, new(current, null, "CellRequestFail", false));
                     var currentPartition = current.Partitions.Single(p => p.Kind == 1);
                     if (currentPartition.StorageIndex != source.StorageIndex || currentPartition.Knowledge != source.Knowledge)
                         return new StateTransition<PublishResult>(null, new(current, null, null, true));

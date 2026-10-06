@@ -67,8 +67,8 @@ public static class CellBridgeAuthorization
             SubRequestType.EditorsTable => a.GetValueOrDefault("EditorsTableRequestType") switch
             {
                 "LeaveEditingSession" or "UpdateEditorMetadata" or "RemoveEditorMetadata" => DocumentAccess.Read,
-                "JoinEditingSession" or "RefreshEditingSession" => a.GetValueOrDefault("AsEditor") == "0" ||
-                    bool.TryParse(a.GetValueOrDefault("AsEditor"), out var asEditor) && !asEditor
+                "JoinEditingSession" or "RefreshEditingSession" =>
+                    CellSubRequestDataValidation.TryGetBoolean(a, "AsEditor", out bool asEditor) && !asEditor
                     ? DocumentAccess.Read : DocumentAccess.Write,
                 _ => DocumentAccess.Write,
             },

@@ -25,14 +25,13 @@ public static class CellBinaryRequestExecutor
         ProtocolHashingOptions? hashing = null)
     {
         var response = new FsshttpbResponse();
-        if (request.SubRequests.Count == 0 || !request.HasValidEnvelope)
+        if (request.TryGetValidationError(out var validationCode, out var validationMessage))
         {
             response.Status = true;
             response.Error = new ResponseError(
                 ErrorType.Cell,
-                (ulong)(request.ProtocolVersion is not (12 or 13 or 14) || request.MinimumVersion != 11
-                    ? CellErrorCode.IncompatibleProtocolVersion : CellErrorCode.RequestStreamSchemaError),
-                "Invalid cell request envelope or hashing schema, or missing subrequests.");
+                (ulong)validationCode,
+                validationMessage);
             return response;
         }
 
@@ -108,7 +107,7 @@ public static class CellBinaryRequestExecutor
             return new FsshttpbSubResponse
             {
                 RequestId = request.RequestId, RequestType = request.RequestType, Status = true,
-                Error = new ResponseError(ErrorType.Protocol, (ulong)ProtocolErrorCode.RequestNotSupported,
+                Error = new ResponseError(ErrorType.Cell, (ulong)CellErrorCode.RequestNotSupported,
                     "Allocation requires a count from 1 through 100000."),
             };
         // A new UUID namespace per request avoids a shared/restarted integer
@@ -203,8 +202,9 @@ public static class CellBinaryRequestExecutor
         RequestType = requestType,
         Status = true,
         Error = new ResponseError(
-            ErrorType.Protocol,
-            (ulong)ProtocolErrorCode.RequestNotSupported,
+            ErrorType.Cell,
+            (ulong)(requestType is RequestTypes.QueryAccess or RequestTypes.QueryChanges or RequestTypes.PutChanges or RequestTypes.AllocateExtendedGuidRange
+                ? CellErrorCode.RequestNotSupported : CellErrorCode.UnknownRequest),
             "The server does not apply this binary operation."),
     };
 }
