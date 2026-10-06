@@ -132,8 +132,10 @@ validated principals to these claims:
 | `cellbridge:create=true` | Permission to create documents. |
 
 The [package consumer](../examples/NuGetConsumer/README.md) demonstrates JWT
-validation and claim mapping. Desktop Office needs a compatible challenge/sign-in
-exchange in addition to API authentication.
+validation and claim mapping. For desktop Office, register
+`AddCellBridgeOfficeFormsAuthentication` with your cookie scheme. The package
+supplies the challenge and completion endpoint; your host supplies the login page.
+See [cookie login integration](package-integration.md#let-desktop-office-use-your-cookie-login).
 
 ### Integration constraints
 
@@ -254,7 +256,9 @@ explicit legacy evaluator is an additional ceiling and cannot bypass a missing
 binding/snapshot. Evaluators must also use stable subjects, be bounded and perform
 no I/O; mutable evaluator decisions are not a coordinated permission update.
 
-The sample authentication library is outside the reusable NuGet packages.
+The sample account database and login pages are outside the reusable NuGet packages.
+`CellBridge.AspNetCore` supplies the opt-in Office challenge and completion adapter;
+see [cookie login integration](package-integration.md#let-desktop-office-use-your-cookie-login).
 Keep passwords, tokens, cookies and connection strings out of shared captures.
 The authentication database holds cookie protection keys; protect its access
 and backups.
@@ -276,7 +280,7 @@ retry and approve the test host when prompted. Organization policy may control
 this setting.
 
 Office receives the HTTP 403 challenge, displays the CellBridge form, reaches
-`/auth/complete` and retries with its cookie. Use separate Windows profiles or
+`/_cellbridge/auth/complete` and retries with its cookie. Use separate Windows profiles or
 machines to test different accounts, because Office can share cached credentials.
 
 For repeatable save/reopen checks, follow

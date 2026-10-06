@@ -4,6 +4,7 @@ using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
@@ -40,7 +41,10 @@ public static class CellBridgeEndpoints
 
     public static IEndpointRouteBuilder MapCellBridge(this IEndpointRouteBuilder app)
     {
-        var routes = app.MapGroup("").RequireAuthorization();
+        var office = CellBridgeOfficeFormsAuthentication.MapCompletion(app);
+        var routes = app.MapGroup("").WithMetadata(new CellBridgeOfficeFormsAuthentication.OfficeEndpointMetadata());
+        if (office is null) routes.RequireAuthorization();
+        else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.CookieScheme });
         routes.MapMethods("/_cellbridge/history/{resourceId:guid}/{generation:long}/{revisionNumber}", ["GET", "HEAD"],
             async (Guid resourceId, long generation, string revisionNumber, HttpContext context, CellBridgeDocumentService service) =>
             {

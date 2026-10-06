@@ -3,6 +3,8 @@ using System.Security.Claims;
 using System.Text.RegularExpressions;
 using CellBridge.AspNetCore;
 using CellBridge.Authentication;
+using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.InMemory;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Identity;
@@ -33,9 +35,9 @@ public sealed class AuthenticationTests
         }
         using var client = first.GetTestClient();
         client.BaseAddress = new("https://localhost");
-        using var challenge = await client.GetAsync("/protected");
+        using var challenge = await client.SendAsync(new(HttpMethod.Options, "/shared/"));
         Assert.Equal(HttpStatusCode.Forbidden, challenge.StatusCode);
-        Assert.Equal("https://localhost/auth/complete", challenge.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
+        Assert.Equal("https://localhost/_cellbridge/auth/complete", challenge.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
         using var apiChallenge = await client.GetAsync("/api/protected");
         Assert.Equal(HttpStatusCode.Unauthorized, apiChallenge.StatusCode);
         using var library = await client.GetAsync("/library");
@@ -117,9 +119,11 @@ public sealed class AuthenticationTests
         builder.Services.AddCellBridgeAuthentication(builder.Configuration, renew, serveOffice: renew);
         builder.Services.Configure<CookieAuthenticationOptions>(IdentityConstants.ApplicationScheme, o => o.TimeProvider = clock);
         builder.Services.Configure<SecurityStampValidatorOptions>(o => o.TimeProvider = clock);
+        builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
         var app = builder.Build();
         app.UseAuthentication(); app.UseAuthorization(); app.UseAntiforgery();
         app.MapCellBridgeAuthentication();
+        app.MapCellBridge();
         app.MapGet("/protected", (System.Security.Claims.ClaimsPrincipal user) => CellBridgeActor.FromPrincipal(user)!.Identity.Subject).RequireAuthorization();
         app.MapGet("/api/protected", () => "ok").RequireAuthorization();
         app.MapGet("/library", () => "ok").RequireAuthorization();

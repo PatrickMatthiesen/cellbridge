@@ -5,6 +5,57 @@ the protocol and provider packages can also be consumed separately. See
 [provider composition](storage-providers.md#consume-the-packages) and the
 [package consumer](../examples/NuGetConsumer/README.md).
 
+## Let desktop Office use your cookie login
+
+When you map CellBridge's HTTP endpoints, enable its Office forms-authentication
+adapter for your existing cookie scheme:
+
+```csharp
+builder.Services.AddAuthentication("Cookies").AddCookie("Cookies", options =>
+{
+    options.LoginPath = "/login";
+});
+builder.Services.AddCellBridgeOfficeFormsAuthentication("Cookies");
+builder.Services.AddCellBridge(provider);
+
+// After building the app:
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapCellBridge();
+```
+
+CellBridge returns the Office challenge on its protected endpoints and maps
+`/_cellbridge/auth/complete` for GET and HEAD. The challenge opens your cookie
+scheme's `LoginPath`, with a local completion path in its `ReturnUrlParameter`.
+Your login page signs in with that scheme and redirects to the validated local
+return path. The completion endpoint accepts the cookie only when its principal
+maps to a `CellBridgeActor`. It does not create accounts or grant file access.
+The host supplies its login page, CSRF checks, account management and trusted
+[identity claims](authentication.md#reusable-hosts).
+
+Existing cookie events, including principal validation, still run. Ordinary
+browser endpoints retain their redirects. Bearer authentication can remain the
+host's default; CellBridge's mapped endpoints explicitly select the Office cookie.
+Authenticated document permission denials return 403 without starting another login.
+The adapter is opt-in and part of the unpublished beta.2 candidate.
+
+Map `MapCellBridge()` at the application root. For a mounted app, call
+`UsePathBase` before routing; mapping inside a prefixed route group is rejected.
+Office must reach the request's external HTTPS origin. Configure trusted forwarded
+headers before authentication when behind a proxy, or supply a fixed origin:
+
+```csharp
+builder.Services.AddCellBridgeOfficeFormsAuthentication("Cookies", options =>
+    options.PublicOrigin = "https://documents.example");
+```
+
+The origin has no path. `CompletionPath` can change the library's completion route.
+Cookie schemes using `CookieAuthenticationOptions.EventsType` are currently
+unsupported; use an `Events` instance. Missing or incompatible schemes fail at
+startup. The repository's Identity account sample uses this same adapter, but
+its account database and login pages are not packaged.
+
 ## Execute parsed SOAP requests
 
 `AddCellBridge` registers `CellBridgeRequestProcessor` and

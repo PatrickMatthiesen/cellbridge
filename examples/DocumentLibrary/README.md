@@ -4,7 +4,11 @@ This example hosts CellBridge from NuGet packages. It keeps CellBridge state and
 
 The built-in owner, editor, and reader accounts exist only for local testing. The sign-in endpoint rejects non-loopback clients and runs only in the Development or Testing environment. This is not an Internet-ready authentication design.
 
-Desktop Office uses a separate sign-in session from your browser. An unauthenticated document or protocol request receives the Office forms-authentication challenge, which opens the same local account selector. Select an identity and sign in; the dialog returns to `/auth/complete` before Office retries the document with its cookie. Browser visits still use `/local-login`. A loopback reverse proxy also passes the connection-address check, so anyone allowed through that proxy can choose a test identity. Keep this example on a private test network.
+The example registers `AddCellBridgeOfficeFormsAuthentication()` from the
+`CellBridge.AspNetCore` package. CellBridge owns the challenge and completion
+endpoint; the example supplies the account selector and login form.
+
+Desktop Office uses a separate sign-in session from your browser. An unauthenticated document or protocol request receives the Office forms-authentication challenge, which opens the same local account selector. Select an identity and sign in; the dialog returns to `/_cellbridge/auth/complete` before Office retries the document with its cookie. Browser visits still use `/local-login`. A loopback reverse proxy also passes the connection-address check, so anyone allowed through that proxy can choose a test identity. Keep this example on a private test network.
 
 Run the package-only app and its PostgreSQL database through the standalone AppHost. A normal launch restores the published packages from the NuGet sources already configured on the machine:
 

@@ -46,15 +46,6 @@ public static class DocumentLibraryEndpoints
         app.MapGet("/auth/login", Login).AllowAnonymous();
         app.MapPost("/local-login", SignIn).AllowAnonymous();
         app.MapPost("/auth/login", SignIn).AllowAnonymous();
-        app.MapMethods("/auth/complete", ["GET", "HEAD"], (HttpContext context) =>
-        {
-            context.Response.Headers.CacheControl = "no-store";
-            return CellBridgeActor.FromPrincipal(context.User) is not null
-                ? HttpMethods.IsHead(context.Request.Method)
-                    ? Results.Ok()
-                    : Html(Page("Signed in", "<h1>Signed in to CellBridge</h1><p><a href=\"/\">Open the library</a></p>"))
-                : Results.Unauthorized();
-        }).AllowAnonymous();
 
         app.MapPost("/local-logout", async (HttpContext context, IAntiforgery antiforgery) =>
         {

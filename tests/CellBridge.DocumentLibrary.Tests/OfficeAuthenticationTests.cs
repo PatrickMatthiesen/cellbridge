@@ -5,6 +5,7 @@ using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 
 namespace CellBridge.DocumentLibrary.Tests;
 
@@ -28,9 +29,9 @@ public sealed class OfficeAuthenticationTests
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Null(response.Headers.Location);
         Assert.Empty(await response.Content.ReadAsByteArrayAsync());
-        Assert.Equal(Origin + "auth/login?returnUrl=%2Fauth%2Fcomplete",
+        Assert.Equal(Origin + "local-login?ReturnUrl=%2F_cellbridge%2Fauth%2Fcomplete",
             response.Headers.GetValues("X-FORMS_BASED_AUTH_REQUIRED").Single());
-        Assert.Equal(Origin + "auth/complete",
+        Assert.Equal(Origin + "_cellbridge/auth/complete",
             response.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
         Assert.Equal("800x600", response.Headers.GetValues("X-FORMS_BASED_AUTH_DIALOG_SIZE").Single());
         Assert.True(response.Headers.CacheControl!.NoStore);
@@ -42,25 +43,25 @@ public sealed class OfficeAuthenticationTests
         using var files = new TemporaryDirectory();
         await using var factory = new LibraryFactory(files.Path);
         using var owner = Client(factory);
-        using var anonymousComplete = await owner.GetAsync("/auth/complete");
+        using var anonymousComplete = await owner.GetAsync("/_cellbridge/auth/complete");
         Assert.Equal(HttpStatusCode.Unauthorized, anonymousComplete.StatusCode);
-        using var anonymousHead = await owner.SendAsync(new(HttpMethod.Head, "/auth/complete"));
+        using var anonymousHead = await owner.SendAsync(new(HttpMethod.Head, "/_cellbridge/auth/complete"));
         Assert.Equal(HttpStatusCode.Unauthorized, anonymousHead.StatusCode);
         using var browserChallenge = await owner.GetAsync("/");
         Assert.Equal(HttpStatusCode.Redirect, browserChallenge.StatusCode);
         Assert.Contains("/local-login", browserChallenge.Headers.Location!.ToString());
 
-        using var login = await SignIn(owner, "/auth/login", "owner", "/auth/complete");
+        using var login = await SignIn(owner, "/auth/login", "owner", "/_cellbridge/auth/complete");
         Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
-        Assert.Equal("/auth/complete", login.Headers.Location!.ToString());
+        Assert.Equal("/_cellbridge/auth/complete", login.Headers.Location!.ToString());
         var cookie = login.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("CellBridge.DocumentLibrary.Local="));
         Assert.Contains("secure", cookie, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("httponly", cookie, StringComparison.OrdinalIgnoreCase);
-        using var complete = await owner.GetAsync("/auth/complete");
+        using var complete = await owner.GetAsync("/_cellbridge/auth/complete");
         Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
-        Assert.Contains("Signed in to CellBridge", await complete.Content.ReadAsStringAsync());
+        Assert.Empty(await complete.Content.ReadAsStringAsync());
         Assert.True(complete.Headers.CacheControl!.NoStore);
-        using var completeHead = await owner.SendAsync(new(HttpMethod.Head, "/auth/complete"));
+        using var completeHead = await owner.SendAsync(new(HttpMethod.Head, "/_cellbridge/auth/complete"));
         Assert.Equal(HttpStatusCode.OK, completeHead.StatusCode);
         Assert.Empty(await completeHead.Content.ReadAsByteArrayAsync());
 
@@ -77,7 +78,7 @@ public sealed class OfficeAuthenticationTests
         Assert.True(discovery.Headers.Contains("X-MSFSSHTTP"));
 
         using var reader = Client(factory);
-        using var readerLogin = await SignIn(reader, "/auth/login", "reader", "/auth/complete");
+        using var readerLogin = await SignIn(reader, "/auth/login", "reader", "/_cellbridge/auth/complete");
         Assert.Equal(bytes, await reader.GetByteArrayAsync("/shared/welcome.docx"));
         using var adminDenied = await reader.PostAsync($"/library/files/{state.ResourceId:D}/permissions",
             new FormUrlEncodedContent(new Dictionary<string, string>()));
@@ -102,7 +103,7 @@ public sealed class OfficeAuthenticationTests
             new FormUrlEncodedContent(new Dictionary<string, string> { ["user"] = "owner" }));
         Assert.Equal(HttpStatusCode.BadRequest, missingCsrf.StatusCode);
         using var signedIn = await SignIn(client, path, "owner", "//evil.example/", tamper: true);
-        Assert.Equal("/auth/complete", signedIn.Headers.Location!.ToString());
+        Assert.Equal("/_cellbridge/auth/complete", signedIn.Headers.Location!.ToString());
 
         var remoteGet = await factory.Server.SendAsync(context =>
         {
@@ -142,7 +143,7 @@ public sealed class OfficeAuthenticationTests
         var hiddenReturn = WebUtility.HtmlDecode(Regex.Match(html,
             "name=\"returnUrl\" value=\"([^\"]+)\"").Groups[1].Value);
         Assert.Equal("/local-login", action);
-        Assert.Equal(tamper ? "/auth/complete" : returnUrl, hiddenReturn);
+        Assert.Equal(tamper ? "/_cellbridge/auth/complete" : returnUrl, hiddenReturn);
         return await client.PostAsync(tamper ? path : action, new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["user"] = user,
@@ -156,8 +157,11 @@ public sealed class OfficeAuthenticationTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.UseSetting("DocumentLibrary:StorageProvider", "InMemory");
-            builder.UseSetting("DocumentLibrary:DestinationRoot", destination);
+            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DocumentLibrary:StorageProvider"] = "InMemory",
+                ["DocumentLibrary:DestinationRoot"] = destination,
+            }));
         }
     }
 }
