@@ -127,10 +127,14 @@ def main():
         run("demo-build", ["dotnet", "build", "demo/CellBridge.Demo.slnx", "-c", "Release", "--nologo", "-v", "minimal"])
         start_attempted = True
         run("aspire-start", ["aspire", "start", "--apphost", str(APPHOST), "--isolated", "--non-interactive"], 600)
-        for resource in ("test-account", "web-peer"):
-            run(f"start-{resource}", ["aspire", "resource", resource, "start", "--apphost", str(APPHOST),
-                "--non-interactive"], 180)
-        for resource in ("web", "web-peer", "demo"):
+        run("start-test-account", ["aspire", "resource", "test-account", "start", "--apphost", str(APPHOST),
+            "--non-interactive"], 180)
+        # Both hosts build the same project. Let the first finish its startup
+        # build before starting the peer against the same output directory.
+        run("ready-web", ["aspire", "wait", "web", "--apphost", str(APPHOST), "--non-interactive"], 180)
+        run("start-web-peer", ["aspire", "resource", "web-peer", "start", "--apphost", str(APPHOST),
+            "--non-interactive"], 180)
+        for resource in ("web-peer", "demo"):
             run(f"ready-{resource}", ["aspire", "wait", resource, "--apphost", str(APPHOST), "--non-interactive"], 180)
         description = cli_json(["aspire", "describe", "--apphost", str(APPHOST), "--non-interactive", "--format", "Json"])
         web = next(r for r in description["resources"] if r.get("displayName") == "web")
