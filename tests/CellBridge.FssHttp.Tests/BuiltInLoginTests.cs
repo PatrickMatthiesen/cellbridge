@@ -103,18 +103,33 @@ public sealed class BuiltInLoginTests
         Assert.Contains("ICellBridgeLoginAuthenticator", error.Message);
     }
 
+    [Theory]
+    [InlineData("password", "__RequestVerificationToken")]
+    [InlineData("PASSWORD", "__RequestVerificationToken")]
+    [InlineData("login", "__RequestVerificationToken")]
+    [InlineData("failed", "__RequestVerificationToken")]
+    [InlineData("__RequestVerificationToken", "__RequestVerificationToken")]
+    [InlineData("csrf", "csrf")]
+    public async Task ConflictingReturnFieldsFailBeforeCredentialsCanBeSubmitted(string returnField, string tokenField)
+    {
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        { await using var app = await Start(returnField: returnField, tokenField: tokenField); });
+        Assert.Contains("return URL parameter", error.Message);
+    }
+
     private static FormUrlEncodedContent Form(string token, string user, string password, string returnUrl) => new(
         new Dictionary<string, string> { ["__RequestVerificationToken"] = token, ["login"] = user,
             ["password"] = password, ["next"] = returnUrl });
     private static string Field(string html, string name) => WebUtility.HtmlDecode(Regex.Match(html,
         "name=\"" + name + "\" value=\"([^\"]+)\"").Groups[1].Value);
 
-    private static async Task<WebApplication> Start(bool custom = false, bool blocked = false, bool missingAuthenticator = false)
+    private static async Task<WebApplication> Start(bool custom = false, bool blocked = false, bool missingAuthenticator = false, string returnField = "next", string tokenField = "__RequestVerificationToken")
     {
         var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
         builder.Services.AddAuthentication("browser").AddCookie("browser").AddCookie("office", options =>
-        { options.LoginPath = "/sign-in"; options.ReturnUrlParameter = "next"; options.Cookie.Name = "Office.Login"; });
+        { options.LoginPath = "/sign-in"; options.ReturnUrlParameter = returnField; options.Cookie.Name = "Office.Login"; });
         builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+        builder.Services.AddAntiforgery(options => options.FormFieldName = tokenField);
         builder.Services.AddSingleton<LoginStats>();
         if (!missingAuthenticator) builder.Services.AddScoped<ICellBridgeLoginAuthenticator, LoginAuthenticator>();
         builder.Services.AddCellBridgeLogin("office", options =>

@@ -257,7 +257,7 @@ explicit legacy evaluator is an additional ceiling and cannot bypass a missing
 binding/snapshot. Evaluators must also use stable subjects, be bounded and perform
 no I/O; mutable evaluator decisions are not a coordinated permission update.
 
-The sample account database and login pages are outside the reusable NuGet packages.
+The sample account database is outside the reusable NuGet packages.
 `CellBridge.AspNetCore` packages the default login HTML, optional renderer and
 Office challenge/completion flow. The account database remains host-owned.
 See [login integration](package-integration.md#use-the-built-in-login-page).

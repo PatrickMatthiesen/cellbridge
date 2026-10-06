@@ -12,7 +12,7 @@ document permissions. `AddCellBridgeLogin` supplies a standard login page with o
 CSRF protection, cookie sign-in and the desktop Office challenge/completion flow.
 Hosts connect their account system through `ICellBridgeLoginAuthenticator`.
 `AddCellBridgeOfficeFormsAuthentication` can connect an existing complete login flow.
-The sample account database and login pages are not packaged.
+The sample account database is not packaged.
 
 Hosts can map the HTTP endpoints or execute parsed SOAP requests through
 `CellBridgeRequestProcessor`. They can supply GUID resource identities, apply

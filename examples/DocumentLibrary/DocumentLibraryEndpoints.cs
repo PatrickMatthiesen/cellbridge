@@ -47,7 +47,7 @@ public static class DocumentLibraryEndpoints
                 return Results.Redirect("/");
             }
             catch (ArgumentException error) { return CreationError(error.Message, 400); }
-            catch (DocumentNameConflictException error) { return CreationError(error.Message, 409);
+            catch (DocumentNameConflictException error) { return CreationError(error.Message, 409); }
         }).RequireAuthorization();
 
         app.MapPost("/library/upload", async (HttpContext context, DocumentLibraryService library,

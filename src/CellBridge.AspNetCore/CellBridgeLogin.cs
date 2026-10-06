@@ -92,7 +92,8 @@ public static class CellBridgeLogin
         {
             context.Response.Headers.CacheControl = "no-store";
             if (registration.IsRequestAllowed?.Invoke(context) == false) return Results.NotFound();
-            if (context.Request.ContentType?.StartsWith("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase) is not true)
+            if (!context.Request.HasFormContentType ||
+                context.Request.ContentType?.StartsWith("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase) is not true)
                 return Results.BadRequest();
             if (context.Request.ContentLength > 16384) return Results.BadRequest();
             IFormCollection form;
@@ -126,10 +127,18 @@ public static class CellBridgeLogin
     private sealed record LoginRegistration(string ApplicationName, Func<CellBridgeLoginPageContext, string>? RenderPage,
         Func<HttpContext, bool>? IsRequestAllowed);
 
-    private sealed class AuthenticatorValidator(IServiceScopeFactory scopes) : IHostedService
+    private sealed class AuthenticatorValidator(IServiceScopeFactory scopes,
+        IOptionsMonitor<CookieAuthenticationOptions> cookies, IOptions<AntiforgeryOptions> antiforgery,
+        CellBridgeOfficeFormsAuthentication.OfficeFormsRegistration office) : IHostedService
     {
         public Task StartAsync(CancellationToken cancellationToken)
         {
+            var returnField = cookies.Get(office.CookieScheme).ReturnUrlParameter;
+            var reserved = new[] { "login", "password", "failed", antiforgery.Value.FormFieldName };
+            if (reserved.Contains(returnField, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The login return URL parameter must not collide with credential, failure or antiforgery fields.");
+            if (new[] { "login", "password", "failed" }.Contains(antiforgery.Value.FormFieldName, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The login antiforgery field must not collide with credential or failure fields.");
             using var scope = scopes.CreateScope();
             _ = scope.ServiceProvider.GetService<ICellBridgeLoginAuthenticator>()
                 ?? throw new InvalidOperationException("Register an ICellBridgeLoginAuthenticator for the built-in login page.");
