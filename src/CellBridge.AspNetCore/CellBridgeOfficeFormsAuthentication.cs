@@ -114,7 +114,7 @@ public static class CellBridgeOfficeFormsAuthentication
                 return original.RedirectToLogin(context);
             var request = context.Request;
             var origin = registration.PublicOrigin ?? $"{request.Scheme}://{request.Host}";
-            var completion = (request.PathBase + registration.CompletionPath).Value!;
+            var completion = (request.PathBase + registration.CompletionPath).ToUriComponent();
             var login = origin + request.PathBase + context.Options.LoginPath;
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             context.Response.Headers.CacheControl = "no-store";

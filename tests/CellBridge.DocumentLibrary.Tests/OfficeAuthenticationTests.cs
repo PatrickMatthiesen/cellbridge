@@ -5,7 +5,6 @@ using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Configuration;
 
 namespace CellBridge.DocumentLibrary.Tests;
 
@@ -91,6 +90,20 @@ public sealed class OfficeAuthenticationTests
         Assert.False(revoked.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
     }
 
+    [Fact]
+    public async Task HostShutdownReleasesItsDestinationLock()
+    {
+        using var files = new TemporaryDirectory();
+        await using (var factory = new LibraryFactory(files.Path))
+        {
+            using var client = Client(factory);
+            using var login = await client.GetAsync("/local-login");
+            Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        }
+        await using var reopened = new DocumentLibraryDestination(files.Path);
+        Assert.Equal(files.Path, reopened.Root);
+    }
+
     [Theory]
     [InlineData("/local-login")]
     [InlineData("/auth/login")]
@@ -157,11 +170,8 @@ public sealed class OfficeAuthenticationTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
-            builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["DocumentLibrary:StorageProvider"] = "InMemory",
-                ["DocumentLibrary:DestinationRoot"] = destination,
-            }));
+            builder.UseSetting("DocumentLibrary:StorageProvider", "InMemory");
+            builder.UseSetting("DocumentLibrary:DestinationRoot", destination);
         }
     }
 }

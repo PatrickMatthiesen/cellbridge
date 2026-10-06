@@ -61,6 +61,11 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.SlidingExpiration = false;
         options.LoginPath = "/local-login";
         options.AccessDeniedPath = "/local-login";
+        options.Events.OnRedirectToAccessDenied = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return Task.CompletedTask;
+        };
     });
 builder.Services.AddCellBridgeOfficeFormsAuthentication();
 builder.Services.AddAuthorization(options =>

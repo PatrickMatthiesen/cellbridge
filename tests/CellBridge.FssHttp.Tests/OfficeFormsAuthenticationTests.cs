@@ -72,6 +72,22 @@ public sealed class OfficeFormsAuthenticationTests
     }
 
     [Fact]
+    public async Task CustomCompletionPathIsEscapedAndCanBeReached()
+    {
+        await using var fixture = await Fixture.Start(completionPath: "/auth/complete 東京");
+        using var challenge = await fixture.Client.SendAsync(new(HttpMethod.Options, "/shared/"));
+        const string completion = "/auth/complete%20%E6%9D%B1%E4%BA%AC";
+        Assert.Equal("https://localhost" + completion,
+            challenge.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
+        var login = new Uri(challenge.Headers.GetValues("X-FORMS_BASED_AUTH_REQUIRED").Single());
+        Assert.Equal(completion, Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(login.Query)["next"].ToString());
+        using var signedIn = await fixture.Client.GetAsync("/sign-in");
+        fixture.Client.DefaultRequestHeaders.Add("Cookie", signedIn.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
+        using var complete = await fixture.Client.GetAsync(completion);
+        Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
+    }
+
+    [Fact]
     public async Task CompletionRequiresMappedActorAndDocumentDenialDoesNotRestartLogin()
     {
         await using var fixture = await Fixture.Start();
@@ -107,7 +123,7 @@ public sealed class OfficeFormsAuthenticationTests
         public WebApplication App => app;
         public HttpClient Client => client;
         public HostCookieEvents Events => events;
-        public static async Task<Fixture> Start(string pathBase = "", string? publicOrigin = null, string configuration = "valid")
+        public static async Task<Fixture> Start(string pathBase = "", string? publicOrigin = null, string configuration = "valid", string? completionPath = null)
         {
             var events = new HostCookieEvents();
             var builder = WebApplication.CreateBuilder();
@@ -123,7 +139,11 @@ public sealed class OfficeFormsAuthenticationTests
             builder.Services.AddAuthorization();
             builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
             builder.Services.AddCellBridgeOfficeFormsAuthentication(configuration is "missing" or "bearer" ? configuration : "office",
-                o => o.PublicOrigin = publicOrigin);
+                o =>
+                {
+                    o.PublicOrigin = publicOrigin;
+                    if (completionPath is not null) o.CompletionPath = completionPath;
+                });
             var app = builder.Build();
             if (pathBase.Length > 0) app.UsePathBase(pathBase);
             app.UseRouting(); app.UseAuthentication(); app.UseAuthorization();
