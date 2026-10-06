@@ -8,8 +8,10 @@ may change before a stable release.
 Start with `CellBridge.AspNetCore` and a storage provider. PostgreSQL is the
 sample host's durable default; `CellBridge.Storage.InMemory` is volatile and
 intended for disposable development. Applications provide authentication and
-document permissions. `AddCellBridgeOfficeFormsAuthentication` connects an existing
-cookie login to desktop Office and supplies the challenge and completion endpoint.
+document permissions. `AddCellBridgeLogin` supplies a standard login page with optional custom HTML,
+CSRF protection, cookie sign-in and the desktop Office challenge/completion flow.
+Hosts connect their account system through `ICellBridgeLoginAuthenticator`.
+`AddCellBridgeOfficeFormsAuthentication` can connect an existing complete login flow.
 The sample account database and login pages are not packaged.
 
 Hosts can map the HTTP endpoints or execute parsed SOAP requests through

@@ -1,5 +1,3 @@
-using System.Net;
-using System.Security.Claims;
 using CellBridge.AspNetCore;
 using CellBridge.DocumentLibrary;
 using CellBridge.Storage.Abstractions;
@@ -59,15 +57,17 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
         options.ExpireTimeSpan = TimeSpan.FromHours(8);
         options.SlidingExpiration = false;
-        options.LoginPath = "/local-login";
-        options.AccessDeniedPath = "/local-login";
+        options.LoginPath = "/auth/login";
+        options.ReturnUrlParameter = "returnUrl";
+        options.AccessDeniedPath = "/auth/login";
         options.Events.OnRedirectToAccessDenied = context =>
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return Task.CompletedTask;
         };
     });
-builder.Services.AddCellBridgeOfficeFormsAuthentication();
+builder.Services.AddCellBridgeLogin<LocalLoginAuthenticator>(configure: options =>
+    options.IsRequestAllowed = context => DocumentLibraryAuthentication.IsRequestAllowed(context, builder.Environment));
 builder.Services.AddAuthorization(options =>
     options.AddPolicy("permission-admin", policy => policy.RequireClaim("document-library:permission-admin", "true")));
 

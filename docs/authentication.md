@@ -132,10 +132,11 @@ validated principals to these claims:
 | `cellbridge:create=true` | Permission to create documents. |
 
 The [package consumer](../examples/NuGetConsumer/README.md) demonstrates JWT
-validation and claim mapping. For desktop Office, register
-`AddCellBridgeOfficeFormsAuthentication` with your cookie scheme. The package
-supplies the challenge and completion endpoint; your host supplies the login page.
-See [cookie login integration](package-integration.md#let-desktop-office-use-your-cookie-login).
+validation and claim mapping. For the packaged default login page, register `AddCellBridgeLogin` with your
+cookie scheme and a host credential checker. Supplying custom HTML is optional.
+If you already have a login page, use `AddCellBridgeOfficeFormsAuthentication`
+for just the Office challenge and completion endpoint.
+See [login integration](package-integration.md#use-the-built-in-login-page).
 
 ### Integration constraints
 
@@ -257,8 +258,9 @@ binding/snapshot. Evaluators must also use stable subjects, be bounded and perfo
 no I/O; mutable evaluator decisions are not a coordinated permission update.
 
 The sample account database and login pages are outside the reusable NuGet packages.
-`CellBridge.AspNetCore` supplies the opt-in Office challenge and completion adapter;
-see [cookie login integration](package-integration.md#let-desktop-office-use-your-cookie-login).
+`CellBridge.AspNetCore` packages the default login HTML, optional renderer and
+Office challenge/completion flow. The account database remains host-owned.
+See [login integration](package-integration.md#use-the-built-in-login-page).
 Keep passwords, tokens, cookies and connection strings out of shared captures.
 The authentication database holds cookie protection keys; protect its access
 and backups.

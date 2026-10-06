@@ -1,5 +1,3 @@
-using System.Net;
-using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
 using CellBridge.AspNetCore;
@@ -15,43 +13,14 @@ public static class DocumentLibraryEndpoints
 {
     public static void Map(WebApplication app, IHostEnvironment environment)
     {
-        IResult Login(HttpContext context, IAntiforgery antiforgery)
-        {
-            if (!LocalIdentityAllowed(context, environment)) return Results.NotFound();
-            context.Response.Headers.CacheControl = "no-store";
-            var token = antiforgery.GetAndStoreTokens(context).RequestToken!;
-            var returnUrl = DocumentLibraryAuthentication.LocalReturnUrl(
-                context.Request.Query["returnUrl"].FirstOrDefault() ??
-                context.Request.Query["ReturnUrl"].FirstOrDefault() ?? "/");
-            return Html(LoginPage(token, returnUrl));
-        }
-
-        async Task<IResult> SignIn(HttpContext context, IAntiforgery antiforgery)
-        {
-            if (!LocalIdentityAllowed(context, environment)) return Results.NotFound();
-            context.Response.Headers.CacheControl = "no-store";
-            try { await antiforgery.ValidateRequestAsync(context); }
-            catch (AntiforgeryValidationException) { return Results.BadRequest(); }
-            var form = await context.Request.ReadFormAsync(context.RequestAborted);
-            var user = form["user"].ToString();
-            var identity = LocalIdentity(user);
-            if (identity is null) return Results.BadRequest("Unknown local demo identity.");
-            await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
-                new ClaimsPrincipal(identity), new AuthenticationProperties { IsPersistent = false });
-            return Results.LocalRedirect(DocumentLibraryAuthentication.LocalReturnUrl(
-                form["returnUrl"].FirstOrDefault() ?? "/"));
-        }
-
-        app.MapGet("/local-login", Login).AllowAnonymous();
-        app.MapGet("/auth/login", Login).AllowAnonymous();
-        app.MapPost("/local-login", SignIn).AllowAnonymous();
-        app.MapPost("/auth/login", SignIn).AllowAnonymous();
+        app.MapGet("/local-login", (HttpContext context) =>
+            Results.Redirect("/auth/login" + context.Request.QueryString)).AllowAnonymous();
 
         app.MapPost("/local-logout", async (HttpContext context, IAntiforgery antiforgery) =>
         {
             await antiforgery.ValidateRequestAsync(context);
             await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-            return Results.Redirect("/local-login");
+            return Results.Redirect("/auth/login");
         }).RequireAuthorization();
 
         app.MapGet("/", async (HttpContext context, DocumentLibraryService library, IAntiforgery antiforgery) =>
@@ -62,6 +31,23 @@ public static class DocumentLibraryEndpoints
             return Html(LibraryPage(context, documents, token,
                 actor.CanCreate,
                 context.User.HasClaim("document-library:permission-admin", "true")));
+        }).RequireAuthorization();
+
+        app.MapPost("/library/create", async (HttpContext context, DocumentLibraryService library,
+            IAntiforgery antiforgery) =>
+        {
+            try { await antiforgery.ValidateRequestAsync(context); }
+            catch (AntiforgeryValidationException) { return CreationError("Refresh the page and try again.", 400); }
+            var actor = RequireActor(context);
+            if (!actor.CanCreate) return Results.StatusCode(403);
+            var form = await context.Request.ReadFormAsync(context.RequestAborted);
+            try
+            {
+                await library.CreateBlankAsync(form["name"], form["type"], actor, context.RequestAborted);
+                return Results.Redirect("/");
+            }
+            catch (ArgumentException error) { return CreationError(error.Message, 400); }
+            catch (DocumentNameConflictException error) { return CreationError(error.Message, 409);
         }).RequireAuthorization();
 
         app.MapPost("/library/upload", async (HttpContext context, DocumentLibraryService library,
@@ -128,55 +114,18 @@ public static class DocumentLibraryEndpoints
         }).RequireAuthorization("permission-admin");
     }
 
-    private static ClaimsIdentity? LocalIdentity(string user)
-    {
-        var subject = user switch
-        {
-            "owner" => DocumentLibraryService.OwnerSubject,
-            "editor" => DocumentLibraryService.EditorSubject,
-            "reader" => DocumentLibraryService.ReaderSubject,
-            _ => null,
-        };
-        if (subject is null) return null;
-        var claims = new List<Claim>
-        {
-            new(ClaimTypes.Name, user),
-            new(CellBridgeActor.SubjectClaim, subject),
-            new(CellBridgeActor.DisplayNameClaim, "Local " + user),
-        };
-        if (user == "owner")
-        {
-            claims.Add(new(CellBridgeActor.CreateClaim, "true"));
-            claims.Add(new("document-library:permission-admin", "true"));
-        }
-        return new(claims, CookieAuthenticationDefaults.AuthenticationScheme, ClaimTypes.Name, ClaimTypes.Role);
-    }
-
-    private static bool LocalIdentityAllowed(HttpContext context, IHostEnvironment environment) =>
-        environment.IsDevelopment() || environment.IsEnvironment("Testing")
-            ? context.Connection.RemoteIpAddress is null || IPAddress.IsLoopback(context.Connection.RemoteIpAddress)
-            : false;
-
     private static CellBridgeActor RequireActor(HttpContext context) =>
         CellBridgeActor.FromPrincipal(context.User)
         ?? throw new UnauthorizedAccessException("A mapped CellBridge subject is required.");
+
+    private static IResult CreationError(string message, int statusCode) => Results.Content(
+        Page("Could not create document", $"<h1>Could not create document</h1><p>{E(message)}</p><a href=\"/\">Back to documents</a>"),
+        "text/html; charset=utf-8", statusCode: statusCode);
 
     private static IResult Html(string body) => Results.Content(body, "text/html; charset=utf-8");
     private static string E(string value) => HtmlEncoder.Default.Encode(value);
     private static string HiddenToken(string token) =>
         $"<input type=\"hidden\" name=\"__RequestVerificationToken\" value=\"{E(token)}\">";
-
-    private static string LoginPage(string token, string returnUrl) => Page("Local sign-in", $$"""
-        <h1>CellBridge document library</h1>
-        <p class="warning">Local demo identities only. Do not expose this authentication setup to the Internet.</p>
-        <form method="post" action="/local-login">
-          {{HiddenToken(token)}}
-          <input type="hidden" name="returnUrl" value="{{E(returnUrl)}}">
-          <div><label for="user">Identity</label></div>
-          <div><select id="user" name="user"><option value="owner">Owner</option><option value="editor">Editor</option><option value="reader">Reader</option></select></div>
-          <button type="submit">Sign in</button>
-        </form>
-        """);
 
     private static string LibraryPage(HttpContext context, IReadOnlyList<LibraryDocument> documents,
         string token, bool canCreate, bool permissionAdmin)
@@ -196,12 +145,22 @@ public static class DocumentLibraryEndpoints
         }
 
         var upload = canCreate ? $$"""
-            <h2>Upload</h2>
-            <form method="post" action="/library/upload" enctype="multipart/form-data">{{HiddenToken(token)}}<input type="file" name="file" accept=".docx,.xlsx,.pptx" required><button type="submit">Upload</button></form>
+            <div class="document-tools">
+            <div class="tool"><h2>New document</h2>
+            <form method="post" action="/library/create">
+              {{HiddenToken(token)}}
+              <label for="new-name">File name</label>
+              <input id="new-name" name="name" placeholder="Untitled" maxlength="180" required>
+              <label for="new-type">Document type</label>
+              <select id="new-type" name="type"><option value="docx">Word document</option><option value="xlsx">Excel workbook</option><option value="pptx">PowerPoint presentation</option></select>
+              <button type="submit">Create document</button>
+            </form></div>
+            <div class="tool"><h2>Upload a document</h2>
+            <form method="post" action="/library/upload" enctype="multipart/form-data">{{HiddenToken(token)}}<input type="file" name="file" accept=".docx,.xlsx,.pptx" required><button type="submit">Upload</button></form></div>
+            </div>
             """ : "";
         return Page("Documents", $$"""
             <h1>Documents</h1>
-            <p class="warning">This sample uses local demo identities. It is not an Internet-ready authentication setup.</p>
             <form method="post" action="/local-logout">{{HiddenToken(token)}}<button type="submit">Sign out</button></form>
             {{upload}}
             <h2>Library</h2>
@@ -218,7 +177,7 @@ public static class DocumentLibraryEndpoints
 
     private static string Page(string title, string body) => $$"""
         <!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{E(title)}}</title>
-        <style>body{font:16px system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#18202a}table{border-collapse:collapse;width:100%}th,td{border:1px solid #cad0d8;padding:.6rem;text-align:left;vertical-align:top}form{margin:.8rem 0}button,input,select{font:inherit;padding:.35rem}.warning{border-left:4px solid #b45309;background:#fff7ed;padding:.75rem}</style></head><body>{{body}}</body></html>
+        <style>body{font:16px/1.5 "Segoe UI",Arial,sans-serif;max-width:1100px;margin:2rem auto;padding:0 24px;color:#202b3c;background:#f3f5f8}table{border-collapse:collapse;width:100%}th,td{border:1px solid #cad0d8;padding:.6rem;text-align:left;vertical-align:top}form{margin:.8rem 0}button,input,select{font:inherit;padding:10px 12px;border:1px solid #a7b2c3;border-radius:5px}button{background:#2457ce;color:#fff;border-color:#2457ce;cursor:pointer}.document-tools{display:flex;gap:24px;flex-wrap:wrap}.tool{flex:1;min-width:240px;padding:20px;background:#fff;border:1px solid #dbe1ea;border-radius:8px}.tool label{display:block;margin:12px 0 5px}.tool input,.tool select{width:100%;box-sizing:border-box}.tool button{margin-top:16px}h2{font-size:20px}table{background:#fff}.warning{border-left:4px solid #b45309;background:#fff7ed;padding:.75rem}</style></head><body>{{body}}</body></html>
         """;
 
     private static string? OfficeScheme(string fileName) => Path.GetExtension(fileName).ToLowerInvariant() switch

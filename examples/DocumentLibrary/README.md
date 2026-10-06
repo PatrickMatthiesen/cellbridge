@@ -2,13 +2,25 @@
 
 This example hosts CellBridge from NuGet packages. It keeps CellBridge state and content in PostgreSQL. A separate destination directory stores immutable Office files. Each document has one atomically replaced manifest that selects the current file revision and retains delivery receipts.
 
-The built-in owner, editor, and reader accounts exist only for local testing. The sign-in endpoint rejects non-loopback clients and runs only in the Development or Testing environment. This is not an Internet-ready authentication design.
+This is separate from the repository's Razor Pages demo at `/library`. Both
+support creating blank Word, Excel and PowerPoint files. This example also
+uploads existing documents and delivers saves to a separate destination.
 
-The example registers `AddCellBridgeOfficeFormsAuthentication()` from the
-`CellBridge.AspNetCore` package. CellBridge owns the challenge and completion
-endpoint; the example supplies the account selector and login form.
+The example uses the package's `AddCellBridgeLogin` with its standard
+username/password page. Supplying custom HTML is optional. The package handles
+the form, CSRF checks, cookie sign-in and Office challenge/completion. No login
+page or challenge headers are implemented in this example.
 
-Desktop Office uses a separate sign-in session from your browser. An unauthenticated document or protocol request receives the Office forms-authentication challenge, which opens the same local account selector. Select an identity and sign in; the dialog returns to `/_cellbridge/auth/complete` before Office retries the document with its cookie. Browser visits still use `/local-login`. A loopback reverse proxy also passes the connection-address check, so anyone allowed through that proxy can choose a test identity. Keep this example on a private test network.
+For private development testing, sign in as `ofba-operator` or `owner` to create
+and manage documents, `editor` to edit, or `reader` to read. All use the test
+password `Test1234!`. These fixed credentials belong only to this example. Both
+login methods return 404 outside Development/Testing or for a known non-loopback
+connection. A missing remote address is allowed by the test host. A loopback proxy
+also passes the address check, so keep this example on a private test network.
+
+Desktop Office has a separate sign-in session from your browser. Select an Office
+link, sign in if prompted, and the dialog completes at
+`/_cellbridge/auth/complete` before Office retries with its cookie.
 
 Run the package-only app and its PostgreSQL database through the standalone AppHost. A normal launch restores the published packages from the NuGet sources already configured on the machine:
 

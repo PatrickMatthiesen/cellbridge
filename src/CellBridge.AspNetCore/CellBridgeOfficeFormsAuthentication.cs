@@ -69,6 +69,7 @@ public static class CellBridgeOfficeFormsAuthentication
         if (registration is null) return null;
         if (app is RouteGroupBuilder)
             throw new InvalidOperationException("MapCellBridge with Office forms authentication must be mapped at the application root. Use PathBase for a mounted application.");
+        CellBridgeLogin.MapLogin(app, registration);
         app.MapMethods(registration.CompletionPath.Value!, ["GET", "HEAD"], async (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-store";

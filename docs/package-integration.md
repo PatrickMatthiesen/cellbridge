@@ -5,17 +5,19 @@ the protocol and provider packages can also be consumed separately. See
 [provider composition](storage-providers.md#consume-the-packages) and the
 [package consumer](../examples/NuGetConsumer/README.md).
 
-## Let desktop Office use your cookie login
+## Use the built-in login page
 
-When you map CellBridge's HTTP endpoints, enable its Office forms-authentication
-adapter for your existing cookie scheme:
+`CellBridge.AspNetCore` includes a standard username/password page and its login
+handler. It supplies CSRF protection, named-cookie sign-in, the Office challenge
+and the completion endpoint. You connect your account system by implementing
+`ICellBridgeLoginAuthenticator`; you do not need to write HTML or challenge headers.
 
 ```csharp
 builder.Services.AddAuthentication("Cookies").AddCookie("Cookies", options =>
 {
-    options.LoginPath = "/login";
+    options.LoginPath = "/auth/login";
 });
-builder.Services.AddCellBridgeOfficeFormsAuthentication("Cookies");
+builder.Services.AddCellBridgeLogin<MyAccountAuthenticator>("Cookies");
 builder.Services.AddCellBridge(provider);
 
 // After building the app:
@@ -25,36 +27,62 @@ app.UseAuthorization();
 app.MapCellBridge();
 ```
 
-CellBridge returns the Office challenge on its protected endpoints and maps
-`/_cellbridge/auth/complete` for GET and HEAD. The challenge opens your cookie
-scheme's `LoginPath`, with a local completion path in its `ReturnUrlParameter`.
-Your login page signs in with that scheme and redirects to the validated local
-return path. The completion endpoint accepts the cookie only when its principal
-maps to a `CellBridgeActor`. It does not create accounts or grant file access.
-The host supplies its login page, CSRF checks, account management and trusted
-[identity claims](authentication.md#reusable-hosts).
+The authenticator is scoped per request. Its `AuthenticateAsync` method receives
+the HTTP context, username, password and cancellation token. Return an authenticated
+`ClaimsPrincipal` with the [CellBridge identity claims](authentication.md#reusable-hosts)
+only after all account checks succeed, or null on failure. Your account system
+remains responsible for password verification, disabled accounts, lockout and any
+second factor. The package rejects unauthenticated or unmapped principals before
+issuing a cookie. The repository Identity sample retains its existing Identity
+credential handler and uses the same default HTML renderer.
 
-Existing cookie events, including principal validation, still run. Ordinary
-browser endpoints retain their redirects. Bearer authentication can remain the
-host's default; CellBridge's mapped endpoints explicitly select the Office cookie.
-Authenticated document permission denials return 403 without starting another login.
-The adapter is opt-in and part of the unpublished beta.2 candidate.
+### Supply your own HTML
 
-Map `MapCellBridge()` at the application root. For a mounted app, call
-`UsePathBase` before routing; mapping inside a prefixed route group is rejected.
-Office must reach the request's external HTTPS origin. Configure trusted forwarded
-headers before authentication when behind a proxy, or supply a fixed origin:
+The standard page works without a renderer. To replace just the HTML:
 
 ```csharp
-builder.Services.AddCellBridgeOfficeFormsAuthentication("Cookies", options =>
-    options.PublicOrigin = "https://documents.example");
+builder.Services.AddCellBridgeLogin<MyAccountAuthenticator>("Cookies", options =>
+{
+    options.ApplicationName = "My document library";
+    options.RenderPage = page => MyLoginHtml(page);
+});
 ```
 
-The origin has no path. `CompletionPath` can change the library's completion route.
+`CellBridgeLoginPageContext` supplies the application name, resolved form action,
+antiforgery token set, validated return URL, return-field name and failure flag.
+Your HTML posts to `page.FormAction` with `login`, `password`, the antiforgery field
+and `page.ReturnUrlParameter`. HTML-encode every supplied value. The package still
+owns the POST handler, cookie and Office completion flow. You can also use
+`CellBridgeLoginPage.Render(page)` within a custom wrapper.
+
+### Use an existing host login page
+
+If you already have a complete login flow, register
+`AddCellBridgeOfficeFormsAuthentication("Cookies")` instead of `AddCellBridgeLogin`.
+This registers the Office challenge and completion endpoint without mapping a login
+page. Both integrations use the selected cookie's `LoginPath` and `ReturnUrlParameter`.
+The login must redirect to the validated local completion path supplied by the
+challenge. `/_cellbridge/auth/complete` accepts GET and HEAD and requires the selected
+cookie's principal to map to a `CellBridgeActor`.
+
+Existing cookie callbacks and principal validation still run. Ordinary browser
+routes retain their redirects. Bearer authentication can remain the host's default;
+CellBridge's mapped Office routes select the named cookie. Document permission
+denials return 403 without restarting login.
+
+Map `MapCellBridge()` at the application root. For a mounted app, call
+`UsePathBase` before routing; prefixed route groups are rejected. Form actions and
+completion URLs include PathBase. Office must reach the external HTTPS origin.
+Configure trusted forwarded headers before authentication when behind a proxy,
+or set `PublicOrigin` to a fixed HTTPS origin in the registration options.
+`CompletionPath` changes the completion route. The origin has no path.
+
 Cookie schemes using `CookieAuthenticationOptions.EventsType` are currently
-unsupported; use an `Events` instance. Missing or incompatible schemes fail at
-startup. The repository's Identity account sample uses this same adapter, but
-its account database and login pages are not packaged.
+unsupported; use an `Events` instance. Invalid schemes and missing login
+authenticators fail at startup. `IsRequestAllowed` optionally gates both login
+methods before token or credential processing. The example uses this for its
+private development accounts; real account policy belongs in the authenticator.
+These APIs are part of the unpublished beta.2 candidate.
 
 ## Execute parsed SOAP requests
 

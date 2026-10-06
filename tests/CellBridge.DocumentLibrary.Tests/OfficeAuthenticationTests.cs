@@ -28,7 +28,7 @@ public sealed class OfficeAuthenticationTests
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Null(response.Headers.Location);
         Assert.Empty(await response.Content.ReadAsByteArrayAsync());
-        Assert.Equal(Origin + "local-login?ReturnUrl=%2F_cellbridge%2Fauth%2Fcomplete",
+        Assert.Equal(Origin + "auth/login?returnUrl=%2F_cellbridge%2Fauth%2Fcomplete",
             response.Headers.GetValues("X-FORMS_BASED_AUTH_REQUIRED").Single());
         Assert.Equal(Origin + "_cellbridge/auth/complete",
             response.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
@@ -48,7 +48,7 @@ public sealed class OfficeAuthenticationTests
         Assert.Equal(HttpStatusCode.Unauthorized, anonymousHead.StatusCode);
         using var browserChallenge = await owner.GetAsync("/");
         Assert.Equal(HttpStatusCode.Redirect, browserChallenge.StatusCode);
-        Assert.Contains("/local-login", browserChallenge.Headers.Location!.ToString());
+        Assert.Contains("/auth/login", browserChallenge.Headers.Location!.ToString());
 
         using var login = await SignIn(owner, "/auth/login", "owner", "/_cellbridge/auth/complete");
         Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
@@ -97,7 +97,7 @@ public sealed class OfficeAuthenticationTests
         await using (var factory = new LibraryFactory(files.Path))
         {
             using var client = Client(factory);
-            using var login = await client.GetAsync("/local-login");
+            using var login = await client.GetAsync("/auth/login");
             Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         }
         await using var reopened = new DocumentLibraryDestination(files.Path);
@@ -105,15 +105,14 @@ public sealed class OfficeAuthenticationTests
     }
 
     [Theory]
-    [InlineData("/local-login")]
     [InlineData("/auth/login")]
-    public async Task BothLoginAliasesRequireCsrfAndUseSafeReturnUrls(string path)
+    public async Task LoginRequiresCsrfAndUsesSafeReturnUrls(string path)
     {
         using var files = new TemporaryDirectory();
         await using var factory = new LibraryFactory(files.Path);
         using var client = Client(factory);
         using var missingCsrf = await client.PostAsync(path,
-            new FormUrlEncodedContent(new Dictionary<string, string> { ["user"] = "owner" }));
+            new FormUrlEncodedContent(new Dictionary<string, string> { ["login"] = "owner" }));
         Assert.Equal(HttpStatusCode.BadRequest, missingCsrf.StatusCode);
         using var signedIn = await SignIn(client, path, "owner", "//evil.example/", tamper: true);
         Assert.Equal("/_cellbridge/auth/complete", signedIn.Headers.Location!.ToString());
@@ -134,14 +133,14 @@ public sealed class OfficeAuthenticationTests
         Assert.Equal(404, remotePost.Response.StatusCode);
     }
 
-    private static HttpClient Client(LibraryFactory factory) => factory.CreateClient(new()
+    internal static HttpClient Client(LibraryFactory factory) => factory.CreateClient(new()
     {
         BaseAddress = Origin,
         AllowAutoRedirect = false,
         HandleCookies = true,
     });
 
-    private static async Task<HttpResponseMessage> SignIn(HttpClient client, string path, string user, string returnUrl,
+    internal static async Task<HttpResponseMessage> SignIn(HttpClient client, string path, string user, string returnUrl,
         bool tamper = false)
     {
         using var page = await client.GetAsync(path + "?returnUrl=" + Uri.EscapeDataString(returnUrl));
@@ -155,17 +154,18 @@ public sealed class OfficeAuthenticationTests
             "<form method=\"post\" action=\"([^\"]+)\"").Groups[1].Value);
         var hiddenReturn = WebUtility.HtmlDecode(Regex.Match(html,
             "name=\"returnUrl\" value=\"([^\"]+)\"").Groups[1].Value);
-        Assert.Equal("/local-login", action);
+        Assert.Equal("/auth/login", action);
         Assert.Equal(tamper ? "/_cellbridge/auth/complete" : returnUrl, hiddenReturn);
         return await client.PostAsync(tamper ? path : action, new FormUrlEncodedContent(new Dictionary<string, string>
         {
-            ["user"] = user,
+            ["login"] = user,
+            ["password"] = "Test1234!",
             ["returnUrl"] = tamper ? returnUrl : hiddenReturn,
             ["__RequestVerificationToken"] = token,
         }));
     }
 
-    private sealed class LibraryFactory(string destination) : WebApplicationFactory<global::Program>
+    internal sealed class LibraryFactory(string destination) : WebApplicationFactory<global::Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

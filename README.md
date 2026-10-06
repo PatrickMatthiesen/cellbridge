@@ -37,8 +37,11 @@ unimplemented or disabled. See [revision history](docs/revision-history.md),
 
 ## Try the demo
 
-The [package-only document library](examples/DocumentLibrary/README.md) adds
-uploads, Office links, downloads, history, permissions and save-delivery status.
+The repository contains two separate applications. The Razor Pages demo served
+at `/library` creates blank documents and uses the sample Identity accounts.
+The [package-only document library](examples/DocumentLibrary/README.md) also creates
+blank documents and adds uploads, Office links, downloads, history, permissions
+and save-delivery status.
 It stores actual destination files separately from CellBridge state and tests
 recovery after lost save replies. Its built-in identities are for local testing.
 
@@ -87,9 +90,9 @@ Follow the [hosting guide](docs/storage-providers.md#consume-the-packages) for
 provider setup and the [authentication guide](docs/authentication.md#reusable-hosts)
 for identity mapping. The [package consumer](examples/NuGetConsumer/README.md)
 provides a complete example with bearer authentication and in-memory storage.
-For desktop Office with a cookie login, register
-`AddCellBridgeOfficeFormsAuthentication` with that scheme. CellBridge handles the
-Office challenge and completion endpoint; see [cookie login integration](docs/package-integration.md#let-desktop-office-use-your-cookie-login).
+For the standard login page, register `AddCellBridgeLogin` with a credential checker
+for your account system. Custom HTML is optional. CellBridge handles sign-in, CSRF
+and the Office challenge/completion flow; see [login integration](docs/package-integration.md#use-the-built-in-login-page).
 This adapter is part of the unpublished beta.2 candidate.
 The [host authorization consumer](examples/HostAuthorization/README.md) uses
 host-owned permission revisions and coordinated revocation without local grants.
