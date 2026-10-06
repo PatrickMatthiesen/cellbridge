@@ -280,7 +280,7 @@ public sealed class HostAuthorizationTests
             binary.SubRequests.Insert(0, new(RequestTypes.QueryChanges) { RequestId = 99,
                 Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } });
             var soap = HostIntegrationTests.File(state.ResourceId, SubRequestType.Cell);
-            soap.SubRequests[0].SubRequestDataBinary = binary.ToByteArray();
+            HostIntegrationTests.SetBinary(soap.SubRequests[0], binary.ToByteArray());
             var result = await new CellBridgeRequestProcessor(hashingService).ExecuteAsync(
                 new() { Requests = { soap } }, "https://host.test", Writer);
             var response = result.Response.Responses[0].SubResponses[0];

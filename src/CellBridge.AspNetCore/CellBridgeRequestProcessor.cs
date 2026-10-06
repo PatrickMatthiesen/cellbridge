@@ -42,6 +42,21 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             WebUrl = publicOrigin,
         };
 
+        if (request.Version != 2 || request.MinorVersion > ushort.MaxValue)
+        {
+            response.Version = 2;
+            response.MinorVersion = 0;
+            response.VersionErrorCode = "IncompatibleVersion";
+            response.VersionErrorMessage = "The requested MS-FSSHTTP version is not supported.";
+            return new(response, []);
+        }
+
+        if (Preflight(request) is { } structuralError)
+        {
+            response.Responses.Add(structuralError);
+            return new(response, []);
+        }
+
         try
         {
             foreach (var fileRequest in request.Requests)
@@ -55,13 +70,13 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         Url = fileRequest.Url,
                         RequestToken = fileRequest.RequestToken,
                         ErrorCode = "FileNotExistsOrCannotBeCreated",
+                        ErrorMessage = "The requested file does not exist and cannot be created by this operation.",
                     });
                     continue;
                 }
 
                 // Every subrequest, including lock release, targets the resolved file.
                 var canRead = service.Access(actor, initial!).HasFlag(DocumentAccess.Read);
-                if (!canRead) response.VersionErrorCode = "FileUnauthorizedAccess";
                 var fileResponse = new FssHttpResponse
                 {
                     Url = canRead ? DocumentRequestResolver.CanonicalUrl(doc, publicOrigin) : fileRequest.Url,
@@ -69,6 +84,11 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                     IntervalOverride = 0,
                     ResourceId = canRead ? doc.TransitionId : null,
                 };
+                if (!canRead)
+                {
+                    fileResponse.ErrorCode = "FileUnauthorizedAccess";
+                    fileResponse.ErrorMessage = "The current user is not authorized to read this file.";
+                }
 
                 foreach (var subRequest in fileRequest.SubRequests)
                 {
@@ -134,6 +154,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                             Type = subRequest.Type,
                             SubRequestToken = subRequest.SubRequestToken,
                             ErrorCode = "CellRequestFail",
+                            ErrorMessage = "The server could not complete the Cell request.",
                             HResult = "2147500037",
                         };
                     }
@@ -153,6 +174,68 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
         {
             throw AcceptedSaveException.Wrap(accepted.ToImmutable(), ex);
         }
+    }
+
+    private static FssHttpResponse RequestError(FssHttpRequest request, string code, string message)
+    {
+        var response = new FssHttpResponse
+        {
+            Url = request.Url,
+            RequestToken = request.RequestToken,
+            ErrorCode = code,
+            ErrorMessage = message,
+        };
+        foreach (var subRequest in request.SubRequests)
+            response.SubResponses.Add(new()
+            {
+                Type = subRequest.Type,
+                SubRequestToken = subRequest.SubRequestToken,
+                ErrorCode = code,
+                HResult = "2147942487",
+            });
+        return response;
+    }
+
+    private static FssHttpResponse? Preflight(CellStorageRequest request)
+    {
+        var requestTokens = new HashSet<ulong>();
+        foreach (var fileRequest in request.Requests)
+        {
+            if (string.IsNullOrEmpty(fileRequest.Url) || fileRequest.RequestToken > uint.MaxValue ||
+                !requestTokens.Add(fileRequest.RequestToken) || fileRequest.SubRequests.Count == 0)
+                return RequestError(fileRequest, "InvalidArgument",
+                    "The request URL, token, or subrequest collection is invalid.");
+            var subRequestTokens = new HashSet<ulong>();
+            foreach (var subRequest in fileRequest.SubRequests)
+            {
+                if (ValidateSubRequest(subRequest, subRequestTokens) is { } error)
+                    return RequestError(fileRequest, error, "The subrequest structure or scalar attributes are invalid.");
+            }
+        }
+        return null;
+    }
+
+    private static string? ValidateSubRequest(FssHttpSubRequest request, HashSet<ulong> seenTokens)
+    {
+        if (request.SubRequestToken is not { } token || token > uint.MaxValue)
+            return "InvalidArgument";
+        if (!seenTokens.Add(token)) return "InvalidRequestDependencyType";
+        if ((request.DependsOn is null) != (request.DependencyType is null) || request.DependsOn > uint.MaxValue ||
+            request.DependsOn == token || request.DependencyType is not null and not
+                ("OnExecute" or "OnSuccess" or "OnFail" or "OnNotSupported" or "OnSuccessOrNotSupported"))
+            return "InvalidRequestDependencyType";
+        if (!Enum.IsDefined(request.Type)) return "InvalidSubRequest";
+
+        bool hasData = request.SubRequestDataXml is not null || request.SubRequestDataBinaryMemory is not null ||
+            request.SubRequestDataAttributes.Count != 0;
+        if (request.Type is SubRequestType.WhoAmI or SubRequestType.ServerTime or SubRequestType.GetDocMetaInfo or
+            SubRequestType.GetVersions or SubRequestType.LockStatus)
+            return hasData ? "InvalidArgument" : null;
+        if (request.Type != SubRequestType.Cell && !hasData) return "InvalidArgument";
+        if (request.Type == SubRequestType.Cell && hasData &&
+            !CellSubRequestDataValidation.TryValidate(request.SubRequestDataAttributes,
+                requireBinaryDataSize: true, out _)) return "InvalidArgument";
+        return null;
     }
 
     static bool OwnsSession(DocumentState state, FssHttpSubRequest request, CellBridgeActor actor, DateTime now)
@@ -189,6 +272,22 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             return null;
         }
 
+        bool hasPayload = subRequest.SubRequestDataBinaryMemory is not null || subRequest.SubRequestDataXml is not null ||
+            subRequest.SubRequestDataAttributes.ContainsKey("IncludeHref");
+        if (!hasPayload)
+        {
+            subResponse.EmitEmptySubResponseData = true;
+            return null;
+        }
+
+        if (!subRequest.SubRequestDataAttributes.TryGetValue("BinaryDataSize", out var binarySizeText) ||
+            !CellSubRequestDataValidation.TryParseXmlInt64(binarySizeText, out long declaredSize) || declaredSize < 1)
+        {
+            subResponse.ErrorCode = "InvalidArgument";
+            subResponse.HResult = "2147942487";
+            return null;
+        }
+
 
         // Try to decode the FSSHTTPB request payload if one was provided.
         FsshttpbCellRequest? fsshttpbRequest = null;
@@ -201,17 +300,31 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
 
         if (subRequest.SubRequestDataBinaryMemory is not null)
         {
+            if (subRequest.SubRequestDataBinaryMemory.Value.Length != declaredSize)
+            {
+                subResponse.ErrorCode = "InvalidArgument";
+                subResponse.HResult = "2147942487";
+                return null;
+            }
             fsshttpbRequest = TryDecodeFsshttpbBinary(subRequest.SubRequestDataBinaryMemory.Value, log);
         }
 
         if (fsshttpbRequest is null && subRequest.SubRequestDataXml is not null)
         {
-            fsshttpbRequest = TryDecodeFsshttpbPayload(subRequest.SubRequestDataXml, log);
+            fsshttpbRequest = TryDecodeFsshttpbPayload(subRequest.SubRequestDataXml, declaredSize, log);
         }
 
         if (fsshttpbRequest is null)
         {
-            subResponse.ErrorCode = "InvalidArgument";
+            subResponse.ErrorCode = "CellRequestFail";
+            subResponse.HResult = "2147500037";
+            var invalid = new FsshttpbResponse
+            {
+                Status = true,
+                Error = new ResponseError(ErrorType.Cell, (ulong)CellErrorCode.RequestStreamSchemaError,
+                    "The binary Cell request is malformed."),
+            };
+            subResponse.SubResponseDataBase64 = invalid.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11);
             return null;
         }
         var execution = await service.ExecuteAsync(resourceId, partitionKind, fsshttpbRequest,
@@ -224,7 +337,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
         }
         var fsshttpbResponse = execution.Response;
         if (service.Access(actor, execution.State).HasFlag(DocumentAccess.Read) &&
-            string.Equals(subRequest.SubRequestDataAttributes.GetValueOrDefault("GetFileProps"), "true", StringComparison.OrdinalIgnoreCase))
+            CellSubRequestDataValidation.TryGetBoolean(subRequest.SubRequestDataAttributes, "GetFileProps", out bool getFileProps) && getFileProps)
         {
             subResponse.SubResponseDataAttributes["Etag"] = execution.State.Etag;
             subResponse.SubResponseDataAttributes["CreateTime"] = execution.State.CreatedUtc.ToFileTimeUtc().ToString();
@@ -390,8 +503,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
     {
         timeoutSeconds = 0;
         if (!attrs.TryGetValue("Timeout", out var timeoutText) ||
-            !int.TryParse(timeoutText, System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out var requested) ||
+            !CellSubRequestDataValidation.TryParseXmlInt64(timeoutText, out long requested) ||
             requested < 60 || requested > 120000)
         {
             return false;
@@ -399,7 +511,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
 
         // The specification permits 60..3600 as an input range but requires the
         // server to replace it with its implementation default. Use 3600.
-        timeoutSeconds = requested < 3600 ? 3600 : requested;
+        timeoutSeconds = requested < 3600 ? 3600 : (int)requested;
         return true;
     }
 
@@ -414,23 +526,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             return false;
         }
 
-        if (bool.TryParse(text, out value))
-        {
-            return true;
-        }
-
-        if (text == "1")
-        {
-            value = true;
-            return true;
-        }
-
-        if (text == "0")
-        {
-            return true;
-        }
-
-        return false;
+        return CellSubRequestDataValidation.TryParseXmlBoolean(text, out value);
     }
 
     static bool TryGetEditorMetadataKey(
@@ -510,7 +606,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
     /// Attempts to decode a base64 FSSHTTPB payload from the SubRequestData XML.
     /// Returns null when no payload is present or it cannot be decoded.
     /// </summary>
-    static FsshttpbCellRequest? TryDecodeFsshttpbPayload(string subRequestDataXml, ILogger log)
+    static FsshttpbCellRequest? TryDecodeFsshttpbPayload(string subRequestDataXml, long declaredSize, ILogger log)
     {
         try
         {
@@ -522,6 +618,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             }
 
             byte[] bytes = Convert.FromBase64String(text.Trim());
+            if (bytes.LongLength != declaredSize) return null;
             return TryDecodeFsshttpbBinary(bytes, log);
         }
         catch (Exception ex) when (ex is FormatException or InvalidDataException or EndOfStreamException or System.Xml.XmlException)
@@ -641,7 +738,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             default:
                 // Other subrequest types are not yet implemented; report
                 // a protocol error rather than a malformed success.
-                subResponse.ErrorCode = "NotSupported";
+                subResponse.ErrorCode = "RequestNotSupported";
                 break;
         }
 

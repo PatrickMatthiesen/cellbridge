@@ -62,8 +62,8 @@ internal static class QueryChangesResponseShaper
                     response.DataElementPackage = null;
                     subResponse.Status = true;
                     subResponse.Error = new ResponseError(
-                        ErrorType.Protocol,
-                        (ulong)ProtocolErrorCode.RequestNotSupported,
+                        ErrorType.Cell,
+                        (ulong)CellErrorCode.RequestNotSupported,
                         "The requested QueryChanges byte budget requires continuation state that is not implemented.");
                     subResponse.Data = null;
                     return;

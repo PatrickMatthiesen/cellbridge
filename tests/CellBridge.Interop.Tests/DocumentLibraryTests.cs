@@ -50,7 +50,7 @@ public sealed class DocumentLibraryTests
         {
             var xml = new XElement(soap + "Envelope", new XElement(soap + "Body",
                 new XElement(ns + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
-                new XElement(ns + "RequestCollection", new XElement(ns + "Request",
+                new XElement(ns + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), new XElement(ns + "Request",
                     new XAttribute("Url", new Uri(endpoint, first.Path)), new XAttribute("RequestToken", 1),
                     new XElement(ns + "SubRequest", new XAttribute("Type", "Coauth"), new XAttribute("SubRequestToken", 1),
                         new XElement(ns + "SubRequestData", new XAttribute("CoauthRequestType", operation),

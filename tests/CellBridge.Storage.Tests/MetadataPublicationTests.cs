@@ -227,7 +227,7 @@ public sealed class MetadataPublicationTests
         var provider = new StorageProvider(new InMemoryStateStore(), content);
         var service = new CellBridgeDocumentService(provider); var before = await Create(service);
         await provider.State.TransitionAsync(before.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Coordination = new(null, [], new("exclusive", "client", now.AddMinutes(1), 0, null, TestActor.Value.Identity.Subject), 1) }, true));
+        { Coordination = new(null, [], new("11111111-1111-1111-1111-111111111111", "client", now.AddMinutes(1), 0, null, TestActor.Value.Identity.Subject), 1) }, true));
         var staged = false; content.Hook = () => { staged = true; return Task.CompletedTask; };
         var result = await service.ExecuteAsync(before.ResourceId, file ? DocumentPartitionKind.FileContents : DocumentPartitionKind.Metadata,
             Upload(before, file), Attributes, TestActor.Value);
@@ -247,10 +247,11 @@ public sealed class MetadataPublicationTests
         var provider = new StorageProvider(state, content);
         var service = new CellBridgeDocumentService(provider); var before = await Create(service);
         await state.TransitionAsync(before.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Coordination = new(null, [], new("exclusive", "client", now.AddMinutes(1), 0, null, TestActor.Value.Identity.Subject), 1) }, true));
+        { Coordination = new(null, [], new("11111111-1111-1111-1111-111111111111", "client", now.AddMinutes(1), 0, null, TestActor.Value.Identity.Subject), 1) }, true));
         content.Hook = () => { state.Now = state.Now.AddMinutes(2); return Task.CompletedTask; };
         var result = await service.ExecuteAsync(before.ResourceId, file ? DocumentPartitionKind.FileContents : DocumentPartitionKind.Metadata,
-            Upload(before, file), new Dictionary<string, string> { ["ExclusiveLockID"] = "exclusive" }, TestActor.Value);
+            Upload(before, file), new Dictionary<string, string>
+            { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }, TestActor.Value);
         Assert.NotNull(result.LockError);
         Assert.Empty(result.State.Receipts);
         Assert.Equal(1, result.State.Coordination.Generation);
@@ -318,6 +319,7 @@ public sealed class MetadataPublicationTests
     [InlineData("duplicate")]
     [InlineData("partial")]
     [InlineData("coalesce")]
+    [InlineData("coalesce-collapsed")]
     public async Task IncompleteAndUnsupportedGraphsNeverPublish(string mode)
     {
         var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
@@ -328,6 +330,7 @@ public sealed class MetadataPublicationTests
         if (mode == "duplicate") request.DataElementPackage!.DataElements.Add(new(DataElementType.ObjectDataBLOBDataElementData, f.Blob, SerialNumber.Null) { Data = [99] });
         if (mode == "partial") Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).Flags |= 2;
         if (mode == "coalesce") attributes["Coalesce"] = "true";
+        if (mode == "coalesce-collapsed") attributes["Coalesce"] = " 1 ";
         var result = await service.ExecuteAsync(before.ResourceId, DocumentPartitionKind.Metadata, request, attributes, TestActor.Value);
         Assert.True(Assert.Single(result.Response.SubResponses).Status);
         Assert.Equal(before, await provider.State.FindByResourceIdAsync(before.ResourceId));

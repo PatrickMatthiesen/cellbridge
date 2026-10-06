@@ -134,6 +134,9 @@ public sealed class CellStorageResponse
     /// <summary>An optional version-level error code.</summary>
     public string? VersionErrorCode { get; set; }
 
+    /// <summary>Optional detail for a version-level error.</summary>
+    public string? VersionErrorMessage { get; set; }
+
     /// <summary>The WebUrl for the ResponseCollection.</summary>
     public string WebUrl { get; set; } = string.Empty;
 
@@ -168,6 +171,10 @@ public sealed class CellStorageResponse
         if (VersionErrorCode is not null)
         {
             sb.Append(" ErrorCode=\"").Append(VersionErrorCode).Append("\"");
+        }
+        if (VersionErrorMessage is not null)
+        {
+            sb.Append(" ErrorMessage=\"").Append(XmlEscape(VersionErrorMessage)).Append("\"");
         }
 
         sb.Append(" />");
@@ -205,6 +212,12 @@ public sealed class CellStorageResponse
             if (response.ErrorCode is not null)
             {
                 sb.Append(" ErrorCode=\"").Append(response.ErrorCode).Append("\"");
+                if (!string.Equals(response.ErrorCode, "Success", StringComparison.Ordinal))
+                {
+                    sb.Append(" ErrorMessage=\"")
+                        .Append(XmlEscape(response.ErrorMessage ?? response.ErrorCode))
+                        .Append('"');
+                }
             }
 
             sb.Append(">");
@@ -223,6 +236,10 @@ public sealed class CellStorageResponse
                 if (subResponse.HResult is not null)
                 {
                     sb.Append(" HResult=\"").Append(XmlEscape(subResponse.HResult)).Append("\"");
+                }
+                if (subResponse.ErrorMessage is not null)
+                {
+                    sb.Append(" ErrorMessage=\"").Append(XmlEscape(subResponse.ErrorMessage)).Append('"');
                 }
                 if (subResponse.ServerCorrelationId is not null)
                 {
@@ -363,6 +380,9 @@ public sealed class FssHttpResponse
     /// <summary>An optional response-level error code.</summary>
     public string? ErrorCode { get; set; }
 
+    /// <summary>Required detail when <see cref="ErrorCode"/> is a non-success response error.</summary>
+    public string? ErrorMessage { get; set; }
+
     /// <summary>The server override interval in seconds.</summary>
     public uint? IntervalOverride { get; set; }
 
@@ -389,6 +409,9 @@ public sealed class FssHttpSubResponse
 
     /// <summary>Optional HRESULT returned with a protocol subresponse error.</summary>
     public string? HResult { get; set; }
+
+    /// <summary>Optional detail for a subresponse error.</summary>
+    public string? ErrorMessage { get; set; }
 
     /// <summary>
     /// Optional SharePoint correlation identifier. [MS-FSSHTTP] does not

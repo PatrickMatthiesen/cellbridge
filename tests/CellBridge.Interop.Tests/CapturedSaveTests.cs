@@ -69,10 +69,10 @@ public sealed class CapturedSaveTests
             var soap = new XElement(XName.Get("Envelope", "http://schemas.xmlsoap.org/soap/envelope/"),
                 new XElement(XName.Get("Body", "http://schemas.xmlsoap.org/soap/envelope/"),
                     new XElement(XName.Get("RequestVersion", ns), new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
-                    new XElement(XName.Get("RequestCollection", ns),
+                    new XElement(XName.Get("RequestCollection", ns), new XAttribute("CorrelationId", Guid.NewGuid()),
                         new XElement(XName.Get("Request", ns), new XAttribute("Url", fileUrl), new XAttribute("RequestToken", 1),
                             new XElement(XName.Get("SubRequest", ns), new XAttribute("Type", "Cell"), new XAttribute("SubRequestToken", 1),
-                                new XElement(XName.Get("SubRequestData", ns), request.ToBase64()))))));
+                                new XElement(XName.Get("SubRequestData", ns), new XAttribute("BinaryDataSize", request.ToByteArray().Length), request.ToBase64()))))));
             using var message = new HttpRequestMessage(HttpMethod.Post, endpoint)
             {
                 Content = new StringContent(soap.ToString(), Encoding.UTF8, "text/xml"),

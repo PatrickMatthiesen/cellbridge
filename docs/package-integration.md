@@ -115,9 +115,10 @@ needs reported by [WopiHost PR #735](https://github.com/petrsvihlik/WopiHost/pul
 Accepted receipts provide a narrower alternative to comparing version counters;
 they are not a reliable post-publication callback.
 
-The beta does not provide shared WOPI/FSSHTTP leases, external revision CAS or
-state deletion/eviction. Do not expose both write protocols concurrently unless
-the host coordinates them safely. Testing the existing WopiHost adapter against
+Beta.1 did not provide shared WOPI/FSSHTTP leases or conditional lifecycle APIs.
+The beta.2 candidate adds opt-in shared base-lock authority, recoverable publication
+and lifecycle operations. The host must supply destination CAS and durable receipts.
+Do not expose conflicting write paths outside that authority. Testing the existing WopiHost adapter against
 CellBridge packages establishes package compatibility, not Office Online Server
 editing qualification or that WopiHost has adopted these new APIs upstream.
 

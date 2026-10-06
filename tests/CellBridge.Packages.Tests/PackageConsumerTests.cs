@@ -130,7 +130,7 @@ public sealed class PackageConsumerTests
                 <RequestCollection xmlns="http://schemas.microsoft.com/sharepoint/soap/" CorrelationId="{Guid.NewGuid():D}">
                   <Request Url="http://localhost/shared/example.bin" RequestToken="1">
                     <SubRequest Type="Cell" SubRequestToken="1">
-                      <SubRequestData>{cell.ToBase64()}</SubRequestData>
+                      <SubRequestData BinaryDataSize="{cell.ToByteArray().Length}">{cell.ToBase64()}</SubRequestData>
                     </SubRequest>
                   </Request>
                 </RequestCollection>

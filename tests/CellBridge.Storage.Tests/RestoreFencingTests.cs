@@ -123,10 +123,11 @@ public sealed class RestoreFencingTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/expiry.docx", MinimalDocx.Create(), TestActor.Value))!;
         await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Coordination = current.Coordination with { Exclusive = new("lease", null, now.AddMilliseconds(300), 0, null, TestActor.Value.Identity.Subject) } }, true));
+        { Coordination = current.Coordination with { Exclusive = new("11111111-1111-1111-1111-111111111111", null, now.AddMilliseconds(300), 0, null, TestActor.Value.Identity.Subject) } }, true));
         var gate = new PausedRead(provider.Content);
         var restoring = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
-            "expires", TestActor.Value, new Dictionary<string, string> { ["ExclusiveLockID"] = "lease" }).AsTask();
+            "expires", TestActor.Value, new Dictionary<string, string>
+            { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }).AsTask();
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await Task.Delay(350);
         gate.Resume.TrySetResult();

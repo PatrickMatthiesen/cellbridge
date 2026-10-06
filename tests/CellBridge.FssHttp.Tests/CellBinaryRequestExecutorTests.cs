@@ -14,7 +14,8 @@ public sealed class CellBinaryRequestExecutorTests
         var document = store.Put("/test.docx", [1, 2, 3]);
         var request = new FsshttpbCellRequest();
         request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryAccess) { RequestId = 41 });
-        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges) { RequestId = 73 });
+        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges)
+            { RequestId = 73, Data = new QueryChangesSubRequestData() });
 
         var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
 
@@ -53,7 +54,16 @@ public sealed class CellBinaryRequestExecutorTests
                 },
             },
         };
-        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.PutChanges) { RequestId = 982 });
+        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.PutChanges)
+        {
+            RequestId = 982,
+            Data = new PutChangesSubRequestData
+            {
+                StorageIndex = new ExGuid(1, Guid.NewGuid()),
+                ExpectedStorageIndex = new ExGuid(1, Guid.NewGuid()),
+                Flags = 0x02,
+            },
+        });
 
         var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
         var result = Assert.Single(response.SubResponses);
@@ -62,7 +72,7 @@ public sealed class CellBinaryRequestExecutorTests
         Assert.Equal(RequestTypes.PutChanges, result.RequestType);
         Assert.True(result.Status);
         Assert.Equal(ErrorType.Cell, result.Error?.Type);
-        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, result.Error?.ErrorCode);
+        Assert.Equal((ulong)CellErrorCode.RequestNotSupported, result.Error?.ErrorCode);
         Assert.Null(result.Data);
         Assert.Equal(contentBefore, document.Content);
         Assert.Equal(contentVersionBefore, document.ContentVersion);
@@ -74,7 +84,7 @@ public sealed class CellBinaryRequestExecutorTests
         Assert.Equal(982UL, wireResult.RequestId);
         Assert.Equal(RequestTypes.PutChanges, wireResult.RequestType);
         Assert.True(wireResult.Status);
-        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, wireResult.Error?.ErrorCode);
+        Assert.Equal((ulong)CellErrorCode.RequestNotSupported, wireResult.Error?.ErrorCode);
     }
 
     [Fact]
@@ -89,8 +99,10 @@ public sealed class CellBinaryRequestExecutorTests
         Assert.Equal((ulong)ProtocolErrorCode.RequestStreamSchemaError, emptyResponse.Error?.ErrorCode);
 
         var request = new FsshttpbCellRequest();
-        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges) { RequestId = 12 });
-        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges) { RequestId = 34 });
+        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges)
+            { RequestId = 12, Data = new QueryChangesSubRequestData() });
+        request.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges)
+            { RequestId = 34, Data = new QueryChangesSubRequestData() });
         var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
 
         Assert.Equal(new ulong[] { 12, 34 }, response.SubResponses.Select(x => x.RequestId));
@@ -114,6 +126,63 @@ public sealed class CellBinaryRequestExecutorTests
         Assert.Equal(321UL, result.RequestId);
         Assert.Equal((RequestTypes)99, result.RequestType);
         Assert.True(result.Status);
-        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, result.Error?.ErrorCode);
+        Assert.Equal(ErrorType.Cell, result.Error?.Type);
+        Assert.Equal((ulong)CellErrorCode.UnknownRequest, result.Error?.ErrorCode);
+    }
+
+    [Fact]
+    public void DuplicateAndMaximumRequestIdsRejectBeforeExecutionWhileZeroIsValid()
+    {
+        var document = new DocumentStore().Put("/test.docx", [1]);
+        var duplicate = new FsshttpbCellRequest
+        {
+            SubRequests =
+            {
+                new(RequestTypes.QueryAccess) { RequestId = 0 },
+                new(RequestTypes.QueryAccess) { RequestId = 0 },
+            },
+        };
+
+        var rejected = CellBinaryRequestExecutor.Execute(document, document.FilePartition, duplicate,
+            CellBridge.Storage.Abstractions.DocumentAccess.Read);
+        Assert.True(rejected.Status);
+        Assert.Equal(ErrorType.Cell, rejected.Error?.Type);
+        Assert.Equal((ulong)CellErrorCode.RequestStreamSchemaError, rejected.Error?.ErrorCode);
+        Assert.Empty(rejected.SubResponses);
+
+        var zero = new FsshttpbCellRequest
+        {
+            SubRequests = { new(RequestTypes.QueryAccess) { RequestId = 0 } },
+        };
+        Assert.Equal(0UL, Assert.Single(CellBinaryRequestExecutor.Execute(document, document.FilePartition, zero,
+            CellBridge.Storage.Abstractions.DocumentAccess.Read).SubResponses).RequestId);
+
+        zero.SubRequests[0].RequestId = uint.MaxValue;
+        Assert.Equal((ulong)CellErrorCode.RequestStreamSchemaError,
+            CellBinaryRequestExecutor.Execute(document, document.FilePartition, zero,
+                CellBridge.Storage.Abstractions.DocumentAccess.Read).Error?.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData(10, 11)]
+    [InlineData(13, 10)]
+    public void WireAndDirectIncompatibleVersionsReturnTypedCellError(ushort version, ushort minimum)
+    {
+        var request = new FsshttpbCellRequest
+        {
+            ProtocolVersion = version,
+            MinimumVersion = minimum,
+            SubRequests = { new(RequestTypes.QueryAccess) { RequestId = 1 } },
+        };
+        var parsed = FsshttpbCellRequest.Deserialize(new(request.ToByteArray()));
+        var document = new DocumentStore().Put("/version.docx", [1]);
+
+        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, parsed,
+            CellBridge.Storage.Abstractions.DocumentAccess.Read);
+
+        Assert.True(response.Status);
+        Assert.Equal(ErrorType.Cell, response.Error?.Type);
+        Assert.Equal((ulong)CellErrorCode.IncompatibleProtocolVersion, response.Error?.ErrorCode);
+        Assert.Empty(response.SubResponses);
     }
 }

@@ -30,48 +30,62 @@ public static class CellStorageRequestParser
 
         var request = new CellStorageRequest();
 
-        var requestVersion = protocolContainer.Elements()
-            .FirstOrDefault(e => e.Name.LocalName == "RequestVersion");
-        if (requestVersion is not null)
-        {
-            request.Version = (uint?)requestVersion.Attribute("Version") ?? 2;
-            request.MinorVersion = (uint?)requestVersion.Attribute("MinorVersion") ?? 0;
-        }
+        var requestVersion = SingleRequiredElement(protocolContainer, "RequestVersion");
+        request.Version = ParseRequiredUInt16(requestVersion, "Version");
+        request.MinorVersion = ParseRequiredUInt16(requestVersion, "MinorVersion");
 
-        var requestCollection = protocolContainer.Elements()
-            .FirstOrDefault(e => e.Name.LocalName == "RequestCollection")
-            ?? throw new InvalidDataException("ExecuteCellStorageRequest is missing RequestCollection.");
+        var requestCollection = SingleRequiredElement(protocolContainer, "RequestCollection");
 
         request.UsesDirectBody = execute is null;
 
-        if (Guid.TryParse((string?)requestCollection.Attribute("CorrelationId"), out var correlationId))
-        {
-            request.CorrelationId = correlationId;
-        }
+        request.CorrelationId = ParseRequiredGuid(requestCollection, "CorrelationId");
 
-        foreach (var requestElement in requestCollection.Elements().Where(e => e.Name.LocalName == "Request"))
+        var requestElements = requestCollection.Elements().Where(e => e.Name.LocalName == "Request").ToArray();
+        if (requestElements.Length == 0)
+            throw new InvalidDataException("RequestCollection must contain at least one Request element.");
+        var requestTokens = new HashSet<uint>();
+        foreach (var requestElement in requestElements)
         {
+            string url = RequiredAttribute(requestElement, "Url");
+            if (url.Length == 0) throw new InvalidDataException("Request Url must not be empty.");
+            uint requestToken = ParseRequiredUInt32(requestElement, "RequestToken");
+            if (!requestTokens.Add(requestToken))
+                throw new InvalidDataException($"Duplicate RequestToken {requestToken}.");
             var fileRequest = new FssHttpRequest
             {
-                Url = (string?)requestElement.Attribute("Url") ?? string.Empty,
-                UseResourceId = string.Equals((string?)requestElement.Attribute("UseResourceID"), "true", StringComparison.OrdinalIgnoreCase),
+                Url = url,
+                UseResourceId = ParseOptionalBoolean(requestElement, "UseResourceID") ?? false,
                 ResourceId = (string?)requestElement.Attribute("ResourceID"),
-                RequestToken = (ulong?)requestElement.Attribute("RequestToken") ?? 0,
-                UserAgent = Guid.TryParse((string?)requestElement.Attribute("UserAgent"), out var ua) ? ua : null,
+                RequestToken = requestToken,
+                UserAgent = ParseOptionalGuid(requestElement, "UserAgent"),
             };
 
-            foreach (var subRequestElement in requestElement.Elements().Where(e => e.Name.LocalName == "SubRequest"))
+            var subRequestElements = requestElement.Elements().Where(e => e.Name.LocalName == "SubRequest").ToArray();
+            if (subRequestElements.Length == 0)
+                throw new InvalidDataException("Request must contain at least one SubRequest element.");
+            var subRequestTokens = new HashSet<uint>();
+            foreach (var subRequestElement in subRequestElements)
             {
+                uint subRequestToken = ParseRequiredUInt32(subRequestElement, "SubRequestToken");
+                if (!subRequestTokens.Add(subRequestToken))
+                    throw new InvalidDataException($"Duplicate SubRequestToken {subRequestToken}.");
+                uint? dependsOn = ParseOptionalUInt32(subRequestElement, "DependsOn");
+                string? dependencyType = (string?)subRequestElement.Attribute("DependencyType");
+                if ((dependsOn is null) != (dependencyType is null) ||
+                    dependencyType is not null && !DependencyTypes.Contains(dependencyType))
+                    throw new InvalidDataException("DependsOn and a valid DependencyType must be specified together.");
                 var subRequest = new FssHttpSubRequest
                 {
-                    Type = ParseSubRequestType((string?)subRequestElement.Attribute("Type")),
-                    SubRequestToken = (ulong?)subRequestElement.Attribute("SubRequestToken"),
-                    DependsOn = (ulong?)subRequestElement.Attribute("DependsOn"),
-                    DependencyType = (string?)subRequestElement.Attribute("DependencyType"),
+                    Type = ParseSubRequestType(RequiredAttribute(subRequestElement, "Type")),
+                    SubRequestToken = subRequestToken,
+                    DependsOn = dependsOn,
+                    DependencyType = dependencyType,
                 };
 
-                var subRequestData = subRequestElement.Elements()
-                    .FirstOrDefault(e => e.Name.LocalName == "SubRequestData");
+                var dataElements = subRequestElement.Elements().Where(e => e.Name.LocalName == "SubRequestData").ToArray();
+                if (dataElements.Length > 1)
+                    throw new InvalidDataException("SubRequest must not contain duplicate SubRequestData elements.");
+                var subRequestData = dataElements.SingleOrDefault();
                 if (subRequestData is not null)
                 {
                     foreach (var attribute in subRequestData.Attributes())
@@ -90,6 +104,8 @@ public static class CellStorageRequestParser
                     subRequest.SubRequestDataXml = subRequestData.ToString(SaveOptions.DisableFormatting);
                 }
 
+                ValidateSubRequestData(subRequest, subRequestData is not null);
+
                 fileRequest.SubRequests.Add(subRequest);
             }
 
@@ -97,6 +113,83 @@ public static class CellStorageRequestParser
         }
 
         return request;
+    }
+
+    private static readonly HashSet<string> DependencyTypes = new(StringComparer.Ordinal)
+    {
+        "OnExecute", "OnSuccess", "OnFail", "OnNotSupported", "OnSuccessOrNotSupported",
+    };
+
+    private static void ValidateSubRequestData(FssHttpSubRequest request, bool hasData)
+    {
+        if (request.Type is SubRequestType.WhoAmI or SubRequestType.ServerTime or SubRequestType.GetDocMetaInfo or
+            SubRequestType.GetVersions or SubRequestType.LockStatus)
+        {
+            if (hasData)
+                throw new InvalidDataException($"{request.Type} must not contain SubRequestData.");
+            return;
+        }
+
+        if (request.Type != SubRequestType.Cell && !hasData)
+            throw new InvalidDataException($"{request.Type} requires SubRequestData.");
+        if (request.Type != SubRequestType.Cell || !hasData) return;
+
+        if (!CellSubRequestDataValidation.TryValidate(request.SubRequestDataAttributes, requireBinaryDataSize: true,
+                out string message))
+            throw new InvalidDataException(message);
+    }
+
+    private static XElement SingleRequiredElement(XElement parent, string localName)
+    {
+        var matches = parent.Elements().Where(e => e.Name.LocalName == localName).ToArray();
+        return matches.Length switch
+        {
+            1 => matches[0],
+            0 => throw new InvalidDataException($"ExecuteCellStorageRequest is missing {localName}."),
+            _ => throw new InvalidDataException($"ExecuteCellStorageRequest contains duplicate {localName} elements."),
+        };
+    }
+
+    private static string RequiredAttribute(XElement element, string name) =>
+        (string?)element.Attribute(name) ?? throw new InvalidDataException($"{element.Name.LocalName} is missing required {name}.");
+
+    private static uint ParseRequiredUInt16(XElement element, string name)
+    {
+        string text = RequiredAttribute(element, name);
+        if (!CellSubRequestDataValidation.TryParseXmlUnsignedShort(text, out ushort value))
+            throw new InvalidDataException($"{element.Name.LocalName}.{name} must be an unsigned 16-bit integer.");
+        return value;
+    }
+
+    private static uint ParseRequiredUInt32(XElement element, string name)
+    {
+        string text = RequiredAttribute(element, name);
+        if (!CellSubRequestDataValidation.TryParseXmlUnsignedInt(text, out uint value))
+            throw new InvalidDataException($"{element.Name.LocalName}.{name} must be an unsigned 32-bit integer.");
+        return value;
+    }
+
+    private static uint? ParseOptionalUInt32(XElement element, string name) =>
+        element.Attribute(name) is null ? null : ParseRequiredUInt32(element, name);
+
+    private static Guid ParseRequiredGuid(XElement element, string name)
+    {
+        string text = RequiredAttribute(element, name);
+        if (!Guid.TryParse(text, out var value))
+            throw new InvalidDataException($"{element.Name.LocalName}.{name} must be a GUID.");
+        return value;
+    }
+
+    private static Guid? ParseOptionalGuid(XElement element, string name) =>
+        element.Attribute(name) is null ? null : ParseRequiredGuid(element, name);
+
+    private static bool? ParseOptionalBoolean(XElement element, string name)
+    {
+        string? text = (string?)element.Attribute(name);
+        if (text is null) return null;
+        if (!CellSubRequestDataValidation.TryParseXmlBoolean(text, out bool value))
+            throw new InvalidDataException($"{element.Name.LocalName}.{name} must be an XML boolean.");
+        return value;
     }
 
     private static SubRequestType ParseSubRequestType(string? value) => value?.Trim() switch

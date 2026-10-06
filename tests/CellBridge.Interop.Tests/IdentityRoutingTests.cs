@@ -34,7 +34,8 @@ public sealed class IdentityRoutingTests
                     new XAttribute("ExclusiveLockRequestType", operation), new XAttribute("ExclusiveLockID", lockId),
                     new XAttribute("Timeout", 60))));
             var xml = new XElement(s + "Envelope", new XElement(s + "Body",
-                new XElement(ns + "RequestCollection", file)));
+                new XElement(ns + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
+                new XElement(ns + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), file)));
             using var response = await http.PostAsync(endpoint, new StringContent(xml.ToString(), Encoding.UTF8, "text/xml"));
             response.EnsureSuccessStatusCode();
             return XDocument.Parse(await response.Content.ReadAsStringAsync()).Descendants(ns + "Response").Single();

@@ -25,7 +25,9 @@ public sealed class ResponseUrlEncodingTests
     {
         var parsed = CellStorageRequestParser.Parse("""
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
-              <s:Body><RequestCollection xmlns="http://schemas.microsoft.com/sharepoint/soap/">
+              <s:Body>
+                <RequestVersion xmlns="http://schemas.microsoft.com/sharepoint/soap/" Version="2" MinorVersion="2" />
+                <RequestCollection xmlns="http://schemas.microsoft.com/sharepoint/soap/" CorrelationId="6B29FC40-CA47-1067-B31D-00DD010662DA">
                 <Request Url="https://localhost:7292/shared/Excel%2520test.xlsx" UseResourceID="true"
                          ResourceID="643ac4721a2f444f821fbc42121f928d" RequestToken="1">
                   <SubRequest Type="ExclusiveLock" SubRequestToken="1">

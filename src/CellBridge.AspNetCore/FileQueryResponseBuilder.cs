@@ -75,7 +75,7 @@ internal static class FileQueryResponseBuilder
     public static FsshttpbResponse Unsupported(ulong id) => new()
     {
         SubResponses = { new FsshttpbSubResponse { RequestId = id, RequestType = RequestTypes.QueryChanges,
-            Status = true, Error = new ResponseError(ErrorType.Protocol,
-                (ulong)ProtocolErrorCode.RequestNotSupported, "This query scope, filter or version is unsupported.") } },
+            Status = true, Error = new ResponseError(ErrorType.Cell,
+                (ulong)CellErrorCode.RequestNotSupported, "This query scope, filter or version is unsupported.") } },
     };
 }

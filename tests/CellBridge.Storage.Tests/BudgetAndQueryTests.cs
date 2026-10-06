@@ -406,7 +406,7 @@ public class BudgetAndQueryTests
         Assert.Equal(saved.State.Content, rejected.State.Content);
     }
 
-    [PostgreSqlFact]
+    [PostgreSqlLinuxFact]
     public Task FilesystemReservationsAreDeduplicatedAndQuiescentOrphansAreReclaimed() =>
         WithDatabase(new() { MaxStoredBytes = 3 }, async source =>
         {

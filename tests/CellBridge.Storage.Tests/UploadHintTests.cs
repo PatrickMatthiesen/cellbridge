@@ -93,17 +93,17 @@ public sealed class UploadHintTests
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/locked.docx", MinimalDocx.Create(), TestActor.Value))!;
         await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Coordination = new(null, [], new("exclusive", "client", now.AddHours(1), 0, null, TestActor.Value.Identity.Subject), 1) }, true));
+        { Coordination = new(null, [], new("11111111-1111-1111-1111-111111111111", "client", now.AddHours(1), 0, null, TestActor.Value.Identity.Subject), 1) }, true));
         var request = Save(state, 0x20); request.SubRequests[0].TargetPartitionId = Guid.Empty;
         var locked = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.NotNull(locked.LockError);
         Assert.Equal(state.ContentVersion, locked.State.ContentVersion);
         var denied = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request,
-            new Dictionary<string, string> { ["ExclusiveLockID"] = "exclusive" }, new CellBridgeActor(new("other", "other", "Other")));
+            new Dictionary<string, string> { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }, new CellBridgeActor(new("other", "other", "Other")));
         Assert.Equal(CellBridgeAuthorization.AccessDeniedHResult, Assert.Single(denied.Response.SubResponses).Error!.ErrorCode);
         Assert.Equal(state.ContentVersion, denied.State.ContentVersion); Assert.Empty(denied.State.Receipts);
         var allowed = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request,
-            new Dictionary<string, string> { ["ExclusiveLockID"] = "exclusive" }, TestActor.Value);
+            new Dictionary<string, string> { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }, TestActor.Value);
         Assert.Null(allowed.LockError); Assert.False(Assert.Single(allowed.Response.SubResponses).Status);
         Assert.Equal(state.ContentVersion + 1, allowed.State.ContentVersion);
     }
@@ -121,7 +121,8 @@ public sealed class UploadHintTests
             new(RequestTypes.PutChanges) { RequestId = 2, TargetPartitionId = Guid.Empty, Data = new PutChangesSubRequestData { Flags = 2 } },
             new(RequestTypes.AllocateExtendedGuidRange) { RequestId = 3, TargetPartitionId = StoredDocument.EditorsTablePartitionId,
                 Data = new AllocateExtendedGuidRangeSubRequestData { RequestIdCount = 1 } },
-            new(RequestTypes.QueryChanges) { RequestId = 4, TargetPartitionId = StoredDocument.MetadataPartitionId },
+            new(RequestTypes.QueryChanges) { RequestId = 4, TargetPartitionId = StoredDocument.MetadataPartitionId,
+                Data = new QueryChangesSubRequestData() },
         } };
         var result = await new CellBridgeDocumentService(new(revoking, content)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.Metadata, request, new Dictionary<string, string>(), TestActor.Value);

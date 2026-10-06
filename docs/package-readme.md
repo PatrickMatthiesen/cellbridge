@@ -1,7 +1,7 @@
 # CellBridge beta
 
 CellBridge implements MS-FSSHTTP and MS-FSSHTTPB for ASP.NET Core hosts on .NET 10.
-It is experimental software. The `0.1.0-beta.1` packages expose the protocol
+It is experimental software. The `0.1.0-beta.2` candidate packages expose the protocol
 libraries, reusable host and storage providers; API and storage compatibility
 may change before a stable release.
 
@@ -15,13 +15,19 @@ Hosts can map the HTTP endpoints or execute parsed SOAP requests through
 document-scoped request permission limits and inspect accepted-save receipts.
 A request permission limit only restricts the configured access evaluator;
 it cannot grant access by itself. Receipts identify committed revisions, but
-do not provide a reliable external write-back queue.
+do not replace external publication. Opt-in ordered delivery requires a destination
+with atomic revision comparison and durable operation receipts.
 
 Desktop Word and Excel have been tested for authenticated editing, saving and
 reopening. OneNote desktop synchronization, two-desktop coauthoring and Office
-Online Server integration remain unqualified. True partial and non-file uploads
-are rejected. Shared WOPI/FSSHTTP locks, reliable external write-back and document
-deletion are not provided by this beta.
+Online Server integration remain unqualified. True partial and unsupported non-file uploads
+are rejected. Shared base-lock authority, recoverable external publication and
+conditional document lifecycle APIs are available for hosts to adopt. Their
+presence does not qualify every external backend or desktop client.
+
+PostgreSQL setup explicitly migrates schema 3 to 4 with hosts stopped. Back up
+state and content before upgrading. See the upgrade and tested recovery limits
+in the repository guides before changing a durable installation.
 
 - [Hosting and provider contracts](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/storage-providers.md)
 - [Embedding in another host](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/package-integration.md)

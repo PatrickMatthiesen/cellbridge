@@ -27,9 +27,12 @@ public sealed class RevisionHistoryInteropTests
             XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
             var request = new XElement(ns + "Request", new XAttribute("Url", url), new XAttribute("RequestToken", 1));
             if (id is not null) request.Add(new XAttribute("UseResourceID", "true"), new XAttribute("ResourceID", id));
-            request.Add(new XElement(ns + "SubRequest", new XAttribute("Type", type), new XAttribute("SubRequestToken", 1),
-                new XElement(ns + "SubRequestData", attrs.Select(a => new XAttribute(a.Key, a.Value)))));
-            var envelope = new XElement(soap + "Envelope", new XElement(soap + "Body", new XElement(ns + "RequestCollection", request)));
+            var subRequest = new XElement(ns + "SubRequest", new XAttribute("Type", type), new XAttribute("SubRequestToken", 1));
+            if (type != "GetVersions") subRequest.Add(new XElement(ns + "SubRequestData", attrs.Select(a => new XAttribute(a.Key, a.Value))));
+            request.Add(subRequest);
+            var envelope = new XElement(soap + "Envelope", new XElement(soap + "Body",
+                new XElement(ns + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
+                new XElement(ns + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), request)));
             using var response = await http.PostAsync(target, new StringContent(envelope.ToString(), Encoding.UTF8, "text/xml"));
             response.EnsureSuccessStatusCode();
             return XDocument.Parse(await response.Content.ReadAsStringAsync()).Descendants(ns + "Response").Single();

@@ -93,6 +93,7 @@ jobs:
           --health-retries 10
     env:
       ConnectionStrings__cellbridge: Host=localhost;Port=5432;Database=cellbridge;Username=cellbridge;Password=cellbridge-tests
+      CELLBRIDGE_QUALIFICATION_DIRECTORY: ${{ github.workspace }}/artifacts/recovery
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -102,6 +103,18 @@ jobs:
       - run: dotnet tools/CellBridge.Storage.Setup/bin/Debug/net10.0/CellBridge.Storage.Setup.dll
       - run: dotnet test CellBridge.slnx --nologo --verbosity minimal
       - run: dotnet test demo/CellBridge.Demo.slnx --nologo --verbosity minimal
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/verify_packages.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: storage-and-package-consumer-evidence
+          path: |
+            artifacts/recovery/environment.json
+            artifacts/packages/test-results/*.trx
+            artifacts/packages/document-library-tests/*.trx
   capture:
     runs-on: windows-latest
     steps:
@@ -121,6 +134,9 @@ jobs:
           $tokens = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile(
             (Join-Path $PWD 'tools/testing/word-smoke.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors) { $errors | Format-List; exit 1 }
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'tools/testing/office-repeat.ps1'), [ref]$tokens, [ref]$errors)
           if ($errors) { $errors | Format-List; exit 1 }
       - name: Exercise the desktop Word wrapper failure paths
         shell: pwsh

@@ -492,7 +492,7 @@ public sealed class FssHttpLockCoordinator
             "MultipleClientsInCoauthSession" => "MultipleClientsInCoauthSession",
             "InvalidCoauthSession" => "InvalidCoauthSession",
             "ExitCoauthSessionAsConvertToExclusiveFailed" => "ExitCoauthSessionAsConvertToExclusiveFailed",
-            _ when result == LockOperationResult.NotSupported => "NotSupported",
+            _ when result == LockOperationResult.NotSupported => "RequestNotSupported",
             _ => "InvalidArgument",
         };
         return result;
@@ -543,15 +543,16 @@ public sealed class FssHttpLockCoordinator
     {
         result = false;
         if (!TryRead(attrs, key, out var value)) return !required;
-        if (value == "1" || value == "true") { result = true; return true; }
-        return value is "0" or "false";
+        return CellSubRequestDataValidation.TryParseXmlBoolean(value, out result);
     }
 
     private static bool TryTransitionTimeout(IReadOnlyDictionary<string, string> attrs, bool coauth, out int timeout)
     {
         timeout = 0;
-        if (!TryRead(attrs, "Timeout", out var value) || !int.TryParse(value, NumberStyles.None,
-            CultureInfo.InvariantCulture, out timeout) || timeout < 60 || timeout > 120000) return false;
+        if (!TryRead(attrs, "Timeout", out var value) ||
+            !CellSubRequestDataValidation.TryParseXmlInt64(value, out long parsed) || parsed < 60 || parsed > 120000)
+            return false;
+        timeout = (int)parsed;
         if (coauth && timeout < 3600) timeout = CoauthSession.DefaultTimeoutSeconds;
         return true;
     }
@@ -577,9 +578,8 @@ public sealed class FssHttpLockCoordinator
     }
 
     private static int ReadTimeout(IReadOnlyDictionary<string, string> attrs) =>
-        TryRead(attrs, "Timeout", out var value) && int.TryParse(value, NumberStyles.Integer,
-            CultureInfo.InvariantCulture, out var timeout)
-            ? Math.Clamp(timeout, 1, 24 * 60 * 60)
+        TryRead(attrs, "Timeout", out var value) && CellSubRequestDataValidation.TryParseXmlInt64(value, out long timeout)
+            ? (int)Math.Clamp(timeout, 1, 24 * 60 * 60)
             : CoauthSession.DefaultTimeoutSeconds;
 
     private static FssHttpSubRequest CopyRequest(FssHttpSubRequest source, string key, string value)

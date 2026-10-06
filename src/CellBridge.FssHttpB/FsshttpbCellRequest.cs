@@ -54,6 +54,45 @@ public sealed class FsshttpbCellRequest
     public bool HasValidEnvelope => ProtocolVersion is 12 or 13 or 14 && MinimumVersion == 11 &&
         Signature == RequestSignature && (HashOptions is null || HashOptions.Schema == 1);
 
+    /// <summary>Validates model-level fields before any operation executes.</summary>
+    public bool TryGetValidationError(out CellErrorCode code, out string message)
+    {
+        if (ProtocolVersion is not (12 or 13 or 14) || MinimumVersion != 11)
+        {
+            code = CellErrorCode.IncompatibleProtocolVersion;
+            message = "The request protocol version is incompatible.";
+            return true;
+        }
+        if (Signature != RequestSignature || HashOptions is { Schema: not 1 } || SubRequests.Count == 0)
+        {
+            code = CellErrorCode.RequestStreamSchemaError;
+            message = "The cell request envelope is malformed.";
+            return true;
+        }
+
+        var ids = new HashSet<ulong>();
+        foreach (var subRequest in SubRequests)
+        {
+            if (subRequest.RequestId >= uint.MaxValue || !ids.Add(subRequest.RequestId) ||
+                subRequest.RequestType switch
+                {
+                    RequestTypes.QueryAccess => subRequest.Data is not null and not QueryAccessSubRequestData,
+                    RequestTypes.QueryChanges => subRequest.Data is not QueryChangesSubRequestData,
+                    RequestTypes.PutChanges => subRequest.Data is not PutChangesSubRequestData,
+                    RequestTypes.AllocateExtendedGuidRange => subRequest.Data is not AllocateExtendedGuidRangeSubRequestData,
+                    _ => false,
+                })
+            {
+                code = CellErrorCode.RequestStreamSchemaError;
+                message = "A subrequest has a duplicate or out-of-range ID, or invalid operation data.";
+                return true;
+            }
+        }
+        code = default;
+        message = string.Empty;
+        return false;
+    }
+
     /// <summary>The sub-requests (MUST contain at least one).</summary>
     public List<FsshttpbCellSubRequest> SubRequests { get; set; }
 
@@ -192,14 +231,13 @@ public sealed class FsshttpbCellRequest
             throw new InvalidDataException(
                 $"Invalid request signature 0x{request.Signature:X16}; expected 0x{RequestSignature:X16}.");
         }
-        if (!request.HasValidEnvelope)
-            throw new InvalidDataException("Request version must be 12, 13 or 14 with minimum version 11.");
 
         // Request start header.
         var requestStart = StreamObjectHeaderStart.Parse(reader);
-        if (requestStart.Type != StreamObjectTypeHeaderStart.Request)
+        if (requestStart.Type != StreamObjectTypeHeaderStart.Request ||
+            requestStart.HeaderType != StreamObjectHeaderStart.HeaderType32Bit || requestStart.Compound != 1 || requestStart.Length != 0)
         {
-            throw new InvalidDataException($"Expected Request header, got {requestStart.Type}.");
+            throw new InvalidDataException("Expected a zero-length 32-bit compound Request header.");
         }
 
         // Compatibility: captured Word inline QueryAccess omits UserAgent.
@@ -207,6 +245,9 @@ public sealed class FsshttpbCellRequest
         var userAgentStart = StreamObjectHeaderStart.Parse(reader);
         if (userAgentStart.Type == StreamObjectTypeHeaderStart.UserAgent)
         {
+            if (userAgentStart.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                userAgentStart.Compound != 1 || userAgentStart.Length != 0)
+                throw new InvalidDataException("Expected a zero-length 32-bit compound UserAgent header.");
             bool hasUserAgentGuid = false;
             bool hasUserAgentVersion = false;
             while (!IsHeaderEnd(reader))
@@ -214,7 +255,8 @@ public sealed class FsshttpbCellRequest
                 var header = StreamObjectHeaderStart.Parse(reader);
                 if (header.Type == StreamObjectTypeHeaderStart.UserAgentGUID)
                 {
-                    if (hasUserAgentGuid || header.Length != 16 || header.Compound != 0)
+                    if (hasUserAgentGuid || header.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                        header.Length != 16 || header.Compound != 0)
                         throw new InvalidDataException("Invalid or duplicate user agent GUID.");
                     request.UserAgentGuid = ExGuid.ReadGuid(reader);
                     hasUserAgentGuid = true;
@@ -227,7 +269,8 @@ public sealed class FsshttpbCellRequest
                 }
                 else if (header.Type == StreamObjectTypeHeaderStart.UserAgentVersion)
                 {
-                    if (hasUserAgentVersion || header.Length != 4 || header.Compound != 0)
+                    if (hasUserAgentVersion || header.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                        header.Length != 4 || header.Compound != 0)
                         throw new InvalidDataException("Invalid or duplicate user agent version.");
                     request.UserAgentVersionValue = reader.ReadUInt32();
                     hasUserAgentVersion = true;
@@ -253,16 +296,21 @@ public sealed class FsshttpbCellRequest
         // Sub-requests until the Request end header.
         request.SubRequests = new List<FsshttpbCellSubRequest>();
         bool hasRoundtripOptions = false;
+        bool hasDataElementPackage = false;
         while (reader.Remaining > 0 && !IsHeaderEnd(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
             if (header.Type == StreamObjectTypeHeaderStart.SubRequest)
             {
+                if (hasDataElementPackage)
+                    throw new InvalidDataException("Subrequests must precede the data element package.");
                 if (request.SubRequests.Count >= 1024) throw new InvalidDataException("Binary subrequest limit exceeded.");
                 request.SubRequests.Add(FsshttpbCellSubRequest.Deserialize(reader, header));
             }
             else if (header.Type == StreamObjectTypeHeaderStart.DataElementPackage)
             {
+                if (hasDataElementPackage) throw new InvalidDataException("Duplicate data element package.");
+                hasDataElementPackage = true;
                 reader.Position -= header.HeaderSize;
                 request.DataElementPackage = DataElementPackage.Deserialize(reader);
             }
@@ -274,6 +322,8 @@ public sealed class FsshttpbCellRequest
             }
             else if (header.Type == StreamObjectTypeHeaderStart.CellRoundtripOptions)
             {
+                if (hasRoundtripOptions || request.SubRequests.Count != 0 || request.DataElementPackage is not null)
+                    throw new InvalidDataException("Duplicate or misplaced Cell Roundtrip Options.");
                 hasRoundtripOptions = true;
                 SkipObject(reader, header);
             }
@@ -286,6 +336,10 @@ public sealed class FsshttpbCellRequest
         }
 
         SkipToCompoundEnd(reader, StreamObjectTypeHeaderEnd.Request);
+
+        if (request.TryGetValidationError(out var validationCode, out var validationMessage) &&
+            validationCode != CellErrorCode.IncompatibleProtocolVersion)
+            throw new InvalidDataException(validationMessage);
 
         return request;
     }
@@ -353,9 +407,10 @@ public sealed class FsshttpbCellSubRequest
 
     internal static FsshttpbCellSubRequest Deserialize(BinaryReaderEx reader, StreamObjectHeaderStart start)
     {
-        if (start.Type != StreamObjectTypeHeaderStart.SubRequest)
+        if (start.Type != StreamObjectTypeHeaderStart.SubRequest ||
+            start.HeaderType != StreamObjectHeaderStart.HeaderType32Bit || start.Compound != 1)
         {
-            throw new InvalidDataException($"Expected SubRequest header, got {start.Type}.");
+            throw new InvalidDataException("Expected a 32-bit compound SubRequest header.");
         }
 
         int preambleStart = reader.Position;
@@ -369,6 +424,8 @@ public sealed class FsshttpbCellSubRequest
             throw new InvalidDataException(
                 $"SubRequest preamble consumed {reader.Position - preambleStart} bytes but declared {start.Length}.");
         }
+        if (requestId >= uint.MaxValue)
+            throw new InvalidDataException("Subrequest ID must be less than 0xFFFFFFFF.");
 
         Guid? targetPartition = null;
         if (!IsHeaderEnd(reader))
@@ -426,21 +483,31 @@ public sealed class FsshttpbCellSubRequest
 
     private static void SkipToSubRequestEnd(BinaryReaderEx reader, FsshttpbCellSubRequest subRequest)
     {
+        bool hasLockId = false;
+        bool hasAdditionalFlags = false;
         while (!IsHeaderEnd(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
             if (header.Type == StreamObjectTypeHeaderStart.TargetPartitionId)
                 throw new InvalidDataException("Duplicate or misplaced target partition.");
+            if (header.Type is StreamObjectTypeHeaderStart.QueryChangesRequest or
+                StreamObjectTypeHeaderStart.PutChangesRequest or
+                StreamObjectTypeHeaderStart.AllocateExtendedGUIDRangeRequest)
+                throw new InvalidDataException("Duplicate or misplaced operation data.");
             if (header.Type == StreamObjectTypeHeaderStart.PutChangesLockId && subRequest.Data is PutChangesSubRequestData put)
             {
-                if (header.Length != 16 || header.Compound != 0)
+                if (hasLockId || header.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                    header.Length != 16 || header.Compound != 0)
                     throw new InvalidDataException("Put Changes lock ID must contain one GUID.");
+                hasLockId = true;
                 put.LockId = ExGuid.ReadGuid(reader);
             }
             else if (header.Type == StreamObjectTypeHeaderStart.AdditionalFlags && subRequest.Data is PutChangesSubRequestData additionalPut)
             {
-                if (header.Compound != 0 || header.Length < 2)
+                if (hasAdditionalFlags || header.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                    header.Compound != 0 || header.Length < 2)
                     throw new InvalidDataException("AdditionalFlags must contain at least two flag bytes.");
+                hasAdditionalFlags = true;
                 byte[] bytes = reader.ReadBytes(header.Length);
                 additionalPut.HasAdditionalFlags = true;
                 additionalPut.AdditionalFlagsBits = (ushort)(bytes[0] | (bytes[1] << 8));
@@ -589,9 +656,11 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
         var data = new QueryChangesSubRequestData();
 
         var requestHeader = StreamObjectHeaderStart.Parse(reader);
-        if (requestHeader.Type != StreamObjectTypeHeaderStart.QueryChangesRequest)
+        if (requestHeader.Type != StreamObjectTypeHeaderStart.QueryChangesRequest ||
+            requestHeader.HeaderType != StreamObjectHeaderStart.HeaderType32Bit || requestHeader.Compound != 0 ||
+            requestHeader.Length is < 1 or > 2)
         {
-            throw new InvalidDataException($"Expected QueryChangesRequest header, got {requestHeader.Type}.");
+            throw new InvalidDataException("Expected a one- or two-byte 32-bit Query Changes request.");
         }
 
         byte[] requestPayload = reader.ReadBytes(requestHeader.Length);
@@ -602,6 +671,9 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
         data.RoundKnowledgeToWholeCellChanges = (requestFlags & 0x20) != 0;
 
         bool precedingUnsupportedFilter = false;
+        bool hasArguments = false;
+        bool hasConstraint = false;
+        bool hasVersioning = false;
         while (!IsHeaderEnd(reader))
         {
             var header = StreamObjectHeaderStart.Parse(reader);
@@ -609,6 +681,11 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
                 precedingUnsupportedFilter = false;
             switch (header.Type)
             {
+                case StreamObjectTypeHeaderStart.QueryChangesRequest:
+                case StreamObjectTypeHeaderStart.PutChangesRequest:
+                case StreamObjectTypeHeaderStart.AllocateExtendedGUIDRangeRequest:
+                    throw new InvalidDataException("Duplicate or misplaced operation data.");
+
                 case StreamObjectTypeHeaderStart.TargetPartitionId:
                     throw new InvalidDataException("Target partition must precede the query data.");
                 case StreamObjectTypeHeaderStart.QueryChangesFilter:
@@ -619,40 +696,45 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
                     break;
 
                 case StreamObjectTypeHeaderStart.QueryChangesFilterFlags:
-                    if (!precedingUnsupportedFilter || header.Length != 1)
+                    if (!precedingUnsupportedFilter || header.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                        header.Compound != 0 || header.Length != 1)
                         throw new InvalidDataException("Invalid Query Changes filter flags.");
                     if ((reader.ReadByte() & 1) != 0) data.HasUnsupportedQueryControls = true;
                     precedingUnsupportedFilter = false;
                     break;
                 case StreamObjectTypeHeaderStart.QueryChangesRequestArguments:
                 {
+                    if (hasArguments || header.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                        header.Compound != 0 || header.Length < 3)
+                        throw new InvalidDataException("Invalid or duplicate Query Changes request arguments.");
+                    hasArguments = true;
                     byte[] argumentsPayload = reader.ReadBytes(header.Length);
-                    if (argumentsPayload.Length > 0)
-                    {
-                        data.IncludeStorageManifest = (argumentsPayload[0] & 0x01) != 0;
-                        data.IncludeCellChanges = (argumentsPayload[0] & 0x02) != 0;
-                    }
-
-                    if (argumentsPayload.Length > 1)
-                    {
-                        data.CellId = CellId.Deserialize(new BinaryReaderEx(
-                            argumentsPayload, 1, argumentsPayload.Length - 1));
-                    }
+                    data.IncludeStorageManifest = (argumentsPayload[0] & 0x01) != 0;
+                    data.IncludeCellChanges = (argumentsPayload[0] & 0x02) != 0;
+                    var argumentsReader = new BinaryReaderEx(argumentsPayload, 1, argumentsPayload.Length - 1);
+                    data.CellId = CellId.Deserialize(argumentsReader);
+                    if (argumentsReader.Remaining != 0)
+                        throw new InvalidDataException("Query Changes request arguments contain trailing bytes.");
                     break;
                 }
 
                 case StreamObjectTypeHeaderStart.QueryChangesDataConstraint:
                 {
+                    if (hasConstraint || header.HeaderType != StreamObjectHeaderStart.HeaderType32Bit ||
+                        header.Compound != 0 || header.Length == 0)
+                        throw new InvalidDataException("Invalid or duplicate Query Changes data constraint.");
+                    hasConstraint = true;
                     byte[] constraintPayload = reader.ReadBytes(header.Length);
-                    if (constraintPayload.Length > 0)
-                    {
-                        data.MaxDataElements = Compact64bitInt.Deserialize(
-                            new BinaryReaderEx(constraintPayload)).Value;
-                    }
+                    var constraintReader = new BinaryReaderEx(constraintPayload);
+                    data.MaxDataElements = Compact64bitInt.Deserialize(constraintReader).Value;
+                    if (constraintReader.Remaining != 0)
+                        throw new InvalidDataException("Query Changes data constraint contains trailing bytes.");
                     break;
                 }
 
                 case StreamObjectTypeHeaderStart.QueryChangesVersioning:
+                    if (hasVersioning) throw new InvalidDataException("Duplicate Query Changes versioning object.");
+                    hasVersioning = true;
                     // MS-FSSHTTPB product behavior note 17: SharePoint 2010/2013
                     // ignore this field. This server follows that versioning profile.
                     data.IgnoredQueryChangesVersioning = true;
@@ -782,9 +864,10 @@ public sealed class PutChangesSubRequestData : ISubRequestData
         var data = new PutChangesSubRequestData();
 
         var putHeader = StreamObjectHeaderStart.Parse(reader);
-        if (putHeader.Type != StreamObjectTypeHeaderStart.PutChangesRequest)
+        if (putHeader.Type != StreamObjectTypeHeaderStart.PutChangesRequest ||
+            putHeader.HeaderType != StreamObjectHeaderStart.HeaderType32Bit || putHeader.Compound != 0)
         {
-            throw new InvalidDataException($"Expected PutChangesRequest header, got {putHeader.Type}.");
+            throw new InvalidDataException("Expected a 32-bit noncompound Put Changes request.");
         }
 
         var payload = new BinaryReaderEx(reader.ReadBytes(putHeader.Length));

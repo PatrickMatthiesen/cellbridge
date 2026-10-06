@@ -19,15 +19,15 @@ public sealed class DependencyTests
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
               <s:Body><ExecuteCellStorageRequest xmlns="http://schemas.microsoft.com/sharepoint/soap/">
                 <RequestVersion Version="2" MinorVersion="2" />
-                <RequestCollection><Request Url="{url}" RequestToken="1">
+                <RequestCollection CorrelationId="{Guid.NewGuid():D}"><Request Url="{url}" RequestToken="1">
                   <SubRequest Type="FileOperation" SubRequestToken="1"><SubRequestData FileOperation="Delete" /></SubRequest>
-                  <SubRequest Type="WhoAmI" SubRequestToken="2" DependsOn="1" DependencyType="OnNotSupported"><SubRequestData /></SubRequest>
-                  <SubRequest Type="WhoAmI" SubRequestToken="3" DependsOn="1" DependencyType="OnSuccessOrNotSupported"><SubRequestData /></SubRequest>
-                  <SubRequest Type="WhoAmI" SubRequestToken="4" DependsOn="1" DependencyType="OnSuccess"><SubRequestData /></SubRequest>
-                  <SubRequest Type="WhoAmI" SubRequestToken="5" DependsOn="2" DependencyType="OnNotSupported"><SubRequestData /></SubRequest>
-                  <SubRequest Type="WhoAmI" SubRequestToken="6" DependsOn="5" DependencyType="OnExecute"><SubRequestData /></SubRequest>
-                  <SubRequest Type="WhoAmI" SubRequestToken="7" DependsOn="4" DependencyType="OnExecute"><SubRequestData /></SubRequest>
-                  <SubRequest Type="WhoAmI" SubRequestToken="8" DependsOn="7" DependencyType="OnExecute"><SubRequestData /></SubRequest>
+                  <SubRequest Type="WhoAmI" SubRequestToken="2" DependsOn="1" DependencyType="OnNotSupported" />
+                  <SubRequest Type="WhoAmI" SubRequestToken="3" DependsOn="1" DependencyType="OnSuccessOrNotSupported" />
+                  <SubRequest Type="WhoAmI" SubRequestToken="4" DependsOn="1" DependencyType="OnSuccess" />
+                  <SubRequest Type="WhoAmI" SubRequestToken="5" DependsOn="2" DependencyType="OnNotSupported" />
+                  <SubRequest Type="WhoAmI" SubRequestToken="6" DependsOn="5" DependencyType="OnExecute" />
+                  <SubRequest Type="WhoAmI" SubRequestToken="7" DependsOn="4" DependencyType="OnExecute" />
+                  <SubRequest Type="WhoAmI" SubRequestToken="8" DependsOn="7" DependencyType="OnExecute" />
                 </Request></RequestCollection>
               </ExecuteCellStorageRequest></s:Body>
             </s:Envelope>
@@ -37,7 +37,7 @@ public sealed class DependencyTests
         var xml = XDocument.Parse(await response.Content.ReadAsStringAsync());
         var replies = xml.Descendants().Where(e => e.Name.LocalName == "SubResponse")
             .ToDictionary(e => (string)e.Attribute("SubRequestToken"));
-        Assert.Equal("NotSupported", (string)replies["1"].Attribute("ErrorCode"));
+        Assert.Equal("RequestNotSupported", (string)replies["1"].Attribute("ErrorCode"));
         foreach (var token in new[] { "2", "3" })
         {
             Assert.Equal("Success", (string)replies[token].Attribute("ErrorCode"));

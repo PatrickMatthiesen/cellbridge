@@ -43,7 +43,8 @@ public sealed class MtomEndpointTests
             XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
             XNamespace xop = "http://www.w3.org/2004/08/xop/include";
             var envelope = new XElement(soap + "Envelope", new XElement(soap + "Body",
-                new XElement(protocol + "RequestCollection", new XElement(protocol + "Request",
+                new XElement(protocol + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
+                new XElement(protocol + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), new XElement(protocol + "Request",
                     new XAttribute("Url", "http://localhost" + state.Path), new XAttribute("RequestToken", 1),
                     new XElement(protocol + "SubRequest", new XAttribute("Type", "Cell"), new XAttribute("SubRequestToken", 1),
                         new XElement(protocol + "SubRequestData", new XAttribute("GetFileProps", "true"),

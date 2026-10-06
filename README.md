@@ -20,7 +20,7 @@ has not been qualified.
 
 | Feature | Current support |
 | --- | --- |
-| Word editing | Open, edit, save and reopen documents, including while signed in. |
+| Word editing | Open, edit, save and reopen tested while signed in; repeated single-save qualification remains open under #42. |
 | Excel editing | Open, edit, save and reopen tested while signed in on the durable host. |
 | PowerPoint editing | Save and reopen presentations, including complex Copilot-generated slides. |
 | Document library | Create blank Office files, import existing documents and download saved files. |
@@ -36,6 +36,11 @@ unimplemented or disabled. See [revision history](docs/revision-history.md),
 [requirements ledger](docs/protocol-requirements.md) for exact coverage and open work.
 
 ## Try the demo
+
+The [package-only document library](examples/DocumentLibrary/README.md) adds
+uploads, Office links, downloads, history, permissions and save-delivery status.
+It stores actual destination files separately from CellBridge state and tests
+recovery after lost save replies. Its built-in identities are for local testing.
 
 Install the .NET 10 SDK, an Aspire CLI compatible with the preview SDK pinned
 in `aspire/apphost.cs`, Docker and Python 3.12 or newer.
@@ -92,6 +97,12 @@ matching symbols are public on NuGet.org, owned by CellBridge. Fresh remote
 consumption passed four consumer tests and the 15 tests of the pinned WopiHost
 adapter. Those checks establish package integration, not Office Online Server
 or new desktop client qualification.
+
+Current source prepares `0.1.0-beta.2`; it is not yet a published release.
+Read the [beta.1 upgrade guide](docs/beta-2-upgrade.md) and
+[tested recovery environments](docs/supported-environments.md) before upgrading.
+The candidate adds opt-in external publication, shared lock authority and
+conditional lifecycle contracts, with host adoption still required.
 
 ## Build and test
 

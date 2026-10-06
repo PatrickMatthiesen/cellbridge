@@ -26,8 +26,8 @@ public sealed class TargetPartitionExecutionTests
             if (!operation.Status) Assert.IsType<AllocateExtendedGuidRangeSubResponseData>(operation.Data);
             else
             {
-                Assert.Equal(ErrorType.Protocol, operation.Error!.Type);
-                Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, operation.Error.ErrorCode);
+                Assert.Equal(ErrorType.Cell, operation.Error!.Type);
+                Assert.Equal((ulong)CellErrorCode.RequestNotSupported, operation.Error.ErrorCode);
             }
         }
     }
@@ -48,8 +48,8 @@ public sealed class TargetPartitionExecutionTests
             var response = Assert.Single(result.Response.SubResponses);
             Assert.True(response.Status); Assert.Equal(type, response.RequestType);
             Assert.Null(response.Data);
-            Assert.Equal(ErrorType.Protocol, response.Error!.Type);
-            Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, response.Error.ErrorCode);
+            Assert.Equal(ErrorType.Cell, response.Error!.Type);
+            Assert.Equal((ulong)CellErrorCode.RequestNotSupported, response.Error.ErrorCode);
             Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
         }
         // Explicit zero means file, and does not inherit a metadata SOAP selector.
@@ -62,7 +62,13 @@ public sealed class TargetPartitionExecutionTests
     {
         var request = new FsshttpbCellRequest();
         request.SubRequests.Add(new(type) { RequestId = 4, TargetPartitionId = target,
-            Data = type == RequestTypes.AllocateExtendedGuidRange ? new AllocateExtendedGuidRangeSubRequestData { RequestIdCount = 1 } : null });
+            Data = type switch
+            {
+                RequestTypes.AllocateExtendedGuidRange => new AllocateExtendedGuidRangeSubRequestData { RequestIdCount = 1 },
+                RequestTypes.QueryChanges => new QueryChangesSubRequestData(),
+                RequestTypes.PutChanges => new PutChangesSubRequestData(),
+                _ => null,
+            } });
         return request;
     }
 }

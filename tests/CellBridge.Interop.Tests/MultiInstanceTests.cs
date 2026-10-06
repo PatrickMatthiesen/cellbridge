@@ -59,7 +59,9 @@ public class MultiInstanceTests
             if (type == "Coauth" && operation == "ConvertToExclusive")
                 data.Add(new XAttribute("ReleaseLockOnConversionToExclusiveFailure", "true"));
             if (type == "AmIAlone") data.Add(new XAttribute("TransitionID", transition));
-            var message = new XElement(soap + "Envelope", new XElement(soap + "Body", new XElement(ns + "RequestCollection",
+            var message = new XElement(soap + "Envelope", new XElement(soap + "Body",
+                new XElement(ns + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
+                new XElement(ns + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()),
                 new XElement(ns + "Request", new XAttribute("Url", fileUrl), new XAttribute("RequestToken", 1),
                     new XElement(ns + "SubRequest", new XAttribute("Type", type), new XAttribute("SubRequestToken", 1), data)))));
             using var response = await http.PostAsync(endpoint, new StringContent(message.ToString(), Encoding.UTF8, "text/xml"));
@@ -95,7 +97,8 @@ public class MultiInstanceTests
             XNamespace ns = "http://schemas.microsoft.com/sharepoint/soap/";
             XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
             var message = new XElement(soap + "Envelope", new XElement(soap + "Body",
-                new XElement(ns + "RequestCollection", new XElement(ns + "Request",
+                new XElement(ns + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
+                new XElement(ns + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), new XElement(ns + "Request",
                     new XAttribute("Url", new Uri(first, path)), new XAttribute("RequestToken", 1),
                     new XElement(ns + "SubRequest", new XAttribute("Type", "ExclusiveLock"),
                         new XAttribute("SubRequestToken", 1), new XElement(ns + "SubRequestData",

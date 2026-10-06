@@ -25,4 +25,17 @@ public class DependencyTests
         var request = new FssHttpSubRequest { DependsOn = 1, DependencyType = type };
         Assert.Equal(expected, FssHttpDependencies.Error(request, [new() { SubRequestToken = 1, ErrorCode = previous }]));
     }
+
+    [Fact]
+    public void DuplicatePredecessorsReturnDependencyErrorWithoutThrowing()
+    {
+        var request = new FssHttpSubRequest { DependsOn = 1, DependencyType = "OnSuccess" };
+        FssHttpSubResponse[] prior =
+        [
+            new() { SubRequestToken = 1, ErrorCode = "Success" },
+            new() { SubRequestToken = 1, ErrorCode = "Success" },
+        ];
+
+        Assert.Equal("InvalidRequestDependencyType", FssHttpDependencies.Error(request, prior));
+    }
 }

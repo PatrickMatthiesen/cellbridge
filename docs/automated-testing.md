@@ -1,5 +1,14 @@
 # Automated testing
 
+Use `python tools/testing/run.py --packages` for the combined candidate check.
+It packs and tests the external application before starting Aspire, then runs
+its PostgreSQL commit/delivery reply-loss test against the disposable database.
+The ordinary package verifier skips that test when no database is configured.
+
+The [recovery environment matrix](supported-environments.md) ties process-crash
+and portable recovery checks to their measured configurations. For repeated
+single-save Word and Excel qualification, use the [desktop procedure](desktop-save-qualification.md).
+
 CellBridge has protocol/unit tests, live HTTP checks, provider tests and an
 interactive Windows Word check. Use the commands below for the part you are
 changing. [Client coverage](interoperability.md#client-coverage) records desktop
@@ -50,6 +59,13 @@ repository metadata and internal versions, and writes `artifacts/packages/manife
 same archive metadata and hashes before release authentication. Artifact tests
 under `tools/testing` exercise tampering, missing packages/symbols and incorrect
 identity/version/commit/clean-source flags.
+It also builds the package-only [document library](../examples/DocumentLibrary/README.md)
+and its setup/probe projects, rejects source-project references to CellBridge,
+and runs destination crash/retry and consumer save/permission/lock tests.
+The PostgreSQL consumer tests require a disposable migrated database through
+`ConnectionStrings__cellbridge`; they report skips when it is absent. The Linux
+storage and publishing jobs supply that database. A package run with skipped
+database tests does not establish restart recovery for the durable consumer.
 The package tests compare the reusable processor's response with the HTTP endpoint
 and exercise host-selected identities and read-only request limits.
 

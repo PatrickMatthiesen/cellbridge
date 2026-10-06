@@ -13,7 +13,7 @@ public sealed class LifecycleCollectionTests
     [PostgreSqlFact]
     public Task PostgreSqlCollectionPreservesDeletedAndRecreatedDocuments() => Check(fileSystem: false);
 
-    [PostgreSqlFact]
+    [PostgreSqlLinuxFact]
     public Task FileSystemCollectionPreservesDeletedAndRecreatedDocuments() => Check(fileSystem: true);
 
     private static Task Check(bool fileSystem)

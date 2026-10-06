@@ -4,6 +4,7 @@ using System.Xml.Linq;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
+using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using Microsoft.AspNetCore.Builder;
@@ -76,9 +77,87 @@ public sealed class AuthorizationEndpointTests
             Assert.Null(file.Attribute("ResourceID"));
             Assert.Empty(data.Attributes());
             Assert.Equal("http://localhost/shared/supplied-only.bin", (string?)file.Attribute("Url"));
-            Assert.Equal("FileUnauthorizedAccess", (string?)xml.Descendants(Protocol + "ResponseVersion").Single().Attribute("ErrorCode"));
+            Assert.Equal("FileUnauthorizedAccess", (string?)file.Attribute("ErrorCode"));
+            Assert.NotNull(file.Attribute("ErrorMessage"));
         }
         else Assert.NotNull(file.Attribute("ResourceID"));
+    }
+
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("0", false)]
+    [InlineData("true", true)]
+    [InlineData("false", false)]
+    [InlineData(" 1 ", true)]
+    [InlineData(" true ", true)]
+    public async Task GetFilePropsUsesXmlBooleanLexicalValues(string value, bool expected)
+    {
+        await using var fixture = await Fixture.Start();
+        var cell = new FsshttpbCellRequest
+        {
+            SubRequests = { new(RequestTypes.QueryAccess) { RequestId = 1 } },
+        };
+        var xml = await fixture.Send("writer", new FssHttpSubRequest
+        {
+            Type = SubRequestType.Cell,
+            SubRequestDataBinary = cell.ToByteArray(),
+            SubRequestDataAttributes = { ["GetFileProps"] = value },
+        });
+
+        var data = xml.Descendants(Protocol + "SubResponseData").Single();
+        Assert.Equal(expected, data.Attribute("Etag") is not null);
+        Assert.Equal(expected, data.Attribute("CreateTime") is not null);
+        Assert.Equal(expected, data.Attribute("LastModifiedTime") is not null);
+    }
+
+    [Fact]
+    public async Task SoapExecutionAcceptsCollapsedSignedBinarySizeAndRejectsCollapsedMetadataCoalesce()
+    {
+        await using var fixture = await Fixture.Start();
+        var put = new PutChangesSubRequestData { StorageIndex = new ExGuid(1, Guid.NewGuid()) };
+        var cell = new FsshttpbCellRequest
+        {
+            SubRequests = { new(RequestTypes.PutChanges) { RequestId = 1, Data = put } },
+            DataElementPackage = new DataElementPackage(),
+        };
+        byte[] binary = cell.ToByteArray();
+        var before = await fixture.Provider.State.FindByResourceIdAsync(fixture.State.ResourceId);
+
+        var xml = await fixture.Send("writer", new FssHttpSubRequest
+        {
+            Type = SubRequestType.Cell,
+            SubRequestDataBinary = binary,
+            SubRequestDataAttributes =
+            {
+                ["PartitionID"] = StoredDocument.MetadataPartitionId.ToString("D"),
+                ["BinaryDataSize"] = $" +{binary.Length} ",
+                ["Coalesce"] = " 1 ",
+            },
+        });
+
+        var payload = Convert.FromBase64String(xml.Descendants(Protocol + "SubResponseData").Single().Value);
+        var response = FsshttpbResponse.Deserialize(new BinaryReaderEx(payload));
+        Assert.Equal((ulong)CellErrorCode.RequestNotSupported, Assert.Single(response.SubResponses).Error?.ErrorCode);
+        Assert.Equal(before, await fixture.Provider.State.FindByResourceIdAsync(fixture.State.ResourceId));
+    }
+
+    [Fact]
+    public async Task EditorsExecutionAcceptsCollapsedBooleanAndSignedTimeout()
+    {
+        await using var fixture = await Fixture.Start();
+        var xml = await fixture.Send("reader", new FssHttpSubRequest
+        {
+            Type = SubRequestType.EditorsTable,
+            SubRequestDataAttributes =
+            {
+                ["EditorsTableRequestType"] = "JoinEditingSession",
+                ["ClientID"] = Guid.NewGuid().ToString("D"),
+                ["Timeout"] = " +60 ",
+                ["AsEditor"] = " 0 ",
+            },
+        });
+
+        Assert.Equal("Success", Error(xml));
     }
 
     [Fact]
@@ -183,11 +262,23 @@ public sealed class AuthorizationEndpointTests
             {
                 var sub = new XElement(Protocol + "SubRequest", new XAttribute("Type", r.Type), new XAttribute("SubRequestToken", r.SubRequestToken ?? 1));
                 if (r.DependsOn is { } depends) sub.Add(new XAttribute("DependsOn", depends), new XAttribute("DependencyType", r.DependencyType!));
-                var data = new XElement(Protocol + "SubRequestData", r.SubRequestDataAttributes.Select(p => new XAttribute(p.Key, p.Value)));
-                if (r.SubRequestDataBinary is { } binary) data.Add(Convert.ToBase64String(binary));
-                sub.Add(data); file.Add(sub);
+                bool forbidsData = r.Type is SubRequestType.WhoAmI or SubRequestType.ServerTime or SubRequestType.GetDocMetaInfo or
+                    SubRequestType.GetVersions or SubRequestType.LockStatus;
+                if (!forbidsData)
+                {
+                    var data = new XElement(Protocol + "SubRequestData", r.SubRequestDataAttributes.Select(p => new XAttribute(p.Key, p.Value)));
+                    if (r.SubRequestDataBinary is { } binary)
+                    {
+                        if (data.Attribute("BinaryDataSize") is null) data.Add(new XAttribute("BinaryDataSize", binary.Length));
+                        data.Add(Convert.ToBase64String(binary));
+                    }
+                    sub.Add(data);
+                }
+                file.Add(sub);
             }
-            var envelope = new XElement(soap + "Envelope", new XElement(soap + "Body", new XElement(Protocol + "RequestCollection", file)));
+            var envelope = new XElement(soap + "Envelope", new XElement(soap + "Body",
+                new XElement(Protocol + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 2)),
+                new XElement(Protocol + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), file)));
             using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")
             { Content = new StringContent(envelope.ToString(), Encoding.UTF8, "text/xml") };
             request.Headers.Add("X-Test-User", user);
