@@ -48,6 +48,7 @@ public static class DocumentLibraryEndpoints
             var documents = await library.ListAsync(actor, context.RequestAborted);
             var token = antiforgery.GetAndStoreTokens(context).RequestToken!;
             return Html(LibraryPage(context, documents, token,
+                actor.CanCreate,
                 context.User.HasClaim("document-library:permission-admin", "true")));
         }).RequireAuthorization();
 
@@ -56,6 +57,7 @@ public static class DocumentLibraryEndpoints
         {
             await antiforgery.ValidateRequestAsync(context);
             var actor = RequireActor(context);
+            if (!actor.CanCreate) return Results.StatusCode(403);
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
             var file = form.Files.GetFile("file");
             if (file is null || file.Length == 0) return Results.BadRequest("Choose a non-empty Office file.");
@@ -163,7 +165,7 @@ public static class DocumentLibraryEndpoints
         """);
 
     private static string LibraryPage(HttpContext context, IReadOnlyList<LibraryDocument> documents,
-        string token, bool permissionAdmin)
+        string token, bool canCreate, bool permissionAdmin)
     {
         var rows = new StringBuilder();
         foreach (var document in documents)
@@ -179,12 +181,15 @@ public static class DocumentLibraryEndpoints
             }
         }
 
+        var upload = canCreate ? $$"""
+            <h2>Upload</h2>
+            <form method="post" action="/library/upload" enctype="multipart/form-data">{{HiddenToken(token)}}<input type="file" name="file" accept=".docx,.xlsx,.pptx" required><button type="submit">Upload</button></form>
+            """ : "";
         return Page("Documents", $$"""
             <h1>Documents</h1>
             <p class="warning">This sample uses local demo identities. It is not an Internet-ready authentication setup.</p>
             <form method="post" action="/local-logout">{{HiddenToken(token)}}<button type="submit">Sign out</button></form>
-            <h2>Upload</h2>
-            <form method="post" action="/library/upload" enctype="multipart/form-data">{{HiddenToken(token)}}<input type="file" name="file" accept=".docx,.xlsx,.pptx" required><button type="submit">Upload</button></form>
+            {{upload}}
             <h2>Library</h2>
             <table><thead><tr><th>File</th><th>CellBridge version</th><th>Save status</th><th>Actions</th></tr></thead><tbody>{{rows}}</tbody></table>
             """);
