@@ -15,24 +15,45 @@ public static class DocumentLibraryEndpoints
 {
     public static void Map(WebApplication app, IHostEnvironment environment)
     {
-        app.MapGet("/local-login", (HttpContext context, IAntiforgery antiforgery) =>
+        IResult Login(HttpContext context, IAntiforgery antiforgery)
         {
             if (!LocalIdentityAllowed(context, environment)) return Results.NotFound();
+            context.Response.Headers.CacheControl = "no-store";
             var token = antiforgery.GetAndStoreTokens(context).RequestToken!;
-            return Html(LoginPage(token));
-        }).AllowAnonymous();
+            var returnUrl = DocumentLibraryAuthentication.LocalReturnUrl(
+                context.Request.Query["returnUrl"].FirstOrDefault() ??
+                context.Request.Query["ReturnUrl"].FirstOrDefault() ?? "/");
+            return Html(LoginPage(token, returnUrl));
+        }
 
-        app.MapPost("/local-login", async (HttpContext context, IAntiforgery antiforgery) =>
+        async Task<IResult> SignIn(HttpContext context, IAntiforgery antiforgery)
         {
             if (!LocalIdentityAllowed(context, environment)) return Results.NotFound();
-            await antiforgery.ValidateRequestAsync(context);
+            context.Response.Headers.CacheControl = "no-store";
+            try { await antiforgery.ValidateRequestAsync(context); }
+            catch (AntiforgeryValidationException) { return Results.BadRequest(); }
             var form = await context.Request.ReadFormAsync(context.RequestAborted);
             var user = form["user"].ToString();
             var identity = LocalIdentity(user);
             if (identity is null) return Results.BadRequest("Unknown local demo identity.");
             await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
                 new ClaimsPrincipal(identity), new AuthenticationProperties { IsPersistent = false });
-            return Results.Redirect("/");
+            return Results.LocalRedirect(DocumentLibraryAuthentication.LocalReturnUrl(
+                form["returnUrl"].FirstOrDefault() ?? "/"));
+        }
+
+        app.MapGet("/local-login", Login).AllowAnonymous();
+        app.MapGet("/auth/login", Login).AllowAnonymous();
+        app.MapPost("/local-login", SignIn).AllowAnonymous();
+        app.MapPost("/auth/login", SignIn).AllowAnonymous();
+        app.MapMethods("/auth/complete", ["GET", "HEAD"], (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            return CellBridgeActor.FromPrincipal(context.User) is not null
+                ? HttpMethods.IsHead(context.Request.Method)
+                    ? Results.Ok()
+                    : Html(Page("Signed in", "<h1>Signed in to CellBridge</h1><p><a href=\"/\">Open the library</a></p>"))
+                : Results.Unauthorized();
         }).AllowAnonymous();
 
         app.MapPost("/local-logout", async (HttpContext context, IAntiforgery antiforgery) =>
@@ -154,12 +175,14 @@ public static class DocumentLibraryEndpoints
     private static string HiddenToken(string token) =>
         $"<input type=\"hidden\" name=\"__RequestVerificationToken\" value=\"{E(token)}\">";
 
-    private static string LoginPage(string token) => Page("Local sign-in", $$"""
+    private static string LoginPage(string token, string returnUrl) => Page("Local sign-in", $$"""
         <h1>CellBridge document library</h1>
         <p class="warning">Local demo identities only. Do not expose this authentication setup to the Internet.</p>
         <form method="post" action="/local-login">
           {{HiddenToken(token)}}
-          <label>Identity <select name="user"><option value="owner">Owner</option><option value="editor">Editor</option><option value="reader">Reader</option></select></label>
+          <input type="hidden" name="returnUrl" value="{{E(returnUrl)}}">
+          <div><label for="user">Identity</label></div>
+          <div><select id="user" name="user"><option value="owner">Owner</option><option value="editor">Editor</option><option value="reader">Reader</option></select></div>
           <button type="submit">Sign in</button>
         </form>
         """);
@@ -203,7 +226,7 @@ public static class DocumentLibraryEndpoints
     }
 
     private static string Page(string title, string body) => $$"""
-        <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{E(title)}}</title>
+        <!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{E(title)}}</title>
         <style>body{font:16px system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#18202a}table{border-collapse:collapse;width:100%}th,td{border:1px solid #cad0d8;padding:.6rem;text-align:left;vertical-align:top}form{margin:.8rem 0}button,input,select{font:inherit;padding:.35rem}.warning{border-left:4px solid #b45309;background:#fff7ed;padding:.75rem}</style></head><body>{{body}}</body></html>
         """;
 

@@ -4,6 +4,8 @@ This example hosts CellBridge from NuGet packages. It keeps CellBridge state and
 
 The built-in owner, editor, and reader accounts exist only for local testing. The sign-in endpoint rejects non-loopback clients and runs only in the Development or Testing environment. This is not an Internet-ready authentication design.
 
+Desktop Office uses a separate sign-in session from your browser. An unauthenticated document or protocol request receives the Office forms-authentication challenge, which opens the same local account selector. Select an identity and sign in; the dialog returns to `/auth/complete` before Office retries the document with its cookie. Browser visits still use `/local-login`. A loopback reverse proxy also passes the connection-address check, so anyone allowed through that proxy can choose a test identity. Keep this example on a private test network.
+
 Run the package-only app and its PostgreSQL database through the standalone AppHost. A normal launch restores the published packages from the NuGet sources already configured on the machine:
 
 ```powershell
@@ -34,4 +36,4 @@ The library reports CellBridge commit status separately from destination deliver
 
 Back up PostgreSQL and the destination root as one coordinated recovery point. If a manifest says CellBridge binding completed but PostgreSQL no longer has that document, startup fails. The destination baseline cannot prove that PostgreSQL had no accepted, undelivered save before an independent database loss.
 
-Desktop Office links use the authenticated `/shared/{fileName}` CellBridge URL. Live Office compatibility, distinct desktop identities, and Internet deployment remain separate qualification work.
+Desktop Office links use the authenticated `/shared/{fileName}` CellBridge URL. Preserve the external HTTPS scheme and hostname when using a reverse proxy so the links and sign-in headers point to the address your Office client can reach. Endpoint checks verify the sign-in handshake and authenticated document requests. Native Office open/edit/save behavior, distinct desktop identities, and Internet deployment remain separate qualification work.

@@ -62,6 +62,23 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.SlidingExpiration = false;
         options.LoginPath = "/local-login";
         options.AccessDeniedPath = "/local-login";
+        options.Events.OnRedirectToLogin = context =>
+        {
+            var request = context.Request;
+            if (request.Path.StartsWithSegments("/shared") ||
+                request.Path.StartsWithSegments("/_vti_bin") ||
+                request.Path.StartsWithSegments("/_cellbridge"))
+                DocumentLibraryAuthentication.OfficeChallenge(context.HttpContext,
+                    $"{request.Scheme}://{request.Host}{request.PathBase}");
+            else
+                context.Response.Redirect(context.RedirectUri);
+            return Task.CompletedTask;
+        };
+        options.Events.OnRedirectToAccessDenied = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return Task.CompletedTask;
+        };
     });
 builder.Services.AddAuthorization(options =>
     options.AddPolicy("permission-admin", policy => policy.RequireClaim("document-library:permission-admin", "true")));
