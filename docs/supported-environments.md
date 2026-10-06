@@ -43,6 +43,11 @@ application process interruption boundary above, not database or hardware
 failure. Filesystem object reclamation remains Linux-only; Windows rejects that
 operation and preserves the stored objects and accounting.
 
+The repository selects stable .NET 10 SDKs through `global.json`; it permits
+newer .NET 10 feature bands and excludes prerelease SDKs. See Microsoft's
+[SDK selection rules](https://learn.microsoft.com/en-us/dotnet/core/tools/global-json).
+The final runner records the selected SDK in `summary.json`.
+
 ## Limits and recovery
 
 These checks terminate application processes. They do not cut disk power, crash

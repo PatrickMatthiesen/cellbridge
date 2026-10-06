@@ -106,6 +106,7 @@ def main():
                "scope": "Protocol replay and synthetic HTTP/storage checks, not desktop Office", "checks": [], "passed": False}
     summary["sourceCommit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     summary["sourceDirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
+    summary["dotnetSdk"] = subprocess.check_output(["dotnet", "--version"], cwd=ROOT, text=True).strip()
     start_attempted = False
 
     def run(name, command, timeout=1200):
