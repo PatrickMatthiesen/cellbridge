@@ -6,8 +6,8 @@ This is separate from the repository's Razor Pages demo at `/library`. Both
 support creating blank Word, Excel and PowerPoint files. This example also
 uploads existing documents and delivers saves to a separate destination.
 
-The workspace has a file list with modification dates, file sizes and destination
-delivery status. Search, file-type filters and sorting work in the browser on the
+The workspace has a file list with modification dates, file sizes and file
+status. Search, file-type filters and sorting work in the browser on the
 documents returned for your account. Use **New document** or **Upload** to add
 files, and a file's actions menu to download it, see saved versions or change
 access. Document links open desktop Office. These links and forms also work
@@ -17,6 +17,35 @@ The example uses the package's `AddCellBridgeLogin` with its standard
 username/password page. Supplying custom HTML is optional. The package handles
 the form, CSRF checks, cookie sign-in and Office challenge/completion. No login
 page or challenge headers are implemented in this example.
+
+## Application setup
+
+`Program.cs` keeps the CellBridge registration and middleware order visible.
+The example's storage, file publication and account setup live in
+`DocumentLibraryHostingExtensions.cs`:
+
+```csharp
+var provider = builder.Services.AddDocumentLibrary(builder.Configuration, builder.Environment);
+builder.Services.AddCellBridge(provider, requireDurability: !builder.Environment.IsEnvironment("Testing"));
+builder.Services.AddDocumentLibraryTestLogin(builder.Environment);
+```
+
+`AddDocumentLibrary` selects PostgreSQL, configures the destination directory and
+registers the publication worker and the example's document permissions. These
+helpers belong to the example, not the NuGet packages.
+
+Ordinary hosts already receive CellBridge's stored owner/grant policy from
+`AddCellBridge`. This example overrides it because its owner/editor/reader
+permissions are bound to immutable revisions in the destination manifests. Its
+private test accounts are also an example choice. Applications with existing
+Identity accounts can use the packaged `AddCellBridgeIdentityLogin<TUser>` with
+their account store and document permissions; see
+[package integration](../../docs/package-integration.md).
+
+Startup checks storage health and loads document permissions before serving
+requests or starting the publication worker.
+
+## Run the example
 
 For private development testing, sign in as `ofba-operator` or `owner` to create
 and manage documents, `editor` to edit, or `reader` to read. All use the test
@@ -55,7 +84,11 @@ The AppHost does not auto-detect local package directories. Leave both settings 
 
 The AppHost creates PostgreSQL, runs the package-only setup project, and starts the web app only after schema initialization succeeds. Its normal mode keeps a named PostgreSQL volume and stores destination files under the ignored `artifacts/document-library` directory. Set `Testing__Enabled=true` in the environment for disposable PostgreSQL and a unique temporary destination. Only one app process may use a destination root. The app holds an exclusive lock file for its full lifetime.
 
-The library reports CellBridge commit status separately from destination delivery. A committed save may remain pending if the destination is unavailable or its revision changed outside CellBridge. The recovery worker scans durable CellBridge state after every restart and retries pending deliveries with their original operation IDs.
+The Status column shows whether the downloadable file has caught up with the
+saved content in CellBridge. A committed save may remain pending if the
+destination is unavailable or its revision changed outside CellBridge. The
+recovery worker scans durable CellBridge state after every restart and retries
+pending deliveries with their original operation IDs.
 
 Back up PostgreSQL and the destination root as one coordinated recovery point. If a manifest says CellBridge binding completed but PostgreSQL no longer has that document, startup fails. The destination baseline cannot prove that PostgreSQL had no accepted, undelivered save before an independent database loss.
 

@@ -8,7 +8,7 @@ namespace CellBridge.DocumentLibrary;
 
 public static class DocumentLibraryEndpoints
 {
-    public static void Map(WebApplication app, IHostEnvironment environment)
+    public static void MapDocumentLibrary(this WebApplication app)
     {
         app.MapGet("/local-login", (HttpContext context) =>
             Results.Redirect("/auth/login" + context.Request.QueryString)).AllowAnonymous();

@@ -5,6 +5,12 @@ the protocol and provider packages can also be consumed separately. See
 [provider composition](storage-providers.md#consume-the-packages) and the
 [package consumer](../examples/NuGetConsumer/README.md).
 
+The snippets below show the CellBridge integration in an existing application.
+The [document-library example](../examples/DocumentLibrary/README.md) is a complete
+application with PostgreSQL, a separate file store, document permissions and
+private test accounts. Its setup helpers belong to that example; they are not
+additional package registrations required by your application.
+
 ## Use the built-in login pages
 
 `CellBridge.AspNetCore` supplies script-free browser and Office login pages through
