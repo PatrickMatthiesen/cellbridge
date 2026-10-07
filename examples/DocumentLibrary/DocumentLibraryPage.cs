@@ -20,7 +20,7 @@ internal static class DocumentLibraryPage
             var office = type switch { "docx" => "ms-word", "xlsx" => "ms-excel", "pptx" => "ms-powerpoint", _ => null };
             var openUrl = office is null ? $"/library/files/{document.ResourceId:D}/download" : $"{office}:ofe|u|{url}";
             var status = document.DeliveryBlock is not null ? "Needs attention"
-                : document.PendingDeliveries > 0 ? "Delivery pending" : "Up to date";
+                : document.PendingDeliveries > 0 ? "Updating file" : "Up to date";
             var statusClass = document.DeliveryBlock is not null ? "blocked" : document.PendingDeliveries > 0 ? "pending" : "delivered";
             var access = permissionAdmin ? $$"""
                 <div class="access-form">
@@ -35,14 +35,13 @@ internal static class DocumentLibraryPage
                 """ : "";
             rows.Append($$"""
                 <tr data-document data-name="{{E(document.FileName)}}" data-type="{{E(type)}}" data-modified="{{new DateTimeOffset(document.ModifiedUtc.ToUniversalTime()).ToUnixTimeMilliseconds()}}" data-size="{{document.Length}}">
-                  <td class="name-cell"><div class="file-name">{{FileIcon(type)}}<div><a class="document-name" href="{{E(openUrl)}}" title="{{E(office is null ? "Download " + document.FileName : "Open " + document.FileName + " in desktop Office")}}">{{E(document.FileName)}}</a><span class="file-kind">{{TypeLabel(type)}}</span></div></div></td>
-                  <td class="modified-cell"><time datetime="{{document.ModifiedUtc.ToUniversalTime():O}}" title="{{document.ModifiedUtc.ToUniversalTime():yyyy-MM-dd HH:mm:ss}} UTC">{{document.ModifiedUtc.ToUniversalTime().ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}}<span class="time-detail">{{document.ModifiedUtc.ToUniversalTime():HH:mm}} UTC</span></time></td>
+                  <td class="name-cell"><div class="file-name">{{FileIcon(type)}}<div><a class="document-name" href="{{E(openUrl)}}">{{E(document.FileName)}}</a></div></div></td>
+                  <td class="modified-cell"><time datetime="{{document.ModifiedUtc.ToUniversalTime():O}}">{{document.ModifiedUtc.ToUniversalTime().ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}}<span class="time-detail">{{document.ModifiedUtc.ToUniversalTime():HH:mm}} UTC</span></time></td>
                   <td class="size-cell">{{Size(document.Length)}}</td><td class="version-cell">{{document.ContentVersion}}</td>
-                  <td class="status-cell"><span class="status {{statusClass}}" title="{{E(document.DeliveryStatus)}}"><span class="status-dot"></span>{{status}}</span><span class="delivery-detail">{{E(document.DeliveryBlock is not null ? document.DeliveryStatus : document.PendingDeliveries > 0 ? $"{document.PendingDeliveries} item(s) waiting for destination" : "Delivered to destination")}}</span></td>
-                  <td class="actions-cell"><details class="action-menu"><summary aria-label="Actions for {{E(document.FileName)}}" title="File actions">{{Icon("more")}}</summary><div class="menu file-menu">
-                    <p class="menu-heading">{{E(document.FileName)}}</p>
-                    {{(office is null ? "" : $"<a href=\"{E(openUrl)}\">{Icon("open")}Open in desktop Office</a>")}}
-                    <a href="/library/files/{{document.ResourceId:D}}/download">{{Icon("download")}}Download delivered file</a>
+                  <td class="status-cell"><span class="status {{statusClass}}"><span class="status-dot"></span>{{status}}</span></td>
+                  <td class="actions-cell"><details class="action-menu"><summary aria-label="Actions for {{E(document.FileName)}}">{{Icon("more")}}</summary><div class="menu file-menu">
+                    {{(office is null ? "" : $"<a href=\"{E(openUrl)}\">{Icon("open")}Open</a>")}}
+                    <a href="/library/files/{{document.ResourceId:D}}/download">{{Icon("download")}}Download</a>
                     <a href="/library/files/{{document.ResourceId:D}}/history">{{Icon("history")}}Version history</a>
                     {{access}}
                   </div></details></td>
@@ -52,16 +51,16 @@ internal static class DocumentLibraryPage
 
         var creation = canCreate ? $$"""
             <details class="tool-menu"><summary class="button primary">{{Icon("plus")}}New document{{Icon("chevron")}}</summary>
-              <div class="menu creation-menu"><h2>New document</h2><p>Start with a blank Office file.</p>
+              <div class="menu creation-menu"><h2>New document</h2>
                 <form method="post" action="/library/create">{{HiddenToken(token)}}
                   <label for="new-type">Document type</label><select id="new-type" name="type"><option value="docx">Word document</option><option value="xlsx">Excel workbook</option><option value="pptx">PowerPoint presentation</option></select>
                   <label for="new-name">File name</label><input id="new-name" name="name" placeholder="Untitled" maxlength="180" required>
-                  <span class="field-hint">The file extension is added for you.</span><button class="button primary" type="submit">Create document</button>
+                  <button class="button primary" type="submit">Create document</button>
                 </form>
               </div>
             </details>
             <details class="tool-menu"><summary class="button quiet">{{Icon("upload")}}Upload{{Icon("chevron")}}</summary>
-              <div class="menu creation-menu"><h2>Upload a document</h2><p>Add a Word, Excel or PowerPoint file.</p>
+              <div class="menu creation-menu"><h2>Upload a document</h2>
                 <form method="post" action="/library/upload" enctype="multipart/form-data">{{HiddenToken(token)}}
                   <label for="upload-file">Choose file</label><input id="upload-file" type="file" name="file" accept=".docx,.xlsx,.pptx" required>
                   <button class="button primary" type="submit">Upload document</button>
@@ -71,15 +70,14 @@ internal static class DocumentLibraryPage
             """ : "";
 
         var body = $$"""
-            <section class="workspace-heading"><div class="workspace-icon">{{Icon("folder")}}</div><div><p class="eyebrow">CELLBRIDGE WORKSPACE</p><h1>Documents</h1><p class="workspace-description">A shared place for your Office files.</p></div><span class="workspace-tag">Document library</span></section>
+            <section class="workspace-heading"><div class="workspace-icon">{{Icon("folder")}}</div><h1>Documents</h1></section>
             <section class="library" aria-label="Document library">
               <div class="toolbar"><div class="toolbar-actions">{{creation}}<a class="button quiet refresh" href="/">{{Icon("refresh")}}Refresh</a></div>
                 <label class="sort-control" hidden data-enhanced>Sort by<select id="sort"><option value="name">Name</option><option value="modified">Last modified</option><option value="size">File size</option></select></label>
               </div>
-              <div class="list-heading"><div><h2 id="view-title">All documents</h2><span id="file-count" role="status" aria-live="polite">{{documents.Count}} {{(documents.Count == 1 ? "file" : "files")}}</span></div><span class="list-hint">Click a file to open it in Office</span></div>
-              <table class="file-table"><caption class="sr-only">Office documents, modification dates, sizes and destination delivery status</caption><thead><tr><th scope="col">Name</th><th scope="col" class="modified-cell">Modified</th><th scope="col" class="size-cell">File size</th><th scope="col" class="version-cell">Version</th><th scope="col" class="status-cell">Delivery status</th><th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th></tr></thead><tbody id="documents">{{rows}}</tbody></table>
-              <div class="empty-state" id="empty-state" {{(documents.Count > 0 ? "hidden" : "")}}>{{Icon("folder")}}<h3>{{(documents.Count > 0 ? "No matching documents" : "Your library is ready")}}</h3><p>{{(documents.Count > 0 ? "Try another search or file type." : canCreate ? "Create a document or upload an Office file to get started." : "Documents you have access to will appear here.")}}</p></div>
-              <footer class="library-footer"><span>{{Icon("shield")}}Only documents you can access are shown</span><span>Open and edit in desktop Office</span></footer>
+              <div class="list-heading"><div><h2 id="view-title">All documents</h2><span id="file-count" role="status" aria-live="polite">{{documents.Count}} {{(documents.Count == 1 ? "file" : "files")}}</span></div></div>
+              <table class="file-table"><caption class="sr-only">Documents</caption><thead><tr><th scope="col">Name</th><th scope="col" class="modified-cell">Modified</th><th scope="col" class="size-cell">File size</th><th scope="col" class="version-cell">Version</th><th scope="col" class="status-cell">Status</th><th scope="col" class="actions-cell"><span class="sr-only">Actions</span></th></tr></thead><tbody id="documents">{{rows}}</tbody></table>
+              <div class="empty-state" id="empty-state" {{(documents.Count > 0 ? "hidden" : "")}}>{{Icon("folder")}}<h3>{{(documents.Count > 0 ? "No matching documents" : "No documents")}}</h3></div>
             </section>
             """;
         return Page("Documents", body, context, token, true);
@@ -92,7 +90,7 @@ internal static class DocumentLibraryPage
             """));
         return Page("Version history", $$"""
             <a class="back-link" href="/">{{Icon("back")}}Back to documents</a>
-            <section class="workspace-heading"><div class="workspace-icon">{{Icon("history")}}</div><div><p class="eyebrow">DOCUMENT LIBRARY</p><h1>Version history</h1><p class="workspace-description">Download a previously saved version.</p></div></section>
+            <section class="workspace-heading"><div class="workspace-icon">{{Icon("history")}}</div><h1>Version history</h1></section>
             <section class="library history-library"><div class="list-heading"><h2>Saved versions</h2><span>{{revisions.Count}} {{(revisions.Count == 1 ? "revision" : "revisions")}}</span></div><div class="history-scroll"><table class="file-table"><caption class="sr-only">Saved document revisions</caption><thead><tr><th scope="col">Revision</th><th scope="col">Version</th><th scope="col">Saved by</th><th scope="col">Saved on</th><th scope="col">File</th></tr></thead><tbody>{{rows}}</tbody></table></div></section>
             """, context, token, false);
     }
@@ -107,7 +105,7 @@ internal static class DocumentLibraryPage
         var initial = account.Length > 0 ? account[..1].ToUpperInvariant() : "C";
         var signOut = token is null ? "" : $"<form method=\"post\" action=\"/local-logout\">{HiddenToken(token)}<button type=\"submit\" class=\"sign-out\">{Icon("logout")}Sign out</button></form>";
         var filters = isLibrary ? $$"""
-            <div class="nav-group" hidden data-enhanced><p class="nav-label">FILE TYPES</p>
+            <div class="nav-group" hidden data-enhanced>
               <button class="nav-item" type="button" data-filter="docx" aria-pressed="false">{{FileIcon("docx")}}Word documents</button>
               <button class="nav-item" type="button" data-filter="xlsx" aria-pressed="false">{{FileIcon("xlsx")}}Excel workbooks</button>
               <button class="nav-item" type="button" data-filter="pptx" aria-pressed="false">{{FileIcon("pptx")}}PowerPoint slides</button>
@@ -116,11 +114,11 @@ internal static class DocumentLibraryPage
         return $$"""
             <!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{E(title)}} | CellBridge</title><link rel="stylesheet" href="/workspace.css"><script src="/workspace.js" defer></script></head><body class="workspace">
             <a class="skip-link" href="#main">Skip to documents</a>
-            <header class="topbar"><a class="brand" href="/" aria-label="CellBridge documents"><span class="brand-mark">{{Icon("bridge")}}</span>CellBridge<span class="brand-divider"></span><span class="brand-subtitle">Workspace</span></a>
+            <header class="topbar"><a class="brand" href="/" aria-label="CellBridge documents"><span class="brand-mark">{{Icon("bridge")}}</span>CellBridge</a>
               {{(isLibrary ? $"<label class=\"search\" hidden data-enhanced>{Icon("search")}<span class=\"sr-only\">Search documents</span><input type=\"search\" id=\"search\" placeholder=\"Search this library\" autocomplete=\"off\"></label>" : "")}}
               <div class="topbar-account"><span class="account-name">{{E(account)}}</span><span class="avatar" aria-hidden="true">{{E(initial)}}</span></div>
             </header>
-            <div class="workspace-layout"><aside class="sidebar"><div class="site-identity"><span class="site-monogram">CB</span><div><strong>Team workspace</strong><span>Document library</span></div></div><nav aria-label="Library navigation"><p class="nav-label">WORKSPACE</p><a class="nav-item active" href="/" {{(isLibrary ? "data-filter=\"all\" aria-current=\"page\"" : "")}}>{{Icon("folder")}}Documents<span class="nav-indicator"></span></a>{{filters}}</nav><div class="sidebar-bottom"><p>Open files in desktop Office</p>{{signOut}}</div></aside>
+            <div class="workspace-layout"><aside class="sidebar"><nav aria-label="Library navigation"><a class="nav-item active" href="/" {{(isLibrary ? "data-filter=\"all\" aria-current=\"page\"" : "")}}>{{Icon("folder")}}Documents<span class="nav-indicator"></span></a>{{filters}}</nav><div class="sidebar-bottom">{{signOut}}</div></aside>
             <main id="main" tabindex="-1">{{body}}</main></div>
             </body></html>
             """;
@@ -131,7 +129,6 @@ internal static class DocumentLibraryPage
     private static string Size(long length) => length < 1024 ? $"{length} B" : length < 1024 * 1024
         ? (length / 1024d).ToString("0.#", CultureInfo.InvariantCulture) + " KB"
         : (length / (1024d * 1024)).ToString("0.#", CultureInfo.InvariantCulture) + " MB";
-    private static string TypeLabel(string type) => type switch { "docx" => "Word document", "xlsx" => "Excel workbook", "pptx" => "PowerPoint presentation", _ => "File" };
     private static string FileIcon(string type) => $"<span class=\"file-icon {type switch { "docx" => "word", "xlsx" => "excel", "pptx" => "powerpoint", _ => "generic" }}\" aria-hidden=\"true\"><span>{type switch { "docx" => "W", "xlsx" => "X", "pptx" => "P", _ => "F" }}</span></span>";
     private static string Icon(string name)
     {
@@ -148,7 +145,6 @@ internal static class DocumentLibraryPage
             "history" => "<path d=\"M3 11a9 9 0 1 1 2 7M3 4v7h7m2-4v6l4 2\"/>",
             "open" => "<path d=\"M13 4h7v7m0-7L10 14M9 5H4v15h15v-5\"/>",
             "refresh" => "<path d=\"M20 10a8 8 0 0 0-14-4L3 9m0-6v6h6m-5 5a8 8 0 0 0 14 4l3-3m0 6v-6h-6\"/>",
-            "shield" => "<path d=\"m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z\"/><path d=\"m8 12 3 3 5-6\"/>",
             "logout" => "<path d=\"M10 4H4v16h6m-1-8h12m-4-4 4 4-4 4\"/>",
             "back" => "<path d=\"M20 12H4m6-6-6 6 6 6\"/>",
             _ => throw new ArgumentOutOfRangeException(nameof(name)),
