@@ -60,7 +60,7 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
         try
         {
             if (await FindByFileNameAsync(fileName, cancellationToken) is not null)
-                throw new InvalidOperationException("A destination document with this file name already exists.");
+                throw new DocumentNameConflictException("A document with this file name already exists.");
             var manifestPath = ManifestPath(resourceId);
             if (File.Exists(manifestPath)) throw new IOException("The destination document already exists.");
             Directory.CreateDirectory(RevisionsRoot(resourceId));

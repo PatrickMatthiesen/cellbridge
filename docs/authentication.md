@@ -132,8 +132,14 @@ validated principals to these claims:
 | `cellbridge:create=true` | Permission to create documents. |
 
 The [package consumer](../examples/NuGetConsumer/README.md) demonstrates JWT
-validation and claim mapping. Desktop Office needs a compatible challenge/sign-in
-exchange in addition to API authentication.
+validation and claim mapping. For packaged default browser and Office login pages, use
+`AddCellBridgeIdentityLogin<TUser>` with existing Identity accounts. It supplies
+authenticator and recovery-code continuation without a custom authenticator.
+For custom account systems, use `AddCellBridgeLogin` with your cookie scheme and
+a host credential checker. Supplying custom HTML is optional.
+If you already have a login page, use `AddCellBridgeOfficeFormsAuthentication`
+for just the Office challenge and completion endpoint.
+See [login integration](package-integration.md#use-the-built-in-login-page).
 
 ### Integration constraints
 
@@ -254,7 +260,10 @@ explicit legacy evaluator is an additional ceiling and cannot bypass a missing
 binding/snapshot. Evaluators must also use stable subjects, be bounded and perform
 no I/O; mutable evaluator decisions are not a coordinated permission update.
 
-The sample authentication library is outside the reusable NuGet packages.
+The sample account database is outside the reusable NuGet packages.
+`CellBridge.AspNetCore` packages the default login HTML, optional renderer and
+Office challenge/completion flow. The account database remains host-owned.
+See [login integration](package-integration.md#use-the-built-in-login-page).
 Keep passwords, tokens, cookies and connection strings out of shared captures.
 The authentication database holds cookie protection keys; protect its access
 and backups.
@@ -276,7 +285,7 @@ retry and approve the test host when prompted. Organization policy may control
 this setting.
 
 Office receives the HTTP 403 challenge, displays the CellBridge form, reaches
-`/auth/complete` and retries with its cookie. Use separate Windows profiles or
+`/_cellbridge/auth/complete` and retries with its cookie. Use separate Windows profiles or
 machines to test different accounts, because Office can share cached credentials.
 
 For repeatable save/reopen checks, follow

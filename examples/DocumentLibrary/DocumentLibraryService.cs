@@ -22,7 +22,7 @@ public sealed class DocumentLibraryService(
     DocumentLibraryDestination destination,
     DocumentLibraryPermissionPolicy permissions,
     ExternalRevisionPublisher publisher,
-    PublicationWorker publicationWorker,
+    ExternalRevisionPublicationWorker publicationWorker,
     DocumentLibraryOptions options)
 {
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _permissionGates = new();
@@ -85,12 +85,21 @@ public sealed class DocumentLibraryService(
         }
     }
 
+    public async Task<DocumentState> CreateBlankAsync(string? name, string? type, CellBridgeActor actor,
+        CancellationToken cancellationToken = default)
+    {
+        if (!actor.CanCreate) throw new UnauthorizedAccessException("Document creation requires permission.");
+        var fileName = DocumentCreation.FileName(name, type);
+        await using var content = new MemoryStream(DocumentCreation.Content(fileName), writable: false);
+        return await UploadAsync(fileName, content, actor, cancellationToken);
+    }
+
     public async Task<DocumentState> UploadAsync(string fileName, Stream content, CellBridgeActor actor,
         CancellationToken cancellationToken = default)
     {
         if (!actor.CanCreate) throw new UnauthorizedAccessException("Document creation is restricted to the local owner.");
         if (await destination.FindByFileNameAsync(fileName, cancellationToken) is not null)
-            throw new InvalidOperationException("A document with this file name already exists.");
+            throw new DocumentNameConflictException("A document with this file name already exists.");
         await using var buffer = new MemoryStream();
         await CopyBoundedAsync(content, buffer, options.MaxUploadBytes, cancellationToken);
         var bytes = buffer.ToArray();

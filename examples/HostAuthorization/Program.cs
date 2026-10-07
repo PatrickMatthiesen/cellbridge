@@ -11,8 +11,8 @@ var signingKey = builder.Configuration["Authentication:SigningKey"]
     ?? throw new InvalidOperationException("Configure Authentication:SigningKey with a disposable key of at least 32 bytes.");
 if (Encoding.UTF8.GetByteCount(signingKey) < 32) throw new InvalidOperationException("Signing key is too short.");
 var permissions = new HostPermissionService();
-builder.Services.AddSingleton<ICellBridgeAuthorizationPolicy>(permissions);
-builder.Services.AddCellBridge(new(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+builder.Services.AddSingleton(permissions);
+builder.Services.AddCellBridge<HostPermissionService>(new(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
 {
     options.MapInboundClaims = false;

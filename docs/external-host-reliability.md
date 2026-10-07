@@ -29,13 +29,24 @@ handle, content version, resource generation, delivery sequence and operation
 GUID. Replay and accepted no-ops do not append. Metadata-only graph commits do
 not change the external file bytes and do not append.
 
-`ExternalRevisionPublisher.PublishNextAsync` delivers one queue head. A recovery
-worker can periodically page through `IDocumentStateStore.ListAsync`, load each
-state and call the publisher for bound documents. Start another pass from offset
-zero after reaching the end. Offset pagination provides eventual discovery in
-ordinary workloads; it does not guarantee fairness under sustained path churn.
-Polling must resume after restart. An `AcceptedSave` notification may wake the
-worker, but request completion is not a delivery acknowledgement.
+Register the packaged background worker with the host's singleton destination:
+
+```csharp
+builder.Services.AddCellBridgeExternalPublishing<MyFileDestination>(options =>
+    options.PollingInterval = TimeSpan.FromSeconds(1));
+```
+
+The helper supplies `ExternalRevisionPublisher` and `ExternalRevisionPublicationWorker`.
+`PublishNextAsync` delivers one queue head. The worker pages through retained state,
+tries one revision per document per pass and polls again after restart. `Wake()`
+can request a pass after a save. A request completion is not a delivery acknowledgement.
+Hosts can also call `PublishPendingOnceAsync` for one scan, or run their own worker
+with `ExternalRevisionPublisher` directly.
+
+Offset pagination provides eventual discovery in ordinary workloads; it does not
+guarantee fairness under sustained path churn. Passes are serialized only within
+one worker instance. Destination compare-and-swap and durable receipts remain
+required across multiple hosts.
 
 The publisher verifies the whole immutable file into temporary disk storage
 before calling `IExternalRevisionDestination.CompareExchangeAsync`. External I/O

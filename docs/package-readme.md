@@ -8,7 +8,13 @@ may change before a stable release.
 Start with `CellBridge.AspNetCore` and a storage provider. PostgreSQL is the
 sample host's durable default; `CellBridge.Storage.InMemory` is volatile and
 intended for disposable development. Applications provide authentication and
-an access evaluator. The sample authentication library is not packaged.
+document permissions. `AddCellBridgeIdentityLogin<TUser>` reuses existing Identity
+accounts and cookies, with packaged browser and Office pages, authenticator codes
+and recovery codes. `AddCellBridgeLogin` connects custom account systems through
+`ICellBridgeLoginAuthenticator`. Both supply CSRF protection and the Office
+challenge/completion flow. Custom HTML is optional.
+`AddCellBridgeOfficeFormsAuthentication` can connect an existing complete login flow.
+The sample account database is not packaged.
 
 Hosts can map the HTTP endpoints or execute parsed SOAP requests through
 `CellBridgeRequestProcessor`. They can supply GUID resource identities, apply

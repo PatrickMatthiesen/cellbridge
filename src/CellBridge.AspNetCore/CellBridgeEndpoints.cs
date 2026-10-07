@@ -4,6 +4,7 @@ using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,6 +15,22 @@ namespace CellBridge.AspNetCore;
 
 public static class CellBridgeEndpoints
 {
+    /// <summary>Registers CellBridge with a shared singleton host document-permission policy.</summary>
+    /// <remarks>Call this overload instead of AddCellBridge when selecting a custom policy.
+    /// An existing singleton registration for the concrete policy is reused.</remarks>
+    public static IServiceCollection AddCellBridge<TAuthorizationPolicy>(this IServiceCollection services,
+        StorageProvider provider, bool requireDurability = true, bool multipleInstances = false,
+        Action<CellBridgeOptions>? configure = null) where TAuthorizationPolicy : class, ICellBridgeAuthorizationPolicy
+    {
+        if (services.Any(x => !x.IsKeyedService && (x.ServiceType == typeof(CellBridgeOptions) ||
+            x.ServiceType == typeof(ICellBridgeAuthorizationPolicy))))
+            throw new InvalidOperationException("Select the custom policy with the first AddCellBridge registration; do not register a competing policy.");
+        CellBridgeHostingRegistration.RequireSingleton<TAuthorizationPolicy>(services);
+        services.TryAddSingleton<TAuthorizationPolicy>();
+        services.AddSingleton<ICellBridgeAuthorizationPolicy>(sp => sp.GetRequiredService<TAuthorizationPolicy>());
+        return services.AddCellBridge(provider, requireDurability, multipleInstances, configure);
+    }
+
     public static IServiceCollection AddCellBridge(this IServiceCollection services, StorageProvider provider,
         bool requireDurability = true, bool multipleInstances = false, Action<CellBridgeOptions>? configure = null)
     {
@@ -40,7 +57,10 @@ public static class CellBridgeEndpoints
 
     public static IEndpointRouteBuilder MapCellBridge(this IEndpointRouteBuilder app)
     {
-        var routes = app.MapGroup("").RequireAuthorization();
+        var office = CellBridgeOfficeFormsAuthentication.MapCompletion(app);
+        var routes = app.MapGroup("").WithMetadata(new CellBridgeOfficeFormsAuthentication.OfficeEndpointMetadata());
+        if (office is null) routes.RequireAuthorization();
+        else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.CookieScheme });
         routes.MapMethods("/_cellbridge/history/{resourceId:guid}/{generation:long}/{revisionNumber}", ["GET", "HEAD"],
             async (Guid resourceId, long generation, string revisionNumber, HttpContext context, CellBridgeDocumentService service) =>
             {

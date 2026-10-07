@@ -58,14 +58,14 @@ public static class AuthenticationServices
             o.Cookie.SameSite = SameSiteMode.Lax;
             o.ExpireTimeSpan = TimeSpan.FromHours(8);
             o.SlidingExpiration = renewCookies;
+            o.LoginPath = "/auth/login";
             o.Events.OnRedirectToLogin = context =>
             {
                 var request = context.Request;
                 if (request.Path.StartsWithSegments("/api")) context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                else if (!serveOffice || request.Path.StartsWithSegments("/library") || request.PathBase.StartsWithSegments("/library"))
+                else
                     context.Response.Redirect(origin.GetLeftPart(UriPartial.Authority) + "/auth/login?returnUrl=" +
                         Uri.EscapeDataString(request.PathBase + request.Path + request.QueryString));
-                else OfficeChallenge(context.HttpContext, origin.GetLeftPart(UriPartial.Authority));
                 return Task.CompletedTask;
             };
             o.Events.OnRedirectToAccessDenied = context =>
@@ -82,6 +82,9 @@ public static class AuthenticationServices
                 };
             }
         });
+        if (serveOffice)
+            services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
+                o => o.PublicOrigin = origin.GetLeftPart(UriPartial.Authority));
         services.AddAuthorization();
         services.AddAntiforgery(o =>
         {
@@ -97,14 +100,7 @@ public static class AuthenticationServices
         return services;
     }
 
-    public static void OfficeChallenge(HttpContext context, string origin)
-    {
-        context.Response.StatusCode = StatusCodes.Status403Forbidden;
-        context.Response.Headers.CacheControl = "no-store";
-        context.Response.Headers["X-FORMS_BASED_AUTH_REQUIRED"] = origin + "/auth/login?returnUrl=%2Fauth%2Fcomplete";
-        context.Response.Headers["X-FORMS_BASED_AUTH_RETURN_URL"] = origin + "/auth/complete";
-        context.Response.Headers["X-FORMS_BASED_AUTH_DIALOG_SIZE"] = "800x600";
-    }
+
 }
 
 public sealed record AuthenticationOrigin(string Value);
