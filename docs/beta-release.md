@@ -160,6 +160,17 @@ durable delivery receipts or coordinated permissions.
 ## Next candidate
 
 The next candidate is `0.1.0-beta.2`. Follow the [beta.1 upgrade guide](beta-2-upgrade.md).
-Publication remains blocked on candidate validation and documented outstanding
-client gates. This section does not record a published release or successful
-desktop retest.
+Publication requires a clean exact-candidate run of `tools/testing/run.py --packages`,
+including disposable PostgreSQL package-consumer recovery without the optional
+skip, a pinned WopiHost package-consumer check and the release workflow's artifact
+and NuGet authentication checks. Record fresh NuGet.org consumption and symbols
+after uploading.
+
+This experimental beta may publish with [Word issue #42](https://github.com/PatrickMatthiesen/cellbridge/issues/42)
+open as a disclosed limitation. The single successful save retests do not complete
+its repeated image/save/reopen and Excel acceptance checks. The embedded package
+readme and release notes must disclose that gap. Native Office MFA, OneNote,
+two-desktop coauthoring and Office Online Server also remain unqualified; publishing
+packages does not complete those client gates or establish stable API compatibility.
+
+This section does not record a published release or claim new desktop qualification.

@@ -10,8 +10,9 @@ sample host's durable default; `CellBridge.Storage.InMemory` is volatile and
 intended for disposable development. Applications provide authentication and
 document permissions. `AddCellBridgeIdentityLogin<TUser>` reuses existing Identity
 accounts and cookies, with packaged browser and Office pages, authenticator codes
-and recovery codes. `AddCellBridgeLogin` connects custom account systems through
-`ICellBridgeLoginAuthenticator`. Both supply CSRF protection and the Office
+and recovery codes. `AddCellBridgeCookieLogin` sets up a cookie and connects custom account systems
+through `ICellBridgeLoginAuthenticator`. Use `AddCellBridgeLogin` when a host
+already registers that cookie. These integrations supply CSRF protection and the Office
 challenge/completion flow. Custom HTML is optional.
 `AddCellBridgeOfficeFormsAuthentication` can connect an existing complete login flow.
 The sample account database is not packaged.
@@ -24,9 +25,13 @@ it cannot grant access by itself. Receipts identify committed revisions, but
 do not replace external publication. Opt-in ordered delivery requires a destination
 with atomic revision comparison and durable operation receipts.
 
-Desktop Word and Excel have been tested for authenticated editing, saving and
-reopening. OneNote desktop synchronization, two-desktop coauthoring and Office
-Online Server integration remain unqualified. True partial and unsupported non-file uploads
+Desktop Word and Excel have successful authenticated edit, save and reopen
+tests. [Word issue #42](https://github.com/PatrickMatthiesen/cellbridge/issues/42)
+remains open for intermittent pending-changes status after a server-acknowledged
+save. Repeated single-save text/image and close/reopen qualification is incomplete.
+Identity MFA has integration-test coverage; native desktop Office MFA remains
+unqualified. OneNote desktop synchronization, two-desktop coauthoring and Office
+Online Server integration also remain unqualified. True partial and unsupported non-file uploads
 are rejected. Shared base-lock authority, recoverable external publication and
 conditional document lifecycle APIs are available for hosts to adopt. Their
 presence does not qualify every external backend or desktop client.
