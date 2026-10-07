@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using CellBridge.Storage.Abstractions;
@@ -112,7 +113,7 @@ internal static class DocumentLibraryPage
             </div>
             """ : "";
         return $$"""
-            <!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{E(title)}} | CellBridge</title><link rel="stylesheet" href="/workspace.css"><script src="/workspace.js" defer></script></head><body class="workspace">
+            <!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{E(title)}} | CellBridge</title><link rel="stylesheet" href="{{AssetPath(context, "workspace.css")}}"><script src="{{AssetPath(context, "workspace.js")}}" defer></script></head><body class="workspace">
             <a class="skip-link" href="#main">Skip to documents</a>
             <header class="topbar"><a class="brand" href="/" aria-label="CellBridge documents"><span class="brand-mark">{{Icon("bridge")}}</span>CellBridge</a>
               {{(isLibrary ? $"<label class=\"search\" hidden data-enhanced>{Icon("search")}<span class=\"sr-only\">Search documents</span><input type=\"search\" id=\"search\" placeholder=\"Search this library\" autocomplete=\"off\"></label>" : "")}}
@@ -125,6 +126,14 @@ internal static class DocumentLibraryPage
     }
 
     private static string E(string value) => HtmlEncoder.Default.Encode(value);
+    private static string AssetPath(HttpContext? context, string name)
+    {
+        var file = context?.RequestServices.GetRequiredService<IWebHostEnvironment>()
+            .WebRootFileProvider.GetFileInfo(name);
+        if (file is not { Exists: true }) return "/" + name;
+        using var stream = file.CreateReadStream();
+        return $"/{name}?v={Convert.ToHexString(SHA256.HashData(stream))}";
+    }
     private static string HiddenToken(string token) => $"<input type=\"hidden\" name=\"__RequestVerificationToken\" value=\"{E(token)}\">";
     private static string Size(long length) => length < 1024 ? $"{length} B" : length < 1024 * 1024
         ? (length / 1024d).ToString("0.#", CultureInfo.InvariantCulture) + " KB"
