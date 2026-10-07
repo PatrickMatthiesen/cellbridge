@@ -36,7 +36,7 @@ internal static class DocumentLibraryPage
                 """ : "";
             rows.Append($$"""
                 <tr data-document data-name="{{E(document.FileName)}}" data-type="{{E(type)}}" data-modified="{{new DateTimeOffset(document.ModifiedUtc.ToUniversalTime()).ToUnixTimeMilliseconds()}}" data-size="{{document.Length}}">
-                  <td class="name-cell"><div class="file-name">{{FileIcon(type)}}<div><a class="document-name" href="{{E(openUrl)}}">{{E(document.FileName)}}</a></div></div></td>
+                  <td class="name-cell"><div class="file-name">{{FileIcon(type)}}<div><a class="document-name" href="{{E(openUrl)}}">{{E(document.FileName)}}</a><span class="file-kind">{{TypeLabel(type)}}</span></div></div></td>
                   <td class="modified-cell"><time datetime="{{document.ModifiedUtc.ToUniversalTime():O}}">{{document.ModifiedUtc.ToUniversalTime().ToString("dd MMM yyyy", CultureInfo.InvariantCulture)}}<span class="time-detail">{{document.ModifiedUtc.ToUniversalTime():HH:mm}} UTC</span></time></td>
                   <td class="size-cell">{{Size(document.Length)}}</td><td class="version-cell">{{document.ContentVersion}}</td>
                   <td class="status-cell"><span class="status {{statusClass}}"><span class="status-dot"></span>{{status}}</span></td>
@@ -106,7 +106,7 @@ internal static class DocumentLibraryPage
         var initial = account.Length > 0 ? account[..1].ToUpperInvariant() : "C";
         var signOut = token is null ? "" : $"<form method=\"post\" action=\"/local-logout\">{HiddenToken(token)}<button type=\"submit\" class=\"sign-out\">{Icon("logout")}Sign out</button></form>";
         var filters = isLibrary ? $$"""
-            <div class="nav-group" hidden data-enhanced>
+            <div class="nav-group" hidden data-enhanced><p class="nav-label">FILE TYPES</p>
               <button class="nav-item" type="button" data-filter="docx" aria-pressed="false">{{FileIcon("docx")}}Word documents</button>
               <button class="nav-item" type="button" data-filter="xlsx" aria-pressed="false">{{FileIcon("xlsx")}}Excel workbooks</button>
               <button class="nav-item" type="button" data-filter="pptx" aria-pressed="false">{{FileIcon("pptx")}}PowerPoint slides</button>
@@ -119,7 +119,7 @@ internal static class DocumentLibraryPage
               {{(isLibrary ? $"<label class=\"search\" hidden data-enhanced>{Icon("search")}<span class=\"sr-only\">Search documents</span><input type=\"search\" id=\"search\" placeholder=\"Search this library\" autocomplete=\"off\"></label>" : "")}}
               <div class="topbar-account"><span class="account-name">{{E(account)}}</span><span class="avatar" aria-hidden="true">{{E(initial)}}</span></div>
             </header>
-            <div class="workspace-layout"><aside class="sidebar"><nav aria-label="Library navigation"><a class="nav-item active" href="/" {{(isLibrary ? "data-filter=\"all\" aria-current=\"page\"" : "")}}>{{Icon("folder")}}Documents<span class="nav-indicator"></span></a>{{filters}}</nav><div class="sidebar-bottom">{{signOut}}</div></aside>
+            <div class="workspace-layout"><aside class="sidebar"><div class="site-identity"><span class="site-monogram">CB</span><div><strong>Team workspace</strong><span>Document library</span></div></div><nav aria-label="Library navigation"><p class="nav-label">WORKSPACE</p><a class="nav-item active" href="/" {{(isLibrary ? "data-filter=\"all\" aria-current=\"page\"" : "")}}>{{Icon("folder")}}Documents<span class="nav-indicator"></span></a>{{filters}}</nav><div class="sidebar-bottom">{{signOut}}</div></aside>
             <main id="main" tabindex="-1">{{body}}</main></div>
             </body></html>
             """;
@@ -138,6 +138,7 @@ internal static class DocumentLibraryPage
     private static string Size(long length) => length < 1024 ? $"{length} B" : length < 1024 * 1024
         ? (length / 1024d).ToString("0.#", CultureInfo.InvariantCulture) + " KB"
         : (length / (1024d * 1024)).ToString("0.#", CultureInfo.InvariantCulture) + " MB";
+    private static string TypeLabel(string type) => type switch { "docx" => "Word document", "xlsx" => "Excel workbook", "pptx" => "PowerPoint presentation", _ => "File" };
     private static string FileIcon(string type) => $"<span class=\"file-icon {type switch { "docx" => "word", "xlsx" => "excel", "pptx" => "powerpoint", _ => "generic" }}\" aria-hidden=\"true\"><span>{type switch { "docx" => "W", "xlsx" => "X", "pptx" => "P", _ => "F" }}</span></span>";
     private static string Icon(string name)
     {
