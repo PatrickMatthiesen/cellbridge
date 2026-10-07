@@ -10,8 +10,9 @@ sample host's durable default; `CellBridge.Storage.InMemory` is volatile and
 intended for disposable development. Applications provide authentication and
 document permissions. `AddCellBridgeIdentityLogin<TUser>` reuses existing Identity
 accounts and cookies, with packaged browser and Office pages, authenticator codes
-and recovery codes. `AddCellBridgeLogin` connects custom account systems through
-`ICellBridgeLoginAuthenticator`. Both supply CSRF protection and the Office
+and recovery codes. `AddCellBridgeCookieLogin` sets up a cookie and connects custom account systems
+through `ICellBridgeLoginAuthenticator`. Use `AddCellBridgeLogin` when a host
+already registers that cookie. These integrations supply CSRF protection and the Office
 challenge/completion flow. Custom HTML is optional.
 `AddCellBridgeOfficeFormsAuthentication` can connect an existing complete login flow.
 The sample account database is not packaged.

@@ -160,6 +160,10 @@ durable delivery receipts or coordinated permissions.
 ## Next candidate
 
 The next candidate is `0.1.0-beta.2`. Follow the [beta.1 upgrade guide](beta-2-upgrade.md).
-Publication remains blocked on candidate validation and documented outstanding
-client gates. This section does not record a published release or successful
-desktop retest.
+Publication requires a clean exact-candidate run of `tools/testing/run.py --packages`,
+including disposable PostgreSQL package-consumer recovery without the optional
+skip, a pinned WopiHost package-consumer check and the release workflow's artifact
+and NuGet authentication checks. Record fresh NuGet.org consumption and symbols
+after uploading.
+
+This section does not record a published release.

@@ -20,7 +20,7 @@ has not been qualified.
 
 | Feature | Current support |
 | --- | --- |
-| Word editing | Open, edit, save and reopen tested while signed in; repeated single-save qualification remains open under #42. |
+| Word editing | Open, edit, save and reopen tested while signed in. |
 | Excel editing | Open, edit, save and reopen tested while signed in on the durable host. |
 | PowerPoint editing | Save and reopen presentations, including complex Copilot-generated slides. |
 | Document library | Create blank Office files, import existing documents and download saved files. |
