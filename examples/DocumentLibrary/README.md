@@ -6,6 +6,13 @@ This is separate from the repository's Razor Pages demo at `/library`. Both
 support creating blank Word, Excel and PowerPoint files. This example also
 uploads existing documents and delivers saves to a separate destination.
 
+The workspace has a file list with modification dates, file sizes and destination
+delivery status. Search, file-type filters and sorting work in the browser on the
+documents returned for your account. Use **New document** or **Upload** to add
+files, and a file's actions menu to download it, see saved versions or change
+access. Document links open desktop Office. These links and forms also work
+without JavaScript; search, filters and sorting require it.
+
 The example uses the package's `AddCellBridgeLogin` with its standard
 username/password page. Supplying custom HTML is optional. The package handles
 the form, CSRF checks, cookie sign-in and Office challenge/completion. No login
