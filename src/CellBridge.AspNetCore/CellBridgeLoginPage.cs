@@ -9,6 +9,30 @@ public static class CellBridgeLoginPage
     {
         var encode = HtmlEncoder.Default;
         var applicationName = encode.Encode(page.ApplicationName);
+        var fields = page.RequiresTwoFactor ? $$"""
+            <input type="hidden" name="{{CellBridgeLogin.MethodField}}" value="{{(page.UseRecoveryCode ? "recovery" : "authenticator")}}">
+            <div class="field">
+              <label for="code">{{(page.UseRecoveryCode ? "Recovery code" : "Authenticator code")}}</label>
+              <input id="code" name="code" autocomplete="one-time-code" maxlength="256" required>
+            </div>
+            """ : """
+            <div class="field">
+              <label for="login">Username</label>
+              <input id="login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="256" required>
+            </div>
+            <div class="field">
+              <label for="password">Password</label>
+              <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+            </div>
+            """;
+        var continuation = page.RequiresTwoFactor ? $$"""
+            <p class="alternate"><a href="{{encode.Encode(page.FormAction)}}?method={{(page.UseRecoveryCode ? "authenticator" : "recovery")}}">{{(page.UseRecoveryCode ? "Use an authenticator code" : "Use a recovery code")}}</a></p>
+            <form method="post" action="{{encode.Encode(page.RestartAction!)}}" novalidate>
+              <input type="hidden" name="{{encode.Encode(page.Antiforgery.FormFieldName)}}" value="{{encode.Encode(page.Antiforgery.RequestToken!)}}">
+              <input type="hidden" name="{{CellBridgeLogin.StateField}}" value="{{encode.Encode(page.ProtectedState!)}}">
+              <button class="restart" name="cancel" value="1" type="submit">Start over</button>
+            </form>
+            """ : "";
         // Keep styles local and the form script-free for Office's embedded sign-in window.
         return $$"""
             <!doctype html>
@@ -36,30 +60,30 @@ public static class CellBridgeLoginPage
                 button:focus { outline: 2px solid #065f63; outline-offset: 3px; }
                 .error { margin: 0 0 22px; padding: 12px 14px; border-left: 3px solid #b34c2b; background: #fbe9df; color: #7c301a; font-size: 14px; }
                 .note { margin: 26px 0 0; padding-top: 18px; border-top: 1px solid #dce8e7; color: #61777d; font-size: 14px; }
+                .alternate { font-size: 15px; margin: 18px 0 0; }
+                a { color: #065f63; }
+                button.restart { background: #fff; color: #065f63; margin-top: 16px; }
                 @media (max-width: 520px) { .sign-in { width: auto; margin: 18px; padding: 24px; } h1 { font-size: 25px; } }
                 @media (max-height: 680px) { .sign-in { margin-top: 20px; margin-bottom: 20px; padding: 26px; } .intro { margin-bottom: 18px; } .field { margin-bottom: 14px; } .error { margin-bottom: 16px; padding: 10px 12px; } .note { margin-top: 20px; padding-top: 14px; } }
+                {{(page.IsOffice ? "html, body { background: #fff; } .sign-in { max-width: none; width: auto; margin: 0; padding: 28px 32px; border: 0; border-radius: 0; } @media (max-width: 520px) { .sign-in { margin: 0; padding: 24px; } }" : "")}}
               </style>
             </head>
             <body>
               <!-- Use a known block element in Office's legacy embedded sign-in browser. -->
               <div class="sign-in" role="main">
                 <p class="eyebrow">DOCUMENT WORKSPACE</p>
-                <h1>Sign in to {{applicationName}}</h1>
-                <p class="intro">Use your account to open and edit documents.</p>
-                {{(page.SignInFailed ? "<p class=\"error\" role=\"alert\">Sign-in failed. Check your credentials or try again later.</p>" : "")}}
+                <h1>{{(page.RequiresTwoFactor ? "Verify your sign-in" : "Sign in to " + applicationName)}}</h1>
+                <p class="intro">{{(page.RequiresTwoFactor ? page.UseRecoveryCode ? "Enter one of your unused recovery codes." : "Enter the code from your authenticator app." : "Use your account to open and edit documents.")}}</p>
+                {{(page.SignInFailed ? "<p class=\"error\" role=\"alert\">Sign-in failed. " + (page.RequiresTwoFactor ? "Check your code or start over." : "Check your credentials or try again later.") + "</p>" : "")}}
                 <form method="post" action="{{encode.Encode(page.FormAction)}}" novalidate>
                   <input type="hidden" name="{{encode.Encode(page.Antiforgery.FormFieldName)}}" value="{{encode.Encode(page.Antiforgery.RequestToken!)}}">
                   <input type="hidden" name="{{encode.Encode(page.ReturnUrlParameter)}}" value="{{encode.Encode(page.ReturnUrl)}}">
-                  <div class="field">
-                    <label for="login">Username</label>
-                    <input id="login" name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="256" required>
-                  </div>
-                  <div class="field">
-                    <label for="password">Password</label>
-                    <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
-                  </div>
-                  <button type="submit">Sign in</button>
+                  {{(page.ProtectedState is null ? "" : "<input type=\"hidden\" name=\"" + CellBridgeLogin.StateField + "\" value=\"" + encode.Encode(page.ProtectedState) + "\">")}}
+                  <input type="hidden" name="{{CellBridgeLogin.PresentationField}}" value="{{(page.IsOffice ? "office" : "browser")}}">
+                  {{fields}}
+                  <button type="submit">{{(page.RequiresTwoFactor ? "Verify and sign in" : "Sign in")}}</button>
                 </form>
+                {{continuation}}
                 <p class="note">Document access depends on your account permissions.</p>
               </div>
             </body>

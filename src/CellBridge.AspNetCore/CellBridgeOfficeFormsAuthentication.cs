@@ -85,8 +85,8 @@ public static class CellBridgeOfficeFormsAuthentication
     {
         var value = path.Value;
         if (string.IsNullOrWhiteSpace(value) || !value.StartsWith('/') || value.StartsWith("//") ||
-            value.Any(x => char.IsControl(x) || x is '\\' or '?' or '#'))
-            throw new ArgumentException("Use a local path without query, fragment, backslash or control characters.", name);
+            value.Any(x => char.IsControl(x) || x is '\\' or '?' or '#' or '{' or '}'))
+            throw new ArgumentException("Use a literal local path without query, fragment, backslash, braces or control characters.", name);
     }
 
     internal sealed record OfficeFormsRegistration(string CookieScheme, PathString CompletionPath, string? PublicOrigin);
@@ -116,7 +116,8 @@ public static class CellBridgeOfficeFormsAuthentication
             var request = context.Request;
             var origin = registration.PublicOrigin ?? $"{request.Scheme}://{request.Host}";
             var completion = (request.PathBase + registration.CompletionPath).ToUriComponent();
-            var login = origin + request.PathBase + context.Options.LoginPath;
+            var packaged = context.HttpContext.RequestServices.GetService<CellBridgeLogin.LoginRegistration>();
+            var login = origin + request.PathBase + (packaged?.Options.OfficeLoginPath ?? context.Options.LoginPath);
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             context.Response.Headers.CacheControl = "no-store";
             context.Response.Headers["X-FORMS_BASED_AUTH_REQUIRED"] = QueryHelpers.AddQueryString(login,
@@ -134,9 +135,20 @@ public static class CellBridgeOfficeFormsAuthentication
             return Task.CompletedTask;
         }
 
-        public override Task ValidatePrincipal(CookieValidatePrincipalContext context) => original.ValidatePrincipal(context);
+        public override async Task ValidatePrincipal(CookieValidatePrincipalContext context)
+        {
+            await original.ValidatePrincipal(context);
+            if (context.Principal is not null && context.HttpContext.RequestServices.GetService<IdentityLoginRegistration>() is { } identity &&
+                !identity.MapPrincipal(context.HttpContext, context.Principal)) context.RejectPrincipal();
+        }
         public override Task CheckSlidingExpiration(CookieSlidingExpirationContext context) => original.CheckSlidingExpiration(context);
-        public override Task SigningIn(CookieSigningInContext context) => original.SigningIn(context);
+        public override async Task SigningIn(CookieSigningInContext context)
+        {
+            await original.SigningIn(context);
+            if (context.HttpContext.RequestServices.GetService<IdentityLoginRegistration>() is { } identity &&
+                !identity.MapPrincipal(context.HttpContext, context.Principal))
+                throw new InvalidOperationException("Identity sign-in requires one authenticated identity with a stable user ID or explicit CellBridge subject.");
+        }
         public override Task SignedIn(CookieSignedInContext context) => original.SignedIn(context);
         public override Task SigningOut(CookieSigningOutContext context) => original.SigningOut(context);
         public override Task RedirectToLogout(RedirectContext<CookieAuthenticationOptions> context) => original.RedirectToLogout(context);

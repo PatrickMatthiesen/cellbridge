@@ -44,7 +44,7 @@ public sealed class BuiltInLoginTests
         { ["login"] = "user", ["password"] = "correct-test-password-29" }));
         Assert.Equal(HttpStatusCode.BadRequest, invalidCsrf.StatusCode);
         Assert.Equal(0, app.Services.GetRequiredService<LoginStats>().Calls);
-        using var loggedIn = await client.PostAsync("/mount/sign-in", Form(token, "user", "correct-test-password-29", "/mount/_cellbridge/auth/complete"));
+        using var loggedIn = await client.PostAsync("/mount/sign-in", Form(html, "user", "correct-test-password-29", "/mount/_cellbridge/auth/complete"));
         Assert.Equal(HttpStatusCode.Redirect, loggedIn.StatusCode);
         Assert.Equal("/mount/_cellbridge/auth/complete", loggedIn.Headers.Location!.ToString());
         var cookie = loggedIn.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("Office.Login="));
@@ -71,7 +71,7 @@ public sealed class BuiltInLoginTests
         Assert.Contains("name=\"next\" value=\"/mount/\"", html);
         client.DefaultRequestHeaders.Add("Cookie", page.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
         using var failed = await client.PostAsync("/mount/sign-in",
-            Form(Field(html, "__RequestVerificationToken"), username, password, "//evil.example"));
+            Form(html, username, password, "//evil.example"));
         Assert.Equal(HttpStatusCode.Redirect, failed.StatusCode);
         Assert.False(failed.Headers.TryGetValues("Set-Cookie", out _));
         Assert.StartsWith("/mount/sign-in?failed=1&next=", failed.Headers.Location!.ToString());
@@ -110,11 +110,21 @@ public sealed class BuiltInLoginTests
     [InlineData("failed", "__RequestVerificationToken")]
     [InlineData("__RequestVerificationToken", "__RequestVerificationToken")]
     [InlineData("csrf", "csrf")]
+    [InlineData("_cellbridgeState", "__RequestVerificationToken")]
+    [InlineData("_cellbridgePresentation", "__RequestVerificationToken")]
+    [InlineData("code", "__RequestVerificationToken")]
+    [InlineData("method", "__RequestVerificationToken")]
+    [InlineData("cancel", "__RequestVerificationToken")]
+    [InlineData("next", "_cellbridgeState")]
+    [InlineData("next", "_cellbridgePresentation")]
+    [InlineData("next", "code")]
+    [InlineData("next", "method")]
+    [InlineData("next", "cancel")]
     public async Task ConflictingReturnFieldsFailBeforeCredentialsCanBeSubmitted(string returnField, string tokenField)
     {
         var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         { await using var app = await Start(returnField: returnField, tokenField: tokenField); });
-        Assert.Contains("return URL parameter", error.Message);
+        Assert.Contains("must not collide", error.Message);
     }
 
     [Theory]
@@ -123,6 +133,9 @@ public sealed class BuiltInLoginTests
     [InlineData("//evil.example/")]
     [InlineData("/\\evil.example/")]
     [InlineData("/bad\npath")]
+    [InlineData("/mount-other/library")]
+    [InlineData("/mount/../outside")]
+    [InlineData("/mount/%2e%2e/outside")]
     public async Task BrowserLoginUsesMountedHomeForMissingOrUnsafeReturns(string? suppliedReturn)
     {
         await using var app = await Start();
@@ -133,7 +146,7 @@ public sealed class BuiltInLoginTests
         Assert.Equal("/mount/", Field(html, "next"));
         client.DefaultRequestHeaders.Add("Cookie", page.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
         var fields = new Dictionary<string, string>
-        { ["__RequestVerificationToken"] = Field(html, "__RequestVerificationToken"), ["login"] = "user", ["password"] = "correct-test-password-29" };
+        { ["__RequestVerificationToken"] = Field(html, "__RequestVerificationToken"), ["_cellbridgeState"] = Field(html, "_cellbridgeState"), ["login"] = "user", ["password"] = "correct-test-password-29" };
         if (suppliedReturn is not null) fields["next"] = suppliedReturn;
         using var login = await client.PostAsync("/mount/sign-in", new FormUrlEncodedContent(fields));
         Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
@@ -149,7 +162,7 @@ public sealed class BuiltInLoginTests
         var html = await page.Content.ReadAsStringAsync();
         Assert.Equal("/mount/library", Field(html, "next"));
         client.DefaultRequestHeaders.Add("Cookie", page.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
-        using var login = await client.PostAsync("/mount/sign-in", Form(Field(html, "__RequestVerificationToken"), "user", "correct-test-password-29", "//evil.example"));
+        using var login = await client.PostAsync("/mount/sign-in", Form(html, "user", "correct-test-password-29", "//evil.example"));
         Assert.Equal("/mount/library", login.Headers.Location!.ToString());
         using var office = await client.SendAsync(new(HttpMethod.Options, "/mount/shared/"));
         Assert.EndsWith("next=%2Fmount%2F_cellbridge%2Fauth%2Fcomplete",
@@ -168,7 +181,7 @@ public sealed class BuiltInLoginTests
         var html = await page.Content.ReadAsStringAsync();
         Assert.Contains("novalidate", html);
         client.DefaultRequestHeaders.Add("Cookie", page.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
-        using var failed = await client.PostAsync("/mount/sign-in", Form(Field(html, "__RequestVerificationToken"), user, password, completion));
+        using var failed = await client.PostAsync("/mount/sign-in", Form(html, user, password, completion));
         Assert.Equal(HttpStatusCode.Redirect, failed.StatusCode);
         Assert.False(failed.Headers.TryGetValues("Set-Cookie", out _));
         Assert.Equal(0, app.Services.GetRequiredService<LoginStats>().Calls);
@@ -176,7 +189,7 @@ public sealed class BuiltInLoginTests
         var retryHtml = await retry.Content.ReadAsStringAsync();
         Assert.Contains("role=\"alert\"", retryHtml);
         Assert.Equal(completion, Field(retryHtml, "next"));
-        using var success = await client.PostAsync("/mount/sign-in", Form(Field(retryHtml, "__RequestVerificationToken"), "user", "correct-test-password-29", Field(retryHtml, "next")));
+        using var success = await client.PostAsync("/mount/sign-in", Form(retryHtml, "user", "correct-test-password-29", Field(retryHtml, "next")));
         Assert.Equal(completion, success.Headers.Location!.ToString());
     }
 
@@ -186,14 +199,15 @@ public sealed class BuiltInLoginTests
     [InlineData("/bad?query")]
     [InlineData("/bad#fragment")]
     [InlineData("/\\bad")]
+    [InlineData("/{route}")]
     public async Task InvalidDefaultReturnPathsAreRejected(string path)
     {
         await Assert.ThrowsAsync<ArgumentException>(async () =>
         { await using var app = await Start(defaultReturnPath: path); });
     }
 
-    private static FormUrlEncodedContent Form(string token, string user, string password, string returnUrl) => new(
-        new Dictionary<string, string> { ["__RequestVerificationToken"] = token, ["login"] = user,
+    private static FormUrlEncodedContent Form(string html, string user, string password, string returnUrl) => new(
+        new Dictionary<string, string> { ["__RequestVerificationToken"] = Field(html, "__RequestVerificationToken"), ["_cellbridgeState"] = Field(html, "_cellbridgeState"), ["login"] = user,
             ["password"] = password, ["next"] = returnUrl });
     private static string Field(string html, string name) => WebUtility.HtmlDecode(Regex.Match(html,
         "name=\"" + name + "\" value=\"([^\"]+)\"").Groups[1].Value);

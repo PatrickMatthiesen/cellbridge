@@ -28,7 +28,7 @@ public sealed class OfficeAuthenticationTests
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Null(response.Headers.Location);
         Assert.Empty(await response.Content.ReadAsByteArrayAsync());
-        Assert.Equal(Origin + "auth/login?returnUrl=%2F_cellbridge%2Fauth%2Fcomplete",
+        Assert.Equal(Origin + "_cellbridge/auth/login?returnUrl=%2F_cellbridge%2Fauth%2Fcomplete",
             response.Headers.GetValues("X-FORMS_BASED_AUTH_REQUIRED").Single());
         Assert.Equal(Origin + "_cellbridge/auth/complete",
             response.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
@@ -147,7 +147,7 @@ public sealed class OfficeAuthenticationTests
             var token = WebUtility.HtmlDecode(Regex.Match(html,
                 "name=\"__RequestVerificationToken\" value=\"([^\"]+)\"").Groups[1].Value);
             using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
-            { ["login"] = "owner", ["password"] = "Test1234!", ["returnUrl"] = "/", ["__RequestVerificationToken"] = token }));
+            { ["login"] = "owner", ["password"] = "Test1234!", ["returnUrl"] = "/", ["__RequestVerificationToken"] = token, ["_cellbridgeState"] = IdentityLoginState(html) }));
             Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
             Assert.Equal("/", login.Headers.Location!.ToString());
             var home = await client.GetStringAsync("/");
@@ -190,8 +190,12 @@ public sealed class OfficeAuthenticationTests
             ["password"] = "Test1234!",
             ["returnUrl"] = tamper ? returnUrl : hiddenReturn,
             ["__RequestVerificationToken"] = token,
+            ["_cellbridgeState"] = IdentityLoginState(html),
         }));
     }
+
+    private static string IdentityLoginState(string html) => WebUtility.HtmlDecode(Regex.Match(html,
+        "name=\"_cellbridgeState\" value=\"([^\"]+)\"").Groups[1].Value);
 
     internal sealed class LibraryFactory(string destination) : WebApplicationFactory<global::Program>
     {

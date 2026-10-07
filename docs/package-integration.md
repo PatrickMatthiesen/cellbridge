@@ -5,12 +5,84 @@ the protocol and provider packages can also be consumed separately. See
 [provider composition](storage-providers.md#consume-the-packages) and the
 [package consumer](../examples/NuGetConsumer/README.md).
 
-## Use the built-in login page
+## Use the built-in login pages
 
-`CellBridge.AspNetCore` includes a standard username/password page and its login
-handler. It supplies CSRF protection, named-cookie sign-in, the Office challenge
-and the completion endpoint. You connect your account system by implementing
-`ICellBridgeLoginAuthenticator`; you do not need to write HTML or challenge headers.
+`CellBridge.AspNetCore` supplies script-free browser and Office login pages through
+minimal API endpoints. The browser gets a centered card; the Office dialog gets a
+white page with padding. Both use the same protected submission handler. No Razor
+Pages or Blazor registration is required, and custom HTML is optional.
+
+### Use existing ASP.NET Core Identity accounts
+
+Keep your application's Identity registration, user database, claims factory and
+account policies. Add the packaged login integration after registering Identity:
+
+```csharp
+builder.Services.AddCellBridge(provider);
+builder.Services.AddCellBridgeIdentityLogin<ApplicationUser>(options =>
+{
+    options.ApplicationName = "My document library";
+    options.DefaultReturnPath = "/library";
+    options.IdentityAuthority = "my-company:accounts";
+});
+
+var app = builder.Build();
+app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapCellBridge();
+```
+
+The adapter requires `UserManager<ApplicationUser>`, `SignInManager<ApplicationUser>`,
+and the standard `Identity.Application` and `Identity.TwoFactorUserId` cookie schemes.
+For example, existing `AddIdentity` or `AddIdentityApiEndpoints` registrations can
+supply these services. An `AddIdentityCore` registration must also register a sign-in
+manager and Identity cookies. Missing services, incompatible cookie schemes and
+conflicting routes fail at startup. A sign-in manager using a different application
+scheme is unsupported.
+
+The package uses Identity's password sign-in, account confirmation and lockout
+checks. Accounts requiring two-factor authentication continue to an authenticator
+code or recovery-code page. No application cookie is issued until sign-in finishes.
+Recovery attempts also recheck account eligibility and lockout, and invalid recovery
+codes increment Identity's failed-attempt count when its store supports lockout.
+The pages never create a remembered-device cookie; Identity's existing remembered
+devices still follow the host's policy. Email/SMS/custom second-factor delivery,
+passkeys, registration, password reset and external-provider buttons are not supplied
+by this adapter. Use an existing complete login flow for those features.
+
+The primary form protects its chosen presentation and destination in `_cellbridgeState`,
+bound to its antiforgery token and mounted path. Editing its return or presentation
+fields cannot change the packaged Office flow. Primary state expires after fifteen
+minutes. Oversized browser destinations fall back to the configured homepage before
+protected state is issued. Protected tokens are limited to 3,000 characters so they
+fit ordinary cookies and bounded form fields.
+
+The pending two-factor flow uses an encrypted, HttpOnly, Secure cookie and a matching protected
+form field. It binds the destination and layout to the pending Identity user, security
+stamp, login attempt and mounted path. Its default lifetime is five minutes, configurable
+through `PendingLifetime` up to fifteen minutes. A new primary POST replaces the pending
+attempt; simply visiting the primary page does not cancel it. Start over is a
+CSRF-protected POST. Shared deployments need shared ASP.NET Core Data Protection keys.
+
+Identity issues and validates its own application cookie. Existing cookie callbacks,
+security-stamp checks and claims factories remain active. After successful validation,
+the selected cookie's principal receives a CellBridge subject generated from
+`IdentityOptions.ClaimsIdentity.UserIdClaimType` and `IdentityAuthority`, with each
+component encoded separately. Keep the authority stable after creating documents;
+changing it changes generated subjects and document ownership. Existing explicit
+CellBridge subject and permission claims are preserved. Generated mappings grant no
+creation permission. Ambiguous identities are rejected. Other cookies, bearer tokens,
+external-provider cookies and pending MFA cookies are not mapped by this adapter.
+
+Signing in does not grant access to every document. The configured document policy
+still checks ownership, grants or host-owned permission revisions on each operation.
+An API's default bearer authentication can remain unchanged; CellBridge's Office
+endpoints select `Identity.Application` explicitly.
+
+### Connect a custom account system
+
+For an account system other than Identity, implement `ICellBridgeLoginAuthenticator`:
 
 ```csharp
 builder.Services.AddAuthentication("Cookies").AddCookie("Cookies", options =>
@@ -19,77 +91,85 @@ builder.Services.AddAuthentication("Cookies").AddCookie("Cookies", options =>
 });
 builder.Services.AddCellBridgeLogin<MyAccountAuthenticator>("Cookies");
 builder.Services.AddCellBridge(provider);
-
-// After building the app:
-app.UseRouting();
-app.UseAuthentication();
-app.UseAuthorization();
-app.MapCellBridge();
 ```
 
-The authenticator is scoped per request. Its `AuthenticateAsync` method receives
-the HTTP context, username, password and cancellation token. Return an authenticated
-`ClaimsPrincipal` with the [CellBridge identity claims](authentication.md#reusable-hosts)
-only after all account checks succeed, or null on failure. Your account system
-remains responsible for password verification, disabled accounts, lockout and any
-second factor. The package rejects unauthenticated or unmapped principals before
-issuing a cookie. The repository Identity sample retains its existing Identity
-credential handler and uses the same default HTML renderer.
+The scoped authenticator receives the HTTP context, username, password and cancellation
+token. Return an authenticated principal with the [CellBridge identity claims](authentication.md#reusable-hosts)
+only after all required checks succeed, or null on failure. Your backend owns password
+verification, disabled accounts, lockout and second factors. This interface has no
+multi-step MFA continuation; use the Identity adapter or an existing complete flow
+when one is required.
 
-Direct browser sign-in returns to the app root when no safe return URL is supplied.
-Set `CellBridgeLoginOptions.DefaultReturnPath` to another local path, such as
-`/library`, to choose the host's home page. The package includes the app's `PathBase`.
-Office supplies its completion URL explicitly, so its sign-in still ends at the
-completion endpoint. The standard form reports empty or invalid credentials on
-the page rather than using the embedded browser's validation popup.
+### Routes and custom HTML
 
-### Supply your own HTML
+The selected cookie's `LoginPath` and `ReturnUrlParameter` determine the browser GET
+route, shared POST route and return field. `OfficeLoginPath` defaults to
+`/_cellbridge/auth/login`. Office challenges advertise that separate page, whose
+successful sign-in always returns to `CompletionPath`, defaulting to
+`/_cellbridge/auth/complete`. Browser sign-in uses a validated local destination or
+`DefaultReturnPath`, which defaults to the app root. Mounted applications keep browser
+returns inside their `PathBase` boundary. Failed attempts preserve the presentation.
+Identity additionally maps `TwoFactorPath`, defaulting to `/_cellbridge/auth/two-factor`.
 
-The standard page works without a renderer. To replace just the HTML:
+Replace either presentation independently:
 
 ```csharp
-builder.Services.AddCellBridgeLogin<MyAccountAuthenticator>("Cookies", options =>
+builder.Services.AddCellBridgeIdentityLogin<ApplicationUser>(options =>
 {
-    options.ApplicationName = "My document library";
-    options.RenderPage = page => MyLoginHtml(page);
+    options.RenderBrowserPage = page => MyBrowserLoginHtml(page);
+    // RenderOfficePage remains unset, so Office uses the packaged default.
 });
 ```
 
-`CellBridgeLoginPageContext` supplies the application name, resolved form action,
-antiforgery token set, validated return URL, return-field name and failure flag.
-Your HTML posts to `page.FormAction` with `login`, `password`, the antiforgery field
-and `page.ReturnUrlParameter`. HTML-encode every supplied value. The package still
-owns the POST handler, cookie and Office completion flow. You can also use
-`CellBridgeLoginPage.Render(page)` within a custom wrapper.
+The renderer context supplies the application name, form action, antiforgery token,
+validated return URL, return-field name, failure flag, `IsOffice`, `RequiresTwoFactor`,
+`UseRecoveryCode`, `ProtectedState` and `RestartAction`. New renderers must handle both
+credential and two-factor stages. The packaged `CellBridgeLoginPage.Render(page)`
+is also available.
 
-### Use an existing host login page
+Primary forms submit `login`, `password`, the supplied antiforgery field,
+`_cellbridgeState`, the supplied return field and `_cellbridgePresentation` set to
+`office` or `browser`. The protected state determines the destination and presentation. Two-factor
+forms submit the antiforgery field, `_cellbridgeState`, `code`, and `method` set to
+`authenticator` or `recovery`. To start over, submit the antiforgery field,
+`_cellbridgeState` and `cancel=1` to `RestartAction`. HTML-encode supplied values and
+preserve all protected fields. HTML replacement does not replace the server checks.
+The layout selector never grants trust or permissions.
 
-If you already have a complete login flow, register
-`AddCellBridgeOfficeFormsAuthentication("Cookies")` instead of `AddCellBridgeLogin`.
-This registers the Office challenge and completion endpoint without mapping a login
-page. Both integrations use the selected cookie's `LoginPath` and `ReturnUrlParameter`.
-The login must redirect to the validated local completion path supplied by the
-challenge. `/_cellbridge/auth/complete` accepts GET and HEAD and requires the selected
-cookie's principal to map to a `CellBridgeActor`.
+The older `RenderPage` override remains a fallback for primary forms in both
+presentations. It does not replace the packaged MFA page. For compatibility, legacy primary
+renderers may omit protected state and retain validated form return handling.
+Use a new stage-aware renderer or include the supplied `_cellbridgeState` field
+to retain the protected primary destination. `RenderBrowserPage` and
+`RenderOfficePage` take precedence. Forms report invalid or empty credentials inline.
 
-Existing cookie callbacks and principal validation still run. Ordinary browser
-routes retain their redirects. Bearer authentication can remain the host's default;
-CellBridge's mapped Office routes select the named cookie. Document permission
-denials return 403 without restarting login.
+### Use an existing complete host login
 
-Map `MapCellBridge()` at the application root. For a mounted app, call
-`UsePathBase` before routing; prefixed route groups are rejected. Form actions and
-completion URLs include PathBase. Office must reach the external HTTPS origin.
-Configure trusted forwarded headers before authentication when behind a proxy,
-or set `PublicOrigin` to a fixed HTTPS origin in the registration options.
-`CompletionPath` changes the completion route. The origin has no path.
+Register `AddCellBridgeOfficeFormsAuthentication("Cookies")` instead of a packaged
+login integration. This supplies the Office challenge and completion endpoint while
+leaving your existing login routes and UI in charge. The challenge uses the selected
+cookie's `LoginPath` and `ReturnUrlParameter`. Your flow must return to the validated
+local completion path after all authentication steps succeed.
 
-Cookie schemes using `CookieAuthenticationOptions.EventsType` are currently
-unsupported; use an `Events` instance. Invalid schemes and missing login
-authenticators fail at startup. `IsRequestAllowed` optionally gates both login
-methods before token or credential processing. The example uses this for its
-private development accounts; real account policy belongs in the authenticator.
-These APIs are part of the unpublished beta.2 candidate.
+Completion accepts GET and HEAD and requires the selected cookie's principal to map
+to a `CellBridgeActor`. Ordinary browser routes retain their original cookie redirects.
+Document permission denials return 403 without restarting login. These integrations
+do not automatically turn a frontend's bearer token into desktop Office authentication.
+
+Map `MapCellBridge()` at the application root. For a mounted app, call `UsePathBase`
+before routing; prefixed route groups are rejected. Office must reach the external
+HTTPS origin. Configure trusted forwarded headers before authentication behind a proxy,
+or set `PublicOrigin` to a fixed HTTPS origin without a path.
+
+Cookie schemes using `CookieAuthenticationOptions.EventsType` are unsupported here;
+use an `Events` instance. `IsRequestAllowed` gates every packaged GET and POST before
+credential or token processing. Connect host rate limiting and other admission policy
+to all primary and second-factor submissions. The example uses a private-development
+request gate; real account policy belongs to the account system.
+
+These APIs are part of the unpublished beta.2 candidate. Keeping the default pages
+independent of UI frameworks does not establish Native AOT support. CellBridge and
+its storage/authentication dependencies have not been qualified under Native AOT.
 
 ## Execute parsed SOAP requests
 

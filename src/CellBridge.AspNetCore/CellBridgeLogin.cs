@@ -24,14 +24,26 @@ public interface ICellBridgeLoginAuthenticator
 
 /// <summary>Values for the standard or host-supplied login HTML. HTML-encode values when rendering them.</summary>
 public sealed record CellBridgeLoginPageContext(string ApplicationName, AntiforgeryTokenSet Antiforgery,
-    string ReturnUrl, bool SignInFailed, string FormAction, string ReturnUrlParameter);
+    string ReturnUrl, bool SignInFailed, string FormAction, string ReturnUrlParameter)
+{
+    public bool IsOffice { get; init; }
+    public bool RequiresTwoFactor { get; init; }
+    public bool UseRecoveryCode { get; init; }
+    public string? ProtectedState { get; init; }
+    public string? RestartAction { get; init; }
+}
 
 /// <summary>Settings for the packaged login page and Office sign-in flow.</summary>
-public sealed class CellBridgeLoginOptions
+public class CellBridgeLoginOptions
 {
     public string ApplicationName { get; set; } = "CellBridge";
     /// <summary>Optional replacement HTML. Keep the supplied form action, return field and antiforgery token.</summary>
     public Func<CellBridgeLoginPageContext, string>? RenderPage { get; set; }
+    /// <summary>Optional browser HTML, including the two-factor stage when Identity is used.</summary>
+    public Func<CellBridgeLoginPageContext, string>? RenderBrowserPage { get; set; }
+    /// <summary>Optional Office HTML, including the two-factor stage when Identity is used.</summary>
+    public Func<CellBridgeLoginPageContext, string>? RenderOfficePage { get; set; }
+    public PathString OfficeLoginPath { get; set; } = new("/_cellbridge/auth/login");
     /// <summary>Optional host request gate, applied to both login methods before any credential or token processing.</summary>
     public Func<HttpContext, bool>? IsRequestAllowed { get; set; }
     /// <summary>Browser destination when no safe return URL is supplied. Relative to the app's PathBase.</summary>
@@ -60,13 +72,21 @@ public static class CellBridgeLogin
     {
         var options = new CellBridgeLoginOptions();
         configure?.Invoke(options);
+        return Register(services, cookieScheme, options, identity: false);
+    }
+
+    internal static IServiceCollection Register(IServiceCollection services, string cookieScheme,
+        CellBridgeLoginOptions options, bool identity)
+    {
+        if (services.Any(x => x.ServiceType == typeof(LoginRegistration)))
+            throw new InvalidOperationException("Configure one packaged CellBridge login per host.");
         if (string.IsNullOrWhiteSpace(options.ApplicationName))
-            throw new ArgumentException("ApplicationName must not be blank.", nameof(configure));
+            throw new ArgumentException("ApplicationName must not be blank.", nameof(options));
         CellBridgeOfficeFormsAuthentication.ValidatePath(options.DefaultReturnPath, nameof(options.DefaultReturnPath));
+        CellBridgeOfficeFormsAuthentication.ValidatePath(options.OfficeLoginPath, nameof(options.OfficeLoginPath));
         services.AddCellBridgeOfficeFormsAuthentication(cookieScheme, office =>
         { office.CompletionPath = options.CompletionPath; office.PublicOrigin = options.PublicOrigin; });
-        services.AddSingleton(new LoginRegistration(options.ApplicationName, options.RenderPage,
-            options.IsRequestAllowed, options.DefaultReturnPath));
+        services.AddSingleton(new LoginRegistration(options, identity));
         services.AddAntiforgery();
         services.AddSingleton<IHostedService, AuthenticatorValidator>();
         return services;
@@ -79,73 +99,138 @@ public static class CellBridgeLogin
         if (registration is null) return;
         var cookie = app.ServiceProvider.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
             .Get(office.CookieScheme);
-        app.MapGet(cookie.LoginPath.Value!, (HttpContext context, IAntiforgery antiforgery) =>
+        IResult Page(HttpContext context, IAntiforgery antiforgery, bool isOffice)
         {
             context.Response.Headers.CacheControl = "no-store";
-            if (registration.IsRequestAllowed?.Invoke(context) == false) return Results.NotFound();
-            var defaultReturn = (context.Request.PathBase + registration.DefaultReturnPath).ToUriComponent();
-            var returnUrl = LocalReturnUrl(context.Request.Query[cookie.ReturnUrlParameter], defaultReturn);
-            var page = new CellBridgeLoginPageContext(registration.ApplicationName,
-                antiforgery.GetAndStoreTokens(context), returnUrl, context.Request.Query.ContainsKey("failed"),
-                (context.Request.PathBase + cookie.LoginPath).ToUriComponent(), cookie.ReturnUrlParameter);
-            return Results.Content((registration.RenderPage ?? CellBridgeLoginPage.Render)(page), "text/html; charset=utf-8");
-        }).AllowAnonymous();
+            if (registration.Options.IsRequestAllowed?.Invoke(context) == false) return Results.NotFound();
+            var returnUrl = ReturnUrl(context, registration, office, cookie, isOffice,
+                context.Request.Query[cookie.ReturnUrlParameter]);
+            var tokens = antiforgery.GetAndStoreTokens(context);
+            var protectedState = CellBridgePrimaryLoginState.Create(context, registration, office, returnUrl, isOffice, tokens.RequestToken!);
+            var page = new CellBridgeLoginPageContext(registration.Options.ApplicationName,
+                tokens, protectedState.ReturnUrl, context.Request.Query.ContainsKey("failed"),
+                (context.Request.PathBase + cookie.LoginPath).ToUriComponent(), cookie.ReturnUrlParameter)
+                { IsOffice = isOffice, ProtectedState = protectedState.Token };
+            return Render(registration, page);
+        }
+        app.MapGet(cookie.LoginPath.Value!, (HttpContext context, IAntiforgery antiforgery) => Page(context, antiforgery, false)).AllowAnonymous();
+        app.MapGet(registration.Options.OfficeLoginPath.Value!, (HttpContext context, IAntiforgery antiforgery) => Page(context, antiforgery, true)).AllowAnonymous();
         app.MapPost(cookie.LoginPath.Value!, async (HttpContext context, IAntiforgery antiforgery,
-            ICellBridgeLoginAuthenticator authenticator) =>
+            IServiceProvider services) =>
         {
             context.Response.Headers.CacheControl = "no-store";
-            if (registration.IsRequestAllowed?.Invoke(context) == false) return Results.NotFound();
-            if (!context.Request.HasFormContentType ||
-                context.Request.ContentType?.StartsWith("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase) is not true)
-                return Results.BadRequest();
-            if (context.Request.ContentLength > 16384) return Results.BadRequest();
-            IFormCollection form;
-            try
-            {
-                form = await context.Request.ReadFormAsync(new FormOptions
-                { ValueCountLimit = 16, KeyLengthLimit = 256, ValueLengthLimit = 4096 }, context.RequestAborted);
-                await antiforgery.ValidateRequestAsync(context);
-            }
-            catch (AntiforgeryValidationException) { return Results.BadRequest(); }
-            catch (InvalidDataException) { return Results.BadRequest(); }
+            if (registration.Options.IsRequestAllowed?.Invoke(context) == false) return Results.NotFound();
+            var form = await ReadForm(context, antiforgery);
+            if (form is null) return Results.BadRequest();
             var username = form["login"].ToString();
             var password = form["password"].ToString();
-            var defaultReturn = (context.Request.PathBase + registration.DefaultReturnPath).ToUriComponent();
-            var returnUrl = LocalReturnUrl(form[cookie.ReturnUrlParameter], defaultReturn);
+            var isOffice = form[PresentationField] == "office" ||
+                form[cookie.ReturnUrlParameter] == (context.Request.PathBase + office.CompletionPath).ToUriComponent();
+            var returnUrl = ReturnUrl(context, registration, office, cookie, isOffice, form[cookie.ReturnUrlParameter]);
+            if (!string.IsNullOrEmpty(form[StateField]))
+            {
+                var state = CellBridgePrimaryLoginState.Read(context, registration, office, form[StateField].ToString(),
+                    form[services.GetRequiredService<IOptions<AntiforgeryOptions>>().Value.FormFieldName].ToString());
+                if (state is null) return Results.BadRequest();
+                isOffice = state.IsOffice; returnUrl = state.ReturnUrl;
+            }
+            else if (registration.Options.RenderPage is null ||
+                (isOffice ? registration.Options.RenderOfficePage : registration.Options.RenderBrowserPage) is not null)
+                return Results.BadRequest();
+            if (registration.Identity)
+                return await services.GetRequiredService<ICellBridgeIdentityLoginHandler>()
+                    .PasswordAsync(context, username, password, returnUrl, isOffice);
+            var authenticator = services.GetRequiredService<ICellBridgeLoginAuthenticator>();
             var principal = username.Length is > 0 and <= 256 && password.Length is > 0 and <= 1024
                 ? await authenticator.AuthenticateAsync(context, username, password, context.RequestAborted) : null;
             if (principal is null || CellBridgeActor.FromPrincipal(principal) is null)
-                return Results.LocalRedirect(QueryHelpers.AddQueryString(
-                    (context.Request.PathBase + cookie.LoginPath).ToUriComponent(),
-                    new Dictionary<string, string?> { ["failed"] = "1", [cookie.ReturnUrlParameter] = returnUrl }));
+                return Failed(context, registration, cookie, isOffice, returnUrl);
             await context.SignInAsync(office.CookieScheme, principal, new AuthenticationProperties { IsPersistent = false });
             return Results.LocalRedirect(returnUrl);
         }).AllowAnonymous();
+        if (registration.Identity) app.ServiceProvider.GetRequiredService<IdentityLoginRegistration>().MapEndpoints(app);
+    }
+
+    internal const string PresentationField = "_cellbridgePresentation";
+    internal const string StateField = "_cellbridgeState";
+    internal const string CodeField = "code";
+    internal const string MethodField = "method";
+    internal const string CancelField = "cancel";
+
+    internal static IResult Render(LoginRegistration registration, CellBridgeLoginPageContext page)
+    {
+        var renderer = page.IsOffice ? registration.Options.RenderOfficePage : registration.Options.RenderBrowserPage;
+        renderer ??= page.RequiresTwoFactor ? CellBridgeLoginPage.Render : registration.Options.RenderPage ?? CellBridgeLoginPage.Render;
+        return Results.Content(renderer(page), "text/html; charset=utf-8");
+    }
+
+    internal static IResult Failed(HttpContext context, LoginRegistration registration,
+        CookieAuthenticationOptions cookie, bool isOffice, string returnUrl, bool failed = true) =>
+        Results.LocalRedirect(QueryHelpers.AddQueryString(
+            (context.Request.PathBase + (isOffice ? registration.Options.OfficeLoginPath : cookie.LoginPath)).ToUriComponent(),
+            new Dictionary<string, string?> { ["failed"] = failed ? "1" : null, [cookie.ReturnUrlParameter] = returnUrl }));
+
+    internal static string ReturnUrl(HttpContext context, LoginRegistration registration,
+        CellBridgeOfficeFormsAuthentication.OfficeFormsRegistration office, CookieAuthenticationOptions cookie,
+        bool isOffice, string? supplied)
+    {
+        if (isOffice) return (context.Request.PathBase + office.CompletionPath).ToUriComponent();
+        var fallback = (context.Request.PathBase + registration.Options.DefaultReturnPath).ToUriComponent();
+        var value = LocalReturnUrl(supplied, fallback);
+        var mount = context.Request.PathBase.ToUriComponent();
+        if (mount.Length == 0) return value;
+        if (!Uri.TryCreate("https://cellbridge.invalid" + value, UriKind.Absolute, out var target)) return fallback;
+        var path = target.AbsolutePath;
+        return path == mount || path.StartsWith(mount + "/", StringComparison.Ordinal) ? value : fallback;
+    }
+
+    internal static async Task<IFormCollection?> ReadForm(HttpContext context, IAntiforgery antiforgery)
+    {
+        if (!context.Request.HasFormContentType ||
+            context.Request.ContentType?.StartsWith("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase) is not true ||
+            context.Request.ContentLength > 16384) return null;
+        try
+        {
+            var form = await context.Request.ReadFormAsync(new FormOptions
+                { ValueCountLimit = 16, KeyLengthLimit = 256, ValueLengthLimit = 4096 }, context.RequestAborted);
+            await antiforgery.ValidateRequestAsync(context);
+            return form;
+        }
+        catch (AntiforgeryValidationException) { return null; }
+        catch (InvalidDataException) { return null; }
     }
 
     internal static string LocalReturnUrl(string? value, string fallback) => !string.IsNullOrWhiteSpace(value) &&
         value.Length <= 2048 && value.StartsWith('/') && !value.StartsWith("//") && !value.Contains('\\') &&
         !value.Any(char.IsControl) ? value : fallback;
 
-    private sealed record LoginRegistration(string ApplicationName, Func<CellBridgeLoginPageContext, string>? RenderPage,
-        Func<HttpContext, bool>? IsRequestAllowed, PathString DefaultReturnPath);
+    internal sealed record LoginRegistration(CellBridgeLoginOptions Options, bool Identity);
 
     private sealed class AuthenticatorValidator(IServiceScopeFactory scopes,
         IOptionsMonitor<CookieAuthenticationOptions> cookies, IOptions<AntiforgeryOptions> antiforgery,
         CellBridgeOfficeFormsAuthentication.OfficeFormsRegistration office) : IHostedService
     {
-        public Task StartAsync(CancellationToken cancellationToken)
+        public async Task StartAsync(CancellationToken cancellationToken)
         {
             var returnField = cookies.Get(office.CookieScheme).ReturnUrlParameter;
-            var reserved = new[] { "login", "password", "failed", antiforgery.Value.FormFieldName };
+            var fields = new[] { "login", "password", "failed", PresentationField, StateField, CodeField, MethodField, CancelField };
+            var reserved = fields.Append(antiforgery.Value.FormFieldName);
             if (reserved.Contains(returnField, StringComparer.OrdinalIgnoreCase))
                 throw new InvalidOperationException("The login return URL parameter must not collide with credential, failure or antiforgery fields.");
-            if (new[] { "login", "password", "failed" }.Contains(antiforgery.Value.FormFieldName, StringComparer.OrdinalIgnoreCase))
+            if (fields.Contains(antiforgery.Value.FormFieldName, StringComparer.OrdinalIgnoreCase))
                 throw new InvalidOperationException("The login antiforgery field must not collide with credential or failure fields.");
             using var scope = scopes.CreateScope();
+            var registration = scope.ServiceProvider.GetRequiredService<LoginRegistration>();
+            var paths = new[] { cookies.Get(office.CookieScheme).LoginPath, registration.Options.OfficeLoginPath, office.CompletionPath };
+            if (paths.Select(p => p.Value!.TrimEnd('/')).Distinct(StringComparer.OrdinalIgnoreCase).Count() != paths.Length)
+                throw new InvalidOperationException("Browser login, Office login and completion paths must differ.");
+            if (registration.Identity)
+            {
+                await scope.ServiceProvider.GetRequiredService<ICellBridgeIdentityLoginHandler>().ValidateAsync(cancellationToken);
+                return;
+            }
             _ = scope.ServiceProvider.GetService<ICellBridgeLoginAuthenticator>()
                 ?? throw new InvalidOperationException("Register an ICellBridgeLoginAuthenticator for the built-in login page.");
-            return Task.CompletedTask;
         }
         public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }

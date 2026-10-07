@@ -132,8 +132,11 @@ validated principals to these claims:
 | `cellbridge:create=true` | Permission to create documents. |
 
 The [package consumer](../examples/NuGetConsumer/README.md) demonstrates JWT
-validation and claim mapping. For the packaged default login page, register `AddCellBridgeLogin` with your
-cookie scheme and a host credential checker. Supplying custom HTML is optional.
+validation and claim mapping. For packaged default browser and Office login pages, use
+`AddCellBridgeIdentityLogin<TUser>` with existing Identity accounts. It supplies
+authenticator and recovery-code continuation without a custom authenticator.
+For custom account systems, use `AddCellBridgeLogin` with your cookie scheme and
+a host credential checker. Supplying custom HTML is optional.
 If you already have a login page, use `AddCellBridgeOfficeFormsAuthentication`
 for just the Office challenge and completion endpoint.
 See [login integration](package-integration.md#use-the-built-in-login-page).
