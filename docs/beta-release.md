@@ -166,11 +166,4 @@ skip, a pinned WopiHost package-consumer check and the release workflow's artifa
 and NuGet authentication checks. Record fresh NuGet.org consumption and symbols
 after uploading.
 
-This experimental beta may publish with [Word issue #42](https://github.com/PatrickMatthiesen/cellbridge/issues/42)
-open as a disclosed limitation. The single successful save retests do not complete
-its repeated image/save/reopen and Excel acceptance checks. The embedded package
-readme and release notes must disclose that gap. Native Office MFA, OneNote,
-two-desktop coauthoring and Office Online Server also remain unqualified; publishing
-packages does not complete those client gates or establish stable API compatibility.
-
-This section does not record a published release or claim new desktop qualification.
+This section does not record a published release.

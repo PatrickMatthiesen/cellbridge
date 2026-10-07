@@ -1,8 +1,7 @@
 # Repeated desktop save qualification
 
-Issue #42 requires repeated desktop evidence on the exact candidate. A passing
-package or server test does not establish Word's Saved indicator or normal-close
-behavior. The tools below have separate automated content and manual UI gates.
+These tools check repeated Word and Excel saves on a specific candidate. Package
+and server tests cannot confirm Word's Saved indicator or normal-close behavior. The tools below have separate automated content and manual UI gates.
 
 Use a dedicated, signed-in Windows desktop with Word and Excel installed. Close
 both applications before each run. Run the candidate through Aspire at an HTTPS
