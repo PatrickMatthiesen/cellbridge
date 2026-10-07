@@ -13,33 +13,35 @@ files, and a file's actions menu to download it, see saved versions or change
 access. Document links open desktop Office. These links and forms also work
 without JavaScript; search, filters and sorting require it.
 
-The example uses the package's `AddCellBridgeLogin` with its standard
+The example uses the package's `AddCellBridgeCookieLogin` with its standard
 username/password page. Supplying custom HTML is optional. The package handles
 the form, CSRF checks, cookie sign-in and Office challenge/completion. No login
 page or challenge headers are implemented in this example.
 
 ## Application setup
 
-`Program.cs` keeps the CellBridge registration and middleware order visible.
-The example's storage, file publication and account setup live in
-`DocumentLibraryHostingExtensions.cs`:
+`Program.cs` uses public methods from `CellBridge.AspNetCore`:
 
 ```csharp
-var provider = builder.Services.AddDocumentLibrary(builder.Configuration, builder.Environment);
-builder.Services.AddCellBridge(provider, requireDurability: !builder.Environment.IsEnvironment("Testing"));
-builder.Services.AddDocumentLibraryTestLogin(builder.Environment);
+builder.Services.AddCellBridge<DocumentLibraryPermissionPolicy>(provider);
+builder.Services.AddCellBridgeExternalPublishing<DocumentLibraryDestination>();
+builder.Services.AddCellBridgeCookieLogin<LocalLoginAuthenticator>("Cookies");
 ```
 
-`AddDocumentLibrary` selects PostgreSQL, configures the destination directory and
-registers the publication worker and the example's document permissions. These
-helpers belong to the example, not the NuGet packages.
+`AddCellBridge<TPolicy>` registers a shared singleton permission policy.
+`AddCellBridgeExternalPublishing<TDestination>` registers the host's destination,
+publisher and background queue worker. `AddCellBridgeCookieLogin<TAuthenticator>`
+creates a cookie scheme and enables the standard login pages. These methods are
+available to any package consumer.
 
-Ordinary hosts already receive CellBridge's stored owner/grant policy from
-`AddCellBridge`. This example overrides it because its owner/editor/reader
-permissions are bound to immutable revisions in the destination manifests. Its
-private test accounts are also an example choice. Applications with existing
-Identity accounts can use the packaged `AddCellBridgeIdentityLogin<TUser>` with
-their account store and document permissions; see
+`DocumentLibraryStorage.cs` selects this application's PostgreSQL connection and
+destination directory. The example supplies its file catalogue, manifest-based
+permission policy and private test accounts. It explicitly selects `Cookies` as
+its default scheme and customizes the cookie name for this test application.
+
+Ordinary hosts receive stored owner/grant authorization through `AddCellBridge(provider)`.
+They need no custom policy. Applications with existing Identity accounts can use
+`AddCellBridgeIdentityLogin<TUser>` with their account store; see
 [package integration](../../docs/package-integration.md).
 
 Startup checks storage health and loads document permissions before serving

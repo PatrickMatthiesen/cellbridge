@@ -92,7 +92,8 @@ for identity mapping. The [package consumer](examples/NuGetConsumer/README.md)
 provides a complete example with bearer authentication and in-memory storage.
 For standard browser and Office login pages, use `AddCellBridgeIdentityLogin<TUser>`
 with existing ASP.NET Core Identity accounts, including authenticator and recovery-code
-sign-in. For a custom account system, use `AddCellBridgeLogin` with a credential checker.
+sign-in. For a custom account system, `AddCellBridgeCookieLogin` registers a cookie and the
+standard pages with a credential checker. Use `AddCellBridgeLogin` for an existing cookie.
 Custom HTML is optional. CellBridge handles sign-in, CSRF
 and the Office challenge/completion flow; see [login integration](docs/package-integration.md#use-the-built-in-login-page).
 This adapter is part of the unpublished beta.2 candidate.

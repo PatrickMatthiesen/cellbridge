@@ -8,8 +8,8 @@ the protocol and provider packages can also be consumed separately. See
 The snippets below show the CellBridge integration in an existing application.
 The [document-library example](../examples/DocumentLibrary/README.md) is a complete
 application with PostgreSQL, a separate file store, document permissions and
-private test accounts. Its setup helpers belong to that example; they are not
-additional package registrations required by your application.
+private test accounts. It uses the public package registrations below. Its file catalogue, directory
+selection and private test accounts belong to the example.
 
 ## Use the built-in login pages
 
@@ -91,12 +91,8 @@ endpoints select `Identity.Application` explicitly.
 For an account system other than Identity, implement `ICellBridgeLoginAuthenticator`:
 
 ```csharp
-builder.Services.AddAuthentication("Cookies").AddCookie("Cookies", options =>
-{
-    options.LoginPath = "/auth/login";
-});
-builder.Services.AddCellBridgeLogin<MyAccountAuthenticator>("Cookies");
 builder.Services.AddCellBridge(provider);
+builder.Services.AddCellBridgeCookieLogin<MyAccountAuthenticator>();
 ```
 
 The scoped authenticator receives the HTTP context, username, password and cancellation
@@ -105,6 +101,66 @@ only after all required checks succeed, or null on failure. Your backend owns pa
 verification, disabled accounts, lockout and second factors. This interface has no
 multi-step MFA continuation; use the Identity adapter or an existing complete flow
 when one is required.
+
+`AddCellBridgeCookieLogin` creates a named cookie scheme, defaulting to `CellBridge`,
+with an HttpOnly, Secure, SameSite=Lax cookie, an eight-hour ticket and no sliding
+expiration. It supplies `/auth/login` and returns 403 on permission denial.
+HTTPS is required. Its cookie and login options remain configurable:
+
+```csharp
+builder.Services.AddCellBridgeCookieLogin<MyAccountAuthenticator>("documents",
+    configureCookie: cookie => cookie.LoginPath = "/sign-in",
+    configure: login => login.ApplicationName = "My document library");
+```
+
+The helper does not select a default authentication scheme. ASP.NET Core can use
+a sole scheme as its implicit default, but adding another scheme removes that
+implicit choice. Mixed-scheme applications must explicitly select defaults or
+name schemes in their authorization policies. An existing explicit bearer or
+cookie default stays unchanged; CellBridge's Office endpoints select the login
+cookie explicitly. Keep `AddCellBridgeLogin<TAuthenticator>("Cookies")` when the
+host already registers that cookie. Do not register the same scheme twice.
+Identity applications should use `AddCellBridgeIdentityLogin<TUser>` instead.
+
+### Register document permissions and file delivery
+
+`AddCellBridge(provider)` supplies stored owner/grant authorization. For a host-owned
+policy, the typed overload registers one shared singleton for both the concrete
+policy and `ICellBridgeAuthorizationPolicy`:
+
+```csharp
+builder.Services.AddCellBridge<MyDocumentPermissions>(provider);
+```
+
+Select the policy in the first CellBridge registration. An existing singleton
+factory for the concrete policy is reused. Scoped/transient policies, a competing
+interface registration or a later attempt to replace an existing CellBridge policy
+are rejected. The policy's own dependencies must also support singleton use.
+
+To deliver accepted saves to your application's file store:
+
+```csharp
+builder.Services.AddCellBridgeExternalPublishing<MyFileDestination>(options =>
+    options.PollingInterval = TimeSpan.FromSeconds(2));
+```
+
+`MyFileDestination` implements `IExternalRevisionDestination`. An existing concrete
+singleton factory is reused. The helper registers a shared `ExternalRevisionPublisher`
+and `ExternalRevisionPublicationWorker`. Do not register competing publishers or
+destinations or additional hosted workers, including opaque factories. No directory, permissions or document bindings are created for you.
+Bind each document explicitly with `ExternalRevisionPublisher.BindAsync`; the
+[external publication contract](external-host-reliability.md) describes durable receipts,
+conflicts and recovery.
+
+The worker polls retained pending revisions after startup and retries transient
+failures. `Wake()` requests a pass after a save; concurrent requests coalesce.
+`PublishPendingOnceAsync()` runs one serialized scan, attempting at most one queued
+revision per document. Serialization is local to that worker instance. Multiple
+hosts still require durable destination receipts and the provider's atomic state
+transitions. Initialize the destination and permissions before starting the host.
+Polling intervals must be at least one millisecond and fit a timer. Transient
+failures delay background retries by that interval, including when wakes arrive. Stopping the worker cancels
+active and waiting passes and waits for the active pass within the shutdown timeout; interrupted revisions remain queued for recovery.
 
 ### Routes and custom HTML
 

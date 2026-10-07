@@ -44,7 +44,8 @@ public sealed class PermissionPolicyTests
         var documents = new CellBridgeDocumentService(provider, authorizationPolicy: policy);
         var publisher = new ExternalRevisionPublisher(provider, destination);
         var options = new DocumentLibraryOptions();
-        var worker = new PublicationWorker(provider, publisher, options, NullLogger<PublicationWorker>.Instance);
+        using var worker = new ExternalRevisionPublicationWorker(provider, publisher,
+            new() { PollingInterval = options.PublicationInterval }, NullLogger<ExternalRevisionPublicationWorker>.Instance);
         var library = new DocumentLibraryService(documents, destination, policy, publisher, worker, options);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => library.InitializeAsync());
@@ -66,7 +67,8 @@ public sealed class PermissionPolicyTests
         var documents = new CellBridgeDocumentService(provider, authorizationPolicy: policy);
         var publisher = new ExternalRevisionPublisher(provider, destination);
         var options = new DocumentLibraryOptions();
-        var worker = new PublicationWorker(provider, publisher, options, NullLogger<PublicationWorker>.Instance);
+        using var worker = new ExternalRevisionPublicationWorker(provider, publisher,
+            new() { PollingInterval = options.PublicationInterval }, NullLogger<ExternalRevisionPublicationWorker>.Instance);
         var library = new DocumentLibraryService(documents, destination, policy, publisher, worker, options);
 
         await library.InitializeAsync();

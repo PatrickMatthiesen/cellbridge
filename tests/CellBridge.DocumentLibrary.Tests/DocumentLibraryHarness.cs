@@ -17,7 +17,7 @@ internal sealed class DocumentLibraryHarness : IAsyncDisposable
         Permissions = new(Destination);
         Documents = new(Provider, authorizationPolicy: Permissions);
         Publisher = new(Provider, Destination);
-        Worker = new(Provider, Publisher, Options, NullLogger<PublicationWorker>.Instance);
+        Worker = new(Provider, Publisher, new() { PollingInterval = Options.PublicationInterval }, NullLogger<ExternalRevisionPublicationWorker>.Instance);
         Library = new(Documents, Destination, Permissions, Publisher, Worker, Options);
     }
 
@@ -27,7 +27,7 @@ internal sealed class DocumentLibraryHarness : IAsyncDisposable
     public DocumentLibraryPermissionPolicy Permissions { get; }
     public CellBridgeDocumentService Documents { get; }
     public ExternalRevisionPublisher Publisher { get; }
-    public PublicationWorker Worker { get; }
+    public ExternalRevisionPublicationWorker Worker { get; }
     public DocumentLibraryService Library { get; }
     public static CellBridgeActor Owner { get; } = new(new(DocumentLibraryService.OwnerSubject,
         "owner", "Local owner"), true);
@@ -72,5 +72,9 @@ internal sealed class DocumentLibraryHarness : IAsyncDisposable
         };
     }
 
-    public ValueTask DisposeAsync() => Destination.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        Worker.Dispose();
+        return Destination.DisposeAsync();
+    }
 }

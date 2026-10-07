@@ -55,6 +55,37 @@ public class CellBridgeLoginOptions
 /// <summary>Registers a standard login page with optional custom HTML.</summary>
 public static class CellBridgeLogin
 {
+    /// <summary>Creates a dedicated cookie scheme and enables the packaged login pages.</summary>
+    /// <remarks>Requires HTTPS. Does not select or replace the host's default authentication scheme.
+    /// Mixed-scheme hosts must configure their defaults or name schemes in authorization policies.
+    /// Use AddCellBridgeLogin for an existing cookie, or AddCellBridgeIdentityLogin for Identity.</remarks>
+    public static IServiceCollection AddCellBridgeCookieLogin<TAuthenticator>(this IServiceCollection services,
+        string cookieScheme = "CellBridge", Action<CookieAuthenticationOptions>? configureCookie = null,
+        Action<CellBridgeLoginOptions>? configure = null) where TAuthenticator : class, ICellBridgeLoginAuthenticator
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(cookieScheme);
+        // Validate the login registration before adding a new authentication scheme.
+        services.AddCellBridgeLogin<TAuthenticator>(cookieScheme, configure);
+        services.AddAuthentication().AddCookie(cookieScheme, cookie =>
+        {
+            cookie.Cookie.Name = ".CellBridge." + Uri.EscapeDataString(cookieScheme);
+            cookie.Cookie.HttpOnly = true;
+            cookie.Cookie.SameSite = SameSiteMode.Lax;
+            cookie.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+            cookie.ExpireTimeSpan = TimeSpan.FromHours(8);
+            cookie.SlidingExpiration = false;
+            cookie.LoginPath = "/auth/login";
+            cookie.ReturnUrlParameter = "returnUrl";
+            cookie.Events.OnRedirectToAccessDenied = context =>
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return Task.CompletedTask;
+            };
+            configureCookie?.Invoke(cookie);
+        });
+        return services;
+    }
+
     /// <summary>Enables the standard login page and Office authentication with a scoped host credential checker.
     /// The selected cookie's LoginPath and ReturnUrlParameter determine the login route and return field.</summary>
     public static IServiceCollection AddCellBridgeLogin<TAuthenticator>(this IServiceCollection services,

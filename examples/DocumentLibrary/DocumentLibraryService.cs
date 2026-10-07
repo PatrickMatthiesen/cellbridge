@@ -22,7 +22,7 @@ public sealed class DocumentLibraryService(
     DocumentLibraryDestination destination,
     DocumentLibraryPermissionPolicy permissions,
     ExternalRevisionPublisher publisher,
-    PublicationWorker publicationWorker,
+    ExternalRevisionPublicationWorker publicationWorker,
     DocumentLibraryOptions options)
 {
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _permissionGates = new();
