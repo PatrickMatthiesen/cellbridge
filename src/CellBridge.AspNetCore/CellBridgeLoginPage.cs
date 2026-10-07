@@ -33,6 +33,19 @@ public static class CellBridgeLoginPage
               <button class="restart" name="cancel" value="1" type="submit">Start over</button>
             </form>
             """ : "";
+        var officeStyles = page.IsOffice ? """
+            html, body { background: #fff; }
+            body { font-size: 24px; }
+            .sign-in { max-width: none; width: auto; margin: 0; padding: 28px 32px; border: 0; border-radius: 0; }
+            h1 { font-size: 40px; margin-bottom: 32px; }
+            label { font-size: 24px; }
+            .field { margin-bottom: 24px; }
+            input { min-height: 68px; padding: 14px; }
+            input:focus { padding: 13px; }
+            button { min-height: 68px; padding: 14px 16px; }
+            .error, .alternate { font-size: 20px; }
+            @media (max-width: 520px) { .sign-in { margin: 0; padding: 24px; } h1 { font-size: 32px; } }
+            """ : "";
         // Keep styles local and the form script-free for Office's embedded sign-in window.
         return $$"""
             <!doctype html>
@@ -62,7 +75,7 @@ public static class CellBridgeLoginPage
                 button.restart { background: #fff; color: #065f63; margin-top: 16px; }
                 @media (max-width: 520px) { .sign-in { width: auto; margin: 18px; padding: 24px; } h1 { font-size: 28px; } }
                 @media (max-height: 680px) { .sign-in { margin-top: 20px; margin-bottom: 20px; padding: 26px; } .field { margin-bottom: 16px; } .error { margin-bottom: 16px; padding: 10px 12px; } }
-                {{(page.IsOffice ? "html, body { background: #fff; } .sign-in { max-width: none; width: auto; margin: 0; padding: 28px 32px; border: 0; border-radius: 0; } @media (max-width: 520px) { .sign-in { margin: 0; padding: 24px; } }" : "")}}
+                {{officeStyles}}
               </style>
             </head>
             <body>
