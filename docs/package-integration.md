@@ -36,6 +36,13 @@ second factor. The package rejects unauthenticated or unmapped principals before
 issuing a cookie. The repository Identity sample retains its existing Identity
 credential handler and uses the same default HTML renderer.
 
+Direct browser sign-in returns to the app root when no safe return URL is supplied.
+Set `CellBridgeLoginOptions.DefaultReturnPath` to another local path, such as
+`/library`, to choose the host's home page. The package includes the app's `PathBase`.
+Office supplies its completion URL explicitly, so its sign-in still ends at the
+completion endpoint. The standard form reports empty or invalid credentials on
+the page rather than using the embedded browser's validation popup.
+
 ### Supply your own HTML
 
 The standard page works without a renderer. To replace just the HTML:

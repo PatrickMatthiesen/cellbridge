@@ -81,7 +81,7 @@ public static class CellBridgeOfficeFormsAuthentication
         return registration;
     }
 
-    private static void ValidatePath(PathString path, string name)
+    internal static void ValidatePath(PathString path, string name)
     {
         var value = path.Value;
         if (string.IsNullOrWhiteSpace(value) || !value.StartsWith('/') || value.StartsWith("//") ||

@@ -115,7 +115,7 @@ public sealed class OfficeAuthenticationTests
             new FormUrlEncodedContent(new Dictionary<string, string> { ["login"] = "owner" }));
         Assert.Equal(HttpStatusCode.BadRequest, missingCsrf.StatusCode);
         using var signedIn = await SignIn(client, path, "owner", "//evil.example/", tamper: true);
-        Assert.Equal("/_cellbridge/auth/complete", signedIn.Headers.Location!.ToString());
+        Assert.Equal("/", signedIn.Headers.Location!.ToString());
 
         var remoteGet = await factory.Server.SendAsync(context =>
         {
@@ -131,6 +131,34 @@ public sealed class OfficeAuthenticationTests
             context.Request.Path = path;
         });
         Assert.Equal(404, remotePost.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DirectBrowserLoginAndLoginAfterSignOutReturnToTheWorkspace()
+    {
+        using var files = new TemporaryDirectory();
+        await using var factory = new LibraryFactory(files.Path);
+        using var client = Client(factory);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            using var page = await client.GetAsync("/auth/login");
+            var html = await page.Content.ReadAsStringAsync();
+            Assert.Contains("name=\"returnUrl\" value=\"/\"", html);
+            var token = WebUtility.HtmlDecode(Regex.Match(html,
+                "name=\"__RequestVerificationToken\" value=\"([^\"]+)\"").Groups[1].Value);
+            using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
+            { ["login"] = "owner", ["password"] = "Test1234!", ["returnUrl"] = "/", ["__RequestVerificationToken"] = token }));
+            Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
+            Assert.Equal("/", login.Headers.Location!.ToString());
+            var home = await client.GetStringAsync("/");
+            Assert.Contains("Document library", home);
+            var logoutToken = WebUtility.HtmlDecode(Regex.Match(home,
+                "name=\"__RequestVerificationToken\" value=\"([^\"]+)\"").Groups[1].Value);
+            using var logout = await client.PostAsync("/local-logout", new FormUrlEncodedContent(new Dictionary<string, string>
+            { ["__RequestVerificationToken"] = logoutToken }));
+            Assert.Equal(HttpStatusCode.Redirect, logout.StatusCode);
+            Assert.Equal("/auth/login", logout.Headers.Location!.ToString());
+        }
     }
 
     internal static HttpClient Client(LibraryFactory factory) => factory.CreateClient(new()
@@ -155,7 +183,7 @@ public sealed class OfficeAuthenticationTests
         var hiddenReturn = WebUtility.HtmlDecode(Regex.Match(html,
             "name=\"returnUrl\" value=\"([^\"]+)\"").Groups[1].Value);
         Assert.Equal("/auth/login", action);
-        Assert.Equal(tamper ? "/_cellbridge/auth/complete" : returnUrl, hiddenReturn);
+        Assert.Equal(tamper ? "/" : returnUrl, hiddenReturn);
         return await client.PostAsync(tamper ? path : action, new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["login"] = user,

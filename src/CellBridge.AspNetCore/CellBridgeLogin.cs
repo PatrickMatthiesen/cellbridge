@@ -34,6 +34,8 @@ public sealed class CellBridgeLoginOptions
     public Func<CellBridgeLoginPageContext, string>? RenderPage { get; set; }
     /// <summary>Optional host request gate, applied to both login methods before any credential or token processing.</summary>
     public Func<HttpContext, bool>? IsRequestAllowed { get; set; }
+    /// <summary>Browser destination when no safe return URL is supplied. Relative to the app's PathBase.</summary>
+    public PathString DefaultReturnPath { get; set; } = new("/");
     public PathString CompletionPath { get; set; } = new("/_cellbridge/auth/complete");
     public string? PublicOrigin { get; set; }
 }
@@ -60,10 +62,11 @@ public static class CellBridgeLogin
         configure?.Invoke(options);
         if (string.IsNullOrWhiteSpace(options.ApplicationName))
             throw new ArgumentException("ApplicationName must not be blank.", nameof(configure));
+        CellBridgeOfficeFormsAuthentication.ValidatePath(options.DefaultReturnPath, nameof(options.DefaultReturnPath));
         services.AddCellBridgeOfficeFormsAuthentication(cookieScheme, office =>
         { office.CompletionPath = options.CompletionPath; office.PublicOrigin = options.PublicOrigin; });
         services.AddSingleton(new LoginRegistration(options.ApplicationName, options.RenderPage,
-            options.IsRequestAllowed));
+            options.IsRequestAllowed, options.DefaultReturnPath));
         services.AddAntiforgery();
         services.AddSingleton<IHostedService, AuthenticatorValidator>();
         return services;
@@ -80,8 +83,8 @@ public static class CellBridgeLogin
         {
             context.Response.Headers.CacheControl = "no-store";
             if (registration.IsRequestAllowed?.Invoke(context) == false) return Results.NotFound();
-            var completion = (context.Request.PathBase + office.CompletionPath).ToUriComponent();
-            var returnUrl = LocalReturnUrl(context.Request.Query[cookie.ReturnUrlParameter], completion);
+            var defaultReturn = (context.Request.PathBase + registration.DefaultReturnPath).ToUriComponent();
+            var returnUrl = LocalReturnUrl(context.Request.Query[cookie.ReturnUrlParameter], defaultReturn);
             var page = new CellBridgeLoginPageContext(registration.ApplicationName,
                 antiforgery.GetAndStoreTokens(context), returnUrl, context.Request.Query.ContainsKey("failed"),
                 (context.Request.PathBase + cookie.LoginPath).ToUriComponent(), cookie.ReturnUrlParameter);
@@ -107,8 +110,8 @@ public static class CellBridgeLogin
             catch (InvalidDataException) { return Results.BadRequest(); }
             var username = form["login"].ToString();
             var password = form["password"].ToString();
-            var completion = (context.Request.PathBase + office.CompletionPath).ToUriComponent();
-            var returnUrl = LocalReturnUrl(form[cookie.ReturnUrlParameter], completion);
+            var defaultReturn = (context.Request.PathBase + registration.DefaultReturnPath).ToUriComponent();
+            var returnUrl = LocalReturnUrl(form[cookie.ReturnUrlParameter], defaultReturn);
             var principal = username.Length is > 0 and <= 256 && password.Length is > 0 and <= 1024
                 ? await authenticator.AuthenticateAsync(context, username, password, context.RequestAborted) : null;
             if (principal is null || CellBridgeActor.FromPrincipal(principal) is null)
@@ -125,7 +128,7 @@ public static class CellBridgeLogin
         !value.Any(char.IsControl) ? value : fallback;
 
     private sealed record LoginRegistration(string ApplicationName, Func<CellBridgeLoginPageContext, string>? RenderPage,
-        Func<HttpContext, bool>? IsRequestAllowed);
+        Func<HttpContext, bool>? IsRequestAllowed, PathString DefaultReturnPath);
 
     private sealed class AuthenticatorValidator(IServiceScopeFactory scopes,
         IOptionsMonitor<CookieAuthenticationOptions> cookies, IOptions<AntiforgeryOptions> antiforgery,
