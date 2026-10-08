@@ -496,18 +496,15 @@ public static class StorageManifestBuilder
         new Compact64bitInt(objectDataSize).Serialize(declareWriter); // Object Data Size
         new Compact64bitInt(0).Serialize(declareWriter);          // Opaque data has no object references
         new Compact64bitInt(0).Serialize(declareWriter);          // Cell References Count
-        byte[] declarePayload = declareWriter.ToArray();
-
         var declareHeader = new StreamObjectHeaderStart16Bit(
-            StreamObjectTypeHeaderStart.ObjectGroupObjectDeclare, declarePayload.Length);
+            StreamObjectTypeHeaderStart.ObjectGroupObjectDeclare, declareWriter.Length);
         declareHeader.Serialize(declarationsWriter);
-        declarationsWriter.WriteBytes(declarePayload);
+        declareWriter.CopyTo(declarationsWriter);
 
-        byte[] declarationsPayload = declarationsWriter.ToArray();
         var declarationsHeader = new StreamObjectHeaderStart32Bit(
             StreamObjectTypeHeaderStart.ObjectGroupDeclarations, 0);
         declarationsHeader.Serialize(payloadWriter);
-        payloadWriter.WriteBytes(declarationsPayload);
+        declarationsWriter.CopyTo(payloadWriter);
         new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.ObjectGroupDeclarations)
             .Serialize(payloadWriter);
 
@@ -526,17 +523,15 @@ public static class StorageManifestBuilder
         // Data: Binary Item (compact length + raw bytes).
         new BinaryItem(objectData).Serialize(objectDataWriter);
 
-        byte[] objectDataPayload = objectDataWriter.ToArray();
         var objectDataHeader = new StreamObjectHeaderStart32Bit(
-            StreamObjectTypeHeaderStart.ObjectGroupObjectData, objectDataPayload.Length);
+            StreamObjectTypeHeaderStart.ObjectGroupObjectData, objectDataWriter.Length);
         objectDataHeader.Serialize(dataWriter);
-        dataWriter.WriteBytes(objectDataPayload);
+        objectDataWriter.CopyTo(dataWriter);
 
-        byte[] dataPayload = dataWriter.ToArray();
         var dataHeader = new StreamObjectHeaderStart32Bit(
             StreamObjectTypeHeaderStart.ObjectGroupData, 0);
         dataHeader.Serialize(payloadWriter);
-        payloadWriter.WriteBytes(dataPayload);
+        dataWriter.CopyTo(payloadWriter);
         new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.ObjectGroupData)
             .Serialize(payloadWriter);
 

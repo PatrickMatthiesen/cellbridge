@@ -208,12 +208,16 @@ try {
     if (-not $env:CELLBRIDGE_INTEROP_COOKIE -or -not $env:CELLBRIDGE_INTEROP_CSRF) {
         throw 'Supply CELLBRIDGE_INTEROP_COOKIE and CELLBRIDGE_INTEROP_CSRF from a signed-in creator account. Office must separately sign in to this origin.'
     }
-    $httpHeaders = @{ Cookie = $env:CELLBRIDGE_INTEROP_COOKIE; 'X-CellBridge-CSRF' = $env:CELLBRIDGE_INTEROP_CSRF }
+    $httpSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    foreach ($cookie in $env:CELLBRIDGE_INTEROP_COOKIE.Split(';')) {
+        if ($cookie.Trim()) { $httpSession.Cookies.SetCookies([uri]"$BaseUrl/", $cookie.Trim()) }
+    }
+    $httpHeaders = @{ 'X-CellBridge-CSRF' = $env:CELLBRIDGE_INTEROP_CSRF }
     $body = @{ name = $fileName; type = 'docx' } | ConvertTo-Json
-    Invoke-RestMethod "$BaseUrl/api/documents" -Headers $httpHeaders -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
-    $before = Invoke-WebRequest $documentUrl -Headers $httpHeaders -Method Head -UseBasicParsing -TimeoutSec 30
+    Invoke-RestMethod "$BaseUrl/api/documents" -WebSession $httpSession -Headers $httpHeaders -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
+    $before = Invoke-WebRequest $documentUrl -WebSession $httpSession -Headers $httpHeaders -Method Head -UseBasicParsing -TimeoutSec 30
     $result.initialEtag = [string]$before.Headers['ETag']
-    Invoke-WebRequest $documentUrl -Headers $httpHeaders -UseBasicParsing -TimeoutSec 30 `
+    Invoke-WebRequest $documentUrl -WebSession $httpSession -Headers $httpHeaders -UseBasicParsing -TimeoutSec 30 `
         -OutFile (Join-Path $OutputDirectory 'server-initial.docx') | Out-Null
     $result.phase = 'open-remote-document'
     $word = Start-OwnedWord
@@ -239,7 +243,7 @@ try {
     do {
         $verificationHeaders = $httpHeaders.Clone()
         $verificationHeaders['Cache-Control'] = 'no-cache'
-        $response = Invoke-WebRequest "$documentUrl`?verification=$runId" -Headers $verificationHeaders -UseBasicParsing -TimeoutSec 15 `
+        $response = Invoke-WebRequest "$documentUrl`?verification=$runId" -WebSession $httpSession -Headers $verificationHeaders -UseBasicParsing -TimeoutSec 15 `
             -OutFile $download -PassThru
         $zip = [IO.Compression.ZipFile]::OpenRead($download)
         try {

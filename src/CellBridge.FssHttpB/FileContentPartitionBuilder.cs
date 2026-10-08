@@ -50,7 +50,7 @@ public static class FileContentPartitionBuilder
     private static void WriteObject(BinaryWriterEx writer, StreamObjectTypeHeaderStart type, BinaryWriterEx body)
     {
         new StreamObjectHeaderStart32Bit(type, body.Length).Serialize(writer);
-        writer.WriteBytes(body.ToArray());
+        body.CopyTo(writer);
     }
 
     private sealed record StreamObject(ExGuid Id, byte[] Content, ExGuid[] References);
