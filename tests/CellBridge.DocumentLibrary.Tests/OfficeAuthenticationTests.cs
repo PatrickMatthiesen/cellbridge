@@ -117,9 +117,12 @@ public sealed class OfficeAuthenticationTests
         using var client = Client(factory);
         using var response = await client.GetAsync("/auth/login");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Throws<IOException>(() =>
+        {
+            using var competing = new DocumentLibraryDestination(files.Path);
+        });
         var lifetime = factory.Services.GetRequiredService<IHostApplicationLifetime>();
         _ = factory.Services.GetRequiredService<DisposalGate>();
-        Assert.Throws<IOException>(() => new DocumentLibraryDestination(files.Path));
 
         try
         {
