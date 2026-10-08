@@ -135,6 +135,10 @@ Normal development includes the explicitly started [SharePoint proxy](capture-ki
 
 ## Performance measurements
 
+For isolated inbound parsing, eager restore and nested builder allocations, see
+[measuring request allocations](allocation-measurements.md). The stage benchmark
+uses synthetic inputs and reviewed fixture bytes without a running app.
+
 ```sh
 python3 tools/testing/run.py --performance --sizes 1,10 --clients 1,8 --iterations 5
 ```

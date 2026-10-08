@@ -53,4 +53,7 @@ public sealed class BinaryWriterEx
     }
 
     public byte[] ToArray() => _buffer.WrittenSpan.ToArray();
+
+    /// <summary>Copies completed nested bytes into another writer's owned buffer.</summary>
+    internal void CopyTo(BinaryWriterEx destination) => destination.WriteBytes(_buffer.WrittenSpan);
 }
