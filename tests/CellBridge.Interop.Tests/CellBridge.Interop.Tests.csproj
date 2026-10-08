@@ -39,10 +39,14 @@
     <Compile Include="GuidAllocationInteropTests.cs" />
     <Compile Include="GraphUploadInteropTests.cs" />
     <Compile Include="BoundedDifferentialGraphTests.cs" />
+    <Compile Include="BoundedServerProcessingTests.cs" />
+    <Compile Include="BoundedDifferentialHeaderTests.cs" />
     <Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" />
     <Compile Include="MicrosoftProtocol\**\*.cs" />
     <Compile Remove="MicrosoftProtocol\FssHttpD\**\*.cs" />
     <ProjectReference Include="..\..\src\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
     <ProjectReference Include="..\..\src\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
+    <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
   </ItemGroup>
 </Project>
