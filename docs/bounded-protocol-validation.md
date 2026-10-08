@@ -49,6 +49,18 @@ mapping headers. Their required 16-bit framing correction belongs to #18.
 The new record permutations accept either width; Microsoft decoding of the
 baseline fixture does not establish conformance to that field-specific rule.
 
+After the reviewed #18 framing correction is integrated, affected mutation
+checks must first fully decode a valid inline graph package independently under
+both 12/11 and 13/11 envelopes. The coordinator reports that the corrected inline
+fixture satisfies this positive baseline, but it has not yet been integrated or
+rerun here. A separate broader BLOB graph probe encountered the vendored parser's
+`BinaryItem` assumption for opaque BLOB data. Existing passing synthetic BLOB
+cases do not remove that limitation. A baseline parser rejection leaves the
+corresponding independent mutation check unvalidated; it cannot count as
+successful rejection of a mutation. Keep this BLOB evidence gate separate from
+inline graph checks and from decoding applied-index-only save replies. No BLOB
+production or vendored decoder changes are included in this tranche.
+
 This tranche starts from merged PR #62, commit
 `58958fcb5b4a777f99b72bbd3e25620753d0ec81`. The local environment is Debian
 13.7 x64, .NET SDK 10.0.401 and .NET/ASP.NET Core runtime 10.0.12. The backend is
