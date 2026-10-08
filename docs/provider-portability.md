@@ -228,3 +228,9 @@ replication/failover, arbitrary shared filesystems, external policy-system recov
 and real external-host adoption require environment-specific qualification. This
 workflow adds no OneNote or two-desktop coauthoring claim and does not publish new
 NuGet packages.
+
+For the separate quiescent `pg_dump`/`pg_restore` procedure, controlled database
+outages and independent raw-table/content verification, see
+[controlled database recovery](supported-environments.md#controlled-database-interruption-and-logical-restore).
+That runner uses disposable local resources and does not qualify a deployed
+backup, shared filesystem or failover configuration.

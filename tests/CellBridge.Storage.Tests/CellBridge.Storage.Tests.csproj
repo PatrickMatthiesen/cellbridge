@@ -12,6 +12,7 @@
     <ProjectReference Include="../../tools/CellBridge.Storage.ProcessProbe/CellBridge.Storage.ProcessProbe.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../tools/CellBridge.Storage.Portability/CellBridge.Storage.Portability.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/CellBridge.Web/CellBridge.Web.csproj" />
+    <ProjectReference Include="../../src/CellBridge.OfficeInspectors/CellBridge.OfficeInspectors.csproj" />
     <None Include="../../testdata/sharepoint/fixtures/save_reopen/*.json" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Using Include="Xunit" />
   </ItemGroup>
