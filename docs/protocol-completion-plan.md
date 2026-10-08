@@ -4,8 +4,10 @@ This plan separates missing behavior from optional optimizations and unverified
 client scenarios. It covers CellBridge's MS-FSSHTTP/MS-FSSHTTPB scope and the
 requested OneNote desktop open, edit and synchronization workflow. It is a plan,
 not a claim that these features are implemented or that every protocol extension
-has already been audited. The inventory below was reviewed against the code and
+has already been audited. The original inventory and phase order were reviewed against the code and
 Microsoft specifications on 2026-10-05, with Astra reviewing the scope and order.
+The implementation status below was reconciled with current source on 2026-10-08.
+Phase descriptions retain the design gates; they are not an inventory of missing code.
 
 The existing SOAP/MTOM transport, binary framing, durable providers, authorization,
 knowledge handling and graph-aware file saves remain the foundation. The earlier
@@ -36,26 +38,28 @@ The [requirements ledger](protocol-requirements.md) records current field-level
 status and profile decisions. GUID allocation, canonical version URLs, user-agent
 identity, matching binary partition selectors and lock transitions now have
 implementations and focused tests. The generic graph resolver now has durable
-codecs and file save/scoped query integration. General non-file publication and
-actual OneNote qualification remain.
+codecs and file save/scoped query integration. Complete opaque application metadata
+graphs, recoverable revision history and selected outer document operations are
+also implemented. General application adapters, staged modes, reference acceptance
+and actual OneNote qualification remain.
 
 The identifiers in this table are stable references for implementation work.
 Acceptance criteria are expanded in the phases below.
 
 | ID | Area and current evidence | Class | Improvement and relative effort |
 | --- | --- | --- | --- |
-| G1 | Generic cells, roots and object partitions have durable codecs and file adapter integration. | Implemented foundation; non-file publication/reference qualification remains | Essential shared foundation for OneNote. Non-file protocol uploads still belong to U1. |
-| G2 | File materialization resolves inherited objects with revision/cell scope and nearest-definition precedence. | Implemented file behavior; reference qualification remains | Required ancestors remain retained. Strict generic resolution preserves explicit errors for incomplete graphs. |
-| G3 | File publication and generic codecs resolve declared BLOB IDs and preserve retained handles. | Implemented file behavior; non-file/reference qualification remains | BLOB integrity and closure have restart/provider tests; no largest-payload recovery. |
-| Q1 | Mixed/repeated file, metadata and editor queries share one package, preserving each scope/knowledge/error. Known binary targets override the SOAP default per operation. | Implemented query assembly; qualification remains | Filter specialization and reference qualification remain #23; metadata graph remains #28 and version queries #7. |
-| Q2 | `QueryChangesVersioning` is rejected; `GetVersions` exposes the current entry with versioning disabled. Retained snapshots are not a public version repository. | Missing version/history capability | Real version tokens, version queries and coherent listing/restoration. Large storage and protocol change. |
+| G1 | Generic cells, roots and object partitions have durable codecs, file adapter integration and complete opaque metadata publication. | Implemented foundation; reference/client qualification remains | OneNote-specific adapters and other application partitions remain #31/#27. |
+| G2 | File and metadata graphs resolve inherited objects with revision/cell scope and nearest-definition precedence. | Implemented graph behavior; reference qualification remains | Required ancestors remain retained. Strict generic resolution preserves explicit errors for incomplete graphs. |
+| G3 | File and metadata publication resolve declared BLOB IDs and preserve retained handles. | Implemented graph behavior; reference qualification remains | BLOB integrity and closure have restart/provider tests; no largest-payload recovery. |
+| Q1 | Mixed/repeated file, metadata and editor queries share one package, preserving each scope/knowledge/error. Known binary targets override the SOAP default per operation. | Implemented query assembly; qualification remains | Filter specialization and reference qualification remain #23; metadata semantics #28 and historical profiles #7. |
+| Q2 | Durable history supports authorized listing/download and graph-aware restore. The selected SharePoint 2010/2013 profile ignores bounded `QueryChangesVersioning` and returns current state. | Implemented history and valid profile fallback; qualification remains | Independent history/restore reference traffic and desktop qualification remain #7. Higher binary version-token profiles are unadvertised. |
 | Q3 | Byte budgets needing continuation return errors; `AllowFragments` is parsed without implementing fragmented delivery. | Missing continuation capability | Bounded synchronization for large graphs. Substantial transaction/state work. Fragment permission alone does not require every response to fragment. |
 | Q4 | `AllocateExtendedGuidRange` has typed codecs and authorized execution using fresh UUID namespaces. | Implemented operation | Exact count, exclusive upper bound and concurrent host decoding tests; no durable shared counter required. |
-| Q5 | File-hash requests are parsed without producing the requested hash; request/data-element hashing needs a profile audit. | Conditional requirement | Implement negotiated wire hashes with their specified ordering/schema. Storage SHA-256 is not a substitute. Medium change. |
-| W1 | Partial/staged multi-request uploads, non-file uploads and alternate coherency modes are explicitly unsupported per operation. Complete saves accept the multi-request coalescing hint. | Missing synchronization modes | Durable staging and correct commit/retry semantics for incremental graph changes. The hint alone does not define a staged transaction. Large change. |
-| M1 | Metadata queries use a storage-index-only placeholder; application metadata writes are unsupported. | Missing partition behavior | Application metadata graphs and consistent read/write knowledge. Medium to large change. |
+| Q5 | Negotiated schema-1 data-element hashing and excluded-data query responses are implemented. The selected product profile ignores the separate file-hash request. | Implemented negotiated facility and valid profile fallback | #26 is closed. Remaining advertised-field/reference audit belongs to #18; storage SHA-256 is separate. |
+| W1 | Complete file and opaque metadata graphs publish atomically, including requested applied indexes and partition-scoped receipts. Partial/staged uploads, alternate coherency modes and buffered/coalescing metadata writes remain unsupported. | Implemented complete saves; missing synchronization modes | Durable staging needs an evidenced association/commit/retry contract under #27. `MultiRequestPutHint` alone does not define one. |
+| M1 | Durable metadata queries return uploaded opaque graphs and scoped knowledge; complete noncoalescing metadata writes publish atomically. Uninitialized metadata and the legacy buffered executor retain the index-only response. | Implemented durable partition behavior; qualification remains | SharePoint application metadata reference traffic and client interpretation remain #28. See [metadata limits](application-metadata.md). |
 | L1 | Exclusive/schema conversions and coauthor transition acknowledgement use durable explicit membership. | Implemented server transitions; qualification remains | Provider/HTTP tests establish state behavior. Reference traffic and two-desktop transition qualification remain in #29/#5. |
-| S1 | Outer `FileOperation`, `Versioning` and `Properties` types exist but dispatch falls through to unsupported. | Missing outer operations, suboperations to inventory | Document management and property/version behavior within MS-FSSHTTP. Medium to large; exact scope follows the normative ledger. |
+| S1 | Durable dispatch implements Rename, Versioning list/restore and Properties enumerate/get. Other suboperations return explicit unsupported errors. | Implemented bounded outer operations; applicability/reference gates remain | #30 owns remaining suboperation applicability and reference acceptance. See [revision history](revision-history.md#outer-document-operations). |
 | N1 | OneNote schemas, graph publication strategy and a qualified native desktop workflow are absent. | New requested compatibility target | Desktop OneNote open/edit/sync, using G1–G3 and synchronization work. Large milestone; the format adapter is only part of the work. |
 
 Evidence locations: [graph selection](../src/CellBridge.FssHttpB/PartitionGraphSnapshot.cs),
@@ -84,11 +88,11 @@ file-hash facility is not an unconditional failure in every supported profile.
 | Specialize currently unsupported query filters and knowledge forms where a full-response fallback is permitted. | Performance or optional compatibility; evaluate each control separately. | Less network traffic and client work. A full response can already be correct. |
 | Load graph elements lazily; reduce eager restoration and payload reads. | Performance, independently of G1–G3. | Lower query latency and memory for large retained graphs. |
 | Stream incoming HTTP/MTOM parsing and reduce nested serialization copies. | Performance. | Lower peak memory for large requests. Response/save streaming is already implemented. |
-| Measure serialized lengths without serializing each element solely to count it. | Performance. | Lower allocation/CPU during response shaping. Preserve exact budget behavior. |
+| Reduce remaining nested serialization and metadata-counting allocations. | Performance. | Query budget checks now measure element lengths without copying raw payloads. Current-profile admission and exact byte limits remain unchanged; #33 covers the remaining costs. |
 | Enable automatic graph pruning/compaction. | Operational feature with storage-efficiency benefits. | Longer operation within quotas. It requires complete reference traversal and stale-client recovery; existing orphan collection is separate. |
-| Provider export/import, migration and public restoration tools. | Operational features. | Recovery and portability; not new binary framing support. |
+| Qualify provider export/import and restoration on additional operator recovery procedures. | Operational qualification. | Public portability tooling is implemented and #32 is closed. See [provider portability](provider-portability.md). |
 | Fuzzing and differential decoding. | Reliability and validation. | Find malformed-input and interpretation defects; neither is a performance feature. |
-| Durable Excel requalification and two distinct authenticated desktops editing together. | Unverified scenarios. | Qualify these environments and workflows; see [client coverage](interoperability.md#client-coverage). |
+| Broader Word/Excel/PowerPoint restart/reconnect coverage and two distinct authenticated desktops editing together. | Unverified scenarios. | Authenticated single-desktop Word/Excel saves and reopen already have evidence; see [client coverage](interoperability.md#client-coverage). |
 | Additional Office builds and deployment failure/power-loss qualification. | Unverified client/operational scenarios. | Establish explicit supported environments and recovery limits. |
 
 ## OneNote complexity and scope
@@ -148,7 +152,7 @@ turns the known-gap inventory into an exhaustive audit for the selected profiles
 
 ### Phase 1 — Generic graph representation
 
-Implement G1–G3 in the standalone graph library and persistent state. Model object
+G1–G3 are implemented in the standalone graph library and persistent state. Qualify object
 identity with its cell/revision scope and object partition. Resolve ancestor
 revisions through the selected index, with explicit precedence and scope rules.
 Support roots, cell references and BLOB references without interpreting arbitrary
@@ -166,7 +170,7 @@ ownership guarantees.
 
 ### Phase 2 — Query execution and allocation
 
-Implement Q1, Q4 and the applicable Q5 behavior. Assemble shared response packages
+Q1, Q4 and the applicable Q5 behavior are implemented. Qualify shared response packages
 while preserving each query's scope, result, knowledge and errors. Add actual
 cell/root selection and the required filter semantics; document permitted full
 fallbacks. Allocate unique GUID ranges across hosts and restart without a process-local counter.
@@ -180,10 +184,12 @@ fixtures. Version queries wait for Phase 3; continuation waits for Phase 4.
 
 ### Phase 3 — Versions and outer document operations
 
-Define a durable immutable version repository and its content/graph references,
-retention limits and access checks. Implement Q2 using the actual version-query
-wire structures; do not reuse the legacy `Waterline` field as a version token.
-Implement the S1 suboperations established by Phase 0. Preserve stable resource
+The durable immutable history repository, graph-aware restore and selected S1
+suboperations are implemented. Qualify them against independent reference traffic
+and target clients. Historical binary version-token profiles need a separate
+profile decision and actual wire structures; the current profile ignores the bounded
+versioning extension. Do not reuse `Waterline` as a version token.
+Audit any further S1 suboperations through Phase 0. Preserve stable resource
 identity during supported file operations and check permissions on properties,
 history and restoration. Restoration must create a coherent new publication.
 
@@ -213,11 +219,13 @@ knowledge. Explicit unsupported errors remain until each mode passes this gate.
 
 ### Phase 5 — Metadata and coordination
 
-Implement M1 and L1 against reference partition/transition semantics. Metadata
-queries and writes must agree on graph state and knowledge. Lock transitions must
+M1 complete durable metadata publication and L1 server lock transitions are
+implemented. Qualify their application/transition semantics against reference
+traffic and target clients. Metadata queries and writes must agree on graph state
+and knowledge. Lock transitions must
 be durable and respect owner, identity, expiry, permissions and concurrent hosts.
 This work can proceed alongside earlier phases where its dependencies permit;
-metadata writes depend on Phases 1 and 4.
+complete metadata writes use Phase 1 graphs; staged metadata modes also need Phase 4.
 
 The gate is reference request/response traces, two-host transition races and
 restart/expiry/revocation tests. Include the already implemented schema-to-exclusive
@@ -241,9 +249,9 @@ scope decision before declaring this target achievable or complete.
 
 ### Phase 7 — Operational lifecycle
 
-Add provider export/import and migration workflows that preserve IDs, serials,
-metadata and all referenced content. Add public restoration tooling on Phase 3's
-version contract. Enable automatic pruning only after retention traversal protects
+Provider export/import, migration and public history restoration are implemented.
+Qualify additional recovery environments while preserving IDs, serials, metadata
+and all referenced content. Enable automatic pruning only after retention traversal protects
 active readers, continuations, ancestor/BLOB references, history, receipts and
 recovery points. Establish stale-client full-resynchronization behavior first.
 

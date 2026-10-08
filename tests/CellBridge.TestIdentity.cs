@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -12,6 +13,17 @@ internal static class TestActor
     public static void Register(IServiceCollection services) => services.AddAuthentication("test")
         .AddScheme<AuthenticationSchemeOptions, TestAuthenticationHandler>("test", _ => { });
     public static CellBridgeActor Value { get; } = new(new("tests:writer", "test-writer", "Test writer"), CanCreate: true);
+
+    public static HttpClient CreateClient(TestServer server, string user) => new(server.CreateHandler(context =>
+    {
+        var claims = new List<Claim>
+        {
+            new(CellBridgeActor.SubjectClaim, "tests:" + user), new(ClaimTypes.Name, "test-" + user),
+            new(CellBridgeActor.DisplayNameClaim, "Test " + user),
+        };
+        if (user == "writer") claims.Add(new(CellBridgeActor.CreateClaim, "true"));
+        context.User = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+    })) { BaseAddress = server.BaseAddress };
 }
 
 internal sealed class TestAuthenticationHandler(IOptionsMonitor<AuthenticationSchemeOptions> options,
@@ -19,16 +31,8 @@ internal sealed class TestAuthenticationHandler(IOptionsMonitor<AuthenticationSc
 {
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        var user = Request.Headers["X-Test-User"].ToString();
-        if (user.Length == 0) return Task.FromResult(AuthenticateResult.NoResult());
-        var subject = "tests:" + user;
-        var claims = new List<Claim>
-        {
-            new(CellBridgeActor.SubjectClaim, subject), new(ClaimTypes.Name, "test-" + user),
-            new(CellBridgeActor.DisplayNameClaim, "Test " + user),
-        };
-        if (user == "writer") claims.Add(new(CellBridgeActor.CreateClaim, "true"));
-        var identity = new ClaimsIdentity(claims, Scheme.Name);
-        return Task.FromResult(AuthenticateResult.Success(new(new ClaimsPrincipal(identity), Scheme.Name)));
+        return Task.FromResult(Context.User.Identity?.IsAuthenticated == true
+            ? AuthenticateResult.Success(new(Context.User, Scheme.Name))
+            : AuthenticateResult.NoResult());
     }
 }

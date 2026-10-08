@@ -19,6 +19,20 @@ public sealed class AuthorizationEndpointTests
     private static readonly XNamespace Protocol = CellStorageRequest.Namespace;
 
     [Theory]
+    [InlineData("writer")]
+    [InlineData("reader")]
+    public async Task AuthenticatedDiscoveryAdvertisesTheSelectedProtocol(string user)
+    {
+        await using var fixture = await Fixture.Start();
+        using var client = fixture.CreateClient(user);
+        using var request = new HttpRequestMessage(HttpMethod.Options, "/shared");
+        using var result = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.Equal("1.0", Assert.Single(result.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Equal("http://localhost/shared/", Assert.Single(result.Headers.GetValues("X-MSGETWEBURL")));
+    }
+
+    [Theory]
     [InlineData("GET", "/shared/secret.bin")]
     [InlineData("HEAD", "/shared/secret.bin")]
     [InlineData("OPTIONS", "/shared")]
@@ -42,12 +56,33 @@ public sealed class AuthorizationEndpointTests
         await using var fixture = await Fixture.Start(externalPolicy: externalPolicy);
         foreach (var user in new[] { "reader", "other" })
         {
+            using var client = fixture.CreateClient(user);
             using var request = new HttpRequestMessage(new(method), "/shared/secret.bin");
-            request.Headers.Add("X-Test-User", user);
-            using var result = await fixture.Client.SendAsync(request);
+            using var result = await client.SendAsync(request);
             Assert.Equal(user == "reader" ? HttpStatusCode.OK : HttpStatusCode.Forbidden, result.StatusCode);
             if (user == "other") { Assert.Null(result.Headers.ETag); Assert.Null(result.Content.Headers.LastModified); }
             else if (method == "GET") Assert.Equal(new byte[] { 1, 2, 3 }, await result.Content.ReadAsByteArrayAsync());
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentClientsKeepTheirOwnIdentity()
+    {
+        await using var fixture = await Fixture.Start();
+        using var reader = fixture.CreateClient("reader");
+        using var other = fixture.CreateClient("other");
+
+        await Task.WhenAll(Enumerable.Range(0, 10).SelectMany(_ => new[]
+        {
+            Check(reader, HttpStatusCode.OK),
+            Check(other, HttpStatusCode.Forbidden),
+            Check(fixture.Client, HttpStatusCode.Unauthorized),
+        }));
+
+        static async Task Check(HttpClient client, HttpStatusCode expected)
+        {
+            using var result = await client.GetAsync("/shared/secret.bin");
+            Assert.Equal(expected, result.StatusCode);
         }
     }
 
@@ -219,11 +254,11 @@ public sealed class AuthorizationEndpointTests
     public async Task BrowserSimpleAndCrossOriginPostsAreRejected(string contentType, string? origin)
     {
         await using var fixture = await Fixture.Start();
+        using var client = fixture.CreateClient("writer");
         using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")
         { Content = new StringContent("<fake/>", Encoding.UTF8, contentType) };
-        request.Headers.Add("X-Test-User", "writer");
         if (origin is not null) request.Headers.Add("Origin", origin);
-        using var result = await fixture.Client.SendAsync(request);
+        using var result = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.UnsupportedMediaType, result.StatusCode);
     }
 
@@ -234,6 +269,7 @@ public sealed class AuthorizationEndpointTests
         public StorageProvider Provider => provider;
         public DocumentState State => state;
         public HttpClient Client => client;
+        public HttpClient CreateClient(string user) => TestActor.CreateClient(app.GetTestServer(), user);
         public static async Task<Fixture> Start(bool otherCanWrite = false, bool externalPolicy = false)
         {
             var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
@@ -281,8 +317,8 @@ public sealed class AuthorizationEndpointTests
                 new XElement(Protocol + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), file)));
             using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")
             { Content = new StringContent(envelope.ToString(), Encoding.UTF8, "text/xml") };
-            request.Headers.Add("X-Test-User", user);
-            using var result = await client.SendAsync(request);
+            using var authenticatedClient = CreateClient(user);
+            using var result = await authenticatedClient.SendAsync(request);
             Assert.Equal(HttpStatusCode.OK, result.StatusCode);
             return XDocument.Parse(await result.Content.ReadAsStringAsync());
         }

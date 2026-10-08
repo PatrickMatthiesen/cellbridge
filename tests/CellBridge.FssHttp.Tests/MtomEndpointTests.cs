@@ -35,7 +35,7 @@ public sealed class MtomEndpointTests
             var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
             var state = (await service.CreateAsync("/shared/stream.bin", new byte[65536], TestActor.Value))!;
             await app.StartAsync();
-            using var client = app.GetTestClient();
+            using var client = TestActor.CreateClient(app.GetTestServer(), "writer");
             var query = new FsshttpbCellRequest { SubRequests = { new(RequestTypes.QueryChanges)
                 { RequestId = 1, Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } } } };
             var binary = query.ToByteArray();
@@ -57,7 +57,6 @@ public sealed class MtomEndpointTests
             using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")
                 { Content = new ByteArrayContent(requestBody.ToArray()) };
             request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse("multipart/related; boundary=request; start=\"<root>\"");
-            request.Headers.Add("X-Test-User", "writer");
             using var response = await client.SendAsync(request);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             var body = await response.Content.ReadAsByteArrayAsync();

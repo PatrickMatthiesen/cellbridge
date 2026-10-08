@@ -96,9 +96,9 @@ public static class MetadataVersioningResponseBuilder
         var nested = new XElement("GetVersionsResponse",
             new XElement("GetVersionsResult",
                 new XElement("results",
-                    // The in-memory store keeps only the current document and
-                    // has no historical-version repository. Reporting enabled
-                    // here would claim history that the server cannot serve.
+                    // This detached-document overload has no revision repository.
+                    // Only the DocumentState overload can advertise retained
+                    // history through the authorized download route.
                     new XElement("versioning", new XAttribute("enabled", "0")),
                     new XElement("result",
                         new XAttribute("version", version),

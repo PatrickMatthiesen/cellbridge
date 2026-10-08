@@ -1,7 +1,7 @@
 # Storage providers and reusable hosting
 
 See [tested environments and recovery limits](supported-environments.md) and the
-[beta.1 upgrade procedure](beta-2-upgrade.md) before upgrading a durable host.
+[upgrade procedure](#upgrading-a-durable-host) before upgrading a durable host.
 
 CellBridge stores document state separately from file content. PostgreSQL holds
 document identities, current revisions, synchronization graphs, save receipts,
@@ -76,9 +76,8 @@ publishes an older retained version through the regular document service.
 
 ## Consume the packages
 
-The reusable packages target .NET 10. Version `0.1.0-beta.1` and its matching symbols
-are public on NuGet.org under the CellBridge owner. See the
-[release evidence](beta-release.md#published-release). `CellBridge.AspNetCore`
+The reusable packages target .NET 10. Use the same version for all CellBridge
+packages. [CellBridge.AspNetCore](https://www.nuget.org/packages/CellBridge.AspNetCore)
 provides endpoint registration and save orchestration. Choose state and content
 stores from `.PostgreSql`, `.FileSystem` and `.InMemory`; filesystem storage
 supplies content only.
@@ -262,6 +261,28 @@ not collector roots. Test restoration with the chosen database/filesystem tools.
 Missing referenced content is corruption and is never replaced by reseeding.
 The filesystem and storage hardware must honor flush/rename operations;
 power-loss and shared-filesystem behavior need deployment-specific qualification.
+
+### Upgrading a durable host
+
+1. Record the installed package versions, database schema and content provider.
+   Keep the previous binaries and configuration.
+2. Stop every writer using the database, including external publication workers.
+   Back up PostgreSQL and any filesystem objects referenced by that recovery point.
+   Test restoration in a separate environment.
+3. Update all CellBridge package references together. Build the application and
+   the repository's `CellBridge.Storage.Setup` tool from matching source.
+4. Run setup against the stopped database. It migrates storage schema 3 to 4,
+   preserves documents and initializes recovery schema 1. Older development
+   schemas need a separate migration or recreation; setup rejects them.
+5. Start one upgraded host. Check provider health, document identities,
+   permissions, downloads and a save/reopen cycle before enabling other writers.
+   Verify publication workers' destination bindings and durable receipt stores
+   before restarting them.
+
+There is no schema-4-to-3 downgrade. For rollback, stop upgraded writers and
+restore the previous database, matching content objects, binaries and
+configuration. This loses changes made after the backup unless you reconcile
+them separately. Do not run older writers against the migrated database.
 
 ## Implement a provider
 

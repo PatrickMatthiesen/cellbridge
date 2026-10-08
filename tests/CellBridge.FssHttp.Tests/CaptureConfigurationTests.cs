@@ -55,10 +55,9 @@ public sealed class CaptureConfigurationTests
                     new XElement(protocol + "SubRequest", new XAttribute("Type", "Cell"), new XAttribute("SubRequestToken", 1),
                         new XElement(protocol + "SubRequestData", new XAttribute("BinaryDataSize", bytes.Length), Convert.ToBase64String(bytes)))))))
                 .ToString(SaveOptions.DisableFormatting);
-            using var client = app.GetTestClient();
+            using var client = TestActor.CreateClient(app.GetTestServer(), "writer");
             using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")
                 { Content = new StringContent(xml, Encoding.UTF8, "text/xml") };
-            request.Headers.Add("X-Test-User", "writer");
             using var response = await client.SendAsync(request);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             var responseBytes = await response.Content.ReadAsByteArrayAsync();

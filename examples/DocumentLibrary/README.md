@@ -69,7 +69,7 @@ aspire ps --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 ```
 
-To smoke-test the unpublished `beta.2` packages produced by the final package verifier, select its feed configuration and isolated package cache explicitly. Run these commands from the repository root after the verifier has populated `artifacts/packages`:
+To smoke-test packages built locally by the package verifier, select its feed configuration and isolated package cache explicitly. Run these commands from the repository root after the verifier has populated `artifacts/packages`:
 
 ```powershell
 $env:DocumentLibrary__RestoreConfigFile = (Resolve-Path artifacts/packages/NuGet.Config).Path
