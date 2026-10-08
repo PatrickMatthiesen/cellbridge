@@ -44,35 +44,23 @@ envelope writer. A positive control accepts the same graph with only the partial
 flags cleared. The optional hierarchy fallback is also executed alone so other
 queries cannot supply its missing data through the shared response package.
 
-The shared synthetic graph fixture retains the baseline's 32-bit storage-index
-mapping headers. Their required 16-bit framing correction belongs to #18.
-The new record permutations accept either width; Microsoft decoding of the
-baseline fixture does not establish conformance to that field-specific rule.
+The shared synthetic graph fixture uses 16-bit starts for fixed storage-index
+mapping and manifest records. Validate each graph mutation against a valid
+baseline that both independent parsers consume completely under the 12/11 and
+13/11 profiles. Both parsers must also decode the mutated wire before its
+intended graph error counts as semantic rejection. A framing failure or an
+exhausted graph budget does not establish that a reference mutation was rejected
+for the correct reason.
 
-After the reviewed #18 framing correction is integrated, affected mutation
-checks must first fully decode a valid inline graph package independently under
-both 12/11 and 13/11 envelopes. The coordinator reports that the corrected inline
-fixture satisfies this positive baseline, but it has not yet been integrated or
-rerun here. A separate broader BLOB graph probe encountered the vendored parser's
-`BinaryItem` assumption for opaque BLOB data. Existing passing synthetic BLOB
-cases do not remove that limitation. A baseline parser rejection leaves the
-corresponding independent mutation check unvalidated; it cannot count as
-successful rejection of a mutation. Keep this BLOB evidence gate separate from
-inline graph checks and from decoding applied-index-only save replies. No BLOB
-production or vendored decoder changes are included in this tranche.
+OfficeInspectors reads Object Data BLOB payloads as opaque bytes using their
+stream-object length. Complete inline and BLOB graphs can therefore be checked
+independently, including the existing BLOB-target wrong-kind mutation. This is
+separate from decoding save replies that contain only an applied storage index.
 
-This tranche starts from merged PR #62, commit
-`58958fcb5b4a777f99b72bbd3e25620753d0ec81`. The local environment is Debian
-13.7 x64, .NET SDK 10.0.401 and .NET/ASP.NET Core runtime 10.0.12. The backend is
-the repository's `CellBridge.Storage.InMemory` source at that baseline. There is
-no Office client, SharePoint farm or database server in the new processing tests.
-The vendored Microsoft parser's upstream commit is not recorded. Its exact Git
-tree identifier at the baseline is `941b3a0e4a9ea42428f3765740ecd976befd096b`.
-Reproduce that identifier with:
-
-```sh
-git rev-parse 58958fcb:tests/CellBridge.Interop.Tests/MicrosoftProtocol/FssHttpB
-```
+The local server-processing tests use disposable in-memory providers and need
+no Office client, SharePoint farm or database server. Record the checked-out
+commit, tool versions and parser source identity with each run's ignored
+artifacts. The PostgreSQL transaction tests require a separate test connection.
 
 With this workspace's Aspire app stopped, run the fast checks:
 
