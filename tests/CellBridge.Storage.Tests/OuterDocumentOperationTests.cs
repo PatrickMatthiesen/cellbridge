@@ -91,6 +91,23 @@ public sealed class OuterDocumentOperationTests
     }
 
     [Fact]
+    public async Task DuplicatePropertyIdsIsInvalidArgumentWithoutMutation()
+    {
+        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/duplicate-properties.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var file = File(state.ResourceId, SubRequestType.Properties, ("Properties", "PropertyGet"));
+        file.SubRequests[0].SubRequestDataXml = "<SubRequestData><PropertyIds/><PropertyIds/></SubRequestData>";
+
+        var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(new() { Requests = { file } },
+            "https://host.test", TestActor.Value);
+
+        Assert.Equal("InvalidArgument", Assert.Single(Assert.Single(result.Response.Responses).SubResponses).ErrorCode);
+        MicrosoftResponseSchema.Validate(result.Response.ToSoapEnvelope());
+        Assert.Empty(result.AcceptedSaves);
+        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+    }
+
+    [Fact]
     public Task RenameUniquenessAndCaseOnlyNames() => CheckRename(Memory());
 
     [PostgreSqlFact]

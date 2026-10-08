@@ -53,7 +53,9 @@ public static class StorageIndexPatch
             mapping.Revision?.Serialize(body);
             mapping.Target.Serialize(body);
             mapping.Serial.Serialize(body);
-            new StreamObjectHeaderStart32Bit(mapping.Type, body.Length).Serialize(writer);
+            // MS-FSSHTTPB 2.2.1.12.2 specifies 16-bit headers for all three
+            // storage-index mapping types, regardless of the outer profile.
+            new StreamObjectHeaderStart16Bit(mapping.Type, body.Length).Serialize(writer);
             writer.WriteBytes(body.ToArray());
         }
         return writer.ToArray();

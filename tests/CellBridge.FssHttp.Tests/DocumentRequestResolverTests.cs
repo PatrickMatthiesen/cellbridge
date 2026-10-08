@@ -84,6 +84,7 @@ public sealed class DocumentRequestResolverTests
         lockRequest.SubRequestDataAttributes["SchemaLockRequestType"] = "GetLock";
         lockRequest.SubRequestDataAttributes["SchemaLockID"] = lockId;
         lockRequest.SubRequestDataAttributes["ClientID"] = clientId.ToString("D");
+        lockRequest.SubRequestDataAttributes["Timeout"] = "3600";
         var lockResponse = new FssHttpSubResponse();
         Assert.Equal(LockOperationResult.Granted,
             FssHttpLockCoordinator.For(document, TestActor.Value.Identity).ApplySchemaLock(lockRequest, lockResponse));

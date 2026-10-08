@@ -92,14 +92,14 @@ public sealed class LockTransitionTests
     public void PendingTransitionRemainsUntilLastMemberExpires()
     {
         var h = new Harness(); var now = DateTime.UtcNow; h.Document.UseAuthoritativeTime(now);
-        var first = h.CoauthRequest(h.First, "JoinCoauthoring"); first.SubRequestDataAttributes["Timeout"] = "100";
-        var second = h.CoauthRequest(h.Second, "JoinCoauthoring"); second.SubRequestDataAttributes["Timeout"] = "200";
+        var first = h.CoauthRequest(h.First, "JoinCoauthoring"); first.SubRequestDataAttributes["Timeout"] = "3600";
+        var second = h.CoauthRequest(h.Second, "JoinCoauthoring"); second.SubRequestDataAttributes["Timeout"] = "7200";
         h.Coordinator.ApplyCoauthSession(h.Document, first, new(), now);
         h.Coordinator.ApplyCoauthSession(h.Document, second, new(), now);
-        h.Coordinator.ApplyLockStatus(new(), new(), now.AddSeconds(101));
+        h.Coordinator.ApplyLockStatus(new(), new(), now.AddSeconds(3601));
         Assert.Single(h.Coordinator.Capture().CoauthorClients);
         Assert.True(h.Coordinator.Capture().CoauthorTransitionPending);
-        h.Coordinator.ApplyLockStatus(new(), new(), now.AddSeconds(201));
+        h.Coordinator.ApplyLockStatus(new(), new(), now.AddSeconds(7201));
         Assert.Empty(h.Coordinator.Capture().CoauthorClients);
         Assert.False(h.Coordinator.Capture().CoauthorTransitionPending);
     }
@@ -206,7 +206,7 @@ public sealed class LockTransitionTests
     {
         var h = new Harness(); h.Join(h.First);
         h.Coordinator.ApplySchemaLock(Harness.Request(("SchemaLockRequestType", "GetLock"),
-            ("SchemaLockID", h.Schema), ("ClientID", h.Second.ToString())), new());
+            ("SchemaLockID", h.Schema), ("ClientID", h.Second.ToString()), ("Timeout", "3600")), new());
         var response = new FssHttpSubResponse(); h.Coauth(h.First, "ConvertToExclusive", response);
         Assert.Equal("MultipleClientsInCoauthSession", response.ErrorCode);
         Assert.NotNull(h.Document.GetSession(h.First));
@@ -217,7 +217,7 @@ public sealed class LockTransitionTests
     {
         var h = new Harness(); var now = DateTime.UtcNow;
         var request = h.CoauthRequest(h.First, "JoinCoauthoring");
-        request.SubRequestDataAttributes["Timeout"] = "3600";
+        request.SubRequestDataAttributes["Timeout"] = "7200";
         h.Coordinator.ApplyCoauthSession(h.Document, request, new(), now);
         var oldExpiry = Assert.Single(h.Coordinator.Capture().SchemaOwners).ExpiresUtc;
         request.SubRequestDataAttributes["CoauthRequestType"] = "RefreshCoauthoring";
@@ -236,7 +236,7 @@ public sealed class LockTransitionTests
     {
         var h = new Harness();
         var request = Harness.Request(("CoauthRequestType", "JoinCoauthoring"),
-            ("ClientID", "native-client"), ("SchemaLockID", h.Schema));
+            ("ClientID", "native-client"), ("SchemaLockID", h.Schema), ("Timeout", "3600"));
         Assert.Equal(LockOperationResult.Granted, h.Coordinator.ApplyCoauthSession(h.Document, request, new()));
         Assert.Equal("native-client", Assert.Single(h.Coordinator.Capture().CoauthorClients));
         Assert.Empty(h.Document.Sessions);
@@ -266,9 +266,14 @@ public sealed class LockTransitionTests
         public Harness() => Coordinator = FssHttpLockCoordinator.For(Document, TestActor.Value.Identity);
         public void Join(Guid client) => Assert.Contains(Coauth(client, "JoinCoauthoring", new()),
             new[] { LockOperationResult.Granted, LockOperationResult.Refreshed });
-        public FssHttpSubRequest CoauthRequest(Guid client, string operation) => Request(
-            ("CoauthRequestType", operation), ("ClientID", client.ToString()), ("SchemaLockID", Schema),
-            ("ExclusiveLockID", ExclusiveId), ("Timeout", "3600"), ("ReleaseLockOnConversionToExclusiveFailure", "false"));
+        public FssHttpSubRequest CoauthRequest(Guid client, string operation)
+        {
+            var request = Request(("CoauthRequestType", operation), ("ClientID", client.ToString()),
+                ("SchemaLockID", Schema), ("ExclusiveLockID", ExclusiveId), ("Timeout", "3600"));
+            if (operation == "ConvertToExclusive")
+                request.SubRequestDataAttributes["ReleaseLockOnConversionToExclusiveFailure"] = "false";
+            return request;
+        }
         public LockOperationResult Coauth(Guid client, string operation, FssHttpSubResponse response) =>
             Coordinator.ApplyCoauthSession(Document, CoauthRequest(client, operation), response);
         public FssHttpSubRequest ExclusiveRequest(string operation) => Request(("ExclusiveLockRequestType", operation),

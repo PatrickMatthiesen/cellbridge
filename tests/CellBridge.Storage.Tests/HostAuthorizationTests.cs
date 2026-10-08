@@ -29,6 +29,7 @@ public sealed class HostAuthorizationTests
         var (provider, policy, service, state) = await Create();
         var join = HostIntegrationTests.File(state.ResourceId, SubRequestType.Coauth);
         join.SubRequests[0].SubRequestDataAttributes["CoauthRequestType"] = "JoinCoauthoring";
+        join.SubRequests[0].SubRequestDataAttributes["Timeout"] = "3600";
         join.SubRequests[0].SubRequestDataAttributes["ClientID"] = Guid.NewGuid().ToString();
         join.SubRequests[0].SubRequestDataAttributes["SchemaLockID"] = Guid.NewGuid().ToString();
         Assert.Equal("Success", (await new CellBridgeRequestProcessor(service).ExecuteAsync(new() { Requests = { join } }, "https://host.test", Writer)).Response.Responses[0].SubResponses[0].ErrorCode);
@@ -73,6 +74,7 @@ public sealed class HostAuthorizationTests
         var service = new CellBridgeDocumentService(provider, new RevisionCeiling(), policy);
         var join = HostIntegrationTests.File(state.ResourceId, SubRequestType.Coauth);
         join.SubRequests[0].SubRequestDataAttributes["CoauthRequestType"] = "JoinCoauthoring";
+        join.SubRequests[0].SubRequestDataAttributes["Timeout"] = "3600";
         join.SubRequests[0].SubRequestDataAttributes["ClientID"] = Guid.NewGuid().ToString();
         join.SubRequests[0].SubRequestDataAttributes["SchemaLockID"] = Guid.NewGuid().ToString();
         Assert.Equal("Success", (await new CellBridgeRequestProcessor(service).ExecuteAsync(new() { Requests = { join } }, "https://host.test", Writer)).Response.Responses[0].SubResponses[0].ErrorCode);
@@ -340,6 +342,7 @@ public sealed class HostAuthorizationTests
         var join = HostIntegrationTests.File(state.ResourceId, SubRequestType.Coauth);
         var attributes = join.SubRequests[0].SubRequestDataAttributes;
         attributes["CoauthRequestType"] = "JoinCoauthoring"; attributes["ClientID"] = client.ToString(); attributes["SchemaLockID"] = schema;
+        attributes["Timeout"] = "3600";
         var processor = new CellBridgeRequestProcessor(service);
         Assert.Equal("Success", (await processor.ExecuteAsync(new() { Requests = { join } }, "https://host.test", Writer)).Response.Responses[0].SubResponses[0].ErrorCode);
         // Another authorized writer cannot use the recorded owner's client ID.
@@ -390,6 +393,7 @@ public sealed class HostAuthorizationTests
         Assert.False(await locks.TryCommitAsync(token, before.StateVersion, Writer, (_, _) => throw new Exception("Must not call commit"), Guid.NewGuid()));
         var request = HostIntegrationTests.File(state.ResourceId, SubRequestType.ExclusiveLock);
         request.SubRequests[0].SubRequestDataAttributes["ExclusiveLockRequestType"] = "GetLock";
+        request.SubRequests[0].SubRequestDataAttributes["Timeout"] = "3600";
         request.SubRequests[0].SubRequestDataAttributes["ExclusiveLockID"] = Guid.NewGuid().ToString();
         Assert.Equal("Success", (await new CellBridgeRequestProcessor(service).ExecuteAsync(new() { Requests = { request } }, "https://host.test", Writer)).Response.Responses[0].SubResponses[0].ErrorCode);
         Assert.NotNull((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Coordination.Exclusive);

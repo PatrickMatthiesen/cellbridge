@@ -92,6 +92,8 @@ public sealed class FssHttpLockCoordinator
             if (_actor is null || client is not null && _schemaOwners.TryGetValue(client, out var existingOwner)
                 && existingOwner.ExpiresUtc > instant && existingOwner.OwnerSubject != _actor.Subject)
                 return Denied(response);
+            if (!TryLockInput(attrs, operation, shared: true, out var timeout))
+                return Fail(response, LockOperationResult.InvalidArgument, "Invalid schema lock input");
             ExpireLocked(instant);
             if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             switch (operation)
@@ -106,7 +108,7 @@ public sealed class FssHttpLockCoordinator
                     _schemaLockId ??= schemaId;
                     var refreshed = _schemaOwners.ContainsKey(client);
                     _schemaOwners[client] = new Lease(schemaId, client,
-                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Schema, OwnerSubject: _actor.Subject);
+                        instant.AddSeconds(timeout), LockKind.Schema, OwnerSubject: _actor.Subject);
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return refreshed ? LockOperationResult.Refreshed : LockOperationResult.Granted;
 
@@ -114,7 +116,7 @@ public sealed class FssHttpLockCoordinator
                     if (client is null || !Same(_schemaLockId, schemaId) || !_schemaOwners.ContainsKey(client))
                         return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
                     _schemaOwners[client] = new Lease(schemaId, client,
-                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Schema, OwnerSubject: _actor.Subject);
+                        instant.AddSeconds(timeout), LockKind.Schema, OwnerSubject: _actor.Subject);
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return LockOperationResult.Refreshed;
 
@@ -134,7 +136,7 @@ public sealed class FssHttpLockCoordinator
                     return LockOperationResult.Observed;
 
                 case "ConvertToExclusive":
-                    return ConvertSchemaToExclusive(attrs, schemaId, instant, response);
+                    return ConvertSchemaToExclusive(attrs, schemaId, instant, response, timeout);
 
                 default:
                     return Fail(response, LockOperationResult.InvalidArgument,
@@ -158,6 +160,8 @@ public sealed class FssHttpLockCoordinator
             if (_actor is null || _exclusive is { } active && active.ExpiresUtc > instant &&
                 Same(active.Id, lockId) && active.OwnerSubject != _actor.Subject)
                 return Denied(response);
+            if (!TryLockInput(attrs, operation, shared: false, out var timeout))
+                return Fail(response, LockOperationResult.InvalidArgument, "Invalid exclusive lock input");
             ExpireLocked(instant);
             if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             switch (operation)
@@ -169,13 +173,13 @@ public sealed class FssHttpLockCoordinator
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
                     var refreshed = _exclusive is not null;
                     _exclusive = new Lease(lockId, ReadClient(attrs),
-                        instant.AddSeconds(ReadTimeout(attrs)), LockKind.Exclusive, OwnerSubject: _actor.Subject);
+                        instant.AddSeconds(timeout), LockKind.Exclusive, OwnerSubject: _actor.Subject);
                     return refreshed ? LockOperationResult.Refreshed : LockOperationResult.Granted;
 
                 case "RefreshLock":
                     if (_exclusive is null || !Same(_exclusive.Id, lockId))
                         return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
-                    _exclusive = _exclusive with { ExpiresUtc = instant.AddSeconds(ReadTimeout(attrs)) };
+                    _exclusive = _exclusive with { ExpiresUtc = instant.AddSeconds(timeout) };
                     return LockOperationResult.Refreshed;
 
                 case "ReleaseLock":
@@ -191,8 +195,7 @@ public sealed class FssHttpLockCoordinator
 
                 case "ConvertToSchema":
                 case "ConvertToSchemaJoinCoauth":
-                    if (!TryRead(attrs, "SchemaLockID", out var schemaId) || ReadClient(attrs) is not { } client ||
-                        !TryTransitionTimeout(attrs, coauth: false, out var timeout))
+                    if (!TryRead(attrs, "SchemaLockID", out var schemaId) || ReadClient(attrs) is not { } client)
                         return Fail(response, LockOperationResult.InvalidArgument, "SchemaLockID, ClientID and valid Timeout are required");
                     if (_schemaOwners.Count != 0)
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
@@ -280,6 +283,8 @@ public sealed class FssHttpLockCoordinator
             if (_actor is null || _schemaOwners.TryGetValue(client, out var owner) &&
                 owner.ExpiresUtc > instant && owner.OwnerSubject != _actor.Subject)
                 return Denied(response);
+            if (!TryLockInput(attrs, operation, shared: true, out var timeout))
+                return Fail(response, LockOperationResult.InvalidArgument, "Invalid coauthoring input");
             ExpireLocked(instant);
             if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             if (!Same(_schemaLockId, schemaId) || !_schemaOwners.ContainsKey(client) || !_coauthors.Contains(client))
@@ -291,10 +296,6 @@ public sealed class FssHttpLockCoordinator
             }
             if (operation != "ConvertToExclusive")
                 return Fail(response, LockOperationResult.InvalidArgument, "Unsupported CoauthRequestType");
-            if (!TryTransitionTimeout(attrs, coauth: true, out var timeout) ||
-                !TryBoolean(attrs, "ReleaseLockOnConversionToExclusiveFailure", required: true, out _) ||
-                !TryRead(attrs, "ExclusiveLockID", out _))
-                return Fail(response, LockOperationResult.InvalidArgument, "Conversion requires Timeout, ExclusiveLockID and a valid release flag");
             return ConvertSchemaToExclusive(attrs, schemaId, instant, response, timeout);
         }
     }
@@ -313,9 +314,13 @@ public sealed class FssHttpLockCoordinator
         var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
         lock (_gate)
         {
-            if (_actor is null || Guid.TryParse(clientText, out var client) &&
+            if (_actor is null || _schemaOwners.TryGetValue(clientText, out var owner) &&
+                owner.ExpiresUtc > instant && owner.OwnerSubject != _actor.Subject ||
+                Guid.TryParse(clientText, out var client) &&
                 document.GetSession(client) is { } existing && existing.Owner?.Subject != _actor.Subject)
                 return Denied(response);
+            if (!TryLockInput(attrs, operation, shared: true, out var timeout))
+                return Fail(response, LockOperationResult.InvalidArgument, "Invalid coauthoring input");
             ExpireLocked(instant);
             if (_hostLock is not null) return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
             switch (operation)
@@ -325,7 +330,7 @@ public sealed class FssHttpLockCoordinator
                     var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "GetLock"), response, instant);
                     if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed))
                         return result;
-                    JoinCoauthor(clientText, ReadTimeout(attrs));
+                    JoinCoauthor(clientText, timeout);
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     SetCoauthStatus(response, includeTransition: true);
                     return result;
@@ -335,11 +340,15 @@ public sealed class FssHttpLockCoordinator
                     // An expired tracker entry refreshes through Join. Legacy states
                     // acquire explicit membership only on this coauthoring request.
                     _schemaOwners.TryGetValue(clientText, out var previous);
-                    var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "GetLock"), response, instant);
+                    var refresh = CopyRequest(request, "SchemaLockRequestType", "GetLock");
+                    // Fallback applies to Join, not Refresh. Internal dispatch must
+                    // not introduce Join's conditional ExclusiveLockID requirement.
+                    refresh.SubRequestDataAttributes.Remove("AllowFallbackToExclusive");
+                    var result = ApplySchemaLock(refresh, response, instant);
                     if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed)) return result;
                     if (previous is not null && previous.ExpiresUtc > _schemaOwners[clientText].ExpiresUtc)
                         _schemaOwners[clientText] = _schemaOwners[clientText] with { ExpiresUtc = previous.ExpiresUtc };
-                    JoinCoauthor(clientText, Math.Max(ReadTimeout(attrs),
+                    JoinCoauthor(clientText, Math.Max(timeout,
                         (int)Math.Ceiling((_schemaOwners[clientText].ExpiresUtc - instant).TotalSeconds)));
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     SetCoauthStatus(response, includeTransition: false);
@@ -438,7 +447,7 @@ public sealed class FssHttpLockCoordinator
     }
 
     private LockOperationResult ConvertSchemaToExclusive(IReadOnlyDictionary<string, string> attrs,
-        string schemaId, DateTime instant, FssHttpSubResponse response, int? timeout = null)
+        string schemaId, DateTime instant, FssHttpSubResponse response, int timeout)
     {
         if (!TryBoolean(attrs, "ReleaseLockOnConversionToExclusiveFailure", required: false, out var release))
             return Fail(response, LockOperationResult.InvalidArgument, "Invalid release flag");
@@ -463,7 +472,7 @@ public sealed class FssHttpLockCoordinator
         _schemaLockId = null;
         RemoveCoauthor(client);
         _exclusive = new Lease(exclusiveId, client,
-            instant.AddSeconds(timeout ?? ReadTimeout(attrs)), LockKind.Exclusive, schemaId, _actor!.Subject);
+            instant.AddSeconds(timeout), LockKind.Exclusive, schemaId, _actor!.Subject);
         response.SubResponseDataAttributes["LockType"] = "ExclusiveLock";
         return LockOperationResult.Completed;
     }
@@ -542,18 +551,40 @@ public sealed class FssHttpLockCoordinator
     private static bool TryBoolean(IReadOnlyDictionary<string, string> attrs, string key, bool required, out bool result)
     {
         result = false;
-        if (!TryRead(attrs, key, out var value)) return !required;
+        if (!attrs.TryGetValue(key, out var value)) return !required;
         return CellSubRequestDataValidation.TryParseXmlBoolean(value, out result);
     }
 
-    private static bool TryTransitionTimeout(IReadOnlyDictionary<string, string> attrs, bool coauth, out int timeout)
+    // MS-FSSHTTP 2.3.1.5, 2.3.1.9 and 2.3.1.13. Lock identifiers are
+    // strings; Cell's separate GUID-valued attribute rules do not apply here.
+    private static bool TryLockInput(IReadOnlyDictionary<string, string> attrs, string operation, bool shared, out int timeout)
     {
-        timeout = 0;
-        if (!TryRead(attrs, "Timeout", out var value) ||
-            !CellSubRequestDataValidation.TryParseXmlInt64(value, out long parsed) || parsed < 60 || parsed > 120000)
+        timeout = CoauthSession.DefaultTimeoutSeconds;
+        bool convertToSchema = operation is "ConvertToSchema" or "ConvertToSchemaJoinCoauth";
+        bool convertToExclusive = operation == "ConvertToExclusive";
+        bool get = operation is "GetLock" or "JoinCoauthoring";
+        bool needsTimeout = get || operation is "RefreshLock" or "RefreshCoauthoring" ||
+            convertToExclusive || convertToSchema;
+        if (shared)
+        {
+            if (ReadClient(attrs) is null || !TryRead(attrs, "SchemaLockID", out _) ||
+                !TryBoolean(attrs, "AllowFallbackToExclusive", required: false, out bool fallback) ||
+                !TryBoolean(attrs, "ReleaseLockOnConversionToExclusiveFailure", required: convertToExclusive, out _) ||
+                !convertToExclusive && attrs.ContainsKey("ReleaseLockOnConversionToExclusiveFailure") ||
+                (convertToExclusive || get && fallback) && !TryRead(attrs, "ExclusiveLockID", out _))
+                return false;
+        }
+        else if (!TryRead(attrs, "ExclusiveLockID", out _) ||
+            convertToSchema && (ReadClient(attrs) is null || !TryRead(attrs, "SchemaLockID", out _)))
             return false;
-        timeout = (int)parsed;
-        if (coauth && timeout < 3600) timeout = CoauthSession.DefaultTimeoutSeconds;
+
+        if (attrs.TryGetValue("Timeout", out var value))
+        {
+            if (!CellSubRequestDataValidation.TryParseXmlInt64(value, out long parsed) || parsed is < 60 or > 120000)
+                return false;
+            timeout = shared && parsed < 3600 ? CoauthSession.DefaultTimeoutSeconds : (int)parsed;
+        }
+        else if (needsTimeout) return false;
         return true;
     }
 
@@ -576,11 +607,6 @@ public sealed class FssHttpLockCoordinator
         response.SubResponseDataAttributes["CoauthStatus"] = _coauthors.Count <= 1 ? "Alone" : "Coauthoring";
         if (includeTransition) response.SubResponseDataAttributes["TransitionID"] = _document.TransitionId.ToString("D");
     }
-
-    private static int ReadTimeout(IReadOnlyDictionary<string, string> attrs) =>
-        TryRead(attrs, "Timeout", out var value) && CellSubRequestDataValidation.TryParseXmlInt64(value, out long timeout)
-            ? (int)Math.Clamp(timeout, 1, 24 * 60 * 60)
-            : CoauthSession.DefaultTimeoutSeconds;
 
     private static FssHttpSubRequest CopyRequest(FssHttpSubRequest source, string key, string value)
     {
