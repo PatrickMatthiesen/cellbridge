@@ -121,8 +121,28 @@ function Start-Office {
 }
 function Open-Document {
     if ($Application -eq 'Word') { $script:document = $script:app.Documents.Open($documentUrl, $false, $false, $false) }
-    else { $script:document = $script:app.Workbooks.Open($documentUrl, 0, $false) }
+    else {
+        $workbooks = $script:app.Workbooks
+        try { $script:document = $workbooks.Open($documentUrl, 0, $false) }
+        finally { Release-Com $workbooks }
+    }
     if ($script:document.ReadOnly) { throw 'Office opened the document read-only.' }
+}
+function Invoke-ExcelCell([int]$Row, [string]$Value, [switch]$Read) {
+    $worksheets = $worksheet = $cells = $cell = $null
+    try {
+        $worksheets = $script:document.Worksheets
+        $worksheet = $worksheets.Item(1)
+        $cells = $worksheet.Cells
+        $cell = $cells.Item($Row, 1)
+        if ($Read) { return [string]$cell.Value2 }
+        $cell.Value2 = $Value
+    } finally {
+        Release-Com $cell
+        Release-Com $cells
+        Release-Com $worksheet
+        Release-Com $worksheets
+    }
 }
 function Read-Package([string]$path) {
     $zip = [IO.Compression.ZipFile]::OpenRead($path)
@@ -196,7 +216,7 @@ try {
                 finally { Release-Com $range }
                 $imageCount++
             }
-        } else { $document.Worksheets.Item(1).Cells.Item($i,1).Value2 = $marker }
+        } else { Invoke-ExcelCell -Row $i -Value $marker }
         $cycle.expectedImages = $imageCount
         $cycle.saveStartedUtc = [DateTime]::UtcNow.ToString('o')
         $cycle.saveCalls = 1
@@ -226,7 +246,7 @@ try {
             $cycle.reopened = @($markers | Where-Object { -not $reopenedText.Contains($_) }).Count -eq 0 -and $document.InlineShapes.Count -ge $imageCount
         } else {
             $cycle.reopened = $true
-            for ($row = 1; $row -le $i; $row++) { if ([string]$document.Worksheets.Item(1).Cells.Item($row,1).Value2 -ne $markers[$row-1]) { $cycle.reopened = $false } }
+            for ($row = 1; $row -le $i; $row++) { if ((Invoke-ExcelCell -Row $row -Read) -ne $markers[$row-1]) { $cycle.reopened = $false } }
         }
         $cycle.reopenedUtc = [DateTime]::UtcNow.ToString('o')
         if (-not $cycle.reopened) { throw "Cycle $i failed fresh-process reopen." }

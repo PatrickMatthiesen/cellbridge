@@ -146,7 +146,11 @@ jobs:
         run: ./tools/testing/test-word-startup.ps1
       - name: Exercise script logic without Office in Windows PowerShell
         shell: powershell
-        run: ./tools/testing/test-word-compatibility.ps1
+        run: |
+          ./tools/testing/test-word-compatibility.ps1
+          ./tools/testing/test-office-repeat-lifetime.ps1
       - name: Exercise script logic without Office in PowerShell Core
         shell: pwsh
-        run: ./tools/testing/test-word-compatibility.ps1
+        run: |
+          ./tools/testing/test-word-compatibility.ps1
+          ./tools/testing/test-office-repeat-lifetime.ps1
