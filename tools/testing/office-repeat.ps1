@@ -4,12 +4,16 @@ param(
     [Parameter(Mandatory)][string]$BaseUrl,
     [Parameter(Mandatory)][string]$CandidateCommit,
     [ValidateSet('Word','Excel')][string]$Application = 'Word',
-    [ValidateRange(2,100)][int]$Cycles = 20,
+    [ValidateRange(1,100)][int]$Cycles = 20,
     [string]$OutputDirectory = (Join-Path $PWD ('artifacts\office-repeat-' + [guid]::NewGuid().ToString('N'))),
     [ValidateRange(60,14400)][int]$TimeoutSeconds = 3600,
-    [switch]$Worker
+    [switch]$Worker,
+    [switch]$HttpPreflightOnly
 )
 $ErrorActionPreference = 'Stop'
+foreach ($module in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility')) {
+    Import-Module (Join-Path $PSHOME "Modules/$module/$module.psd1") -ErrorAction Stop
+}
 $uri = [uri]$BaseUrl
 if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or $uri.AbsolutePath -ne '/' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) { throw 'BaseUrl must be an HTTPS origin.' }
 if ($CandidateCommit -notmatch '^[a-fA-F0-9]{40}$') { throw 'Supply the full tested candidate commit.' }
@@ -19,19 +23,26 @@ $resultPath = Join-Path $OutputDirectory 'repeat-result.json'
 $pidPath = Join-Path $OutputDirectory 'owned-office.pid'
 $processName = if ($Application -eq 'Word') { 'WINWORD' } else { 'EXCEL' }
 if (-not $Worker) {
-    if (Get-Process WINWORD,EXCEL -ErrorAction SilentlyContinue) { throw 'Close Word and Excel before running in this desktop.' }
+    if (-not $HttpPreflightOnly -and (Get-Process WINWORD,EXCEL -ErrorAction SilentlyContinue)) { throw 'Close Word and Excel before running in this desktop.' }
     if (Test-Path $OutputDirectory) { throw 'Choose a new output directory.' }
     New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
     function Quote-PS([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
     $command = '& ' + (Quote-PS $PSCommandPath) + ' -Worker -BaseUrl ' + (Quote-PS $BaseUrl) +
         ' -CandidateCommit ' + (Quote-PS $CandidateCommit) + ' -Application ' + $Application +
         ' -Cycles ' + $Cycles + ' -OutputDirectory ' + (Quote-PS $OutputDirectory)
+    if ($HttpPreflightOnly) { $command += ' -HttpPreflightOnly' }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $started = Get-Date
-    $child = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -PassThru -WindowStyle Hidden `
-        -ArgumentList @('-NoProfile','-STA','-ExecutionPolicy','RemoteSigned','-EncodedCommand',$encoded) `
-        -WorkingDirectory (Get-Location).Path -RedirectStandardOutput (Join-Path $OutputDirectory 'stdout.log') `
-        -RedirectStandardError (Join-Path $OutputDirectory 'stderr.log')
+    $start = @{ FilePath = (Get-Process -Id $PID).Path; PassThru = $true;
+        ArgumentList = @('-NoProfile','-EncodedCommand',$encoded);
+        WorkingDirectory = (Get-Location).Path;
+        RedirectStandardOutput = (Join-Path $OutputDirectory 'stdout.log');
+        RedirectStandardError = (Join-Path $OutputDirectory 'stderr.log') }
+    if ($env:OS -eq 'Windows_NT') {
+        $start.WindowStyle = 'Hidden'
+        $start.ArgumentList = @('-NoProfile','-STA','-ExecutionPolicy','RemoteSigned','-EncodedCommand',$encoded)
+    } elseif (-not $HttpPreflightOnly) { throw 'Desktop Office checks require Windows.' }
+    $child = Start-Process @start
     [void]$child.Handle
     $finished = $child.WaitForExit($TimeoutSeconds * 1000)
     if (-not $finished) { Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue }
@@ -42,6 +53,13 @@ if (-not $Worker) {
     if (-not $finished) { throw "Office timed out. Evidence remains in $OutputDirectory." }
     if ($child.ExitCode -ne 0) { throw "Office worker failed. Inspect $resultPath and stderr.log." }
     $result = Get-Content $resultPath -Raw | ConvertFrom-Json
+    if ($HttpPreflightOnly) {
+        if (-not $result.httpPreflightPassed -or $result.officeStarted) { throw "HTTP preflight failed. Inspect $resultPath." }
+        $result.workerFinished = $true
+        $result | ConvertTo-Json -Depth 12 | Set-Content $resultPath -Encoding UTF8
+        Write-Host "Authenticated document creation/download passed: $resultPath. Office was not started."
+        exit 0
+    }
     if (-not $result.contentCheckPassed -or $result.cleanupError) { throw "Office content or cleanup check failed. Inspect $resultPath." }
     $result.workerFinished = $true
     $result | ConvertTo-Json -Depth 12 | Set-Content $resultPath -Encoding UTF8
@@ -129,17 +147,33 @@ $documentUrl = "$BaseUrl/shared/$fileName"
 $result = [ordered]@{ schemaVersion = 1; application = $Application; candidateCommit = $CandidateCommit; origin = $BaseUrl;
     scriptSha256 = (Get-FileHash $PSCommandPath -Algorithm SHA256).Hash; documentUrl = $documentUrl;
     expectedCycles = $Cycles; workerFinished = $false; contentCheckPassed = $false; cycles = @();
+    httpPreflightPassed = $false; officeStarted = $false; httpPreflightOnly = [bool]$HttpPreflightOnly;
     closePromptObservation = 'manual-required'; startedUtc = [DateTime]::UtcNow.ToString('o') }
 try {
     if (-not $env:CELLBRIDGE_INTEROP_COOKIE -or -not $env:CELLBRIDGE_INTEROP_CSRF) { throw 'Supply existing signed-in CELLBRIDGE_INTEROP_COOKIE and CELLBRIDGE_INTEROP_CSRF. Office signs in separately.' }
-    $headers = @{ Cookie = $env:CELLBRIDGE_INTEROP_COOKIE; 'X-CellBridge-CSRF' = $env:CELLBRIDGE_INTEROP_CSRF; 'Cache-Control' = 'no-cache' }
-    Invoke-RestMethod "$BaseUrl/api/documents" -Headers $headers -Method Post -ContentType 'application/json' `
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    foreach ($cookie in $env:CELLBRIDGE_INTEROP_COOKIE.Split(';')) {
+        if ($cookie.Trim()) { $session.Cookies.SetCookies([uri]"$BaseUrl/", $cookie.Trim()) }
+    }
+    $headers = @{ 'X-CellBridge-CSRF' = $env:CELLBRIDGE_INTEROP_CSRF; 'Cache-Control' = 'no-cache' }
+    Invoke-RestMethod "$BaseUrl/api/documents" -WebSession $session -Headers $headers -Method Post -ContentType 'application/json' `
         -Body (@{ name = $fileName; type = $extension } | ConvertTo-Json) -TimeoutSec 30 | Out-Null
-    $previousEtag = [string](Invoke-WebRequest $documentUrl -Headers $headers -Method Head -UseBasicParsing -TimeoutSec 30).Headers['ETag']
+    $previousEtag = [string](Invoke-WebRequest $documentUrl -WebSession $session -Headers $headers -Method Head -UseBasicParsing -TimeoutSec 30).Headers['ETag']
+    if ($HttpPreflightOnly) {
+        $download = Join-Path $OutputDirectory "http-preflight.$extension"
+        Invoke-WebRequest $documentUrl -WebSession $session -Headers $headers -UseBasicParsing -TimeoutSec 30 -OutFile $download | Out-Null
+        $null = Read-Package $download
+        if (-not $previousEtag) { throw 'Created document has no ETag.' }
+        $result.httpPreflightPassed = $true
+        $result.initialEtag = $previousEtag
+        $result.initialSha256 = (Get-FileHash $download -Algorithm SHA256).Hash
+        return
+    }
     $markers = @()
     $imageCount = 0
     for ($i = 1; $i -le $Cycles; $i++) {
         Start-Office
+        $result.officeStarted = $true
         $result.officeVersion = [string]$app.Version
         $result.officeBuild = [string]$app.Build
         if ($Application -eq 'Word') { $result.backgroundSave = [bool]$app.Options.BackgroundSave }
@@ -171,7 +205,7 @@ try {
         $deadline = [DateTime]::UtcNow.AddSeconds(60)
         $download = Join-Path $OutputDirectory "cycle-$i.$extension"
         do {
-            $response = Invoke-WebRequest "$documentUrl`?verification=$runId-$i" -Headers $headers -UseBasicParsing -TimeoutSec 15 -OutFile $download -PassThru
+            $response = Invoke-WebRequest "$documentUrl`?verification=$runId-$i" -WebSession $session -Headers $headers -UseBasicParsing -TimeoutSec 15 -OutFile $download -PassThru
             $package = Read-Package $download
             $cycle.remoteContentVerified = @($markers | Where-Object { -not $package.text.Contains($_) }).Count -eq 0 -and $package.images -ge $imageCount
             $cycle.saved = [bool]$document.Saved

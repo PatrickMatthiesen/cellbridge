@@ -3,12 +3,18 @@
 param(
     [ValidateSet('Word','Excel')][string]$Application = 'Word',
     [ValidateSet('office-a','office-b')][string]$Account = 'office-a',
-    [ValidateRange(2,100)][int]$Cycles = 20,
-    [string]$Configuration = (Join-Path $PSScriptRoot 'office-test.json'),
+    [ValidateRange(1,100)][int]$Cycles = 20,
+    [string]$Configuration,
     [System.Management.Automation.PSCredential]$Credential,
-    [switch]$CopyOfficePassword
+    [switch]$CopyOfficePassword,
+    [switch]$HttpPreflightOnly
 )
 $ErrorActionPreference = 'Stop'
+# Use this engine's built-in modules even if a parent engine supplied PSModulePath.
+foreach ($module in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility')) {
+    Import-Module (Join-Path $PSHOME "Modules/$module/$module.psd1") -ErrorAction Stop
+}
+if (-not $Configuration) { $Configuration = Join-Path $PSScriptRoot 'office-test.json' }
 $config = Get-Content -LiteralPath $Configuration -Raw | ConvertFrom-Json
 $origin = [uri]$config.origin
 if (-not $origin.IsAbsoluteUri -or $origin.Scheme -ne 'https' -or $origin.AbsolutePath -ne '/' -or $origin.UserInfo -or $origin.Query -or $origin.Fragment) {
@@ -61,14 +67,18 @@ try {
     $env:CELLBRIDGE_INTEROP_COOKIE = $session.Cookies.GetCookieHeader([uri]$baseUrl)
     $env:CELLBRIDGE_INTEROP_CSRF = Form-Token $page.Content
     $output = Join-Path $manifestRoot ('results\' + $env:COMPUTERNAME + '-' + $Account + '-' + $Application + '-' + [guid]::NewGuid().ToString('N'))
-    Write-Host "Office signs in separately as $Account. Keep the desktop visible for its dialog."
+    if (-not $HttpPreflightOnly) { Write-Host "Office signs in separately as $Account. Keep the desktop visible for its dialog." }
     & (Join-Path $manifestRoot 'office-repeat.ps1') -BaseUrl $baseUrl -CandidateCommit $config.candidateCommit `
-        -Application $Application -Cycles $Cycles -OutputDirectory $output
+        -Application $Application -Cycles $Cycles -OutputDirectory $output -HttpPreflightOnly:$HttpPreflightOnly
     if (-not $?) { throw 'Office repeat check failed.' }
-    Write-Host "Evidence saved in $output. Manual checks and server capture review remain separate."
+    if ($HttpPreflightOnly) { Write-Host "HTTP preflight passed: $output. Office was not started." }
+    else { Write-Host "Evidence saved in $output. Manual checks and server capture review remain separate." }
 } finally {
     $env:CELLBRIDGE_INTEROP_COOKIE = $savedCookie
     $env:CELLBRIDGE_INTEROP_CSRF = $savedCsrf
-    if ($CopyOfficePassword -and (Get-Clipboard -Raw) -eq $Credential.GetNetworkCredential().Password) { Set-Clipboard -Value '' }
+    if ($CopyOfficePassword) {
+        try { if ((Get-Clipboard -Raw) -eq $Credential.GetNetworkCredential().Password) { Set-Clipboard } }
+        catch { Write-Warning 'Could not clear the test password from the clipboard; clear it manually.' }
+    }
     $Credential = $null; $session = $null; $form = $null
 }
