@@ -35,12 +35,14 @@ SOAP dependencies determine which subsequent operations execute.
   still reuse unchanged file parts. Complete saves accept `MultiRequestPutHint`
   as a coalescing hint. Unsupported partial operations do not cancel independent
   operations in the same binary request.
-- Historical-version queries, unmapped cell scopes, waterline-only query controls
+- Historical binary version-token selectors, unmapped cell scopes, waterline-only query controls
   and some filters are unsupported. Optional unsupported filters fall back to
   more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
 - Mixed and repeated queries deduplicate immutable elements. A later failure
   preserves earlier payloads and save acknowledgements. Metadata starts as a
-  storage-index-only placeholder until a complete graph is uploaded.
+  storage-index-only response until a complete graph is uploaded. The legacy
+  buffered executor continues to return that response and rejects metadata writes;
+  durable execution reads and publishes opaque graphs.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
   and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
   outside the current normative four-operation inventory.
@@ -63,8 +65,8 @@ Zero/oversized requests return an explicit unsupported error. Allocation require
 write access and does not change content or retained graph state.
 
 Binary ClientAndPlatform identity is supported alongside GUID identity. Optional
-binary target selectors must match the selected SOAP partition; independent
-subrequest routing across partitions remains part of scoped-query work. See the
+binary target selectors independently route each operation to a known partition,
+overriding the SOAP default. Unknown selectors return explicit errors. See the
 [requirements ledger](protocol-requirements.md) for normative applicability,
 implementation evidence and remaining audit gates.
 

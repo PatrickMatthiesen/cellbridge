@@ -124,8 +124,27 @@ public sealed class DataElement
     /// <summary>Serializes the data element to the writer.</summary>
     public void Serialize(BinaryWriterEx writer) => Serialize(writer, FsshttpbSerializationProfile.Current);
 
-    /// <summary>Serializes the package using the selected wire profile.</summary>
+    /// <summary>Serializes the data element using the selected wire profile.</summary>
     public void Serialize(BinaryWriterEx writer, FsshttpbSerializationProfile profile)
+    {
+        WritePrefix(writer, profile);
+        if (Data is not null) writer.WriteBytes(Data);
+        WriteEnd(writer, profile);
+    }
+
+    /// <summary>Measures the wire length without copying the type-specific payload.</summary>
+    public long GetSerializedLength() => GetSerializedLength(FsshttpbSerializationProfile.Current);
+
+    /// <summary>Measures the wire length for the selected framing profile.</summary>
+    public long GetSerializedLength(FsshttpbSerializationProfile profile)
+    {
+        var writer = new BinaryWriterEx();
+        WritePrefix(writer, profile);
+        WriteEnd(writer, profile);
+        return checked(writer.Length + (Data?.LongLength ?? 0));
+    }
+
+    private void WritePrefix(BinaryWriterEx writer, FsshttpbSerializationProfile profile)
     {
         var metadataWriter = new BinaryWriterEx();
         DataElementExtendedGuid.Serialize(metadataWriter);
@@ -142,11 +161,10 @@ public sealed class DataElement
         else
             new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.DataElement, metadata.Length).Serialize(writer);
         writer.WriteBytes(metadata);
-        if (Data is not null)
-        {
-            writer.WriteBytes(Data);
-        }
+    }
 
+    private static void WriteEnd(BinaryWriterEx writer, FsshttpbSerializationProfile profile)
+    {
         if (profile.UsesSharePointLegacyDataElementFraming())
             new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.DataElement).Serialize(writer);
         else

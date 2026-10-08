@@ -30,8 +30,7 @@ public sealed class PackageConsumerTests
         app.UseAuthorization();
         app.MapCellBridge();
         await app.StartAsync();
-        using var client = app.GetTestClient();
-        client.DefaultRequestHeaders.Add("X-Test-User", "writer");
+        using var client = TestActor.CreateClient(app.GetTestServer(), "writer");
         using HttpContent content = unknownLength
             ? new StreamContent(new NonSeekableReadStream(new byte[33])) : new ByteArrayContent(new byte[33]);
         content.Headers.ContentType = new("text/xml");
@@ -81,8 +80,7 @@ public sealed class PackageConsumerTests
         Assert.Equal(id, document!.ResourceId);
         Assert.NotNull(document);
 
-        using var client = app.GetTestClient();
-        client.DefaultRequestHeaders.Add("X-Test-User", "writer");
+        using var client = TestActor.CreateClient(app.GetTestServer(), "writer");
         using var discovery = await client.SendAsync(new(HttpMethod.Options, "/shared"));
         Assert.Equal(HttpStatusCode.OK, discovery.StatusCode);
         Assert.True(discovery.Headers.Contains("X-MSFSSHTTP"));

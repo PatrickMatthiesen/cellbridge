@@ -1,6 +1,6 @@
 # Automated testing
 
-Use `python tools/testing/run.py --packages` for the combined candidate check.
+Use `python tools/testing/run.py --packages` to check protocols, providers and packages together.
 It packs and tests the external application before starting Aspire, then runs
 its PostgreSQL commit/delivery reply-loss test against the disposable database.
 The ordinary package verifier skips that test when no database is configured.
@@ -53,7 +53,7 @@ python3 tools/verify_packages.py
 This packs the libraries, builds the [consumer example](../examples/NuGetConsumer/README.md)
 and runs [package tests](../tests/CellBridge.Packages.Tests/README.md) using an
 isolated local feed/cache. Verification clears its own package output, checks
-all nine beta packages and symbol packages, validates embedded readmes, license,
+all nine packages and symbol packages, validates embedded readmes, license,
 repository metadata and internal versions, and writes `artifacts/packages/manifest.json`.
 `python3 tools/check_release.py --version <version> --commit <sha>` checks the
 same archive metadata and hashes before release authentication. Artifact tests
@@ -68,6 +68,39 @@ storage and publishing jobs supply that database. A package run with skipped
 database tests does not establish restart recovery for the durable consumer.
 The package tests compare the reusable processor's response with the HTTP endpoint
 and exercise host-selected identities and read-only request limits.
+
+## Publishing packages
+
+Set the version in `Directory.Build.props` and commit the reviewed changes.
+From that clean commit, with this workspace's Aspire stopped, run:
+
+```sh
+python3 tools/testing/run.py --packages
+python3 tools/check_release.py --version <version> --commit <sha>
+```
+
+Check `artifacts/packages/manifest.json` for nine matching package versions,
+repository commits, archive hashes and `sourceDirty: false`. Require the durable
+consumer check to pass without a database skip. Use a new version for changed
+source; NuGet versions are immutable.
+
+The [publish workflow](../.github/workflows/publish-nuget.yml) runs only from
+`main`. Dispatch it with the committed version and `publish: false` to validate
+packing, artifact checks and NuGet login. After checking that run, dispatch
+`publish: true` against the same source. The workflow checks the artifacts before
+authentication, then uploads dependencies, the hosting package and symbols.
+
+NuGet Trusted Publishing needs a policy for `PatrickMatthiesen/cellbridge`,
+workflow `publish-nuget.yml`, environment `nuget`, owner `CellBridge` and package
+pattern `CellBridge.*`. Set the GitHub repository variable `NUGET_USER` to the
+policy creator's NuGet profile name. The publishing job exchanges GitHub OIDC
+credentials for temporary NuGet credentials.
+
+Publication across packages is not atomic. After a partial failure, retain the
+run artifact and verify which versions NuGet accepted before uploading only the
+remaining artifacts. The workflow does not skip duplicates. After publication,
+verify restoration from NuGet.org with a fresh cache, check symbol availability,
+and create the source tag and release notes on GitHub.
 
 ## Bounded protocol properties and differential checks
 

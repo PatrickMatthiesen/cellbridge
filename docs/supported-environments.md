@@ -71,4 +71,4 @@ using coordinated recovery points.
 The portable archive tests validate recovery into an empty destination with the
 documented context restrictions. They do not validate an operator's particular
 `pg_dump`, snapshot or replica-backup procedure. See [provider recovery](provider-portability.md),
-[storage configuration](storage-providers.md) and [beta.1 upgrading](beta-2-upgrade.md).
+[storage configuration](storage-providers.md) and [durable host upgrades](storage-providers.md#upgrading-a-durable-host).

@@ -1,8 +1,8 @@
-# CellBridge beta
+# CellBridge
 
 CellBridge implements MS-FSSHTTP and MS-FSSHTTPB for ASP.NET Core hosts on .NET 10.
-It is experimental software. The `0.1.0-beta.2` candidate packages expose the protocol
-libraries, reusable host and storage providers; API and storage compatibility
+It is experimental software. The packages contain the protocol
+libraries, reusable host and storage providers. API and storage compatibility
 may change before a stable release.
 
 Start with `CellBridge.AspNetCore` and a storage provider. PostgreSQL is the

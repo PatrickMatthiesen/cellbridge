@@ -229,8 +229,7 @@ credential or token processing. Connect host rate limiting and other admission p
 to all primary and second-factor submissions. The example uses a private-development
 request gate; real account policy belongs to the account system.
 
-These APIs are part of the unpublished beta.2 candidate. Keeping the default pages
-independent of UI frameworks does not establish Native AOT support. CellBridge and
+CellBridge and
 its storage/authentication dependencies have not been qualified under Native AOT.
 
 ## Execute parsed SOAP requests
@@ -299,10 +298,8 @@ Do not depend on ambient HTTP state or require an `AccessLimit` to be present.
 Persist permission changes through versioned document/coordination updates that
 advance the affected editor graph knowledge; changing a mutable external
 permission cache alone can change graph bytes without changing their version.
-The legacy evaluator remains available for unbound beta integrations. It does not
-replace the coordinated policy-update contract. The published `0.1.0-beta.1`
-packages predate this new source API; use project references until a release
-includes it.
+The legacy evaluator remains available for documents without a host-policy binding.
+It does not replace the coordinated policy-update contract.
 
 ## Accepted saves and external content
 
@@ -343,8 +340,7 @@ needs reported by [WopiHost PR #735](https://github.com/petrsvihlik/WopiHost/pul
 Accepted receipts provide a narrower alternative to comparing version counters;
 they are not a reliable post-publication callback.
 
-Beta.1 did not provide shared WOPI/FSSHTTP leases or conditional lifecycle APIs.
-The beta.2 candidate adds opt-in shared base-lock authority, recoverable publication
+Hosts can opt into shared base-lock authority, recoverable publication
 and lifecycle operations. The host must supply destination CAS and durable receipts.
 Do not expose conflicting write paths outside that authority. Testing the existing WopiHost adapter against
 CellBridge packages establishes package compatibility, not Office Online Server

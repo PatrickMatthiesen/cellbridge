@@ -145,7 +145,8 @@ public static class CellBinaryRequestExecutor
         }
         else
         {
-            // The application metadata stream remains an explicit placeholder.
+            // This legacy buffered path has no opaque metadata graph executor.
+            // Durable execution reads uploaded graphs through MetadataQueryAsync.
             response = StorageManifestBuilder.BuildStorageIndexOnlyQueryChangesResponse(
                 requestId,
                 new ExGuid(1, partition.ProtocolIdentity.SerialGuid),

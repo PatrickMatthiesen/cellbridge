@@ -96,23 +96,12 @@ sign-in. For a custom account system, `AddCellBridgeCookieLogin` registers a coo
 standard pages with a credential checker. Use `AddCellBridgeLogin` for an existing cookie.
 Custom HTML is optional. CellBridge handles sign-in, CSRF
 and the Office challenge/completion flow; see [login integration](docs/package-integration.md#use-the-built-in-login-page).
-This adapter is part of the unpublished beta.2 candidate.
-The [host authorization consumer](examples/HostAuthorization/README.md) uses
-host-owned permission revisions and coordinated revocation without local grants.
-The published `0.1.0-beta.1` packages add a reusable parsed-SOAP processor,
-host-selected resource GUIDs, request permission limits and accepted-save receipts.
-See [embedding in another host](docs/package-integration.md) and the
-[beta release record and checklist](docs/beta-release.md). All nine packages and
-matching symbols are public on NuGet.org, owned by CellBridge. Fresh remote
-consumption passed four consumer tests and the 15 tests of the pinned WopiHost
-adapter. Those checks establish package integration, not Office Online Server
-or new desktop client qualification.
 
-Current source prepares `0.1.0-beta.2`; it is not yet a published release.
-Read the [beta.1 upgrade guide](docs/beta-2-upgrade.md) and
-[tested recovery environments](docs/supported-environments.md) before upgrading.
-The candidate adds opt-in external publication, shared lock authority and
-conditional lifecycle contracts, with host adoption still required.
+For applications with their own document permissions, see the
+[host authorization example](examples/HostAuthorization/README.md).
+The [integration guide](docs/package-integration.md) covers parsed SOAP requests,
+resource IDs and save receipts. To publish saves to an external file store or
+share locks with WOPI, follow [external host reliability](docs/external-host-reliability.md).
 
 ## Build and test
 

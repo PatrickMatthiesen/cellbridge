@@ -131,12 +131,9 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
         }
     }
 
-    private static long Size(DataElement element)
-    {
-        var writer = new BinaryWriterEx();
-        element.Serialize(writer);
-        return writer.Length;
-    }
+    // Admission has always counted Current framing, independently of the final
+    // response profile. Measure the same bytes without copying every payload.
+    private static long Size(DataElement element) => element.GetSerializedLength();
 
     private static void Reject(FsshttpbResponse query, string message)
     {

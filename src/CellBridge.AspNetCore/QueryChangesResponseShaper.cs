@@ -54,9 +54,9 @@ internal static class QueryChangesResponseShaper
             ulong used = 0;
             foreach (var element in package.DataElements)
             {
-                var writer = new BinaryWriterEx();
-                element.Serialize(writer);
-                ulong size = (ulong)writer.Length;
+                // Keep the existing Current-profile admission budget, even when
+                // the final response uses the smaller SharePoint framing.
+                ulong size = (ulong)element.GetSerializedLength();
                 if (size > maximum - used)
                 {
                     response.DataElementPackage = null;

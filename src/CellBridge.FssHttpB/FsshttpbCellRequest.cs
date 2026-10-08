@@ -612,7 +612,7 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
     /// <summary>Optional maximum serialized data-element size in bytes.</summary>
     public ulong? MaxDataElements { get; set; }
 
-    /// <summary>Legacy field. Query versioning and waterline-only queries are not supported.</summary>
+    /// <summary>Legacy field. Waterline selectors are unsupported; the selected profile ignores the bounded QueryChangesVersioning extension.</summary>
     public ulong? Waterline { get; set; }
 
     /// <summary>Serializes the payload to the writer.</summary>

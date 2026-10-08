@@ -26,7 +26,7 @@ public sealed class OuterDocumentOperationTests
         var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
         builder.Services.AddCellBridge(provider, requireDurability: false); TestActor.Register(builder.Services);
         await using var app = builder.Build(); app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge(); await app.StartAsync();
-        using var client = app.GetTestClient(); client.DefaultRequestHeaders.Add("X-Test-User", "writer");
+        using var client = TestActor.CreateClient(app.GetTestServer(), "writer");
         var processor = new CellBridgeRequestProcessor(service);
         var history = await Call(processor, state.ResourceId, SubRequestType.GetVersions);
         var results = XElement.Parse(history.SubResponseXml!).Descendants("result").ToArray();
