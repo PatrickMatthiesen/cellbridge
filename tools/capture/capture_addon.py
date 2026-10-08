@@ -1,4 +1,4 @@
-"""mitmproxy addon that records allow-listed HTTP flows without rewriting them.
+"""mitmproxy addon that records allow-listed HTTP and WebSocket traffic.
 
 Bodies are tee'd from mitmproxy's streaming callbacks. Capture limits affect only
 the evidence written to disk; callbacks always return the original bytes.
@@ -71,8 +71,9 @@ def _headers(headers: Any) -> list[list[str]]:
 class BodySink:
     """Bounded streaming body writer; retains no body chunks in memory."""
 
-    def __init__(self, addon: "CaptureAddon", flow_id: str, kind: str):
+    def __init__(self, addon: "CaptureAddon", flow_id: str, kind: str, limit: int | None = None):
         self.addon, self.flow_id, self.kind = addon, flow_id, kind
+        self.limit = addon.max_body if limit is None else limit
         self.path = addon.root / "files" / f"{flow_id}.{kind}.body.bin"
         self.temp = self.path.with_name(self.path.name + ".part")
         self.digest = hashlib.sha256()
@@ -92,7 +93,7 @@ class BodySink:
         data = bytes(chunk)
         self.original_bytes += len(data)
         self.digest.update(data)
-        room_body = max(0, self.addon.max_body - self.captured_bytes)
+        room_body = max(0, self.limit - self.captured_bytes)
         room_total = max(0, self.addon.max_total - self.addon.total_captured)
         portion = data[: min(len(data), room_body, room_total)]
         if len(portion) != len(data):
@@ -163,11 +164,16 @@ class CaptureAddon:
         self.max_body = int(env.get("CAPTURE_MAX_BODY_BYTES", 32 * 1024 * 1024))
         self.max_total = int(env.get("CAPTURE_MAX_TOTAL_BYTES", 512 * 1024 * 1024))
         self.max_flows = int(env.get("CAPTURE_MAX_FLOWS", "10000"))
-        if self.max_body < 0 or self.max_total < 0 or self.max_flows < 1:
+        self.max_ws_message = int(env.get("CAPTURE_MAX_WEBSOCKET_MESSAGE_BYTES", 32 * 1024 * 1024))
+        self.max_ws_messages = int(env.get("CAPTURE_MAX_WEBSOCKET_MESSAGES", "10000"))
+        if min(self.max_body, self.max_total, self.max_ws_message) < 0 or min(self.max_flows, self.max_ws_messages) < 1:
             raise ValueError("capture byte limits must be non-negative")
         self.lock = threading.RLock()
         self.total_captured = 0
         self.next_sequence = 1
+        self.next_ws_event = 1
+        self.ws_message_count = 0
+        self.session_id = str(uuid.uuid4())
         self.exchanges: dict[str, dict[str, Any]] = {}
         self.flow_ids: dict[str, str] = {}
         self.sinks: dict[tuple[str, str], BodySink] = {}
@@ -215,7 +221,9 @@ class CaptureAddon:
 
     def _write_manifest(self, status: str) -> None:
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "session_id": self.session_id,
+            "websocket_capture_scope": "completed_application_messages",
             "engine": "mitmproxy",
             "engine_version": self._engine_version(),
             "python_version": platform.python_version(),
@@ -226,13 +234,19 @@ class CaptureAddon:
             "proxy_mode": "reverse" if self.reverse_upstream else "forward",
             "reverse_upstream": self.reverse_upstream,
             "flow_count": len(self.exchanges),
-            "pending_count": sum(1 for x in self.exchanges.values() if x.get("completeness") == "pending"),
+            "pending_count": sum(1 for x in self.exchanges.values() if x.get("completeness") == "pending" or x.get("websocket", {}).get("completeness") == "pending"),
+            "websocket_count": sum(1 for x in self.exchanges.values() if "websocket" in x),
+            "websocket_message_count": self.ws_message_count,
+            "websocket_observed_messages": sum(x.get("websocket", {}).get("observed_messages", 0) for x in self.exchanges.values()),
+            "websocket_dropped_messages": sum(x.get("websocket", {}).get("dropped_messages", 0) for x in self.exchanges.values()),
             "recording_healthy": self.recording_healthy,
             "errors": self.recording_errors,
             "recording_errors": self.recording_errors,
             "recording_error_details": self.recording_error_details,
             "captured_body_bytes": self.total_captured,
-            "limits": {"max_body_bytes": self.max_body, "max_total_bytes": self.max_total},
+            "limits": {"max_body_bytes": self.max_body, "max_total_bytes": self.max_total,
+                       "max_flows": self.max_flows, "max_websocket_message_bytes": self.max_ws_message,
+                       "max_websocket_messages": self.max_ws_messages},
         }
         try:
             _atomic_json(self.root / "manifest.json", manifest)
@@ -285,8 +299,10 @@ class CaptureAddon:
         req = flow.request
         conn = getattr(flow, "client_conn", None)
         self.exchanges[fid] = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "session_id": self.session_id,
             "flow_id": fid,
+            "mitmproxy_flow_id": flow_id,
             "sequence": self.next_sequence,
             "completeness": "pending",
             "request": {
@@ -364,6 +380,8 @@ class CaptureAddon:
         if not fid:
             return
         response = flow.response
+        if getattr(flow, "websocket", None) is not None:
+            self.exchanges[fid]["websocket_expected"] = True
         if response is not None:
             trailers = getattr(response, "trailers", None)
             self.exchanges[fid]["response"]["trailers"] = _headers(trailers) if trailers else []
@@ -372,6 +390,95 @@ class CaptureAddon:
                 sink.feed(response.raw_content)
             self._close_body(fid, "response")
         self._complete(fid, flow)
+
+    def _ws_event(self) -> dict[str, Any]:
+        event = {"event_sequence": self.next_ws_event, "timestamp": _now()}
+        self.next_ws_event += 1
+        return event
+
+    def websocket_start(self, flow: Any) -> None:
+        fid = self.flow_ids.get(str(flow.id))
+        if not fid:
+            return  # HTTP flow limit already marks this run unhealthy.
+        self.exchanges[fid]["websocket_expected"] = True
+        self.exchanges[fid]["websocket"] = {
+            "start": self._ws_event(), "completeness": "pending",
+            "observed_messages": 0, "recorded_messages": 0, "dropped_messages": 0,
+            "original_bytes": 0, "captured_bytes": 0,
+        }
+        self._save_flow(fid)
+        self._write_manifest("running")
+
+    def websocket_message(self, flow: Any) -> None:
+        # In 12.2.3 the relay retains the current message in a local variable
+        # after this hook. Remove older history without modifying that message
+        # or its forwarding flags. This kit runs as the only custom addon.
+        message = flow.websocket.messages[-1]
+        del flow.websocket.messages[:-1]
+        fid = self.flow_ids.get(str(flow.id))
+        if not fid:
+            return
+        ws = self.exchanges[fid].get("websocket")
+        if ws is None:
+            self._transport_failure("websocket_start_missing")
+            return
+        ws["observed_messages"] += 1
+        ws["original_bytes"] += len(message.content)
+        event = self._ws_event()
+        if message.dropped or message.injected:
+            self._recording_error("websocket_message_modified")
+        if self.ws_message_count >= self.max_ws_messages:
+            ws["dropped_messages"] += 1
+            self._recording_error("max_websocket_messages_reached")
+        else:
+            number = ws["observed_messages"]
+            sink = BodySink(self, fid, f"websocket.{number:08d}", self.max_ws_message)
+            sink.feed(message.content)
+            payload = sink.finish()
+            item = {
+                "schema_version": 2, "session_id": self.session_id, "flow_id": fid,
+                "sequence": number, **event, "received_at": message.timestamp,
+                "direction": "client_to_server" if message.from_client else "server_to_client",
+                "type": "text" if message.is_text else "binary",
+                "dropped": message.dropped, "injected": message.injected, "payload": payload,
+            }
+            self.ws_message_count += 1
+            ws["recorded_messages"] += 1
+            ws["captured_bytes"] += payload["captured_bytes"]
+            if not payload["complete"]:
+                self._recording_error("websocket_payload_incomplete")
+            path = self.root / "websockets" / fid / f"{number:08d}.json"
+            try:
+                _atomic_json(path, item)
+            except OSError as ex:
+                self._io_error(ex, "websocket_message_write", path)
+        self._save_flow(fid)
+        self._write_manifest("running")
+
+    def websocket_end(self, flow: Any) -> None:
+        fid = self.flow_ids.get(str(flow.id))
+        if not fid:
+            return
+        ws = self.exchanges[fid].get("websocket")
+        if ws is None:
+            self._transport_failure("websocket_start_missing")
+            return
+        data = flow.websocket
+        ws["end"] = {
+            **self._ws_event(), "closed_at": data.timestamp_end,
+            "closed_by_client": data.closed_by_client, "close_code": data.close_code,
+            "close_reason": data.close_reason,
+            "error": str(flow.error.msg)[:256] if flow.error else None,
+        }
+        ws["completeness"] = "complete" if (
+            data.close_code in (1000, 1001) and not flow.error
+            and ws["dropped_messages"] == 0 and ws["original_bytes"] == ws["captured_bytes"]
+        ) else "incomplete"
+        if data.close_code not in (1000, 1001) or flow.error:
+            self._recording_error("websocket_abnormal_end")
+        flow.websocket.messages.clear()
+        self._save_flow(fid)
+        self._write_manifest("running")
 
     def error(self, flow: Any) -> None:
         fid = self.flow_ids.get(str(getattr(flow, "id", "")))
@@ -418,8 +525,10 @@ class CaptureAddon:
             if not sink.closed:
                 self.exchanges[fid][f"{kind}_body"] = sink.finish()
                 self._save_flow(fid)
-        pending = any(x.get("completeness") == "pending" for x in self.exchanges.values())
-        incomplete = any(x.get("completeness") != "complete" for x in self.exchanges.values())
+        pending = any(x.get("completeness") == "pending" or x.get("websocket", {}).get("completeness") == "pending" for x in self.exchanges.values())
+        incomplete = any(x.get("completeness") != "complete" or
+                         (x.get("websocket_expected") and x.get("websocket", {}).get("completeness") != "complete")
+                         for x in self.exchanges.values())
         status = "complete" if not pending and not incomplete and self.recording_healthy else "incomplete"
         self._write_manifest(status)
 

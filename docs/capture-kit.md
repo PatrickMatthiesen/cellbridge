@@ -1,8 +1,8 @@
 # Capture Word and SharePoint traffic
 
 The kit uses mitmproxy 12.2.3 to record Office traffic for comparison with
-SharePoint. It streams application bodies unchanged and provides offline
-validation and SOAP/MTOM extraction.
+SharePoint. It streams HTTP application bodies unchanged, records WebSocket
+application messages and provides offline validation and SOAP/MTOM extraction.
 
 Choose reverse mode through Aspire to open a local HTTPS URL, or standalone
 forward mode to keep the original SharePoint URL and configure a client proxy.
@@ -234,18 +234,87 @@ Inspect the manifest's `errors` field and proxy console.
 
 Validation checks completion, files, lengths and hashes. Extraction decodes
 content encodings, validates MIME/XOP references and writes HTTP bodies and
-SOAP/attachment files to a new directory. Existing extraction output is not
+SOAP/attachment files to a new directory. WebSocket payloads and their message
+metadata are copied into each flow's `websocket` extraction directory, with
+`.txt` for text and `.bin` for binary messages. Existing extraction output is not
 overwritten; unsupported encodings fail. Use the
 [Office Inspectors dump tool](office-inspectors.md#run-the-checks) for binary responses.
 
 | Recording limit | Default | Override |
 | --- | --- | --- |
 | Body size | 32 MiB | `--max-body-bytes` |
-| Total body data | 512 MiB | `--max-total-bytes` |
+| WebSocket message size | 32 MiB | `--max-websocket-message-bytes` |
+| Total HTTP body and WebSocket payload data | 512 MiB | `--max-total-bytes` |
+| WebSocket messages across the run | 10,000 | `--max-websocket-messages` |
 | Exchanges | 10,000 | Fixed |
 
 Allowed traffic continues after recording limits. The recorder marks the run
 unhealthy rather than silently discarding evidence.
+
+## WebSocket capture
+
+No extra switch is required. The kit uses mitmproxy 12.2.3's `websocket_start`,
+`websocket_message` and `websocket_end` hooks. The HTTP upgrade remains an
+ordinary recorded flow, including its request/response headers and bodies.
+Negotiation, rejected upgrades and HTTP fallback requests are also recorded
+through the HTTP hooks. Capturing these exchanges does not classify a session
+as SignalR or establish its application protocol.
+
+Each upgraded flow has a `websocket` lifecycle summary. Its start/end events
+have UTC timestamps and a run-wide WebSocket event sequence. Each message has a
+one-based sequence within the connection, a run-wide event sequence, the
+engine's receipt timestamp, direction, text/binary type and dropped/injected
+flags. Payload descriptors include the full observed length and SHA-256 hash,
+the captured length and an integrity/completeness flag. The run's `session_id`,
+recorded `flow_id`, original `mitmproxy_flow_id` and HTTP client/server connection
+IDs correlate messages with the upgrade. Separate reconnects produce separate
+flows. These identifiers describe proxy observations, not Office user identities
+or application collaboration sessions.
+
+End events retain the engine's close time, initiating side, close code/reason and
+any flow error. Mitmproxy has no separate WebSocket error hook. Abnormal closes,
+including local code 1006 for a connection lost without a close frame, fail
+validation. The kit accepts end codes 1000 and 1001 as normal capture completion;
+other codes remain recorded but require investigation. Stopping with an open
+WebSocket leaves its lifecycle pending and the run incomplete. Close the client
+connections before requesting capture shutdown.
+
+Mitmproxy reassembles fragmented text/binary messages and handles negotiated
+compression before the message hook. The recordings are application messages,
+not original frames, masking keys or compression bytes. Ping/pong frames are
+relayed by the engine but do not reach the message hook. An unfinished fragmented
+message never reaches that hook. A peer can abandon it with a normal close, so
+close codes alone cannot detect this loss. The manifest explicitly sets
+`websocket_capture_scope` to `completed_application_messages`. A valid run
+establishes integrity for completed messages exposed by the engine; it cannot
+prove that every fragment sent by a peer was recorded. Investigations needing
+partial frames or control frames require separate packet-level evidence.
+
+The payload byte cap truncates only the recording. The message count cap stops
+creating message files, increments observed/dropped counters and marks the run
+unhealthy. Forwarding continues unchanged. Both HTTP and WebSocket payloads use
+the total byte budget. The addon keeps counters and at most the latest engine
+message per connection rather than accumulating payload history. The pinned
+engine still buffers a whole message before invoking the hook, so these limits
+bound evidence files and retained history, not the memory required to receive
+one arbitrarily large or unfinished message. Use the kit as the sole custom addon;
+adding message-mutating addons requires separate qualification.
+
+Validation checks lifecycle, correlation, ordering, message counts, payload
+files, lengths/hashes and limits. Missing records, truncated payloads, recording
+loss and dropped/injected messages fail validation. It checks the messages
+observed by the proxy, not traffic that bypassed it. Schema 1 HTTP-only captures
+remain readable, but a legacy WebSocket upgrade cannot pass as a complete
+WebSocket capture.
+
+Local tests use synthetic upstream/client peers with independent RFC 6455 frame
+parsing, including fragmented UTF-8, binary/empty messages, simultaneous
+connections, TLS interception, reverse listeners, HTTP fallback, abnormal ends
+and exhausted limits. They do not establish Office/SharePoint compatibility.
+A cloud two-PC capture still requires controlled Windows clients, exact client
+and backend versions, distinct identities, trusted interception and reachable
+allowlisted destinations. No RTC/OCS service or native Excel coauthoring is
+implemented by this tooling.
 
 ## Files and privacy
 
@@ -253,6 +322,11 @@ Each run has `manifest.json`, `flows/*.json` and `files/*.body.bin`.
 Flow metadata includes connections, timestamps, sizes, hashes and completeness.
 Raw bodies retain content encoding but exclude HTTP chunk framing; extraction
 decodes them separately.
+
+New runs use schema 2. WebSocket message metadata lives under
+`websockets/<flow_id>/<sequence>.json`, with payload bytes in
+`files/<flow_id>.websocket.<sequence>.body.bin`. Run counters include WebSocket
+connections, recorded/observed/dropped messages and combined captured bytes.
 
 On Windows, replacement retries brief sharing locks for up to 140 ms.
 Persistent errors mark the run unhealthy. `recording_error_details` and console
@@ -278,8 +352,21 @@ manual; raw captures should not be uploaded as CI artifacts.
 Tests start a local upstream and proxy subprocess. TLS tests use temporary
 certificates rather than changing OS trust. CI runs without Office or SharePoint.
 
+For standalone Debian testing, create a local environment before running the
+same checks:
+
+```sh
+python3 -m venv tools/capture/.venv
+tools/capture/.venv/bin/python -m pip install -r tools/capture/requirements-dev.txt
+tools/capture/.venv/bin/python -m pytest tools/capture -q
+```
+
 References: [Aspire certificates](https://aspire.dev/app-host/certificate-configuration/),
 [mitmproxy modes](https://docs.mitmproxy.org/stable/concepts/modes/#reverse-proxy),
 [streaming](https://docs.mitmproxy.org/stable/overview/features/#streaming),
 [options](https://docs.mitmproxy.org/stable/concepts/options/) and
 [certificates](https://docs.mitmproxy.org/stable/concepts/certificates/).
+WebSocket behavior follows the pinned engine's
+[relay hooks](https://github.com/mitmproxy/mitmproxy/blob/v12.2.3/mitmproxy/proxy/layers/websocket.py)
+and [message model](https://github.com/mitmproxy/mitmproxy/blob/v12.2.3/mitmproxy/websocket.py),
+with [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455) as the transport reference.

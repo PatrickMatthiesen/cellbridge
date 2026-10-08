@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import zlib
@@ -14,6 +15,7 @@ from urllib.parse import unquote
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
+from datetime import datetime
 from typing import Any
 
 MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024
@@ -53,6 +55,117 @@ def _file_integrity(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def _nonnegative(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _timestamp(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def _iso_timestamp(value: Any) -> bool:
+    try:
+        return isinstance(value, str) and datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _validate_payload(run: Path, body: Any, label: str, problems: list[str]) -> int:
+    if not isinstance(body, dict):
+        raise CaptureError(f"{label} descriptor is missing or invalid")
+    if body.get("complete") is not True or body.get("error"):
+        problems.append(f"{label} is incomplete")
+    path = _safe_file(run, body.get("file"))
+    if not path.is_file():
+        problems.append(f"{label} file is missing")
+        return 0
+    size, digest = _file_integrity(path)
+    if not _nonnegative(body.get("captured_bytes")) or body["captured_bytes"] != size:
+        problems.append(f"{label} length mismatch")
+    if not isinstance(body.get("sha256"), str) or body["sha256"].lower() != digest:
+        problems.append(f"{label} sha256 mismatch")
+    if not _nonnegative(body.get("original_bytes")) or body.get("captured_bytes") != body.get("original_bytes"):
+        problems.append(f"{label} capture is truncated")
+    return size
+
+
+def _validate_websocket(run: Path, flow: dict, manifest: dict, events: list[int],
+                        problems: list[str]) -> tuple[int, int, int, int, int]:
+    fid = flow["flow_id"]
+    ws = flow.get("websocket")
+    if not isinstance(ws, dict):
+        raise CaptureError("WebSocket lifecycle is missing")
+    if manifest.get("websocket_capture_scope") != "completed_application_messages":
+        problems.append(f"{fid}: WebSocket capture scope is missing or unsupported")
+    if flow.get("session_id") != manifest.get("session_id"):
+        problems.append(f"{fid}: WebSocket session correlation mismatch")
+    if ws.get("completeness") != "complete":
+        problems.append(f"{fid}: WebSocket is incomplete")
+    for key in ("observed_messages", "recorded_messages", "dropped_messages", "original_bytes", "captured_bytes"):
+        if not _nonnegative(ws.get(key)):
+            raise CaptureError(f"WebSocket {key} is invalid")
+    if ws["dropped_messages"] or ws["observed_messages"] != ws["recorded_messages"]:
+        problems.append(f"{fid}: WebSocket messages were dropped or not recorded")
+    start, end = ws.get("start"), ws.get("end")
+    for name, event in (("start", start), ("end", end)):
+        if not isinstance(event, dict) or type(event.get("event_sequence")) is not int or event["event_sequence"] < 1:
+            raise CaptureError(f"WebSocket {name} event is missing or invalid")
+        events.append(event["event_sequence"])
+        if not _iso_timestamp(event.get("timestamp")):
+            problems.append(f"{fid}: WebSocket {name} timestamp is missing")
+    if end["event_sequence"] <= start["event_sequence"]:
+        problems.append(f"{fid}: WebSocket lifecycle order is invalid")
+    request, response = flow.get("request"), flow.get("response")
+    if (not isinstance(request, dict) or not request.get("client_connection_id")
+            or not isinstance(response, dict) or not response.get("server_connection_id")
+            or not flow.get("mitmproxy_flow_id")):
+        problems.append(f"{fid}: WebSocket connection correlation is missing")
+    if (not _timestamp(end.get("closed_at")) or type(end.get("closed_by_client")) is not bool
+            or end.get("close_code") not in (1000, 1001) or end.get("error")
+            or not isinstance(end.get("close_reason"), str)):
+        problems.append(f"{fid}: WebSocket close/error state is abnormal or missing")
+    paths = sorted((run / "websockets" / fid).glob("*.json"))
+    if len(paths) != ws["recorded_messages"]:
+        problems.append(f"{fid}: WebSocket message count does not match files")
+    previous = start["event_sequence"]
+    original = captured = 0
+    for number, path in enumerate(paths, 1):
+        try:
+            msg = _json(path)
+            if not isinstance(msg, dict):
+                raise CaptureError("WebSocket message must be an object")
+            if (path.name != f"{number:08d}.json" or msg.get("sequence") != number
+                    or msg.get("flow_id") != fid or msg.get("session_id") != manifest.get("session_id")
+                    or msg.get("schema_version") != 2):
+                problems.append(f"{fid}/{path.stem}: WebSocket message order/correlation mismatch")
+            event = msg.get("event_sequence")
+            if type(event) is not int or not previous < event < end["event_sequence"]:
+                raise CaptureError("WebSocket message event order is invalid")
+            previous = event
+            events.append(event)
+            if not _timestamp(msg.get("received_at")) or not _iso_timestamp(msg.get("timestamp")):
+                problems.append(f"{fid}/{path.stem}: WebSocket timestamp is invalid")
+            if msg.get("direction") not in ("client_to_server", "server_to_client") or msg.get("type") not in ("text", "binary"):
+                problems.append(f"{fid}/{path.stem}: WebSocket direction/type is invalid")
+            if msg.get("dropped") is not False or msg.get("injected") is not False:
+                problems.append(f"{fid}/{path.stem}: WebSocket message was dropped/injected")
+            payload = msg.get("payload")
+            size = _validate_payload(run, payload, f"{fid}/{path.stem}: WebSocket payload", problems)
+            captured += size
+            limits = manifest.get("limits")
+            limit = limits.get("max_websocket_message_bytes") if isinstance(limits, dict) else None
+            if (not _nonnegative(limit) or not _nonnegative(payload.get("captured_bytes"))
+                    or payload["captured_bytes"] > limit):
+                problems.append(f"{fid}/{path.stem}: WebSocket message byte limit is invalid or exceeded")
+            if _nonnegative(payload.get("original_bytes")) and _nonnegative(payload.get("captured_bytes")):
+                original += payload["original_bytes"]
+        except (CaptureError, OSError) as exc:
+            problems.append(f"{fid}/{path.stem}: {exc}")
+    if original != ws["original_bytes"] or captured != ws["captured_bytes"]:
+        problems.append(f"{fid}: WebSocket payload byte totals mismatch")
+    return 1, ws["recorded_messages"], ws["observed_messages"], ws["dropped_messages"], captured
+
+
 def validate_run(run: Path) -> tuple[int, list[str]]:
     problems: list[str] = []
     count = 0
@@ -65,8 +178,11 @@ def validate_run(run: Path) -> tuple[int, list[str]]:
         return 0, [str(exc)]
     if not isinstance(manifest, dict):
         return 0, ["manifest root must be an object"]
-    if manifest.get("schema_version") != 1:
+    schema = manifest.get("schema_version")
+    if schema not in (1, 2):
         problems.append("unsupported schema_version")
+    if schema == 2 and not isinstance(manifest.get("session_id"), str):
+        problems.append("session_id is missing")
     if manifest.get("status") != "complete":
         problems.append("run is not complete")
     if manifest.get("recording_healthy") is not True:
@@ -84,13 +200,17 @@ def validate_run(run: Path) -> tuple[int, list[str]]:
         problems.append("manifest flow_count does not match flow files")
     if not flow_files:
         problems.append("run contains no flows")
+    ws_totals = [0, 0, 0, 0, 0]
+    http_bytes = 0
+    ws_events: list[int] = []
+    ws_ids: set[str] = set()
     for flow_path in flow_files:
         count += 1
         try:
             flow = _json(flow_path)
             if not isinstance(flow, dict):
                 raise CaptureError("flow root must be an object")
-            if flow.get("schema_version") != 1:
+            if flow.get("schema_version") != schema:
                 problems.append(f"{flow_path.stem}: unsupported flow schema_version")
             if flow.get("completeness") != "complete":
                 problems.append(f"{flow_path.stem}: flow is {flow.get('completeness', 'pending')}")
@@ -111,6 +231,7 @@ def validate_run(run: Path) -> tuple[int, list[str]]:
                     problems.append(f"{flow_path.stem}: {side} file is missing")
                     continue
                 size, digest = _file_integrity(relpath)
+                http_bytes += size
                 if not isinstance(body.get("captured_bytes"), int) or body["captured_bytes"] != size:
                     problems.append(f"{flow_path.stem}: {side} length mismatch")
                 if not isinstance(body.get("sha256"), str) or body["sha256"].lower() != digest:
@@ -119,8 +240,39 @@ def validate_run(run: Path) -> tuple[int, list[str]]:
                     problems.append(f"{flow_path.stem}: {side} capture is truncated")
             if flow.get("error"):
                 problems.append(f"{flow_path.stem}: flow records an error")
+            response = flow.get("response")
+            upgraded = isinstance(response, dict) and response.get("status_code") == 101 and _headers(flow, "response").get("upgrade", "").lower() == "websocket"
+            if upgraded or flow.get("websocket_expected") or "websocket" in flow:
+                if schema != 2:
+                    raise CaptureError("legacy HTTP-only recording cannot validate WebSocket traffic")
+                if flow.get("flow_id") != flow_path.stem:
+                    raise CaptureError("WebSocket flow_id does not match filename")
+                ws_ids.add(flow_path.stem)
+                if not upgraded:
+                    problems.append(f"{flow_path.stem}: WebSocket HTTP upgrade is missing")
+                totals = _validate_websocket(run, flow, manifest, ws_events, problems)
+                ws_totals = [a + b for a, b in zip(ws_totals, totals)]
         except (CaptureError, OSError) as exc:
             problems.append(f"{flow_path.stem}: {exc}")
+    if schema == 2:
+        total_bytes = http_bytes + ws_totals[4]
+        if not _nonnegative(manifest.get("captured_body_bytes")) or manifest["captured_body_bytes"] != total_bytes:
+            problems.append("manifest captured_body_bytes does not match HTTP/WebSocket files")
+        for key, total in zip(("websocket_count", "websocket_message_count", "websocket_observed_messages", "websocket_dropped_messages"), ws_totals[:4]):
+            if type(manifest.get(key)) is not int or manifest[key] != total:
+                problems.append(f"manifest {key} does not match WebSocket records")
+        if sorted(ws_events) != list(range(1, len(ws_events) + 1)):
+            problems.append("WebSocket event sequence has gaps or duplicates")
+        orphaned = [p for p in (run / "websockets").glob("*/*.json") if p.parent.name not in ws_ids]
+        if orphaned:
+            problems.append("orphaned WebSocket message records")
+        limits = manifest.get("limits", {})
+        if not isinstance(limits, dict):
+            problems.append("capture limits are invalid")
+        else:
+            for key, value in (("max_websocket_messages", ws_totals[1]), ("max_total_bytes", total_bytes)):
+                if not _nonnegative(limits.get(key)) or not _nonnegative(value) or value > limits[key]:
+                    problems.append(f"capture limit {key} is invalid or exceeded")
     return count, problems
 
 
@@ -258,6 +410,15 @@ def inspect_run(run: Path, output: Path) -> tuple[int, list[str]]:
             target.mkdir()
             for side in ("request", "response"):
                 extracted += extract_flow(run, flow, side, target)
+            if "websocket" in flow:
+                ws_target = target / "websocket"
+                ws_target.mkdir()
+                for path in sorted((run / "websockets" / flow_file.stem).glob("*.json")):
+                    msg = _json(path)
+                    suffix = ".txt" if msg["type"] == "text" else ".bin"
+                    shutil.copyfile(_safe_file(run, msg["payload"]["file"]), ws_target / (path.stem + suffix))
+                    shutil.copyfile(path, ws_target / path.name)
+                    extracted += 1
     except (CaptureError, OSError) as exc:
         # Do not leave a partial export that could be mistaken for a complete one.
         # Remove only the exact directory this call created, after checking it is
