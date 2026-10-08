@@ -174,7 +174,14 @@ public sealed class GraphFixture
     public static void Record(BinaryWriterEx writer, StreamObjectTypeHeaderStart type, Action<BinaryWriterEx> write)
     {
         var body = new BinaryWriterEx(); write(body);
-        new StreamObjectHeaderStart32Bit(type, body.Length).Serialize(writer);
+        if (type is StreamObjectTypeHeaderStart.StorageIndexManifestMapping or
+            StreamObjectTypeHeaderStart.StorageIndexCellMapping or StreamObjectTypeHeaderStart.StorageIndexRevisionMapping or
+            StreamObjectTypeHeaderStart.StorageManifestSchemaGUID or StreamObjectTypeHeaderStart.StorageManifestRootDeclare or
+            StreamObjectTypeHeaderStart.CellManifestCurrentRevision or StreamObjectTypeHeaderStart.RevisionManifest or
+            StreamObjectTypeHeaderStart.RevisionManifestRootDeclare or StreamObjectTypeHeaderStart.RevisionManifestObjectGroupReferences)
+            new StreamObjectHeaderStart16Bit(type, body.Length).Serialize(writer);
+        else
+            new StreamObjectHeaderStart32Bit(type, body.Length).Serialize(writer);
         writer.WriteBytes(body.ToArray());
     }
     private static DataElement RevisionRecord(ExGuid element, ExGuid revision, ExGuid parent, ExGuid root, ExGuid obj, ExGuid group) =>

@@ -138,6 +138,12 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                                 store.Attach(document);
                                 ApplyMetadata(document, store, new FssHttpRequest { Url = document.Url }, subRequest, subResponse, log, publicOrigin, actor);
                                 if (subResponse.ErrorCode == "FileUnauthorizedAccess") return new StateTransition<bool>(null, false);
+                                // Invalid lock input cannot publish incidental editor expiry
+                                // from restoring, inspecting or logging the detached document.
+                                // Valid failed conversions may deliberately release membership.
+                                if (subResponse.ErrorCode == "InvalidArgument" && subRequest.Type is
+                                    SubRequestType.SchemaLock or SubRequestType.ExclusiveLock or SubRequestType.Coauth)
+                                    return new StateTransition<bool>(null, false);
                                 var next = document.CaptureCoordination(current, coordinator.Capture());
                                 if (System.Text.Json.JsonSerializer.Serialize(next) == System.Text.Json.JsonSerializer.Serialize(current))
                                     return new StateTransition<bool>(null, true);

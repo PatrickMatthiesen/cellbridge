@@ -86,12 +86,18 @@ public sealed class LockTransitionPersistenceTests
         });
     }
 
-    private static FssHttpSubRequest Request(string key, string operation, string client, string schema) => new()
+    private static FssHttpSubRequest Request(string key, string operation, string client, string schema)
     {
-        SubRequestDataAttributes =
+        var request = new FssHttpSubRequest
         {
-            [key] = operation, ["ClientID"] = client, ["SchemaLockID"] = schema, ["Timeout"] = "3600",
-            ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["ReleaseLockOnConversionToExclusiveFailure"] = "false",
-        },
-    };
+            SubRequestDataAttributes =
+            {
+                [key] = operation, ["ClientID"] = client, ["SchemaLockID"] = schema, ["Timeout"] = "3600",
+                ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111",
+            },
+        };
+        if (operation == "ConvertToExclusive")
+            request.SubRequestDataAttributes["ReleaseLockOnConversionToExclusiveFailure"] = "false";
+        return request;
+    }
 }
