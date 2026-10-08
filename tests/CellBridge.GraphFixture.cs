@@ -16,8 +16,22 @@ public sealed class GraphFixture
     public List<DataElement> Elements { get; }
     public byte[] Bytes { get; }
 
-    public GraphFixture(byte[] bytes, bool blob = false)
+    public GraphFixture(byte[] bytes, bool blob = false, Func<uint, ExGuid>? identity = null, bool swapCellHalves = false)
     {
+        if (identity is not null)
+        {
+            Index = identity(1); Manifest = identity(2); CellManifest = identity(3); RevisionElement = identity(4);
+            BaseElement = identity(5); CurrentGroup = identity(6); BaseGroup = identity(7); Blob = identity(8);
+            OtherCellManifest = identity(9); OtherRevisionElement = identity(10); OtherGroup = identity(11);
+            Revision = identity(20); BaseRevision = identity(21); OtherRevision = identity(22);
+            RootObject = identity(30); Child = identity(31); OtherRoot = identity(32);
+            Cell = new(identity(40), identity(41)); OtherCell = new(identity(42), identity(43));
+        }
+        // Root is a distinguished file-profile constant, not a generated identity.
+        if (swapCellHalves)
+        {
+            Cell = new(Cell.ShortId, Cell.LongId); OtherCell = new(OtherCell.ShortId, OtherCell.LongId);
+        }
         Bytes = bytes;
         Elements = [
             Element(DataElementType.StorageIndexDataElementData, Index, w =>
@@ -88,17 +102,74 @@ public sealed class GraphFixture
     }
     public void SetOverriddenAncestorReference(CellId cell) => Replace(Group(BaseGroup,
         new Item(RootObject, 1, [], Cells: [cell]), new Item(Child, 1, Bytes)));
+    public void SetRootReferences(ExGuid[] objects, CellId[] cells) => Replace(Group(CurrentGroup,
+        new Item(RootObject, 1, [], objects, Cells: cells), new Item(RootObject, 4, [255])));
+
+    /// <summary>Permutes records within their grammar positions, pairing each declaration with its data.</summary>
+    public void PermuteRecords(Random random)
+    {
+        foreach (var element in Elements)
+        {
+            if (element.DataElementType == DataElementType.StorageIndexDataElementData)
+            {
+                var records = ReadRecords(new(element.Data!));
+                element.Data = records.GroupBy(r => r.Type).SelectMany(g => g.OrderBy(_ => random.Next()))
+                    .SelectMany(r => r.Bytes).ToArray();
+            }
+            else if (element.DataElementType == DataElementType.ObjectGroupDataElementData)
+            {
+                var reader = new BinaryReaderEx(element.Data!);
+                int start = reader.Position; StreamObjectHeaderStart.Parse(reader);
+                byte[] declarationStart = element.Data![start..reader.Position];
+                var declarations = ReadRecords(reader);
+                start = reader.Position; StreamObjectHeaderEnd.Parse(reader);
+                byte[] declarationEnd = element.Data![start..reader.Position];
+                start = reader.Position; StreamObjectHeaderStart.Parse(reader);
+                byte[] dataStart = element.Data![start..reader.Position];
+                var data = ReadRecords(reader);
+                byte[] dataEnd = element.Data![reader.Position..];
+                int[] order = Enumerable.Range(0, declarations.Count).OrderBy(_ => random.Next()).ToArray();
+                element.Data = [..declarationStart, ..order.SelectMany(i => declarations[i].Bytes), ..declarationEnd,
+                    ..dataStart, ..order.SelectMany(i => data[i].Bytes), ..dataEnd];
+            }
+        }
+    }
+
+    private static List<(StreamObjectTypeHeaderStart Type, byte[] Bytes)> ReadRecords(BinaryReaderEx reader)
+    {
+        var result = new List<(StreamObjectTypeHeaderStart, byte[])>();
+        while (reader.Remaining > 0)
+        {
+            int position = reader.Position;
+            byte first = reader.ReadByte(); reader.Position = position;
+            if ((first & 3) is 1 or 3) break;
+            var header = StreamObjectHeaderStart.Parse(reader);
+            reader.Skip(header.Length);
+            int end = reader.Position; reader.Position = position;
+            result.Add((header.Type, reader.ReadBytes(end - position)));
+        }
+        return result;
+    }
     public void MakeSelfContainedWithUnmappedAncestor()
     {
         Replace(Group(CurrentGroup, new Item(RootObject, 1, [], [Child]), new Item(Child, 1, Bytes)));
         SetBase(Id(99));
     }
     public static ExGuid Id(uint value) => new(value, Namespace);
-    public static SerialNumber Mapping(ExGuid id) => new(Namespace, id.Value + 1000UL);
+    public static Func<uint, ExGuid> IdentityMap(int mode) => value => mode switch
+    {
+        0 => new(value, Namespace),
+        1 => new(31, new Guid((int)value, 1, 2, [3, 4, 5, 6, 7, 8, 9, 10])),
+        2 => new(value * 4096, Namespace),
+        _ => throw new ArgumentOutOfRangeException(nameof(mode)),
+    };
+    public static DataElement GroupWithForeignObject(ExGuid group, ExGuid root, ExGuid foreign) =>
+        Group(group, new Item(root, 1, [7]), new Item(foreign, 1, [9]));
+    public static SerialNumber Mapping(ExGuid id) => new(id.Guid, id.Value + 1000UL);
     public static DataElement Element(DataElementType type, ExGuid id, Action<BinaryWriterEx> write)
     {
         var writer = new BinaryWriterEx(); write(writer);
-        return new(type, id, new(Namespace, id.Value)) { Data = writer.ToArray() };
+        return new(type, id, new(id.Guid, id.Value)) { Data = writer.ToArray() };
     }
     public static void Record(BinaryWriterEx writer, StreamObjectTypeHeaderStart type, Action<BinaryWriterEx> write)
     {
