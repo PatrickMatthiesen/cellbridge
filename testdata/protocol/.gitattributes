@@ -1,0 +1,2 @@
+# Preserve the pinned upstream schema bytes, including CRLF and upstream spacing.
+MS-FSSHTTP-FSSHTTPB.wsdl -text whitespace=-blank-at-eol,-space-before-tab,cr-at-eol
