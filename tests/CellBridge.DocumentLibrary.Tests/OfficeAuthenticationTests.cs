@@ -4,7 +4,10 @@ using CellBridge.DocumentLibrary;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 
 namespace CellBridge.DocumentLibrary.Tests;
 
@@ -104,6 +107,52 @@ public sealed class OfficeAuthenticationTests
         Assert.Equal(files.Path, reopened.Root);
     }
 
+    [Fact]
+    public async Task FactoryReleasesDestinationWhenEntrypointDisposalIsStillPending()
+    {
+        using var files = new TemporaryDirectory();
+        var disposal = new DisposalGate();
+        await using var factory = new LibraryFactory(files.Path,
+            services => services.AddSingleton(_ => disposal));
+        using var client = Client(factory);
+        using var response = await client.GetAsync("/auth/login");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var lifetime = factory.Services.GetRequiredService<IHostApplicationLifetime>();
+        _ = factory.Services.GetRequiredService<DisposalGate>();
+        Assert.Throws<IOException>(() => new DocumentLibraryDestination(files.Path));
+
+        try
+        {
+            lifetime.StopApplication();
+            await disposal.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await factory.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.False(disposal.Completed.Task.IsCompleted);
+            await using var reopened = new DocumentLibraryDestination(files.Path);
+            Assert.Equal(files.Path, reopened.Root);
+        }
+        finally
+        {
+            disposal.Release.TrySetResult();
+            await disposal.Completed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    private sealed class DisposalGate : IDisposable, IAsyncDisposable
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Completed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Dispose() => throw new InvalidOperationException("Entrypoint must begin asynchronous disposal first.");
+
+        public async ValueTask DisposeAsync()
+        {
+            Entered.TrySetResult();
+            await Release.Task;
+            Completed.TrySetResult();
+        }
+    }
+
     [Theory]
     [InlineData("/auth/login")]
     public async Task LoginRequiresCsrfAndUsesSafeReturnUrls(string path)
@@ -197,13 +246,37 @@ public sealed class OfficeAuthenticationTests
     private static string IdentityLoginState(string html) => WebUtility.HtmlDecode(Regex.Match(html,
         "name=\"_cellbridgeState\" value=\"([^\"]+)\"").Groups[1].Value);
 
-    internal sealed class LibraryFactory(string destination) : WebApplicationFactory<global::Program>
+    internal sealed class LibraryFactory(string destination, Action<IServiceCollection>? configureServices = null)
+        : WebApplicationFactory<global::Program>
     {
+        private DocumentLibraryDestination? _ownedDestination;
+
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseEnvironment("Testing");
             builder.UseSetting("DocumentLibrary:StorageProvider", "InMemory");
             builder.UseSetting("DocumentLibrary:DestinationRoot", destination);
+            builder.ConfigureTestServices(services =>
+            {
+                // RunAsync and WebApplicationFactory can dispose the provider concurrently.
+                // Own the lock here; neither registration may capture it for DI disposal.
+                _ownedDestination = new DocumentLibraryDestination(destination);
+                services.Replace(ServiceDescriptor.Singleton(_ownedDestination));
+                services.Replace(ServiceDescriptor.Singleton<IExternalRevisionDestination>(_ownedDestination));
+                configureServices?.Invoke(services);
+            });
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            try
+            {
+                await base.DisposeAsync();
+            }
+            finally
+            {
+                _ownedDestination?.Dispose();
+            }
         }
     }
 }
