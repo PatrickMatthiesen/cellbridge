@@ -106,8 +106,9 @@ internal static class OuterDocumentOperations
                 XElement input;
                 try { input = XElement.Parse(request.SubRequestDataXml); }
                 catch (System.Xml.XmlException) { response.ErrorCode = "InvalidArgument"; return; }
-                var container = input.Elements().SingleOrDefault(e => e.Name.LocalName == "PropertyIds");
-                if (container is null) { response.ErrorCode = "InvalidArgument"; return; }
+                var containers = input.Elements().Where(e => e.Name.LocalName == "PropertyIds").ToArray();
+                if (containers.Length != 1) { response.ErrorCode = "InvalidArgument"; return; }
+                var container = containers[0];
                 var ids = container.Elements().ToArray();
                 if (ids.Length > 256 || ids.Any(e => e.Name.LocalName != "PropertyId" || e.Attribute("id") is null))
                 { response.ErrorCode = "InvalidArgument"; return; }

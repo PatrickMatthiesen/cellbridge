@@ -8,6 +8,78 @@ namespace CellBridge.Interop.Tests;
 public sealed class BoundedDifferentialGraphTests(ITestOutputHelper output)
 {
     [Fact]
+    public void MicrosoftDecoderPreservesNearCollidingIdentitiesAndPairedRecordPermutations()
+    {
+        const int seed = 0x34_18;
+        var random = new Random(seed);
+        for (int sample = 0; sample < 12; sample++)
+        {
+            byte[] content = new byte[random.Next(1, 1025)]; random.NextBytes(content);
+            bool blob = sample % 2 == 0;
+            var f = new GraphFixture(content, blob, GraphFixture.IdentityMap(sample % 3), sample % 2 != 0);
+            Server.ExGuid[] references = sample % 2 == 0 ? [f.Child, f.RootObject] : [f.RootObject, f.Child];
+            Server.CellId[] cells = sample % 2 == 0 ? [f.OtherCell, f.Cell] : [f.Cell, f.OtherCell];
+            f.SetRootReferences(references, cells);
+            f.PermuteRecords(random);
+            var response = new Server.FsshttpbResponse { DataElementPackage = new() };
+            response.DataElementPackage.DataElements.AddRange(f.Elements.OrderBy(_ => random.Next()));
+            response.SubResponses.Add(new() { RequestId = 7, RequestType = Server.RequestTypes.QueryChanges,
+                Data = new Server.QueryChangesSubResponseData { StorageIndexExtendedGuid = f.Index } });
+            byte[] wire = response.ToByteArray(Server.FsshttpbSerializationProfile.SharePoint13_11);
+            Assert.InRange(wire.Length, 1, 16 * 1024);
+            var parsed = Reference.FsshttpbResponse.DeserializeResponseFromByteArray(wire, 0);
+            var elements = parsed.DataElementPackage.DataElements;
+            Assert.Equal(f.Elements.Count, elements.Count);
+            Reference.DataElement Find(Server.ExGuid id) => Assert.Single(elements, e => Same(id, e.DataElementExtendedGUID));
+            foreach (var expected in f.Elements)
+            {
+                var actual = Find(expected.DataElementExtendedGuid);
+                Assert.Equal((ulong)expected.DataElementType, (ulong)actual.DataElementType);
+                Assert.Equal(expected.SerialNumber.Guid, actual.SerialNumber.GUID);
+                Assert.Equal(expected.SerialNumber.Value, actual.SerialNumber.Value);
+            }
+            var index = Assert.IsType<Reference.StorageIndexDataElementData>(Find(f.Index).Data);
+            Equal(f.Manifest, index.StorageIndexManifestMapping.ManifestMappingExtendedGUID);
+            Assert.Equal(2, index.StorageIndexCellMappingList.Count);
+            Assert.Equal(3, index.StorageIndexRevisionMappingList.Count);
+            foreach (var (cell, target) in new[] { (f.Cell, f.CellManifest), (f.OtherCell, f.OtherCellManifest) })
+            {
+                var mapping = Assert.Single(index.StorageIndexCellMappingList, m => Same(cell.LongId, m.CellID.ExtendGUID1) && Same(cell.ShortId, m.CellID.ExtendGUID2));
+                Equal(target, mapping.CellMappingExtendedGUID);
+            }
+            foreach (var (revision, target) in new[] { (f.Revision, f.RevisionElement), (f.BaseRevision, f.BaseElement), (f.OtherRevision, f.OtherRevisionElement) })
+                Equal(target, Assert.Single(index.StorageIndexRevisionMappingList, m => Same(revision, m.RevisionExtendedGUID)).RevisionMappingExtendedGUID);
+            var current = Assert.IsType<Reference.ObjectGroupDataElementData>(Find(f.CurrentGroup).Data);
+            int rootPosition = current.ObjectGroupDeclarations.ObjectDeclarationList.FindIndex(d => d.ObjectPartitionID.DecodedValue == 1);
+            Equal(f.RootObject, current.ObjectGroupDeclarations.ObjectDeclarationList[rootPosition].ObjectExtendedGUID);
+            var rootData = current.ObjectGroupData.ObjectGroupObjectDataList[rootPosition];
+            Assert.Equal(references.Length, rootData.ObjectExGUIDArray.Content.Count);
+            for (int i = 0; i < references.Length; i++) Equal(references[i], rootData.ObjectExGUIDArray.Content[i]);
+            Assert.Equal(cells.Length, rootData.CellIDArray.Content.Count);
+            for (int i = 0; i < cells.Length; i++)
+            {
+                Equal(cells[i].LongId, rootData.CellIDArray.Content[i].ExtendGUID1);
+                Equal(cells[i].ShortId, rootData.CellIDArray.Content[i].ExtendGUID2);
+            }
+            var parent = Assert.IsType<Reference.ObjectGroupDataElementData>(Find(f.BaseGroup).Data);
+            if (blob)
+            {
+                var declaration = Assert.Single(parent.ObjectGroupDeclarations.ObjectGroupObjectBLOBDataDeclarationList);
+                Equal(f.Child, declaration.ObjectExGUID); Equal(f.Blob, declaration.ObjectDataBLOBExGUID);
+                Assert.Equal(content, Assert.IsType<Reference.ObjectDataBLOBDataElementData>(Find(f.Blob).Data).ObjectDataBLOB.Data);
+            }
+            else
+            {
+                int position = parent.ObjectGroupDeclarations.ObjectDeclarationList.FindIndex(d => Same(f.Child, d.ObjectExtendedGUID));
+                Assert.Equal(content, parent.ObjectGroupData.ObjectGroupObjectDataList[position].Data.Content);
+            }
+            output.WriteLine($"seed={seed} sample={sample} bytes={wire.Length} identities={sample % 3} mutation=paired-record-order");
+        }
+    }
+
+    private static bool Same(Server.ExGuid expected, Reference.ExGuid actual) => expected.Value == actual.Value && expected.Guid == actual.GUID;
+
+    [Fact]
     public void MicrosoftDecoderPreservesGeneratedGraphIdentitiesMappingsPartitionsAndBlobReferences()
     {
         const int seed = 0x18_34;
