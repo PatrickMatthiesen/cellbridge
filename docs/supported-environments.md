@@ -27,6 +27,7 @@ and the source commit when qualifying a deployment.
 | PostgreSQL state and local filesystem content | `ProcessTests.FileSystemProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` | The same process boundary with immutable files under the reported temporary root. |
 | PostgreSQL state and filesystem content under the run output root | `ProcessTests.ConfiguredFileSystemProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` | The same process boundary on the reported output filesystem. Missing qualification inputs cause a skip. |
 | Portable recovery across PostgreSQL/filesystem content | `PortabilityProviderTests.PostgreSqlToFileSystemToPostgreSqlRetainsEverySnapshotRootAndRestores` and portability failure tests | Export/import preserves current and retained graph/content roots, history, receipts and pending delivery. A reopened provider can restore a retained revision. |
+| Disposable local Linux PostgreSQL, with PostgreSQL or local filesystem content | `DatabaseRecoveryTests`, run through `tools/testing/recovery.py` | Database process termination before publication SQL, clean database stop/start after acknowledged saves, and quiescent custom-format `pg_dump`/`pg_restore`, each with state and content verification. |
 | In-memory state and content | Volatile provider conformance | API behavior during a process lifetime, with no restart recovery guarantee. |
 
 Current CI also exercises PostgreSQL 18 in a Linux container and protocol/package
@@ -50,8 +51,10 @@ The final runner records the selected SDK in `summary.json`.
 
 ## Limits and recovery
 
-These checks terminate application processes. They do not cut disk power, crash
-the database, force replica failover or qualify SMB/NFS semantics. Those scenarios
+The `ProcessTests` checks terminate application writers. The dedicated
+`DatabaseRecoveryTests` also terminate the disposable PostgreSQL process and
+restart the same container. None of these checks cut disk power, force replica
+failover or qualify SMB/NFS semantics. Those scenarios
 remain unqualified until their own fault/restore procedures pass with independent
 state and content verification. Flushing and atomic rename are prerequisites,
 not proof of hardware durability.
@@ -69,6 +72,92 @@ Recover authentication and external destination receipt/policy stores separately
 using coordinated recovery points.
 
 The portable archive tests validate recovery into an empty destination with the
-documented context restrictions. They do not validate an operator's particular
-`pg_dump`, snapshot or replica-backup procedure. See [provider recovery](provider-portability.md),
+documented context restrictions. The database runner below tests one quiescent
+logical backup procedure. Other operator procedures, physical snapshots and
+replica backups still need their own qualification. See [provider recovery](provider-portability.md),
 [storage configuration](storage-providers.md) and [durable host upgrades](storage-providers.md#upgrading-a-durable-host).
+
+## Controlled database interruption and logical restore
+
+On Linux with Docker, the pinned Aspire SDK and .NET 10 available, run:
+
+```sh
+python3 tools/testing/recovery.py
+```
+
+The runner builds the storage tests and starts its own minimal AppHost with
+`--isolated`. It refuses an active AppHost in this worktree and removes inherited
+connection strings and storage configuration. It creates a PostgreSQL 18.3
+container with a unique ownership marker, dynamic ports and PGDATA in the
+container's writable layer. The image's unused default data mount is tmpfs.
+There are no database bind mounts or persistent volumes. Removing the container
+discards its database. Filesystem objects and copied backup roots are under the
+run's ignored `artifacts/recovery` directory. The runner retains the exact
+container during faults and removes it after stopping its AppHost.
+
+All six recovery cases must execute and pass. Missing opt-in inputs skip the
+tests in ordinary test runs; skips do not qualify a database recovery run. The
+runner also executes existing process, provider-portability and environment
+checks, then stops only its own AppHost and removes its verified container.
+Keep its summary, TRX results, environment reports and backup artifacts together.
+Reports identify the source commit and dirty state, host and container OS,
+SDK/runtime, Npgsql, Aspire CLI, Docker, image digest, PostgreSQL and backup-client
+versions, durability settings and filesystem mounts. They omit connection strings
+and passwords.
+
+The Debian qualification on 2026-10-09 covers both PostgreSQL content and
+local filesystem content. All six controlled database recovery cases and the
+19 existing process/provider/environment checks passed without skips. Every
+retained source and restored save reply decoded fully through OfficeInspectors,
+with status zero, alongside raw-state/content equality and the separate
+reference-save controls. The original pre-correction run had two passing outage
+cases and four failures caused by storage-index wire/fixture framing. The merged
+framing corrections resolve those failures; no decoding exemption remains.
+
+That qualification used Debian 13.7, SDK 10.0.401, .NET 10.0.12 and Npgsql 10.0.3.
+PostgreSQL and both backup clients were 18.3, from the Debian 13 container image.
+Local content was on ext4; PGDATA was on the container overlay filesystem. All
+three recorded database durability settings were `on`. The retained run summary
+identifies the actual clean source commit, image digest and runtime versions;
+these local results do not qualify other storage deployments. Passing raw-state
+or content comparisons alone is insufficient: retained replies must decode fully.
+
+The interruption case holds a real provider transaction after calculating the
+proposed save, before executing publication SQL. It kills the verified database
+container, releases the test gate and requires failure while the database stays
+down. After restart, heads, every retained state snapshot, security, history,
+receipts and pending delivery must match the prior recovery point before retry.
+Staged immutable objects can remain charged after rollback. The ledger must still
+equal object lengths plus persisted state and recovery-receipt bytes. Two retries
+must publish exactly one revision, save receipt and pending delivery entry. This
+does not establish interruption during COMMIT or external delivery exactly once.
+
+The clean stop/start case requires a zero database exit status, then compares all
+raw CellBridge table rows and verifies the provider through its existing pool
+and a fresh pool. Neither verification reinitializes the schema or repairs
+accounting.
+
+The backup case has no concurrent writer, publisher or collector. It captures
+expected raw rows and referenced object bytes, runs a complete custom-format
+[pg_dump](https://www.postgresql.org/docs/18/app-pgdump.html), and copies the
+filesystem objects when applicable. It restores into a separately created empty
+database using [pg_restore](https://www.postgresql.org/docs/18/app-pgrestore.html)
+with `--single-transaction --exit-on-error`. It compares every raw table row before
+any initialization, checks SHA-256 and length against the frozen content manifest,
+and materializes current and historical file graphs. Retained binary save replies
+must preserve their frozen source bytes and independent OfficeInspectors decoding
+results and decode fully. The runner saves source reply bytes, profile and fixture
+provenance before verification, so a source wire/fixture defect remains diagnosable
+even when restored bytes match exactly. An unchanged decoding failure still rejects
+qualification. Separate file-save replies from the supported SharePoint reference
+request fixtures provide fully decoded positive controls after recovery. Missing
+and same-length corrupted filesystem objects used only by historical state must
+reject verification. A valid restore must preserve authorization and tombstones,
+restore a retained revision, and accept new reference saves with idempotent retries.
+
+This procedure covers CellBridge provider tables and content only. Roles,
+authentication accounts, protection keys and external destination ledgers need
+coordinated backups and separate restore checks. The local writable-layer database
+and local content roots do not qualify deployed database volumes, shared content,
+replication failover or hardware power loss. These server checks add no desktop
+Office compatibility or coauthoring evidence.
