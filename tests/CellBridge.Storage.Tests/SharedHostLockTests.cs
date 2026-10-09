@@ -239,14 +239,20 @@ public sealed class SharedHostLockTests
         SubRequestDataAttributes = { ["ExclusiveLockRequestType"] = operation, ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111",
             ["SchemaLockID"] = "22222222-2222-2222-2222-222222222222", ["ClientID"] = "client", ["Timeout"] = "3600" },
     });
-    private static Task<string?> ApplySchema(StorageProvider provider, Guid id, string operation) => Apply(provider, id, new()
+    private static Task<string?> ApplySchema(StorageProvider provider, Guid id, string operation)
     {
-        Type = SubRequestType.SchemaLock,
-        SubRequestToken = 1,
-        SubRequestDataXml = "<SubRequestData />",
-        SubRequestDataAttributes = { ["SchemaLockRequestType"] = operation, ["SchemaLockID"] = "22222222-2222-2222-2222-222222222222", ["ClientID"] = "client",
-            ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" },
-    });
+        var request = new FssHttpSubRequest
+        {
+            Type = SubRequestType.SchemaLock,
+            SubRequestToken = 1,
+            SubRequestDataXml = "<SubRequestData />",
+            SubRequestDataAttributes = { ["SchemaLockRequestType"] = operation, ["SchemaLockID"] = "22222222-2222-2222-2222-222222222222", ["ClientID"] = "client",
+                ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" },
+        };
+        if (operation == "ConvertToExclusive")
+            request.SubRequestDataAttributes["ReleaseLockOnConversionToExclusiveFailure"] = "false";
+        return Apply(provider, id, request);
+    }
     private static async Task<string?> Apply(StorageProvider provider, Guid id, FssHttpSubRequest request)
     {
         var response = await new CellBridgeRequestProcessor(new(provider)).ExecuteAsync(new() { Requests =

@@ -159,9 +159,9 @@ public sealed class FssHttpLockCoordinatorTests
         var owner = Guid.NewGuid();
 
         Assert.Equal(LockOperationResult.Granted, coordinator.ApplySchemaLock(
-            Request(("ClientID", owner.ToString()), ("SchemaLockID", Guid.NewGuid().ToString()), ("SchemaLockRequestType", "GetLock"), ("Timeout", "1")),
+            Request(("ClientID", owner.ToString()), ("SchemaLockID", Guid.NewGuid().ToString()), ("SchemaLockRequestType", "GetLock"), ("Timeout", "3600")),
             new FssHttpSubResponse(), at));
-        coordinator.ApplyLockStatus(Request(), response, at.AddSeconds(2));
+        coordinator.ApplyLockStatus(Request(), response, at.AddSeconds(3601));
 
         Assert.Equal("0", response.SubResponseDataAttributes["LockType"]);
     }
@@ -279,7 +279,7 @@ public sealed class FssHttpLockCoordinatorTests
         var grantedAt = DateTime.UtcNow;
         Assert.Equal(LockOperationResult.Granted, coordinator.ApplyExclusiveLock(
             Request(("ExclusiveLockID", lockId.ToString("D")),
-                ("ExclusiveLockRequestType", "GetLock"), ("Timeout", "1")),
+                ("ExclusiveLockRequestType", "GetLock"), ("Timeout", "60")),
             new FssHttpSubResponse(), grantedAt));
 
         var denied = coordinator.ExecuteCellWrite(
@@ -299,7 +299,7 @@ public sealed class FssHttpLockCoordinatorTests
             () => 2,
             out int? value,
             out string? allowedCode,
-            grantedAt.AddSeconds(2));
+            grantedAt.AddSeconds(61));
         Assert.True(afterExpiry);
         Assert.Equal(2, value);
         Assert.Null(allowedCode);
@@ -344,6 +344,12 @@ public sealed class FssHttpLockCoordinatorTests
         var request = new FssHttpSubRequest();
         foreach (var (key, value) in values)
             request.SubRequestDataAttributes[key] = value;
+        // These lifecycle fixtures supply valid acquisition/conversion input.
+        var attrs = request.SubRequestDataAttributes;
+        if (attrs.Values.Any(v => v is "GetLock" or "RefreshLock" or "JoinCoauthoring" or "RefreshCoauthoring" or "ConvertToExclusive"))
+            attrs.TryAdd("Timeout", "3600");
+        if (attrs.Values.Contains("ConvertToExclusive"))
+            attrs.TryAdd("ReleaseLockOnConversionToExclusiveFailure", "false");
         return request;
     }
 
@@ -352,6 +358,12 @@ public sealed class FssHttpLockCoordinatorTests
         var request = new FssHttpSubRequest();
         foreach (var pair in values)
             request.SubRequestDataAttributes[pair.Key] = pair.Value;
+        // These lifecycle fixtures supply valid acquisition/conversion input.
+        var attrs = request.SubRequestDataAttributes;
+        if (attrs.Values.Any(v => v is "GetLock" or "RefreshLock" or "JoinCoauthoring" or "RefreshCoauthoring" or "ConvertToExclusive"))
+            attrs.TryAdd("Timeout", "3600");
+        if (attrs.Values.Contains("ConvertToExclusive"))
+            attrs.TryAdd("ReleaseLockOnConversionToExclusiveFailure", "false");
         return request;
     }
 }

@@ -22,6 +22,11 @@ input and compressed editors tables have a 16 MiB decoded limit.
 Put Changes also decodes OfficeDev-compatible serial reassignment records before
 Knowledge, retaining typed element IDs and serials and checking declared lengths.
 
+Object Data BLOB elements read opaque bytes using the stream-object header length,
+as required by MS-FSSHTTPB 2.2.1.12.8. The imported `BinaryItem Data` field remains
+a compatibility container; its length is derived from the header. Element metadata,
+BLOB lengths and the element end type are checked.
+
 The library has no reference to `CellBridge.FssHttpB`. Keeping its grammar separate
 allows comparisons between server serialization, this parser, the vendored
 Interop-TestSuites parser and reviewed SharePoint traffic. It is a diagnostic

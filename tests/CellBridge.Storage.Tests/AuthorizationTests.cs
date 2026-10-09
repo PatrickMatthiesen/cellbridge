@@ -147,7 +147,7 @@ public sealed class AuthorizationTests
             var document = StoredDocument.RestoreMetadata(current, now);
             var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, Other.Identity);
             coordinator.ApplyCoauthSession(document, new() { SubRequestDataAttributes =
-            { ["CoauthRequestType"] = "JoinCoauthoring", ["ClientID"] = client.ToString(), ["SchemaLockID"] = schema } }, new());
+            { ["CoauthRequestType"] = "JoinCoauthoring", ["ClientID"] = client.ToString(), ["SchemaLockID"] = schema, ["Timeout"] = "3600" } }, new());
             return new StateTransition<bool>(document.CaptureCoordination(current, coordinator.Capture()), true);
         });
         var before = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
@@ -178,7 +178,7 @@ public sealed class AuthorizationTests
         var id = Guid.NewGuid().ToString(); var client = Guid.NewGuid().ToString();
         var acquire = new FssHttpSubRequest { SubRequestDataAttributes =
         { [schemaLock ? "SchemaLockRequestType" : "ExclusiveLockRequestType"] = "GetLock",
-          [schemaLock ? "SchemaLockID" : "ExclusiveLockID"] = id, ["ClientID"] = client } };
+          [schemaLock ? "SchemaLockID" : "ExclusiveLockID"] = id, ["ClientID"] = client, ["Timeout"] = "3600" } };
         Assert.Equal(LockOperationResult.Granted, schemaLock ? coordinator.ApplySchemaLock(acquire, new()) : coordinator.ApplyExclusiveLock(acquire, new()));
         var before = JsonSerializer.Serialize(coordinator.Capture());
         FssHttpLockCoordinator.For(document, Other.Identity);
