@@ -105,12 +105,22 @@ SDK/runtime, Npgsql, Aspire CLI, Docker, image digest, PostgreSQL and backup-cli
 versions, durability settings and filesystem mounts. They omit connection strings
 and passwords.
 
-The local Debian run on 2026-10-08 used Debian 13.7, SDK 10.0.401,
-.NET 10.0.12 and Npgsql 10.0.3. PostgreSQL and both backup clients were 18.3,
-from the Debian 13 container image. Local content was on ext4; PGDATA was on
-the container overlay filesystem. All three recorded database durability settings
-were `on`. Passing raw-state/content comparisons alone do not qualify the run;
-the retained-reply independent decoding checks must pass as well.
+The Debian qualification on 2026-10-09 covers both PostgreSQL content and
+local filesystem content. All six controlled database recovery cases and the
+19 existing process/provider/environment checks passed without skips. Every
+retained source and restored save reply decoded fully through OfficeInspectors,
+with status zero, alongside raw-state/content equality and the separate
+reference-save controls. The original pre-correction run had two passing outage
+cases and four failures caused by storage-index wire/fixture framing. The merged
+framing corrections resolve those failures; no decoding exemption remains.
+
+That qualification used Debian 13.7, SDK 10.0.401, .NET 10.0.12 and Npgsql 10.0.3.
+PostgreSQL and both backup clients were 18.3, from the Debian 13 container image.
+Local content was on ext4; PGDATA was on the container overlay filesystem. All
+three recorded database durability settings were `on`. The retained run summary
+identifies the actual clean source commit, image digest and runtime versions;
+these local results do not qualify other storage deployments. Passing raw-state
+or content comparisons alone is insufficient: retained replies must decode fully.
 
 The interruption case holds a real provider transaction after calculating the
 proposed save, before executing publication SQL. It kills the verified database
