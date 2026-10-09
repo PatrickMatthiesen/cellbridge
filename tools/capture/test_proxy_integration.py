@@ -16,7 +16,6 @@ import os
 import socket
 import ssl
 import subprocess
-import signal
 import sys
 import tempfile
 import threading
@@ -146,14 +145,24 @@ class ProxyIntegrationTests(unittest.TestCase):
             "--name", "integration", "--max-body-bytes", "1048576",
             "--max-total-bytes", "4194304",
         ]
-        creationflags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                          getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(
-            args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, creationflags=creationflags,
-        )
+        self._launch_proxy(args)
         self.addCleanup(self._stop_proxy)
         self._wait_ready()
+
+    def _launch_proxy(self, args) -> None:
+        # Keep every launch, including restarts, detached from the caller's
+        # Windows console. Shutdown uses stop.request, never console events.
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        # A PIPE read only after exit can fill and prevent shutdown on Windows.
+        # Preserve child diagnostics in a disposable file instead.
+        self.proxy_log = tempfile.TemporaryFile(dir=self.temp.name)
+        try:
+            self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL,
+                                         stdout=self.proxy_log, stderr=subprocess.STDOUT,
+                                         creationflags=flags)
+        except Exception:
+            self.proxy_log.close()
+            raise
 
     @staticmethod
     def _free_port() -> int:
@@ -165,7 +174,8 @@ class ProxyIntegrationTests(unittest.TestCase):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                output = self.proc.stdout.read().decode("utf-8", "replace") if self.proc.stdout else ""
+                self.proxy_log.seek(0)
+                output = self.proxy_log.read().decode("utf-8", "replace")
                 self.fail(f"capture proxy exited during startup ({self.proc.returncode}):\n{output}")
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
@@ -175,26 +185,29 @@ class ProxyIntegrationTests(unittest.TestCase):
         self.fail("capture proxy did not listen within 15 seconds")
 
     def _stop_proxy(self) -> None:
-        if self.proc.poll() is None:
-            run_dirs = list(self.output_root.glob("*/manifest.json"))
-            if run_dirs:
+        try:
+            if self.proc.poll() is None:
+                run_dirs = list(self.output_root.glob("*/manifest.json"))
+                if run_dirs:
+                    try:
+                        subprocess.run([sys.executable, str(ROOT / "tools" / "capture" / "stop.py"),
+                                        str(run_dirs[0].parent)], cwd=ROOT, timeout=12,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    except subprocess.TimeoutExpired:
+                        pass
+                # A final manifest acknowledges flushing, not process exit.
+                # Allow the event loop to finish before any forced termination.
                 try:
-                    subprocess.run([sys.executable, str(ROOT / "tools" / "capture" / "stop.py"),
-                                    str(run_dirs[0].parent)], cwd=ROOT, timeout=12,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    self.proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    pass
-            if self.proc.poll() is None and os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
-                self.proc.send_signal(signal.CTRL_BREAK_EVENT)
-            elif self.proc.poll() is None:
-                self.proc.terminate()
-            try:
-                self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        if self.proc.stdout is not None:
-            self.proc.stdout.close()
+                    self.proc.terminate()
+                    try:
+                        self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.proc.kill()
+                        self.proc.wait(timeout=5)
+        finally:
+            self.proxy_log.close()
 
     def _validate_run(self) -> None:
         from tools.capture.inspect_capture import validate_run
@@ -323,8 +336,7 @@ class ProxyIntegrationTests(unittest.TestCase):
         args = [PROXY_PYTHON, str(RUNNER), "--hosts", "localhost", "--port", str(self.port),
                 "--output-root", str(self.output_root), "--max-websocket-message-bytes", "3",
                 "--max-websocket-messages", "2", "--max-total-bytes", "5"]
-        self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT)
+        self._launch_proxy(args)
         self._wait_ready()
         client = websocket_test_peer.Client(self.port, self.upstream_port)
         self.addCleanup(client.close)
@@ -440,10 +452,7 @@ class ProxyIntegrationTests(unittest.TestCase):
         args = [PROXY_PYTHON, str(RUNNER), "--hosts", "localhost,127.0.0.1", "--port", str(self.port),
                 "--output-root", str(self.output_root), "--name", "limited", "--max-body-bytes", "8",
                 "--max-total-bytes", "32"]
-        creationflags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                          getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, creationflags=creationflags)
+        self._launch_proxy(args)
         self._wait_ready()
         payload = bytes(range(256))
         status, _, response = self._request("POST", "/large", payload)
@@ -527,10 +536,7 @@ class ProxyIntegrationTests(unittest.TestCase):
             if upstream_http:
                 # A stale HTTPS CA setting must not prevent an HTTP capture.
                 args.extend(["--upstream-ca", str(Path(self.temp.name) / "missing.pem")])
-        flags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                  getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, creationflags=flags)
+        self._launch_proxy(args)
         self._wait_ready()
         proxy_ca = self.output_root / ".mitmproxy" / "mitmproxy-ca-cert.pem"
         deadline = time.monotonic() + 10
@@ -623,10 +629,7 @@ class ProxyIntegrationTests(unittest.TestCase):
         self.port = self._free_port()
         args = [PROXY_PYTHON, str(RUNNER), "--hosts", "localhost", "--port", str(self.port),
                 "--output-root", str(self.output_root), "--name", "tls-untrusted"]
-        flags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                  getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, creationflags=flags)
+        self._launch_proxy(args)
         self._wait_ready()
         proxy_ca = self.output_root / ".mitmproxy" / "mitmproxy-ca-cert.pem"
         deadline = time.monotonic() + 10
