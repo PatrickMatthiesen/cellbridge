@@ -144,6 +144,9 @@ public static class CellBridgeOfficeFormsAuthentication
         public override Task CheckSlidingExpiration(CookieSlidingExpirationContext context) => original.CheckSlidingExpiration(context);
         public override async Task SigningIn(CookieSigningInContext context)
         {
+            if (context.HttpContext.Items[CellBridgeIdentityLogin.PersistentRecoverySignIn] is bool persistent &&
+                context.Scheme.Name == Microsoft.AspNetCore.Identity.IdentityConstants.ApplicationScheme)
+                context.Properties.IsPersistent = persistent;
             await original.SigningIn(context);
             if (context.HttpContext.RequestServices.GetService<IdentityLoginRegistration>() is { } identity &&
                 !identity.MapPrincipal(context.HttpContext, context.Principal))

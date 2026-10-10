@@ -113,6 +113,18 @@ builder.Services.AddCellBridgeCookieLogin<MyAccountAuthenticator>("documents",
     configure: login => login.ApplicationName = "My document library");
 ```
 
+Packaged Office logins request persistent cookies by default, so Office can retain
+its login after closing. Set `login.PersistOfficeSession = false` to opt out.
+This applies to `AddCellBridgeCookieLogin`, `AddCellBridgeLogin` and
+`AddCellBridgeIdentityLogin`. Only a protected Office login flow requests persistence; browser sign-ins and
+legacy custom forms without protected state request session cookies.
+The selected cookie handler controls ticket duration, sliding expiration and
+revocation, and its sign-in callback can override persistence. With the dedicated
+cookie's defaults, the retained login expires after eight hours without renewal.
+Office applications may share their cookie store, so signing into one can sign
+the others in too. Identity's two-factor checks still run before issuing an
+application cookie; this option does not remember a two-factor device.
+
 The helper does not select a default authentication scheme. ASP.NET Core can use
 a sole scheme as its implicit default, but adding another scheme removes that
 implicit choice. Mixed-scheme applications must explicitly select defaults or

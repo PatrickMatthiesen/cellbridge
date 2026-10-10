@@ -50,6 +50,10 @@ public class CellBridgeLoginOptions
     public PathString DefaultReturnPath { get; set; } = new("/");
     public PathString CompletionPath { get; set; } = new("/_cellbridge/auth/complete");
     public string? PublicOrigin { get; set; }
+    /// <summary>Retain cookies issued by a verified Office login after the client closes.
+    /// Defaults to true. Set false for session-only Office sign-in.
+    /// The host cookie's ticket lifetime and validation rules still apply.</summary>
+    public bool PersistOfficeSession { get; set; } = true;
 }
 
 /// <summary>Registers a standard login page with optional custom HTML.</summary>
@@ -158,25 +162,27 @@ public static class CellBridgeLogin
             var isOffice = form[PresentationField] == "office" ||
                 form[cookie.ReturnUrlParameter] == (context.Request.PathBase + office.CompletionPath).ToUriComponent();
             var returnUrl = ReturnUrl(context, registration, office, cookie, isOffice, form[cookie.ReturnUrlParameter]);
+            var persistSession = false;
             if (!string.IsNullOrEmpty(form[StateField]))
             {
                 var state = CellBridgePrimaryLoginState.Read(context, registration, office, form[StateField].ToString(),
                     form[services.GetRequiredService<IOptions<AntiforgeryOptions>>().Value.FormFieldName].ToString());
                 if (state is null) return Results.BadRequest();
                 isOffice = state.IsOffice; returnUrl = state.ReturnUrl;
+                persistSession = isOffice && registration.Options.PersistOfficeSession;
             }
             else if (registration.Options.RenderPage is null ||
                 (isOffice ? registration.Options.RenderOfficePage : registration.Options.RenderBrowserPage) is not null)
                 return Results.BadRequest();
             if (registration.Identity)
                 return await services.GetRequiredService<ICellBridgeIdentityLoginHandler>()
-                    .PasswordAsync(context, username, password, returnUrl, isOffice);
+                    .PasswordAsync(context, username, password, returnUrl, isOffice, persistSession);
             var authenticator = services.GetRequiredService<ICellBridgeLoginAuthenticator>();
             var principal = username.Length is > 0 and <= 256 && password.Length is > 0 and <= 1024
                 ? await authenticator.AuthenticateAsync(context, username, password, context.RequestAborted) : null;
             if (principal is null || CellBridgeActor.FromPrincipal(principal) is null)
                 return Failed(context, registration, cookie, isOffice, returnUrl);
-            await context.SignInAsync(office.CookieScheme, principal, new AuthenticationProperties { IsPersistent = false });
+            await context.SignInAsync(office.CookieScheme, principal, new AuthenticationProperties { IsPersistent = persistSession });
             return Results.LocalRedirect(returnUrl);
         }).AllowAnonymous();
         if (registration.Identity) app.ServiceProvider.GetRequiredService<IdentityLoginRegistration>().MapEndpoints(app);

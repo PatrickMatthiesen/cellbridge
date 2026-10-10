@@ -3,11 +3,13 @@ using System.Text.RegularExpressions;
 using CellBridge.DocumentLibrary;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace CellBridge.DocumentLibrary.Tests;
 
@@ -53,12 +55,20 @@ public sealed class OfficeAuthenticationTests
         Assert.Equal(HttpStatusCode.Redirect, browserChallenge.StatusCode);
         Assert.Contains("/auth/login", browserChallenge.Headers.Location!.ToString());
 
-        using var login = await SignIn(owner, "/auth/login", "owner", "/_cellbridge/auth/complete");
+        using var login = await SignIn(owner, "/_cellbridge/auth/login", "owner", "/_cellbridge/auth/complete");
         Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
         Assert.Equal("/_cellbridge/auth/complete", login.Headers.Location!.ToString());
         var cookie = login.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("CellBridge.DocumentLibrary.Local="));
         Assert.Contains("secure", cookie, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("httponly", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        var options = factory.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
+            .Get(CookieAuthenticationDefaults.AuthenticationScheme);
+        var ticket = options.TicketDataFormat.Unprotect(cookie.Split(';')[0].Split('=', 2)[1]);
+        Assert.NotNull(ticket);
+        Assert.True(ticket.Properties.IsPersistent);
+        Assert.Equal(TimeSpan.FromHours(8), ticket.Properties.ExpiresUtc - ticket.Properties.IssuedUtc);
+        Assert.False(options.SlidingExpiration);
         using var complete = await owner.GetAsync("/_cellbridge/auth/complete");
         Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
         Assert.Empty(await complete.Content.ReadAsStringAsync());
@@ -80,7 +90,7 @@ public sealed class OfficeAuthenticationTests
         Assert.True(discovery.Headers.Contains("X-MSFSSHTTP"));
 
         using var reader = Client(factory);
-        using var readerLogin = await SignIn(reader, "/auth/login", "reader", "/_cellbridge/auth/complete");
+        using var readerLogin = await SignIn(reader, "/_cellbridge/auth/login", "reader", "/_cellbridge/auth/complete");
         Assert.Equal(bytes, await reader.GetByteArrayAsync("/shared/welcome.docx"));
         using var adminDenied = await reader.PostAsync($"/library/files/{state.ResourceId:D}/permissions",
             new FormUrlEncodedContent(new Dictionary<string, string>()));
