@@ -59,6 +59,9 @@ also passes the address check, so keep this example on a private test network.
 Desktop Office has a separate sign-in session from your browser. Select an Office
 link, sign in if prompted, and the dialog completes at
 `/_cellbridge/auth/complete` before Office retries with its cookie.
+The package defaults to `PersistOfficeSession = true`, so Office can retain this login after
+closing. It expires after eight hours without sliding renewal. Word, Excel and
+PowerPoint may reuse the same login cookie. Browser sign-ins request session cookies.
 
 Run the package-only app and its PostgreSQL database through the standalone AppHost. A normal launch restores the published packages from the NuGet sources already configured on the machine:
 

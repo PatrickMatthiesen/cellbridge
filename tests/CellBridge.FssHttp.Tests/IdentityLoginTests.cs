@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace CellBridge.FssHttp.Tests;
 
@@ -29,7 +30,9 @@ public sealed class IdentityLoginTests
         Assert.Equal(office, html.Contains("max-width: none"));
         using var success = await f.Post(f.Login, Fields(html, ("login", "alice"), ("password", Fixture.Password)));
         Assert.Equal(office ? f.Completion : "/mount/", success.Headers.Location!.ToString());
-        Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.Equal(office, cookie.Contains("expires=", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(office, f.Ticket(cookie).Properties.IsPersistent);
         using var subject = await f.Get("/mount/who");
         Assert.Contains("identity:", await subject.Content.ReadAsStringAsync());
         Assert.Contains("host:claim", await subject.Content.ReadAsStringAsync());
@@ -43,6 +46,157 @@ public sealed class IdentityLoginTests
         });
         using var revoked = await f.Get(f.Completion);
         Assert.Equal(HttpStatusCode.Unauthorized, revoked.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("password")]
+    [InlineData("authenticator")]
+    [InlineData("recovery")]
+    public async Task OfficePersistenceUsesIdentityCookieLifetimeAndStillExpiresAndRevokes(string method)
+    {
+        var lifetime = TimeSpan.FromMinutes(23);
+        await using var f = await Fixture.Start(cookieLifetime: lifetime);
+        string html;
+        if (method == "password") html = await f.Html(f.Office);
+        else
+        {
+            await f.EnableMfa();
+            html = await f.BeginMfa(true);
+        }
+        using var success = method == "password"
+            ? await f.Post(f.Login, Fields(html, ("login", "alice"), ("password", Fixture.Password), ("next", "/mount/forged"), ("_cellbridgePresentation", "browser")))
+            : await f.Post(f.Mfa, Fields(html, ("code", method == "recovery" ? f.RecoveryCode : await f.Code()), ("method", method)));
+        Assert.Equal(f.Completion, success.Headers.Location!.ToString());
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.Contains("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        var ticket = f.Ticket(cookie);
+        Assert.True(ticket.Properties.IsPersistent);
+        Assert.Equal(lifetime, ticket.Properties.ExpiresUtc - ticket.Properties.IssuedUtc);
+        Assert.DoesNotContain(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith(".AspNetCore.Identity.TwoFactorRememberMe="));
+        // Keep submitting the original cookie so renewal cannot hide its expiry.
+        f.Clock.Now = ticket.Properties.ExpiresUtc!.Value.AddSeconds(-1);
+        using var valid = await f.Get(f.Completion);
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+        f.Jar.SetCookies(new("https://localhost/mount"), cookie);
+        f.Clock.Now = ticket.Properties.ExpiresUtc.Value.AddSeconds(1);
+        using var expired = await f.Get(f.Completion);
+        Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
+        f.Clock.Now = ticket.Properties.IssuedUtc!.Value.AddSeconds(1);
+        f.Jar.SetCookies(new("https://localhost/mount"), cookie);
+        await f.Users(async users => Assert.True((await users.UpdateSecurityStampAsync((await users.FindByNameAsync("alice"))!)).Succeeded));
+        using var revoked = await f.Get(f.Completion);
+        Assert.Equal(HttpStatusCode.Unauthorized, revoked.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("password")]
+    [InlineData("authenticator")]
+    [InlineData("recovery")]
+    public async Task OfficePersistenceCanBeDisabledForEveryIdentitySignInMethod(string method)
+    {
+        await using var f = await Fixture.Start(persistOfficeSession: false);
+        string html;
+        if (method == "password") html = await f.Html(f.Office);
+        else
+        {
+            await f.EnableMfa();
+            html = await f.BeginMfa(true);
+        }
+        using var success = method == "password"
+            ? await f.Post(f.Login, Fields(html, ("login", "alice"), ("password", Fixture.Password)))
+            : await f.Post(f.Mfa, Fields(html, ("code", method == "recovery" ? f.RecoveryCode : await f.Code()), ("method", method)));
+        Assert.Equal(f.Completion, success.Headers.Location!.ToString());
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.DoesNotContain("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.False(f.Ticket(cookie).Properties.IsPersistent);
+    }
+
+    [Fact]
+    public async Task RecoveryPersistenceIsVisibleToHostSigningInAndHonorsItsExpiryOverride()
+    {
+        var hostLifetime = TimeSpan.FromMinutes(7);
+        await using var f = await Fixture.Start(persistOfficeSession: true, cookieLifetime: TimeSpan.FromMinutes(23), signInLifetime: hostLifetime);
+        await f.EnableMfa();
+        var html = await f.BeginMfa(true);
+        using var success = await f.Post(f.Mfa, Fields(html, ("code", f.RecoveryCode), ("method", "recovery")));
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.True(f.HostSawPersistentSignIn);
+        Assert.Equal(1, f.ApplicationSignIns);
+        Assert.Contains("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        var ticket = f.Ticket(cookie);
+        Assert.True(ticket.Properties.IsPersistent);
+        Assert.Equal(hostLifetime, ticket.Properties.ExpiresUtc - ticket.Properties.IssuedUtc);
+        // A later host sign-in must not inherit the recovery request's persistence.
+        using var hostLogin = await f.Get("/mount/host-login");
+        var hostCookie = Assert.Single(hostLogin.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.False(f.HostSawPersistentSignIn);
+        Assert.DoesNotContain("expires=", hostCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.False(f.Ticket(hostCookie).Properties.IsPersistent);
+    }
+
+    [Fact]
+    public async Task HostSigningInCanDisableRecoveryCookiePersistence()
+    {
+        await using var f = await Fixture.Start(signInPersistence: false);
+        await f.EnableMfa();
+        var html = await f.BeginMfa(true);
+        using var success = await f.Post(f.Mfa, Fields(html, ("code", f.RecoveryCode), ("method", "recovery")));
+        Assert.Equal(f.Completion, success.Headers.Location!.ToString());
+        Assert.True(f.HostSawPersistentSignIn);
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.DoesNotContain("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.False(f.Ticket(cookie).Properties.IsPersistent);
+    }
+
+    [Fact]
+    public async Task FreshClientNeedsOnlyPersistentApplicationCookieToAccessProtectedResources()
+    {
+        await using var f = await Fixture.Start();
+        await f.EnableMfa();
+        var html = await f.BeginMfa(true);
+        using var success = await f.Post(f.Mfa, Fields(html, ("code", f.RecoveryCode), ("method", "recovery")));
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.True(f.Ticket(cookie).Properties.IsPersistent);
+        using var fresh = f.FreshClient(cookie);
+        using var complete = await fresh.GetAsync(f.Completion);
+        Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
+        using var protectedResource = await fresh.GetAsync("/mount/who");
+        Assert.Equal(HttpStatusCode.OK, protectedResource.StatusCode);
+        var subject = await protectedResource.Content.ReadAsStringAsync();
+        Assert.Contains("identity:", subject);
+        Assert.Contains("host:claim=preserved", subject);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyOfficeRendererWithoutProtectedPrimaryStateCannotPersist(bool mfa)
+    {
+        await using var f = await Fixture.Start(customRenderer: false, persistOfficeSession: true);
+        if (mfa) await f.EnableMfa();
+        var fields = Fields(await f.Html(f.Office), ("login", "alice"), ("password", Fixture.Password));
+        fields.Remove("_cellbridgeState");
+        using var primary = await f.Post(f.Login, fields);
+        using var success = mfa
+            ? await f.Post(f.Mfa, Fields(await f.Html(f.Mfa), ("code", await f.Code()), ("method", "authenticator")))
+            : primary;
+        Assert.Equal(f.Completion, success.Headers.Location!.ToString());
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.DoesNotContain("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.False(f.Ticket(cookie).Properties.IsPersistent);
+    }
+
+    [Fact]
+    public async Task ForgedOfficePresentationAndReturnCannotPersistABrowserPasswordSession()
+    {
+        await using var f = await Fixture.Start(persistOfficeSession: true);
+        var html = await f.Html(f.Login);
+        using var success = await f.Post(f.Login, Fields(html, ("login", "alice"), ("password", Fixture.Password),
+            ("next", f.Completion), ("_cellbridgePresentation", "office")));
+        Assert.Equal("/mount/", success.Headers.Location!.ToString());
+        var cookie = Assert.Single(success.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.DoesNotContain("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.False(f.Ticket(cookie).Properties.IsPersistent);
     }
 
     [Theory]
@@ -99,16 +253,18 @@ public sealed class IdentityLoginTests
     [InlineData(true, true)]
     public async Task MfaUsesPendingCookieThenAuthenticatesWithProtectedDestination(bool office, bool recovery)
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(persistOfficeSession: true);
         await f.EnableMfa();
         var html = await f.BeginMfa(office);
         using var blocked = await f.Get(f.Completion);
         Assert.Equal(HttpStatusCode.Unauthorized, blocked.StatusCode);
         var code = recovery ? f.RecoveryCode : await f.Code();
         using var response = await f.Post(f.Mfa, Fields(html, ("code", code), ("method", recovery ? "recovery" : "authenticator"),
-            ("next", "//evil.example"), ("_cellbridgePresentation", office ? "browser" : "office")));
+            ("next", office ? "//evil.example" : f.Completion), ("_cellbridgePresentation", office ? "browser" : "office")));
         Assert.Equal(office ? f.Completion : "/mount/library", response.Headers.Location!.ToString());
-        Assert.Single(response.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        var cookie = Assert.Single(response.Headers.GetValues("Set-Cookie"), c => c.StartsWith("Identity.Application="));
+        Assert.Equal(office, f.Ticket(cookie).Properties.IsPersistent);
+        Assert.Equal(office, cookie.Contains("expires=", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(response.Headers.GetValues("Set-Cookie"), c => c.StartsWith(".AspNetCore.Identity.TwoFactorRememberMe="));
         using var complete = await f.Get(f.Completion);
         Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
@@ -132,14 +288,16 @@ public sealed class IdentityLoginTests
     [InlineData("recovery")]
     public async Task BadMfaCodesRetainOfficeLayoutAndEventuallyLockOut(string method)
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(persistOfficeSession: true);
         await f.EnableMfa();
         var html = await f.BeginMfa(true);
         using var bad = await f.Post(f.Mfa, Fields(html, ("code", "invalid-code"), ("method", method)));
+        Assert.False(bad.Headers.TryGetValues("Set-Cookie", out var badCookies) && badCookies.Any(c => c.StartsWith("Identity.Application=")));
         html = await f.Html(bad.Headers.Location!.ToString());
         Assert.Contains("max-width: none", html);
         Assert.Contains("Sign-in failed", html);
         using var locked = await f.Post(f.Mfa, Fields(html, ("code", "invalid-code"), ("method", method)));
+        Assert.False(locked.Headers.TryGetValues("Set-Cookie", out var lockedCookies) && lockedCookies.Any(c => c.StartsWith("Identity.Application=")));
         Assert.StartsWith(f.Office, locked.Headers.Location!.ToString());
         await f.Users(async users => Assert.True(await users.IsLockedOutAsync((await users.FindByNameAsync("alice"))!)));
         using var complete = await f.Get(f.Completion);
@@ -157,7 +315,7 @@ public sealed class IdentityLoginTests
     [InlineData("disabled-mfa", true)]
     public async Task ChangedAccountPolicyCannotBeBypassedDuringTwoFactorSignIn(string change, bool recovery)
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(persistOfficeSession: true);
         await f.EnableMfa();
         var html = await f.BeginMfa(true);
         var code = recovery ? f.RecoveryCode : await f.Code();
@@ -183,7 +341,7 @@ public sealed class IdentityLoginTests
     [InlineData("missing")]
     public async Task InvalidContinuationCannotIssueAnApplicationCookie(string change)
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(persistOfficeSession: true);
         await f.EnableMfa();
         var html = await f.BeginMfa(true);
         var fields = Fields(html, ("code", await f.Code()), ("method", "authenticator"));
@@ -405,6 +563,17 @@ public sealed class IdentityLoginTests
         internal readonly TestClock Clock = app.Services.GetRequiredService<TestClock>();
         internal bool Allowed { get => app.Services.GetRequiredService<Gate>().Allowed; set => app.Services.GetRequiredService<Gate>().Allowed = value; }
         internal bool RejectCookie { set => app.Services.GetRequiredService<Gate>().RejectCookie = value; }
+        internal bool HostSawPersistentSignIn => app.Services.GetRequiredService<Gate>().HostSawPersistentSignIn;
+        internal int ApplicationSignIns => app.Services.GetRequiredService<Gate>().ApplicationSignIns;
+        internal AuthenticationTicket Ticket(string cookie) => app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
+            .Get(IdentityConstants.ApplicationScheme).TicketDataFormat.Unprotect(cookie.Split(';')[0].Split('=', 2)[1])!;
+        internal HttpClient FreshClient(string cookie)
+        {
+            var client = app.GetTestClient();
+            client.BaseAddress = new("https://localhost");
+            client.DefaultRequestHeaders.Add("Cookie", cookie.Split(';')[0]);
+            return client;
+        }
         internal string RecoveryCode = "";
         private readonly HttpClient _client = app.GetTestClient();
         internal async Task<HttpResponseMessage> Get(string path) => await Send(new(HttpMethod.Get, path));
@@ -469,7 +638,9 @@ public sealed class IdentityLoginTests
             return await Html(Mfa);
         }
         internal static async Task<Fixture> Start(bool explicitSubject = false, string? twoFactorPath = null,
-            bool? customRenderer = null, string? userIdClaim = null, string? configuration = null)
+            bool? customRenderer = null, string? userIdClaim = null, string? configuration = null,
+            bool? persistOfficeSession = null, TimeSpan? cookieLifetime = null, TimeSpan? signInLifetime = null,
+            bool? signInPersistence = null)
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
@@ -500,6 +671,16 @@ public sealed class IdentityLoginTests
             builder.Services.Configure<CookieAuthenticationOptions>(IdentityConstants.ApplicationScheme, o =>
             {
                 o.LoginPath = "/auth/login"; o.ReturnUrlParameter = "next"; o.Cookie.Name = "Identity.Application";
+                if (cookieLifetime.HasValue) o.ExpireTimeSpan = cookieLifetime.Value;
+                o.Events.OnSigningIn = context =>
+                {
+                    var gate = context.HttpContext.RequestServices.GetRequiredService<Gate>();
+                    gate.HostSawPersistentSignIn = context.Properties.IsPersistent;
+                    gate.ApplicationSignIns++;
+                    if (signInLifetime.HasValue) context.Properties.ExpiresUtc = context.Properties.IssuedUtc!.Value + signInLifetime.Value;
+                    if (signInPersistence.HasValue) context.Properties.IsPersistent = signInPersistence.Value;
+                    return Task.CompletedTask;
+                };
                 var validate = o.Events.OnValidatePrincipal;
                 o.Events.OnValidatePrincipal = async context =>
                 {
@@ -512,6 +693,7 @@ public sealed class IdentityLoginTests
             builder.Services.AddCellBridgeIdentityLogin<IdentityUser>(o =>
             {
                 o.IdentityAuthority = "test:accounts";
+                if (persistOfficeSession.HasValue) o.PersistOfficeSession = persistOfficeSession.Value;
                 o.IsRequestAllowed = c => c.RequestServices.GetRequiredService<Gate>().Allowed;
                 if (twoFactorPath is not null) o.TwoFactorPath = new(twoFactorPath);
                 if (customRenderer == false) o.RenderPage = page => "<!-- Legacy custom -->" + CellBridgeLoginPage.Render(page);
@@ -557,7 +739,13 @@ public sealed class IdentityLoginTests
         }
         public async ValueTask DisposeAsync() { _client.Dispose(); await app.DisposeAsync(); }
     }
-    private sealed class Gate { public bool Allowed = true; public bool RejectCookie; }
+    private sealed class Gate
+    {
+        public bool Allowed = true;
+        public bool RejectCookie;
+        public bool HostSawPersistentSignIn;
+        public int ApplicationSignIns;
+    }
     private sealed class TestClock : TimeProvider
     {
         public DateTimeOffset Now = DateTimeOffset.UtcNow;

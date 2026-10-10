@@ -52,6 +52,7 @@ public static class CellBridgeIdentityLogin
 
     internal const string AttemptItem = "CellBridge.IdentityLogin.Attempt";
     internal const string AttemptClaim = "cellbridge:login-attempt";
+    internal static readonly object PersistentRecoverySignIn = new();
 
     private sealed class PendingCookieEvents(CookieAuthenticationEvents original) : CookieAuthenticationEvents
     {
@@ -98,7 +99,7 @@ internal sealed record IdentityLoginRegistration(CellBridgeIdentityLoginOptions 
 internal interface ICellBridgeIdentityLoginHandler
 {
     Task ValidateAsync(CancellationToken cancellationToken);
-    Task<IResult> PasswordAsync(HttpContext context, string username, string password, string returnUrl, bool isOffice);
+    Task<IResult> PasswordAsync(HttpContext context, string username, string password, string returnUrl, bool isOffice, bool persistSession);
 }
 
 internal sealed class IdentityLoginHandler<TUser>(SignInManager<TUser> signIn, UserManager<TUser> users,
@@ -107,7 +108,7 @@ internal sealed class IdentityLoginHandler<TUser>(SignInManager<TUser> signIn, U
     IAuthenticationSchemeProvider schemes, IServiceProvider services) : ICellBridgeIdentityLoginHandler where TUser : class
 {
     private const string FlowCookie = "CellBridge.IdentityLogin.Pending";
-    private readonly IDataProtector _protector = protection.CreateProtector("CellBridge.IdentityLogin", "v1", IdentityConstants.ApplicationScheme,
+    private readonly IDataProtector _protector = protection.CreateProtector("CellBridge.IdentityLogin", "v2", IdentityConstants.ApplicationScheme,
         registration.Options.IdentityAuthority, registration.Options.TwoFactorPath.Value!, registration.Options.OfficeLoginPath.Value!,
         registration.Options.CompletionPath.Value!);
     private TimeProvider Clock => services.GetService<TimeProvider>() ?? TimeProvider.System;
@@ -130,14 +131,14 @@ internal sealed class IdentityLoginHandler<TUser>(SignInManager<TUser> signIn, U
         _ = cookies.Get(IdentityConstants.TwoFactorUserIdScheme);
     }
 
-    public async Task<IResult> PasswordAsync(HttpContext context, string username, string password, string returnUrl, bool isOffice)
+    public async Task<IResult> PasswordAsync(HttpContext context, string username, string password, string returnUrl, bool isOffice, bool persistSession)
     {
         await Clear(context);
         var attempt = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
         context.Items[CellBridgeIdentityLogin.AttemptItem] = attempt;
         if (username.Length is not (> 0 and <= 256) || password.Length is not (> 0 and <= 1024))
             return CellBridgeLogin.Failed(context, login, Cookie, isOffice, returnUrl);
-        var result = await signIn.PasswordSignInAsync(username, password, isPersistent: false, lockoutOnFailure: true);
+        var result = await signIn.PasswordSignInAsync(username, password, isPersistent: persistSession, lockoutOnFailure: true);
         if (result.Succeeded) return Results.LocalRedirect(returnUrl);
         if (!result.RequiresTwoFactor) return CellBridgeLogin.Failed(context, login, Cookie, isOffice, returnUrl);
         var user = await signIn.GetTwoFactorAuthenticationUserAsync();
@@ -154,7 +155,7 @@ internal sealed class IdentityLoginHandler<TUser>(SignInManager<TUser> signIn, U
         }
         var stamp = users.SupportsUserSecurityStamp ? await users.GetSecurityStampAsync(user) : "";
         var state = new Pending(await users.GetUserIdAsync(user), stamp, attempt, context.Request.PathBase.ToUriComponent(),
-            returnUrl, isOffice, Clock.GetUtcNow().Add(Options.PendingLifetime).UtcTicks);
+            returnUrl, isOffice, persistSession, Clock.GetUtcNow().Add(Options.PendingLifetime).UtcTicks);
         var token = Protect(state);
         if (token.Length > CellBridgePrimaryLoginState.MaxTokenLength && !isOffice)
         {
@@ -227,12 +228,20 @@ internal sealed class IdentityLoginHandler<TUser>(SignInManager<TUser> signIn, U
         SignInResult result;
         if (method == "recovery")
         {
-            result = users.SupportsUserTwoFactorRecoveryCodes
-                ? await signIn.TwoFactorRecoveryCodeSignInAsync(code.Replace(" ", "")) : SignInResult.Failed;
+            // Identity's recovery-code API always signs in with IsPersistent=false.
+            // Apply our protected flow's choice to that one application-cookie issuance,
+            // before the host's SigningIn event gets its final say.
+            context.Items[CellBridgeIdentityLogin.PersistentRecoverySignIn] = state.PersistSession;
+            try
+            {
+                result = users.SupportsUserTwoFactorRecoveryCodes
+                    ? await signIn.TwoFactorRecoveryCodeSignInAsync(code.Replace(" ", "")) : SignInResult.Failed;
+            }
+            finally { context.Items.Remove(CellBridgeIdentityLogin.PersistentRecoverySignIn); }
             if (!result.Succeeded && users.SupportsUserLockout) await users.AccessFailedAsync(user);
         }
         else result = await signIn.TwoFactorAuthenticatorSignInAsync(code.Replace(" ", "").Replace("-", ""),
-            isPersistent: false, rememberClient: false);
+            isPersistent: state.PersistSession, rememberClient: false);
         if (result.Succeeded)
         {
             context.Response.Cookies.Delete(FlowCookie, CookieOptions(context));
@@ -291,7 +300,7 @@ internal sealed class IdentityLoginHandler<TUser>(SignInManager<TUser> signIn, U
         using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
         {
             writer.Write(state.UserId); writer.Write(state.SecurityStamp); writer.Write(state.Attempt);
-            writer.Write(state.PathBase); writer.Write(state.ReturnUrl); writer.Write(state.IsOffice); writer.Write(state.Expires);
+            writer.Write(state.PathBase); writer.Write(state.ReturnUrl); writer.Write(state.IsOffice); writer.Write(state.PersistSession); writer.Write(state.Expires);
         }
         return WebEncoders.Base64UrlEncode(_protector.Protect(stream.ToArray()));
     }
@@ -299,9 +308,9 @@ internal sealed class IdentityLoginHandler<TUser>(SignInManager<TUser> signIn, U
     {
         using var stream = new MemoryStream(_protector.Unprotect(WebEncoders.Base64UrlDecode(token)));
         using var reader = new BinaryReader(stream, Encoding.UTF8);
-        var state = new Pending(reader.ReadString(), reader.ReadString(), reader.ReadString(), reader.ReadString(), reader.ReadString(), reader.ReadBoolean(), reader.ReadInt64());
+        var state = new Pending(reader.ReadString(), reader.ReadString(), reader.ReadString(), reader.ReadString(), reader.ReadString(), reader.ReadBoolean(), reader.ReadBoolean(), reader.ReadInt64());
         if (stream.Position != stream.Length) throw new InvalidDataException("Unexpected pending login fields.");
         return state;
     }
-    private sealed record Pending(string UserId, string SecurityStamp, string Attempt, string PathBase, string ReturnUrl, bool IsOffice, long Expires);
+    private sealed record Pending(string UserId, string SecurityStamp, string Attempt, string PathBase, string ReturnUrl, bool IsOffice, bool PersistSession, long Expires);
 }

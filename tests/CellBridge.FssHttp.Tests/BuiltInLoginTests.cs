@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace CellBridge.FssHttp.Tests;
 
@@ -50,12 +51,71 @@ public sealed class BuiltInLoginTests
         var cookie = loggedIn.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("Office.Login="));
         Assert.Contains("secure", cookie, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("httponly", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(!custom, cookie.Contains("expires=", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(!custom, Ticket(app, cookie).Properties.IsPersistent);
         client.DefaultRequestHeaders.Remove("Cookie");
         client.DefaultRequestHeaders.Add("Cookie", cookie.Split(';')[0]);
         using var complete = await client.GetAsync("/mount/_cellbridge/auth/complete");
         Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
         using var office = await client.SendAsync(new(HttpMethod.Options, "/mount/shared/"));
         Assert.Equal(HttpStatusCode.OK, office.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PersistentOfficeCookieUsesConfiguredLifetimeAndHostSigningInOverride(bool overrideExpiry)
+    {
+        var lifetime = TimeSpan.FromMinutes(23);
+        var hostLifetime = overrideExpiry ? TimeSpan.FromMinutes(7) : (TimeSpan?)null;
+        await using var app = await Start(persistOfficeSession: true, cookieLifetime: lifetime, signInLifetime: hostLifetime);
+        using var client = app.GetTestClient(); client.BaseAddress = new("https://localhost");
+        using var page = await client.GetAsync("/mount/_cellbridge/auth/login");
+        var html = await page.Content.ReadAsStringAsync();
+        client.DefaultRequestHeaders.Add("Cookie", page.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
+        using var login = await client.PostAsync("/mount/sign-in", Form(html, "user", "correct-test-password-29", "/mount/forged"));
+        Assert.Equal("/mount/_cellbridge/auth/complete", login.Headers.Location!.ToString());
+        var cookie = login.Headers.GetValues("Set-Cookie").Single(c => c.StartsWith("Office.Login="));
+        Assert.Contains("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        var ticket = Ticket(app, cookie);
+        Assert.True(ticket.Properties.IsPersistent);
+        Assert.Equal(hostLifetime ?? lifetime, ticket.Properties.ExpiresUtc - ticket.Properties.IssuedUtc);
+        var clock = app.Services.GetRequiredService<TestClock>();
+        client.DefaultRequestHeaders.Remove("Cookie");
+        client.DefaultRequestHeaders.Add("Cookie", cookie.Split(';')[0]);
+        clock.Now = ticket.Properties.ExpiresUtc!.Value.AddSeconds(-1);
+        using var valid = await client.GetAsync("/mount/_cellbridge/auth/complete");
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+        clock.Now = ticket.Properties.ExpiresUtc.Value.AddSeconds(1);
+        using var expired = await client.GetAsync("/mount/_cellbridge/auth/complete");
+        Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("browser")]
+    [InlineData("legacy")]
+    [InlineData("opt-out")]
+    public async Task PersistenceRequiresEnabledOptionAndProtectedOfficeStateEvenWithForgedOfficeFields(string flow)
+    {
+        var legacyRenderer = flow == "legacy";
+        await using var app = await Start(custom: legacyRenderer, persistOfficeSession: flow != "opt-out");
+        using var client = app.GetTestClient(); client.BaseAddress = new("https://localhost");
+        using var page = await client.GetAsync(flow == "browser" ? "/mount/sign-in" : "/mount/_cellbridge/auth/login");
+        var html = await page.Content.ReadAsStringAsync();
+        client.DefaultRequestHeaders.Add("Cookie", page.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
+        var fields = new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = Field(html, "__RequestVerificationToken"),
+            ["login"] = "user", ["password"] = "correct-test-password-29",
+            ["next"] = "/mount/_cellbridge/auth/complete", ["_cellbridgePresentation"] = "office"
+        };
+        if (!legacyRenderer) fields["_cellbridgeState"] = Field(html, "_cellbridgeState");
+        using var login = await client.PostAsync("/mount/sign-in", new FormUrlEncodedContent(fields));
+        Assert.Equal(HttpStatusCode.Redirect, login.StatusCode);
+        Assert.Equal(flow == "browser" ? "/mount/" : "/mount/_cellbridge/auth/complete", login.Headers.Location!.ToString());
+        var cookie = login.Headers.GetValues("Set-Cookie").Single(c => c.StartsWith("Office.Login="));
+        Assert.DoesNotContain("expires=", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.False(Ticket(app, cookie).Properties.IsPersistent);
     }
 
     [Theory]
@@ -212,11 +272,28 @@ public sealed class BuiltInLoginTests
     private static string Field(string html, string name) => WebUtility.HtmlDecode(Regex.Match(html,
         "name=\"" + name + "\" value=\"([^\"]+)\"").Groups[1].Value);
 
-    private static async Task<WebApplication> Start(bool custom = false, bool blocked = false, bool missingAuthenticator = false, string returnField = "next", string tokenField = "__RequestVerificationToken", string? defaultReturnPath = null)
+    private static Microsoft.AspNetCore.Authentication.AuthenticationTicket Ticket(WebApplication app, string cookie) =>
+        app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>().Get("office")
+            .TicketDataFormat.Unprotect(cookie.Split(';')[0].Split('=', 2)[1])!;
+
+    private static async Task<WebApplication> Start(bool custom = false, bool blocked = false, bool missingAuthenticator = false, string returnField = "next", string tokenField = "__RequestVerificationToken", string? defaultReturnPath = null,
+        bool? persistOfficeSession = null, TimeSpan? cookieLifetime = null, TimeSpan? signInLifetime = null)
     {
         var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
+        var clock = new TestClock();
+        builder.Services.AddSingleton(clock);
+        builder.Services.AddSingleton<TimeProvider>(clock);
         builder.Services.AddAuthentication("browser").AddCookie("browser").AddCookie("office", options =>
-        { options.LoginPath = "/sign-in"; options.ReturnUrlParameter = returnField; options.Cookie.Name = "Office.Login"; });
+        {
+            options.LoginPath = "/sign-in"; options.ReturnUrlParameter = returnField; options.Cookie.Name = "Office.Login";
+            options.TimeProvider = clock;
+            if (cookieLifetime.HasValue) options.ExpireTimeSpan = cookieLifetime.Value;
+            if (signInLifetime.HasValue) options.Events.OnSigningIn = context =>
+            {
+                context.Properties.ExpiresUtc = context.Properties.IssuedUtc!.Value + signInLifetime.Value;
+                return Task.CompletedTask;
+            };
+        });
         builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
         builder.Services.AddAntiforgery(options => options.FormFieldName = tokenField);
         builder.Services.AddSingleton<LoginStats>();
@@ -224,6 +301,7 @@ public sealed class BuiltInLoginTests
         builder.Services.AddCellBridgeLogin("office", options =>
         {
             options.ApplicationName = "Portal <Team>";
+            if (persistOfficeSession.HasValue) options.PersistOfficeSession = persistOfficeSession.Value;
             if (defaultReturnPath is not null) options.DefaultReturnPath = new(defaultReturnPath);
             options.IsRequestAllowed = _ => !blocked;
             if (custom) options.RenderPage = page =>
@@ -242,6 +320,11 @@ public sealed class BuiltInLoginTests
     }
 
     private sealed class LoginStats { public int Calls; }
+    private sealed class TestClock : TimeProvider
+    {
+        public DateTimeOffset Now = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
     private sealed class LoginAuthenticator(LoginStats stats) : ICellBridgeLoginAuthenticator
     {
         public Task<ClaimsPrincipal?> AuthenticateAsync(HttpContext context, string username, string password, CancellationToken cancellationToken)
