@@ -16,7 +16,6 @@ import os
 import socket
 import ssl
 import subprocess
-import signal
 import sys
 import tempfile
 import threading
@@ -30,6 +29,8 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+
+from tools.capture import websocket_test_peer
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +70,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
         return self.rfile.read(int(self.headers.get("Content-Length", "0")))
 
     def _handle(self) -> None:
+        if self.headers.get("Upgrade", "").lower() == "websocket" and not self.path.endswith("/ws-rejected"):
+            websocket_test_peer.serve(self)
+            return
         body = self._read_body()
         with self.lock:
             self.received.append((self.command, body, self.headers.get("Authorization")))
@@ -141,14 +145,24 @@ class ProxyIntegrationTests(unittest.TestCase):
             "--name", "integration", "--max-body-bytes", "1048576",
             "--max-total-bytes", "4194304",
         ]
-        creationflags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                          getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(
-            args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, creationflags=creationflags,
-        )
+        self._launch_proxy(args)
         self.addCleanup(self._stop_proxy)
         self._wait_ready()
+
+    def _launch_proxy(self, args) -> None:
+        # Keep every launch, including restarts, detached from the caller's
+        # Windows console. Shutdown uses stop.request, never console events.
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        # A PIPE read only after exit can fill and prevent shutdown on Windows.
+        # Preserve child diagnostics in a disposable file instead.
+        self.proxy_log = tempfile.TemporaryFile(dir=self.temp.name)
+        try:
+            self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL,
+                                         stdout=self.proxy_log, stderr=subprocess.STDOUT,
+                                         creationflags=flags)
+        except Exception:
+            self.proxy_log.close()
+            raise
 
     @staticmethod
     def _free_port() -> int:
@@ -160,7 +174,8 @@ class ProxyIntegrationTests(unittest.TestCase):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
-                output = self.proc.stdout.read().decode("utf-8", "replace") if self.proc.stdout else ""
+                self.proxy_log.seek(0)
+                output = self.proxy_log.read().decode("utf-8", "replace")
                 self.fail(f"capture proxy exited during startup ({self.proc.returncode}):\n{output}")
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
@@ -170,26 +185,29 @@ class ProxyIntegrationTests(unittest.TestCase):
         self.fail("capture proxy did not listen within 15 seconds")
 
     def _stop_proxy(self) -> None:
-        if self.proc.poll() is None:
-            run_dirs = list(self.output_root.glob("*/manifest.json"))
-            if run_dirs:
+        try:
+            if self.proc.poll() is None:
+                run_dirs = list(self.output_root.glob("*/manifest.json"))
+                if run_dirs:
+                    try:
+                        subprocess.run([sys.executable, str(ROOT / "tools" / "capture" / "stop.py"),
+                                        str(run_dirs[0].parent)], cwd=ROOT, timeout=12,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    except subprocess.TimeoutExpired:
+                        pass
+                # A final manifest acknowledges flushing, not process exit.
+                # Allow the event loop to finish before any forced termination.
                 try:
-                    subprocess.run([sys.executable, str(ROOT / "tools" / "capture" / "stop.py"),
-                                    str(run_dirs[0].parent)], cwd=ROOT, timeout=12,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    self.proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    pass
-            if self.proc.poll() is None and os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
-                self.proc.send_signal(signal.CTRL_BREAK_EVENT)
-            elif self.proc.poll() is None:
-                self.proc.terminate()
-            try:
-                self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        if self.proc.stdout is not None:
-            self.proc.stdout.close()
+                    self.proc.terminate()
+                    try:
+                        self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.proc.kill()
+                        self.proc.wait(timeout=5)
+        finally:
+            self.proxy_log.close()
 
     def _validate_run(self) -> None:
         from tools.capture.inspect_capture import validate_run
@@ -233,6 +251,107 @@ class ProxyIntegrationTests(unittest.TestCase):
     def _run_dir(self) -> Path:
         runs = list(self.output_root.glob("*/manifest.json"))
         return runs[0].parent if runs else self.output_root
+
+    def _websocket_records(self):
+        records = self._flow_records()
+        return [r for r in records if "websocket" in r]
+
+    def test_websocket_messages_fragmentation_order_and_http_fallback(self):
+        # Negotiation and fallback remain ordinary HTTP; no SignalR semantics
+        # are inferred from these synthetic paths and payloads.
+        self.assertEqual(self._request("POST", "/negotiate", b"synthetic")[0], 200)
+        a = websocket_test_peer.Client(self.port, self.upstream_port)
+        b = websocket_test_peer.Client(self.port, self.upstream_port)
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        text = "local \u00f8 \U0001f642".encode()
+        a.send(1, text[:7], final=False)
+        a.send(0, text[7:])
+        self.assertEqual(a.receive(), (1, text))
+        binary = bytes(range(256)) * 300  # 64-bit frame length, arbitrary bytes.
+        b.send(2, binary)
+        self.assertEqual(b.receive(), (2, binary))
+        a.send(2, b"")
+        self.assertEqual(a.receive(), (2, b""))
+        a.send(9, b"ping")
+        self.assertEqual(a.receive(), (10, b"ping"))
+        a.finish()
+        b.finish(1001)
+        self.assertEqual(self._request("GET", "/ws-rejected", headers={"Upgrade": "websocket",
+            "Connection": "Upgrade", "Sec-WebSocket-Version": "13"})[0], 200)
+        self.assertEqual(self._request("GET", "/fallback")[2], b"upstream:")
+        self._stop_proxy()
+        self._validate_run()
+        records = self._websocket_records()
+        self.assertEqual(len(records), 2)
+        self.assertNotEqual(records[0]["request"]["client_connection_id"], records[1]["request"]["client_connection_id"])
+        self.assertNotEqual(records[0]["response"]["server_connection_id"], records[1]["response"]["server_connection_id"])
+        run = self._run_dir()
+        payloads = []
+        for record in records:
+            self.assertEqual(record["response"]["status_code"], 101)
+            paths = sorted((run / "websockets" / record["flow_id"]).glob("*.json"))
+            messages = [json.loads(p.read_text()) for p in paths]
+            self.assertEqual([m["sequence"] for m in messages], list(range(1, len(messages) + 1)))
+            self.assertEqual([m["direction"] for m in messages], ["client_to_server", "server_to_client"] * (len(messages) // 2))
+            payloads.extend((run / m["payload"]["file"]).read_bytes() for m in messages)
+        self.assertCountEqual(payloads, [text, text, binary, binary, b"", b""])
+        self.assertTrue(any(r["request"]["path"] == "/negotiate" for r in self._flow_records()))
+        self.assertTrue(any(r["request"]["path"] == "/fallback" for r in self._flow_records()))
+
+    def test_websocket_abrupt_disconnect_and_protocol_error_are_invalid(self):
+        for path in ("/ws-abort", "/ws-error"):
+            client = websocket_test_peer.Client(self.port, self.upstream_port, path)
+            self.addCleanup(client.close)
+            opcode, payload = client.receive()
+            self.assertEqual(opcode, 8)
+            # 1006 is a local abnormal-close state and cannot be sent on wire.
+            self.assertIn(int.from_bytes(payload[:2], "big"), (1000, 1002))
+            client.close()
+        self._stop_proxy()
+        from tools.capture.inspect_capture import validate_run
+        self.assertTrue(validate_run(self._run_dir())[1])
+        records = self._websocket_records()
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(r["websocket"]["end"]["close_code"] in (1002, 1006) for r in records))
+        self.assertTrue(all(r["websocket"]["recorded_messages"] == 0 for r in records))
+
+    def test_websocket_normal_close_after_partial_fragment_exposes_hook_limit(self):
+        client = websocket_test_peer.Client(self.port, self.upstream_port)
+        self.addCleanup(client.close)
+        client.send(1, b"unfinished message", final=False)
+        client.finish()
+        self._stop_proxy()
+        self._validate_run()
+        # The pinned engine emits no message hook for this partial message.
+        # Completion is explicitly scoped to completed application messages.
+        record = self._websocket_records()[0]["websocket"]
+        self.assertEqual(record["observed_messages"], 0)
+        manifest = json.loads((self._run_dir() / "manifest.json").read_text())
+        self.assertEqual(manifest["websocket_capture_scope"], "completed_application_messages")
+
+    def test_websocket_limits_preserve_forwarding_and_mark_run_invalid(self):
+        self._stop_proxy()
+        self.output_root = Path(self.temp.name) / "websocket-limited"
+        args = [PROXY_PYTHON, str(RUNNER), "--hosts", "localhost", "--port", str(self.port),
+                "--output-root", str(self.output_root), "--max-websocket-message-bytes", "3",
+                "--max-websocket-messages", "2", "--max-total-bytes", "5"]
+        self._launch_proxy(args)
+        self._wait_ready()
+        client = websocket_test_peer.Client(self.port, self.upstream_port)
+        self.addCleanup(client.close)
+        for payload in (b"unchanged", b"still forwarded", b"after limits"):
+            client.send(2, payload)
+            self.assertEqual(client.receive(), (2, payload))
+        client.finish()
+        self._stop_proxy()
+        from tools.capture.inspect_capture import validate_run
+        self.assertTrue(validate_run(self._run_dir())[1])
+        record = self._websocket_records()[0]["websocket"]
+        self.assertEqual(record["observed_messages"], 6)
+        self.assertEqual(record["recorded_messages"], 2)
+        self.assertEqual(record["dropped_messages"], 4)
+        self.assertEqual(record["captured_bytes"], 5)
 
     def test_binary_multipart_upload_download_and_auth_redaction(self) -> None:
         boundary = b"--fsshttp-test-boundary\r\n"
@@ -333,10 +452,7 @@ class ProxyIntegrationTests(unittest.TestCase):
         args = [PROXY_PYTHON, str(RUNNER), "--hosts", "localhost,127.0.0.1", "--port", str(self.port),
                 "--output-root", str(self.output_root), "--name", "limited", "--max-body-bytes", "8",
                 "--max-total-bytes", "32"]
-        creationflags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                          getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, creationflags=creationflags)
+        self._launch_proxy(args)
         self._wait_ready()
         payload = bytes(range(256))
         status, _, response = self._request("POST", "/large", payload)
@@ -420,10 +536,7 @@ class ProxyIntegrationTests(unittest.TestCase):
             if upstream_http:
                 # A stale HTTPS CA setting must not prevent an HTTP capture.
                 args.extend(["--upstream-ca", str(Path(self.temp.name) / "missing.pem")])
-        flags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                  getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, creationflags=flags)
+        self._launch_proxy(args)
         self._wait_ready()
         proxy_ca = self.output_root / ".mitmproxy" / "mitmproxy-ca-cert.pem"
         deadline = time.monotonic() + 10
@@ -462,7 +575,22 @@ class ProxyIntegrationTests(unittest.TestCase):
             self.assertEqual(dict(record["request"]["headers"])["Host"],
                              f"sharepoint.dev.localhost:{tls_server.server_port}")
             self.assertEqual(record["request"]["original_host_header"], request_host)
+        # Exercise WebSocket upgrade through the same TLS trust path, including
+        # both reverse listener variants. The test peers parse RFC 6455 frames.
+        if reverse:
+            ws_sock = client_context.wrap_socket(
+                socket.create_connection(("127.0.0.1", self.port), timeout=5), server_hostname="sharepoint.dev.localhost")
+        else:
+            ws_sock = self._connect_tls(tls_server.server_port, client_context)
+        ws_client = websocket_test_peer.Client(self.port, tls_server.server_port, sock=ws_sock, host=request_host)
+        self.addCleanup(ws_client.close)
+        ws_client.send(2, b"tls-websocket-\x00\xff")
+        self.assertEqual(ws_client.receive(), (2, b"tls-websocket-\x00\xff"))
+        ws_client.finish()
         self._stop_proxy()
+        ws_records = self._websocket_records()
+        self.assertEqual(len(ws_records), 1)
+        self.assertEqual(ws_records[0]["websocket"]["recorded_messages"], 2)
         if reject_proxy_ca:
             from tools.capture.inspect_capture import validate_run
             manifest = json.loads((self._run_dir() / "manifest.json").read_text("utf-8"))
@@ -501,10 +629,7 @@ class ProxyIntegrationTests(unittest.TestCase):
         self.port = self._free_port()
         args = [PROXY_PYTHON, str(RUNNER), "--hosts", "localhost", "--port", str(self.port),
                 "--output-root", str(self.output_root), "--name", "tls-untrusted"]
-        flags = ((getattr(subprocess, "CREATE_NO_WINDOW", 0) |
-                  getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if os.name == "nt" else 0)
-        self.proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, creationflags=flags)
+        self._launch_proxy(args)
         self._wait_ready()
         proxy_ca = self.output_root / ".mitmproxy" / "mitmproxy-ca-cert.pem"
         deadline = time.monotonic() + 10

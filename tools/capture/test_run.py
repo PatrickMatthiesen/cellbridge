@@ -33,3 +33,12 @@ def test_reverse_rejects_mismatched_allowlist(monkeypatch, capsys):
         run.main()
     assert error.value.code == 2
     assert "must match the fixed upstream" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("option", ["--max-websocket-message-bytes", "--max-websocket-messages"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_websocket_limits_require_positive_values(monkeypatch, option, value):
+    monkeypatch.setattr(sys, "argv", ["run.py", "--hosts", "sharepoint.test", option, value])
+    with pytest.raises(SystemExit) as error:
+        run.main()
+    assert error.value.code == 2

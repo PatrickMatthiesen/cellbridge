@@ -57,6 +57,10 @@ def main() -> int:
                         default=int(os.getenv("CAPTURE_MAX_BODY_BYTES", str(32 * 1024 * 1024))))
     parser.add_argument("--max-total-bytes", type=positive_int,
                         default=int(os.getenv("CAPTURE_MAX_TOTAL_BYTES", str(512 * 1024 * 1024))))
+    parser.add_argument("--max-websocket-message-bytes", type=positive_int,
+                        default=int(os.getenv("CAPTURE_MAX_WEBSOCKET_MESSAGE_BYTES", str(32 * 1024 * 1024))))
+    parser.add_argument("--max-websocket-messages", type=positive_int,
+                        default=int(os.getenv("CAPTURE_MAX_WEBSOCKET_MESSAGES", "10000")))
     parser.add_argument("--upstream-ca", type=Path, default=os.getenv("CAPTURE_UPSTREAM_CA"),
                         help="PEM CA bundle for validating a private upstream certificate")
     args = parser.parse_args()
@@ -89,7 +93,8 @@ def main() -> int:
         parser.error(str(exc))
     if args.port > 65535:
         parser.error("port must be at most 65535")
-    if min(args.port, args.max_body_bytes, args.max_total_bytes) <= 0:
+    if min(args.port, args.max_body_bytes, args.max_total_bytes,
+           args.max_websocket_message_bytes, args.max_websocket_messages) <= 0:
         parser.error("port and capture byte limits must be positive")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.name):
         parser.error("name must contain 1-64 ASCII letters, digits, underscores or hyphens")
@@ -110,6 +115,8 @@ def main() -> int:
         "CAPTURE_HOSTS": ",".join(hosts),
         "CAPTURE_MAX_BODY_BYTES": str(args.max_body_bytes),
         "CAPTURE_MAX_TOTAL_BYTES": str(args.max_total_bytes),
+        "CAPTURE_MAX_WEBSOCKET_MESSAGE_BYTES": str(args.max_websocket_message_bytes),
+        "CAPTURE_MAX_WEBSOCKET_MESSAGES": str(args.max_websocket_messages),
         "CAPTURE_REVERSE_UPSTREAM": args.reverse_upstream or "",
     })
 

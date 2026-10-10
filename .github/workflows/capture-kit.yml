@@ -115,6 +115,17 @@ jobs:
             artifacts/recovery/environment.json
             artifacts/packages/test-results/*.trx
             artifacts/packages/document-library-tests/*.trx
+  capture-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: 'tools/capture/requirements*.txt'
+      - run: python -m pip install -r tools/capture/requirements-dev.txt
+      - run: python -m pytest tools/capture -q
   capture:
     runs-on: windows-latest
     steps:
