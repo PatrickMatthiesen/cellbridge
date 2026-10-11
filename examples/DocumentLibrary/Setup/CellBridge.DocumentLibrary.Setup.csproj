@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-    <CellBridgePackageVersion Condition="'$(CellBridgePackageVersion)' == ''">0.1.0-beta.2</CellBridgePackageVersion>
+    <CellBridgePackageVersion Condition="'$(CellBridgePackageVersion)' == ''">0.1.0-beta.3</CellBridgePackageVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="CellBridge.Storage.PostgreSql" Version="$(CellBridgePackageVersion)" />
