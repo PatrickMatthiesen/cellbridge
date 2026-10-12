@@ -140,9 +140,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                                 }
                                 var document = StoredDocument.RestoreMetadata(current, now);
                                 var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, actor.Identity);
-                                var store = new DocumentStore();
-                                store.Attach(document);
-                                ApplyMetadata(document, store, new FssHttpRequest { Url = document.Url }, subRequest, subResponse, log, publicBase, actor);
+                                ApplyMetadata(document, subRequest, subResponse, log, publicBase, actor);
                                 if (subResponse.ErrorCode == "FileUnauthorizedAccess") return new StateTransition<bool>(null, false);
                                 // Invalid lock input cannot publish incidental editor expiry
                                 // from restoring, inspecting or logging the detached document.
@@ -387,8 +385,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
     /// </summary>
     static void HandleEditorsTableSubRequest(
         CellBridgeActor actor,
-        DocumentStore store,
-        FssHttpRequest fileRequest,
+        StoredDocument doc,
         FssHttpSubRequest subRequest,
         FssHttpSubResponse subResponse,
         ILogger log)
@@ -403,14 +400,6 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             subResponse.EmitEmptySubResponseData = false;
             return;
         }
-
-        if (string.IsNullOrWhiteSpace(fileRequest.Url))
-        {
-            subResponse.ErrorCode = "FileNotExistsOrCannotBeCreated";
-            return;
-        }
-
-        var doc = store.Get(fileRequest.Url)!;
 
         switch (requestType)
         {
@@ -662,18 +651,16 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
     /// [MS-FSSHTTP] sections 2.3.1.5, 2.3.1.6, 2.3.3.3.
     /// </summary>
     static void HandleCoauthSubRequest(
-        DocumentStore store,
-        FssHttpRequest fileRequest,
+        StoredDocument doc,
         FssHttpSubRequest subRequest,
         FssHttpSubResponse subResponse,
         ILogger log)
     {
-        var doc = store.Get(fileRequest.Url)!;
         var result = FssHttpLockCoordinator.For(doc)
             .ApplyCoauthSession(doc, subRequest, subResponse);
         log.LogInformation("Coauth operation {Operation} for {Url}: result={Result} editors={Count}",
             subRequest.SubRequestDataAttributes.GetValueOrDefault("CoauthRequestType", "<missing>"),
-            fileRequest.Url, result, doc.Sessions.Count);
+            doc.Url, result, doc.Sessions.Count);
     }
 
     /// <summary>
@@ -681,21 +668,19 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
     /// [MS-FSSHTTP] section 2.3.1.13.
     /// </summary>
     static void HandleSchemaLockSubRequest(
-        DocumentStore store,
-        FssHttpRequest fileRequest,
+        StoredDocument doc,
         FssHttpSubRequest subRequest,
         FssHttpSubResponse subResponse,
         ILogger log)
     {
-        var doc = store.Get(fileRequest.Url)!;
         var result = FssHttpLockCoordinator.For(doc)
             .ApplySchemaLock(subRequest, subResponse);
         log.LogInformation("SchemaLock operation {Operation} for {Url}: result={Result}",
             subRequest.SubRequestDataAttributes.GetValueOrDefault("SchemaLockRequestType", "<missing>"),
-            fileRequest.Url, result);
+            doc.Url, result);
     }
 
-    static void ApplyMetadata(StoredDocument doc, DocumentStore store, FssHttpRequest fileRequest,
+    static void ApplyMetadata(StoredDocument doc,
         FssHttpSubRequest subRequest, FssHttpSubResponse subResponse, ILogger log, string publicOrigin, CellBridgeActor actor)
     {
         switch (subRequest.Type)
@@ -704,11 +689,11 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 throw new InvalidOperationException("Cell execution is handled asynchronously.");
 
             case SubRequestType.Coauth:
-                HandleCoauthSubRequest(store, fileRequest, subRequest, subResponse, log);
+                HandleCoauthSubRequest(doc, subRequest, subResponse, log);
                 break;
 
             case SubRequestType.SchemaLock:
-                HandleSchemaLockSubRequest(store, fileRequest, subRequest, subResponse, log);
+                HandleSchemaLockSubRequest(doc, subRequest, subResponse, log);
                 break;
 
             case SubRequestType.WhoAmI:
@@ -744,7 +729,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 break;
 
             case SubRequestType.EditorsTable:
-                HandleEditorsTableSubRequest(actor, store, fileRequest, subRequest, subResponse, log);
+                HandleEditorsTableSubRequest(actor, doc, subRequest, subResponse, log);
                 break;
 
             default:

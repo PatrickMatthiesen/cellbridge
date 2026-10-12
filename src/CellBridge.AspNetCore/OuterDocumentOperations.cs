@@ -127,7 +127,7 @@ public sealed partial class CellBridgeDocumentService
     public async ValueTask<DocumentState> RenameDocumentAsync(Guid resourceId, string newFileName, CellBridgeActor actor,
         IReadOnlyDictionary<string, string>? lockAttributes = null, CancellationToken cancellationToken = default)
     {
-        if (!ValidPathSegment(newFileName))
+        if (!ValidPathSegment(newFileName) || ReservedPathSegment(newFileName))
             throw new ArgumentException("A valid filename without a relative path is required.", nameof(newFileName));
         return await ChangePathAsync(resourceId,
             current => current.Path[..(current.Path.LastIndexOf('/') + 1)] + newFileName,
@@ -140,13 +140,15 @@ public sealed partial class CellBridgeDocumentService
         IReadOnlyDictionary<string, string>? lockAttributes = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(newPath) || newPath[0] != '/' || newPath == "/" ||
-            newPath.Split('/').Skip(1).Any(segment => !ValidPathSegment(segment) ||
-                segment.Equals("_vti_bin", StringComparison.OrdinalIgnoreCase) ||
-                segment.Equals("_vti_inf.html", StringComparison.OrdinalIgnoreCase) ||
-                segment.Equals("_cellbridge", StringComparison.OrdinalIgnoreCase)))
+            newPath.Split('/').Skip(1).Any(segment => !ValidPathSegment(segment) || ReservedPathSegment(segment)))
             throw new ArgumentException("An application-rooted document path is required.", nameof(newPath));
         return ChangePathAsync(resourceId, _ => newPath, actor, lockAttributes, cancellationToken);
     }
+
+    private static bool ReservedPathSegment(string segment) =>
+        segment.Equals("_vti_bin", StringComparison.OrdinalIgnoreCase) ||
+        segment.Equals("_vti_inf.html", StringComparison.OrdinalIgnoreCase) ||
+        segment.Equals("_cellbridge", StringComparison.OrdinalIgnoreCase);
 
     private static bool ValidPathSegment(string segment) =>
         segment.Length is > 0 and <= 255 && segment is not ("." or "..") &&
