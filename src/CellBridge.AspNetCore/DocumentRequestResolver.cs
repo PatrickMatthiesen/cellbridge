@@ -19,7 +19,7 @@ public static class DocumentRequestResolver
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(request);
 
-        if (request.UseResourceId && request.ResourceId is not null)
+        if (request.UseResourceId)
         {
             if (string.IsNullOrWhiteSpace(request.ResourceId) ||
                 !Guid.TryParse(request.ResourceId, out var resourceId))

@@ -122,6 +122,7 @@ are opt-in.
 - [Document library and desktop editing](docs/demo-library.md)
 - [Authentication and permissions](docs/authentication.md)
 - [Storage, hosting and provider authoring](docs/storage-providers.md)
+- [Document paths and migration](docs/document-paths.md)
 - [Protocol support and compatibility](docs/interoperability.md)
 - [Architecture](docs/architecture.md)
 - [Protocol scope and references](docs/protocol-version-decision.md)

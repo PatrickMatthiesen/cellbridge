@@ -17,8 +17,13 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
     ILogger<CellBridgeRequestProcessor>? logger = null)
 {
     /// <summary>Executes against existing documents, preserving authorization, dependencies and durable publication.</summary>
+    public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, string publicOrigin,
+        CellBridgeActor actor, CancellationToken cancellationToken = default) =>
+        ExecuteAsync(request, publicOrigin, actor, cancellationToken, "");
+
+    /// <summary>Executes using application-relative state paths beneath a decoded HTTP mount path.</summary>
     public async Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, string publicOrigin,
-        CellBridgeActor actor, CancellationToken cancellationToken = default)
+        CellBridgeActor actor, CancellationToken cancellationToken, string applicationPathBase)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(actor);
@@ -29,6 +34,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             (publicOrigin.IndexOf('/', publicOrigin.IndexOf("://", StringComparison.Ordinal) + 3) is var slash &&
                 slash >= 0 && slash != publicOrigin.Length - 1))
             throw new ArgumentException("An HTTP(S) origin without credentials, path, query or fragment is required.", nameof(publicOrigin));
+        var publicBase = publicOrigin.TrimEnd('/') + DocumentUrlPaths.ValidateMount(applicationPathBase);
         var log = logger ?? NullLogger<CellBridgeRequestProcessor>.Instance;
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
         // WebUrl must be same-origin with the request ([MS-FSSHTTP] 2.2.3.6).
@@ -39,7 +45,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             Version = request.Version,
             MinorVersion = request.Version == 2 ? 3u : request.MinorVersion,
             UsesDirectBody = request.UsesDirectBody,
-            WebUrl = publicOrigin,
+            WebUrl = publicBase,
         };
 
         if (request.Version != 2 || request.MinorVersion > ushort.MaxValue)
@@ -61,7 +67,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
         {
             foreach (var fileRequest in request.Requests)
             {
-                var initial = await service.LookupAsync(fileRequest, cancellationToken);
+                var initial = await service.LookupAsync(fileRequest, cancellationToken, applicationPathBase);
                 var doc = initial is null ? null : StoredDocument.RestoreMetadata(initial, DateTime.UtcNow);
                 if (doc is null)
                 {
@@ -79,7 +85,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 var canRead = service.Access(actor, initial!).HasFlag(DocumentAccess.Read);
                 var fileResponse = new FssHttpResponse
                 {
-                    Url = canRead ? DocumentRequestResolver.CanonicalUrl(doc, publicOrigin) : fileRequest.Url,
+                    Url = canRead ? DocumentRequestResolver.CanonicalUrl(doc, publicBase) : fileRequest.Url,
                     RequestToken = fileRequest.RequestToken,
                     IntervalOverride = 0,
                     ResourceId = canRead ? doc.TransitionId : null,
@@ -121,7 +127,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         }
                         else if (OuterDocumentOperations.Handles(subRequest.Type))
                             await OuterDocumentOperations.ExecuteAsync(service, doc.TransitionId, subRequest, subResponse,
-                                publicOrigin, actor, cancellationToken);
+                                publicBase, actor, cancellationToken);
                         else
                             await service.Provider.State.TransitionAsync(doc.TransitionId, (current, now) =>
                             {
@@ -136,7 +142,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                                 var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, actor.Identity);
                                 var store = new DocumentStore();
                                 store.Attach(document);
-                                ApplyMetadata(document, store, new FssHttpRequest { Url = document.Url }, subRequest, subResponse, log, publicOrigin, actor);
+                                ApplyMetadata(document, store, new FssHttpRequest { Url = document.Url }, subRequest, subResponse, log, publicBase, actor);
                                 if (subResponse.ErrorCode == "FileUnauthorizedAccess") return new StateTransition<bool>(null, false);
                                 // Invalid lock input cannot publish incidental editor expiry
                                 // from restoring, inspecting or logging the detached document.
@@ -170,7 +176,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
 
                 if (await service.Provider.State.FindByResourceIdAsync(doc.TransitionId, cancellationToken) is { } latest &&
                     service.Access(actor, latest).HasFlag(DocumentAccess.Read))
-                    fileResponse.Url = DocumentRequestResolver.CanonicalUrl(StoredDocument.RestoreMetadata(latest, DateTime.UtcNow), publicOrigin);
+                    fileResponse.Url = DocumentRequestResolver.CanonicalUrl(StoredDocument.RestoreMetadata(latest, DateTime.UtcNow), publicBase);
                 response.Responses.Add(fileResponse);
             }
 
