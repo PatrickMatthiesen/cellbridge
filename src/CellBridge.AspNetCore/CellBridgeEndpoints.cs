@@ -86,48 +86,69 @@ public static class CellBridgeEndpoints
                 }
                 return Results.Empty;
             });
-        routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
-        routes.MapMethods("/shared/{fileName}/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], () => Results.Ok());
-        routes.MapMethods("/shared", ["OPTIONS"], (HttpContext context) =>
-        {
-            var origin = $"{context.Request.Scheme}://{context.Request.Host}";
-            context.Response.Headers["X-MSFSSHTTP"] = "1.0";
-            context.Response.Headers["X-MS-AuthDomainSupport"] = "False";
-            context.Response.Headers["X-FORMS_BASED_AUTH_ACCEPTED"] = "t";
-            context.Response.Headers["X-MSGETWEBURL"] = origin + "/shared/";
-            context.Response.Headers["Public-Extension"] = "http://schemas.microsoft.com/repl-2";
-            context.Response.Headers["Allow"] = "OPTIONS,GET,HEAD,POST";
-            return Results.Ok();
-        });
+        routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], (HttpContext context) =>
+            DocumentUrlPaths.TryRequestPath(context, out _) ? Results.Ok() : Results.BadRequest());
         routes.MapPost("/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
-        routes.MapPost("/shared/{fileName}/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
-        routes.MapMethods("/shared/{fileName}", ["GET", "HEAD"], async (HttpContext context, CellBridgeDocumentService service) =>
-        {
-            var escaped = string.Join('/', context.Request.Path.Value!.Split('/').Select(Uri.EscapeDataString));
-            var state = await service.Provider.State.FindByPathKeyAsync(StorageIds.PathKey(DocumentStore.NormalizeUrl(escaped)), context.RequestAborted);
-            var actor = CellBridgeActor.FromPrincipal(context.User);
-            if (actor is null) return Results.Unauthorized();
-            if (state is null) return Results.NotFound();
-            if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) return Results.StatusCode(403);
-            context.Response.Headers.CacheControl = "private, no-store";
-            context.Response.ContentLength = state.Content.Length;
-            context.Response.Headers.ETag = state.Etag;
-            context.Response.Headers.LastModified = state.ModifiedUtc.ToString("R");
-            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
-            var contentTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
-            context.Response.ContentType = contentTypes.TryGetContentType(state.Path, out var type) ? type : "application/octet-stream";
-            if (context.Request.Query["download"] == "true")
-                context.Response.Headers.ContentDisposition = new System.Net.Http.Headers.ContentDispositionHeaderValue("attachment")
-                { FileNameStar = Path.GetFileName(state.Path) }.ToString();
-            if (!HttpMethods.IsHead(context.Request.Method))
-            {
-                await using var source = await service.Provider.Content.OpenReadAsync(state.Content, context.RequestAborted);
-                await source.CopyToAsync(context.Response.Body, context.RequestAborted);
-            }
-            return Results.Empty;
-        });
+        routes.MapMethods("/shared/{**documentPath}", ["GET", "HEAD", "OPTIONS", "POST"], HandleSharedRequest);
         return app;
     }
+
+
+private static async Task<IResult> HandleSharedRequest(HttpContext context, CellBridgeDocumentService service)
+{
+    if (!DocumentUrlPaths.TryRequestPath(context, out var path)) return Results.BadRequest();
+    const string marker = "/_vti_bin/cellstorage.svc";
+    var protocol = path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+    if (protocol >= 0 && (protocol + marker.Length == path.Length || path[protocol + marker.Length] == '/'))
+    {
+        if (HttpMethods.IsOptions(context.Request.Method)) return Results.Ok();
+        return HttpMethods.IsPost(context.Request.Method)
+            ? await HandleCellStoragePost(context, service) : Results.NotFound();
+    }
+    // These names belong to protocol discovery and cannot identify a document.
+    if (path.Split('/').Any(s => s.Equals("_vti_bin", StringComparison.OrdinalIgnoreCase) ||
+        s.Equals("_vti_inf.html", StringComparison.OrdinalIgnoreCase) || s.Equals("_cellbridge", StringComparison.OrdinalIgnoreCase)))
+        return Results.NotFound();
+    if (HttpMethods.IsOptions(context.Request.Method)) return Discovery(context);
+    if (HttpMethods.IsPost(context.Request.Method)) return Results.NotFound();
+    var state = await service.Provider.State.FindByPathKeyAsync(StorageIds.PathKey(path), context.RequestAborted);
+    var actor = CellBridgeActor.FromPrincipal(context.User);
+    if (actor is null) return Results.Unauthorized();
+    if (state is null) return Results.NotFound();
+    if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) return Results.StatusCode(403);
+    context.Response.Headers.CacheControl = "private, no-store";
+    context.Response.ContentLength = state.Content.Length;
+    context.Response.Headers.ETag = state.Etag;
+    context.Response.Headers.LastModified = state.ModifiedUtc.ToString("R");
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    var contentTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+    context.Response.ContentType = contentTypes.TryGetContentType(state.Path, out var type) ? type : "application/octet-stream";
+    if (context.Request.Query["download"] == "true")
+        context.Response.Headers.ContentDisposition = new System.Net.Http.Headers.ContentDispositionHeaderValue("attachment")
+        { FileNameStar = Path.GetFileName(state.Path) }.ToString();
+    if (!HttpMethods.IsHead(context.Request.Method))
+    {
+        await using var source = await service.Provider.Content.OpenReadAsync(state.Content, context.RequestAborted);
+        await source.CopyToAsync(context.Response.Body, context.RequestAborted);
+    }
+    return Results.Empty;
+
+}
+
+private static string PublicOrigin(HttpContext context) =>
+    context.RequestServices.GetService<CellBridgeOfficeFormsAuthentication.OfficeFormsRegistration>()?.PublicOrigin
+        ?? $"{context.Request.Scheme}://{context.Request.Host}";
+
+private static IResult Discovery(HttpContext context)
+{
+    context.Response.Headers["X-MSFSSHTTP"] = "1.0";
+    context.Response.Headers["X-MS-AuthDomainSupport"] = "False";
+    context.Response.Headers["X-FORMS_BASED_AUTH_ACCEPTED"] = "t";
+    context.Response.Headers["X-MSGETWEBURL"] = PublicOrigin(context) + context.Request.PathBase.ToUriComponent() + "/shared/";
+    context.Response.Headers["Public-Extension"] = "http://schemas.microsoft.com/repl-2";
+    context.Response.Headers["Allow"] = "OPTIONS,GET,HEAD,POST";
+    return Results.Ok();
+}
 
 static bool ProtocolRequestAllowed(HttpContext context)
 {
@@ -141,6 +162,7 @@ static bool ProtocolRequestAllowed(HttpContext context)
 
 static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
 {
+    if (!DocumentUrlPaths.TryRequestPath(ctx, out _)) return Results.BadRequest();
     var admission = ctx.RequestServices.GetRequiredService<RequestAdmission>();
     if (!await admission.Gate.WaitAsync(0, ctx.RequestAborted)) return Results.StatusCode(503);
     try { return new AdmittedResult(await HandleAdmittedCellStoragePost(ctx, service), admission.Gate); }
@@ -271,7 +293,7 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
     }
 
     var execution = await ctx.RequestServices.GetRequiredService<CellBridgeRequestProcessor>()
-        .ExecuteAsync(request, $"{ctx.Request.Scheme}://{ctx.Request.Host}", actor, ctx.RequestAborted);
+        .ExecuteAsync(request, PublicOrigin(ctx), actor, ctx.RequestAborted, ctx.Request.PathBase.Value ?? "");
     var response = execution.Response;
 
     if (options.CaptureDirectory is { } summaryDirectory)

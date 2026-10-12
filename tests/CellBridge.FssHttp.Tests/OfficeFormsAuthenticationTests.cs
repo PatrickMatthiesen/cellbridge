@@ -57,18 +57,34 @@ public sealed class OfficeFormsAuthenticationTests
     public async Task MountedAppUsesLocalReturnPathAndConfiguredExternalOrigin()
     {
         await using var fixture = await Fixture.Start(pathBase: "/mount", publicOrigin: "https://office.example:8446");
-        using var challenge = await fixture.Client.SendAsync(new(HttpMethod.Head, "/mount/shared/file.docx"));
-        Assert.Equal(HttpStatusCode.Forbidden, challenge.StatusCode);
-        Assert.Equal("https://office.example:8446/mount/login?next=%2Fmount%2F_cellbridge%2Fauth%2Fcomplete",
-            challenge.Headers.GetValues("X-FORMS_BASED_AUTH_REQUIRED").Single());
-        Assert.Equal("https://office.example:8446/mount/_cellbridge/auth/complete",
-            challenge.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
+        foreach (var (method, path) in new[]
+        {
+            (HttpMethod.Head, "/mount/shared/deep/file.docx"),
+            (HttpMethod.Options, "/mount/shared/deep/"),
+            (HttpMethod.Post, "/mount/shared/deep/file.docx/_vti_bin/cellstorage.svc"),
+        })
+        {
+            using var challenge = await fixture.Client.SendAsync(new(method, path));
+            Assert.Equal(HttpStatusCode.Forbidden, challenge.StatusCode);
+            Assert.Equal("https://office.example:8446/mount/login?next=%2Fmount%2F_cellbridge%2Fauth%2Fcomplete",
+                challenge.Headers.GetValues("X-FORMS_BASED_AUTH_REQUIRED").Single());
+            Assert.Equal("https://office.example:8446/mount/_cellbridge/auth/complete",
+                challenge.Headers.GetValues("X-FORMS_BASED_AUTH_RETURN_URL").Single());
+        }
         using var login = await fixture.Client.GetAsync("/mount/sign-in");
         fixture.Client.DefaultRequestHeaders.Add("Cookie", login.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
         using var complete = await fixture.Client.SendAsync(new(HttpMethod.Head, "/mount/_cellbridge/auth/complete"));
         Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
         Assert.True(complete.Headers.CacheControl!.NoStore);
         Assert.Empty(await complete.Content.ReadAsByteArrayAsync());
+        using var discovery = await fixture.Client.SendAsync(new(HttpMethod.Options, "/mount/shared/deep/"));
+        Assert.Equal(HttpStatusCode.OK, discovery.StatusCode);
+        Assert.Equal("https://office.example:8446/mount/shared/",
+            discovery.Headers.GetValues("X-MSGETWEBURL").Single());
+        using var post = await fixture.Client.SendAsync(new HttpRequestMessage(HttpMethod.Post,
+            "/mount/shared/deep/file.docx/_vti_bin/cellstorage.svc")
+        { Content = new StringContent("bad XML", System.Text.Encoding.UTF8, "text/xml") });
+        Assert.Equal(HttpStatusCode.BadRequest, post.StatusCode);
     }
 
     [Fact]

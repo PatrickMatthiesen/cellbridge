@@ -361,3 +361,11 @@ editing qualification or that WopiHost has adopted these new APIs upstream.
 For external write-back, shared WOPI/FSSHTTP locks and conditional state deletion,
 follow [external host reliability](external-host-reliability.md). Accepted-save
 receipts alone do not provide recoverable external delivery.
+
+## Nested paths and migration
+
+Standard endpoints support nested `/shared` document paths. Use
+`CellBridgeDocumentService.MoveDocumentAsync` to move an existing resource
+without changing its ID. See [document paths and migration](document-paths.md)
+for the decoded-path contract, retired-link behavior and host metadata
+reconciliation after API moves or Office protocol renames.

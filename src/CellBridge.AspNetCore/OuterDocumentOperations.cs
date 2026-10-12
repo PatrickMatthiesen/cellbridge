@@ -127,9 +127,37 @@ public sealed partial class CellBridgeDocumentService
     public async ValueTask<DocumentState> RenameDocumentAsync(Guid resourceId, string newFileName, CellBridgeActor actor,
         IReadOnlyDictionary<string, string>? lockAttributes = null, CancellationToken cancellationToken = default)
     {
-        if (newFileName.Length == 0 || newFileName.Length > 255 || newFileName is "." or ".." ||
-            newFileName.IndexOfAny(['/', '\\', ':', '?', '*', '"', '<', '>', '|']) >= 0 || newFileName.Any(char.IsControl))
+        if (!ValidPathSegment(newFileName) || ReservedPathSegment(newFileName))
             throw new ArgumentException("A valid filename without a relative path is required.", nameof(newFileName));
+        return await ChangePathAsync(resourceId,
+            current => current.Path[..(current.Path.LastIndexOf('/') + 1)] + newFileName,
+            actor, lockAttributes, cancellationToken);
+    }
+
+    /// <summary>Atomically moves a resource to a decoded application-rooted path without changing its identity or content.</summary>
+    /// <remarks>The input is not URL-decoded. A retry to the same exact path checks permissions and locks but does not change state.</remarks>
+    public ValueTask<DocumentState> MoveDocumentAsync(Guid resourceId, string newPath, CellBridgeActor actor,
+        IReadOnlyDictionary<string, string>? lockAttributes = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(newPath) || newPath[0] != '/' || newPath == "/" ||
+            newPath.Split('/').Skip(1).Any(segment => !ValidPathSegment(segment) || ReservedPathSegment(segment)))
+            throw new ArgumentException("An application-rooted document path is required.", nameof(newPath));
+        return ChangePathAsync(resourceId, _ => newPath, actor, lockAttributes, cancellationToken);
+    }
+
+    private static bool ReservedPathSegment(string segment) =>
+        segment.Equals("_vti_bin", StringComparison.OrdinalIgnoreCase) ||
+        segment.Equals("_vti_inf.html", StringComparison.OrdinalIgnoreCase) ||
+        segment.Equals("_cellbridge", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ValidPathSegment(string segment) =>
+        segment.Length is > 0 and <= 255 && segment is not ("." or "..") &&
+        segment.IndexOfAny(['/', '\\', ':', '?', '*', '"', '<', '>', '|']) < 0 &&
+        !segment.Any(char.IsControl);
+
+    private async ValueTask<DocumentState> ChangePathAsync(Guid resourceId, Func<DocumentState, string> pathFor,
+        CellBridgeActor actor, IReadOnlyDictionary<string, string>? lockAttributes, CancellationToken cancellationToken)
+    {
         if (provider.State is not IAtomicDocumentRenameStore store) throw new NotSupportedException("This provider does not support atomic rename.");
         return await store.RenameAsync(resourceId, (current, now) =>
         {
@@ -138,7 +166,7 @@ public sealed partial class CellBridgeDocumentService
             var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, actor.Identity);
             if (!coordinator.ExecuteCellWrite(lockAttributes ?? new Dictionary<string, string>(), () => true, out _, out var error, now))
                 throw new DocumentOperationLockException(error ?? "FileLockConflict");
-            var path = current.Path[..(current.Path.LastIndexOf('/') + 1)] + newFileName;
+            var path = pathFor(current);
             if (path == current.Path) return new StateTransition<DocumentState>(null, current);
             var next = current with { Path = path, PathKey = StorageIds.PathKey(path),
                 StateVersion = checked(current.StateVersion + 1) };

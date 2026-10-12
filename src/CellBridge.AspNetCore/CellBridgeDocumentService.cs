@@ -44,14 +44,16 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         return state;
     }
 
-    internal ValueTask<DocumentState?> LookupAsync(FssHttpRequest request, CancellationToken cancellationToken = default)
+    internal ValueTask<DocumentState?> LookupAsync(FssHttpRequest request, CancellationToken cancellationToken = default,
+        string applicationPathBase = "")
     {
-        if (request.UseResourceId && request.ResourceId is not null)
+        if (request.UseResourceId)
             return Guid.TryParse(request.ResourceId, out var id)
                 ? provider.State.FindByResourceIdAsync(id, cancellationToken)
                 : ValueTask.FromResult<DocumentState?>(null);
-        return string.IsNullOrWhiteSpace(request.Url) ? ValueTask.FromResult<DocumentState?>(null)
-            : provider.State.FindByPathKeyAsync(StorageIds.PathKey(DocumentStore.NormalizeUrl(request.Url)), cancellationToken);
+        return DocumentUrlPaths.TryDecode(request.Url, out var path) && DocumentUrlPaths.StripMount(ref path, applicationPathBase)
+            ? provider.State.FindByPathKeyAsync(StorageIds.PathKey(path), cancellationToken)
+            : ValueTask.FromResult<DocumentState?>(null);
     }
 
     public async ValueTask<DocumentState?> CreateAsync(string escapedPath, byte[] bytes, CellBridgeActor actor, CancellationToken cancellationToken = default)

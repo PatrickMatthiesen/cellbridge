@@ -52,7 +52,7 @@ public sealed class DocumentRequestResolverTests
     }
 
     [Fact]
-    public void InvalidResourceIdDoesNotFallbackButAbsentResourceIdUsesUrl()
+    public void EnabledResourceIdLookupNeverFallsBackAndPathLookupRemainsAvailable()
     {
         var store = new DocumentStore();
         var document = store.Put("/shared/existing.docx", [1]);
@@ -63,10 +63,15 @@ public sealed class DocumentRequestResolverTests
             UseResourceId = true,
             ResourceId = "not-a-guid",
         }));
-        Assert.Same(document, DocumentRequestResolver.Resolve(store, new FssHttpRequest
+        Assert.Null(DocumentRequestResolver.Resolve(store, new FssHttpRequest
         {
             Url = document.Url,
             UseResourceId = true,
+        }));
+        Assert.Same(document, DocumentRequestResolver.Resolve(store, new FssHttpRequest
+        {
+            Url = document.Url,
+            UseResourceId = false,
         }));
     }
 
