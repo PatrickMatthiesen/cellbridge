@@ -17,6 +17,84 @@ namespace CellBridge.Storage.Tests;
 public sealed class AuthenticationKeyProtectionTests
 {
     [Fact]
+    public void CertificateDirectoryIsSynchronizedBeforeNewAndExistingKeysReturn()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cellbridge-certificate-publication-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(root, "private");
+        var path = Path.Combine(directory, "key.pfx");
+        var synchronized = new List<string>();
+        try
+        {
+            AuthenticationKeyCertificate.CreateLocalCertificateIfMissing(path, flushed =>
+            {
+                if (flushed == directory) Assert.True(File.Exists(path));
+                synchronized.Add(flushed);
+            });
+            var expected = new Stack<string>();
+            for (string? ancestor = directory; ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))
+                expected.Push(ancestor);
+            Assert.Equal(expected, synchronized);
+            var original = File.ReadAllBytes(path);
+            synchronized.Clear();
+            AuthenticationKeyCertificate.CreateLocalCertificateIfMissing(path, synchronized.Add);
+            Assert.Equal(expected, synchronized);
+            Assert.Equal(original, File.ReadAllBytes(path));
+            Assert.Throws<IOException>(() => AuthenticationKeyCertificate.CreateLocalCertificateIfMissing(path,
+                _ => throw new IOException("Injected directory synchronization failure.")));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task ConcurrentCreatorSynchronizesAncestorsEvenWhenAnotherCreatorMadeThem()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cellbridge-certificate-parent-race-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(root, "private");
+        var path = Path.Combine(directory, "key.pfx");
+        using var firstCreatorPaused = new ManualResetEventSlim();
+        using var releaseFirstCreator = new ManualResetEventSlim();
+        Task? firstCreator = null;
+        try
+        {
+            firstCreator = Task.Run(() => AuthenticationKeyCertificate.CreateLocalCertificateIfMissing(path, _ =>
+            {
+                firstCreatorPaused.Set();
+                if (!releaseFirstCreator.Wait(TimeSpan.FromSeconds(30)))
+                    throw new TimeoutException("The other certificate creator did not finish.");
+            }));
+            Assert.True(firstCreatorPaused.Wait(TimeSpan.FromSeconds(30)));
+            var synchronized = new List<string>();
+            AuthenticationKeyCertificate.CreateLocalCertificateIfMissing(path, synchronized.Add);
+            Assert.Contains(root, synchronized);
+            Assert.Contains(Path.GetDirectoryName(root)!, synchronized);
+            Assert.Equal(directory, synchronized[^1]);
+            Assert.True(File.Exists(path));
+        }
+        finally
+        {
+            releaseFirstCreator.Set();
+            if (firstCreator is not null) await firstCreator;
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentLocalCertificateCreatorsKeepOneValidDurablyPublishedKey()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cellbridge-certificate-race-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(root, "key.pfx");
+        try
+        {
+            await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => Task.Run(() =>
+                AuthenticationKeyCertificate.CreateLocalCertificateIfMissing(path))));
+            using var certificate = AuthenticationKeyCertificate.Load(Configuration("Host=localhost;Database=unused", path, ""));
+            Assert.True(certificate.Certificate.HasPrivateKey);
+            Assert.Equal(new[] { path }, Directory.GetFiles(root));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void MissingConfiguredCertificateFailsClosed()
     {
         string missing = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "missing.pfx");

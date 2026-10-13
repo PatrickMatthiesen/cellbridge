@@ -1,9 +1,11 @@
 using System.Net;
 using System.Text.Encodings.Web;
 using System.Text.RegularExpressions;
+using System.Threading.RateLimiting;
 using CellBridge.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Configuration;
@@ -90,6 +92,156 @@ public sealed class AuthenticationPageTests
         Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HostGlobalRateLimiterIsPreserved(bool configureAfterAuthentication)
+    {
+        using var hostLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
+            _ => RateLimitPartition.GetNoLimiter("host"));
+        var services = new ServiceCollection();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:cellbridge"] = "Host=localhost;Database=unused",
+                ["Authentication:PublicOrigin"] = "https://localhost",
+                ["Authentication:ApplicationName"] = "Example",
+            }).Build();
+
+        if (!configureAfterAuthentication)
+            services.AddRateLimiter(options => options.GlobalLimiter = hostLimiter);
+        services.AddCellBridgeAuthentication(configuration);
+        if (configureAfterAuthentication)
+            services.AddRateLimiter(options => options.GlobalLimiter = hostLimiter);
+
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<IOptions<RateLimiterOptions>>().Value;
+
+        Assert.Same(hostLimiter, options.GlobalLimiter);
+    }
+
+    [Fact]
+    public void AggregateLoginBudgetIsSharedAcrossRemoteAddresses()
+    {
+        using var policy = new AuthenticationLoginRateLimitPolicy();
+        using var limiter = PartitionedRateLimiter.Create<HttpContext, string>(policy.GetPartition);
+
+        for (int address = 1; address <= 5; address++)
+        {
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                using var lease = limiter.AttemptAcquire(ContextFor($"192.0.2.{address}"), 1);
+                Assert.True(lease.IsAcquired);
+            }
+        }
+
+        using var rejected = limiter.AttemptAcquire(ContextFor("192.0.2.6"), 1);
+        Assert.False(rejected.IsAcquired);
+    }
+
+    [Fact]
+    public void ExhaustedRemoteAddressDoesNotConsumeAggregateBudget()
+    {
+        using var policy = new AuthenticationLoginRateLimitPolicy();
+        using var limiter = PartitionedRateLimiter.Create<HttpContext, string>(policy.GetPartition);
+
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            using var lease = limiter.AttemptAcquire(ContextFor("192.0.2.1"), 1);
+            Assert.True(lease.IsAcquired);
+        }
+        using (var rejectedAddress = limiter.AttemptAcquire(ContextFor("192.0.2.1"), 1))
+            Assert.False(rejectedAddress.IsAcquired);
+
+        for (int address = 2; address <= 5; address++)
+        {
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                using var lease = limiter.AttemptAcquire(ContextFor($"192.0.2.{address}"), 1);
+                Assert.True(lease.IsAcquired);
+            }
+        }
+
+        using var aggregateRejected = limiter.AttemptAcquire(ContextFor("192.0.2.6"), 1);
+        Assert.False(aggregateRejected.IsAcquired);
+    }
+
+    [Fact]
+    public void DisposingRemoteAddressPartitionLeavesAggregateLimiterAvailable()
+    {
+        using var policy = new AuthenticationLoginRateLimitPolicy();
+        var firstPartition = policy.GetPartition(ContextFor("192.0.2.1"));
+        var firstLimiter = firstPartition.Factory(firstPartition.PartitionKey);
+        using (var lease = firstLimiter.AttemptAcquire(1))
+            Assert.True(lease.IsAcquired);
+        firstLimiter.Dispose();
+
+        var secondPartition = policy.GetPartition(ContextFor("192.0.2.2"));
+        using var secondLimiter = secondPartition.Factory(secondPartition.PartitionKey);
+        using var secondLease = secondLimiter.AttemptAcquire(1);
+
+        Assert.True(secondLease.IsAcquired);
+    }
+
+    [Fact]
+    public void DisposingLoginPolicyClosesSharedAggregateLimiter()
+    {
+        var policy = new AuthenticationLoginRateLimitPolicy();
+        var partition = policy.GetPartition(ContextFor("192.0.2.1"));
+        using var remoteAddressLimiter = partition.Factory(partition.PartitionKey);
+
+        policy.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => remoteAddressLimiter.AttemptAcquire(1));
+    }
+
+    [Fact]
+    public void DisposingOwnedChainClosesTimerBackedLimiters()
+    {
+        var window = new FixedWindowRateLimiter(new()
+        {
+            PermitLimit = 1,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+        var concurrency = new ConcurrencyLimiter(new()
+        {
+            PermitLimit = 1,
+            QueueLimit = 0,
+        });
+        var chain = new OwnedChainedRateLimiter([window, concurrency], [window, concurrency]);
+
+        chain.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => chain.AttemptAcquire(1));
+        Assert.Throws<ObjectDisposedException>(() => window.AttemptAcquire(1));
+        Assert.Throws<ObjectDisposedException>(() => concurrency.AttemptAcquire(1));
+    }
+
+    [Fact]
+    public void PerIpIdleDurationIgnoresBorrowedAggregateActivity()
+    {
+        var aggregate = new IdleRateLimiter(TimeSpan.Zero);
+        var perIp = new IdleRateLimiter(TimeSpan.FromMinutes(15));
+        using var chain = new OwnedChainedRateLimiter([aggregate, perIp], [perIp]);
+
+        Assert.Equal(TimeSpan.FromMinutes(15), chain.IdleDuration);
+    }
+
+    [Fact]
+    public void PerIpPartitionIsNotIdleWhileAnyLocalLimiterIsActive()
+    {
+        var aggregate = new IdleRateLimiter(TimeSpan.FromMinutes(15));
+        var activePerIpLimiter = new IdleRateLimiter(null);
+        var idlePerIpLimiter = new IdleRateLimiter(TimeSpan.FromMinutes(15));
+        using var chain = new OwnedChainedRateLimiter(
+            [activePerIpLimiter, idlePerIpLimiter, aggregate],
+            [activePerIpLimiter, idlePerIpLimiter]);
+
+        Assert.Null(chain.IdleDuration);
+    }
+
     private static async Task<WebApplication> Start(string applicationName,
         Func<LoginPageContext, string>? renderer = null)
     {
@@ -125,5 +277,25 @@ public sealed class AuthenticationPageTests
             await app.DisposeAsync();
             throw;
         }
+    }
+
+    private static DefaultHttpContext ContextFor(string address)
+    {
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.Parse(address);
+        return context;
+    }
+
+    private sealed class IdleRateLimiter(TimeSpan? idleDuration) : RateLimiter
+    {
+        public override TimeSpan? IdleDuration => idleDuration;
+        public override RateLimiterStatistics? GetStatistics() => null;
+
+        protected override RateLimitLease AttemptAcquireCore(int permitCount) =>
+            throw new NotSupportedException();
+
+        protected override ValueTask<RateLimitLease> AcquireAsyncCore(
+            int permitCount, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 }

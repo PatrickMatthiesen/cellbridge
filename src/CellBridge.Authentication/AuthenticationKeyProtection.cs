@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Xml.Linq;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.DataProtection.XmlEncryption;
@@ -72,12 +74,26 @@ internal sealed class AuthenticationKeyCertificate : IDisposable
 
     public void Dispose() => Certificate.Dispose();
 
-    private static void CreateLocalCertificateIfMissing(string path)
+    internal static void CreateLocalCertificateIfMissing(string path, Action<string>? flushDirectory = null)
     {
+        flushDirectory ??= FlushCertificateDirectory;
         string directory = System.IO.Path.GetDirectoryName(path)!;
         ConfidentialFileSystem.CreateDirectory(directory);
         ValidatePrivateDirectory(directory);
-        if (File.Exists(path)) return;
+        // Existing ancestors may have just been created by another process.
+        // Persist every parent entry before committing secrets that need this key.
+        var ancestors = new Stack<string>();
+        for (var parent = System.IO.Path.GetDirectoryName(directory); parent is not null;
+            parent = System.IO.Path.GetDirectoryName(parent))
+            ancestors.Push(parent);
+        while (ancestors.TryPop(out var ancestor))
+            flushDirectory(ancestor);
+        if (File.Exists(path))
+        {
+            // Another creator may have just published it without flushing yet.
+            flushDirectory(directory);
+            return;
+        }
 
         using var rsa = RSA.Create(3072);
         var request = new CertificateRequest("CN=CellBridge Local Data Protection", rsa,
@@ -101,6 +117,9 @@ internal sealed class AuthenticationKeyCertificate : IDisposable
             }
             try { File.Move(temporary, path, overwrite: false); }
             catch (IOException) when (File.Exists(path)) { }
+            // Flush on both success and the concurrent-creator path. Flushing
+            // the PFX bytes alone does not persist the renamed directory entry.
+            flushDirectory(directory);
         }
         finally
         {
@@ -108,6 +127,34 @@ internal sealed class AuthenticationKeyCertificate : IDisposable
             if (File.Exists(temporary)) File.Delete(temporary);
         }
     }
+
+    private static void FlushCertificateDirectory(string path)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        // O_RDONLY can open a directory on supported Unix hosts without relying
+        // on platform-specific O_DIRECTORY flag values.
+        int descriptor = OpenDirectory(path, 0);
+        if (descriptor < 0)
+            throw new IOException("Cannot open the authentication certificate directory for synchronization.",
+                new Win32Exception(Marshal.GetLastPInvokeError()));
+        try
+        {
+            int result;
+            do { result = FsyncDirectory(descriptor); }
+            while (result != 0 && Marshal.GetLastPInvokeError() == 4); // EINTR
+            if (result != 0)
+                throw new IOException("Authentication certificate directory synchronization failed.",
+                    new Win32Exception(Marshal.GetLastPInvokeError()));
+        }
+        finally { CloseDirectory(descriptor); }
+    }
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int OpenDirectory(string path, int flags);
+    [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int FsyncDirectory(int descriptor);
+    [DllImport("libc", EntryPoint = "close")]
+    private static extern int CloseDirectory(int descriptor);
 
     private static void ValidateCertificate(X509Certificate2 certificate)
     {

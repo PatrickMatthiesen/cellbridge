@@ -50,11 +50,14 @@ accounts and create or import documents again.
 
 ## Protect authentication keys
 
-CellBridge encrypts ASP.NET Core Data Protection keys before it stores them in
+The sample authentication service encrypts ASP.NET Core Data Protection keys before it stores them in
 PostgreSQL. On a local single-machine installation, the web and demo processes
 use one generated certificate under the current user's local application-data
 directory. Keep that user profile and the PostgreSQL key rows in backups. Both
 are required to read existing authentication cookies and protected login state.
+This certificate protects authentication keys, not document contents. On Unix,
+local certificate creation synchronizes its file and ancestor directories before
+startup can store keys encrypted with it.
 
 Processes under the same user profile share the local default certificate. For
 deployments with distinct user profiles, machines, or containers, supply the same
@@ -91,7 +94,10 @@ The sample login POST requires `UseRateLimiter()` and `UseRequestTimeouts()` in
 the host. Its absolute request timeout is 30 seconds. It admits at most
 20 attempts per minute and two concurrent requests per remote IP, with aggregate
 limits of 100 attempts per minute and eight concurrent requests. It returns
-HTTP 429 without queueing. Account lockout remains separate. Trusted forwarded
+HTTP 429 without queueing. These limits belong to the login policy and preserve
+the host's global rate limiter and rejection settings. Attempts rejected by an
+exhausted per-IP limit do not consume the aggregate login budget.
+Account lockout remains separate. Trusted forwarded
 headers run before rate limiting so a known proxy can supply the client address.
 
 ## Manage access

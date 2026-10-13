@@ -108,6 +108,8 @@ identity metadata. Restrict backups and copies as well as the original files.
 
 `Protocol:MaxCaptureBytes` defaults to 1 GiB. A process includes existing files
 when initializing its capture budget and skips further writes at the limit.
+Failed or cancelled writes remove their partial file and release its reservation.
+If cleanup fails, the retained bytes remain counted toward the budget.
 Skipped or failed diagnostic writes do not fail a save. Concurrent processes
 must use separate capture directories; this limit is not a shared-volume quota.
 There is no automatic rotation or expiration. Choose a retention period and

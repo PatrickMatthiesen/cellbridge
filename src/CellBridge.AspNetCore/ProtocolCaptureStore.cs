@@ -19,7 +19,9 @@ internal sealed class ProtocolCaptureStore(CellBridgeOptions options, ILogger<Pr
         Func<Stream, Task> write, CancellationToken token)
     {
         if (options.CaptureDirectory is not { } directory) return;
-        string path;
+        string? path = null;
+        bool reserved = false, created = false, completed = false;
+        long retained = 0;
         try
         {
             lock (_sync)
@@ -35,16 +37,44 @@ internal sealed class ProtocolCaptureStore(CellBridgeOptions options, ILogger<Pr
                     return;
                 }
                 _used += length;
+                reserved = true;
                 path = Path.Combine(directory, id + suffix);
             }
-            await using var output = ConfidentialFileSystem.CreateFile(path, FileAccess.Write);
-            token.ThrowIfCancellationRequested();
-            await write(output);
+            await using (var output = ConfidentialFileSystem.CreateFile(path, FileAccess.Write))
+            {
+                created = true;
+                token.ThrowIfCancellationRequested();
+                await write(output);
+                token.ThrowIfCancellationRequested();
+                retained = output.Length;
+                if (retained > length) throw new IOException("Capture exceeded its reserved length.");
+            }
+            completed = true;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             // Diagnostic failures must not turn an accepted save into a failed HTTP request.
             logger.LogWarning("Raw protocol capture could not be written ({ErrorType}).", error.GetType().Name);
+        }
+        finally
+        {
+            if (reserved)
+            {
+                if (created && !completed)
+                {
+                    try { File.Delete(path!); retained = 0; }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                    {
+                        // Account for evidence that could not be removed. If its size
+                        // cannot be read, keep the reservation rather than undercount it.
+                        try { retained = new FileInfo(path!).Length; }
+                        catch (Exception sizeError) when (sizeError is IOException or UnauthorizedAccessException)
+                        { retained = length; }
+                        logger.LogWarning("Incomplete raw protocol capture could not be removed ({ErrorType}).", error.GetType().Name);
+                    }
+                }
+                lock (_sync) _used -= length - retained;
+            }
         }
     }
 }
