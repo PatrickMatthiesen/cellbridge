@@ -48,6 +48,52 @@ Initialization accepts a fresh database or the current schema. Older experimenta
 schemas are rejected. Recreate an outdated development database, then provision
 accounts and create or import documents again.
 
+## Protect authentication keys
+
+CellBridge encrypts ASP.NET Core Data Protection keys before it stores them in
+PostgreSQL. On a local single-machine installation, the web and demo processes
+use one generated certificate under the current user's local application-data
+directory. Keep that user profile and the PostgreSQL key rows in backups. Both
+are required to read existing authentication cookies and protected login state.
+
+Processes under the same user profile share the local default certificate. For
+deployments with distinct user profiles, machines, or containers, supply the same
+PKCS#12 certificate and password to every instance:
+
+```text
+Authentication__KeyProtection__CertificatePath=/run/secrets/cellbridge-key-protection.pfx
+Authentication__KeyProtection__Password=secret-store-value
+Storage__MultipleInstances=true
+```
+
+The certificate must contain an RSA private key of at least 2048 bits, permit key
+encipherment, and be within its validity period. On Unix, the certificate file
+must have owner-only permissions and its directory must not be writable by group
+or other users. The path cannot be a symbolic link. On Windows, place it under a
+profile or directory whose ACL grants access only to the service identity and
+trusted administrators.
+
+Do not generate a different certificate in each container. Losing or replacing
+the certificate prevents startup while stored keys require the old private key.
+Retain the original certificate in backups. This sample configures one wrapping
+certificate; rotation requires a host extension that retains old decryption
+certificates, or an explicitly coordinated reset of authentication keys and
+sessions. At startup, CellBridge encrypts legacy plaintext
+Data Protection key rows in place without changing their key IDs, so existing
+cookies remain valid. Stop older CellBridge versions while the first upgraded
+instance performs this migration.
+
+Backups made before the migration still contain plaintext cookie keys. Restrict
+or replace those backups. Startup checks that every existing key can decrypt
+with the selected certificate and fails if a different certificate is selected.
+
+The sample login POST requires `UseRateLimiter()` and `UseRequestTimeouts()` in
+the host. Its absolute request timeout is 30 seconds. It admits at most
+20 attempts per minute and two concurrent requests per remote IP, with aggregate
+limits of 100 attempts per minute and eight concurrent requests. It returns
+HTTP 429 without queueing. Account lockout remains separate. Trusted forwarded
+headers run before rate limiting so a known proxy can supply the client address.
+
 ## Manage access
 
 Use the resource GUID from an authorized FSSHTTP response or an operator database

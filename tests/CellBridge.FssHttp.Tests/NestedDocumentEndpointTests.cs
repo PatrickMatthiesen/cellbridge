@@ -194,7 +194,7 @@ public sealed class NestedDocumentEndpointTests
             new StateTransition<bool>(current with { Security = current.Security with
                 { Owner = null, Grants = current.Security.Grants.SetItem("tests:writer", DocumentAccess.None) } }, true));
         using var download = await fixture.Send(HttpMethod.Get, "/shared/deep/private.docx");
-        Assert.Equal(HttpStatusCode.Forbidden, download.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, download.StatusCode);
         using var soap = await fixture.Soap("/shared/deep/private.docx/_vti_bin/cellstorage.svc",
             "/shared/deep/private.docx", "GetDocMetaInfo");
         Assert.Equal("FileUnauthorizedAccess", FileError(XDocument.Parse(await soap.Content.ReadAsStringAsync())));

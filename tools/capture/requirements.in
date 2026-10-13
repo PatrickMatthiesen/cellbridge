@@ -1,0 +1,6 @@
+# The latest published release 12.2.3 excludes patched dependencies.
+# Pin the upstream source commit until a compatible stable release is published.
+mitmproxy @ https://github.com/mitmproxy/mitmproxy/archive/5253dcbd1d8f0522de097bfe56918fe12a0f267a.tar.gz
+cryptography==50.0.2
+h2==4.4.1
+tornado==6.5.10

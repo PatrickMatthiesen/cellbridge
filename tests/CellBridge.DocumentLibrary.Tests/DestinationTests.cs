@@ -9,6 +9,32 @@ namespace CellBridge.DocumentLibrary.Tests;
 public sealed class DestinationTests
 {
     [Fact]
+    public async Task NewDestinationFilesAndDirectoriesHaveOwnerOnlyUnixPermissions()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var files = new TemporaryDirectory();
+        var root = Path.Combine(files.Path, "private-library");
+        await using var destination = new DocumentLibraryDestination(root);
+        var resourceId = Guid.NewGuid();
+        await destination.CreateAsync(resourceId, Guid.NewGuid(), "example.docx",
+            "/shared/example.docx", new MemoryStream(TestOfficeFile.Docx("private")), Permissions());
+        await destination.MarkCellBridgeBoundAsync(resourceId);
+        var fileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        Assert.All(Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories),
+            path =>
+            {
+                if (!OperatingSystem.IsWindows()) Assert.Equal(fileMode, File.GetUnixFileMode(path));
+            });
+        var directoryMode = fileMode | UnixFileMode.UserExecute;
+        Assert.Equal(directoryMode, File.GetUnixFileMode(root));
+        Assert.All(Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories),
+            path =>
+            {
+                if (!OperatingSystem.IsWindows()) Assert.Equal(directoryMode, File.GetUnixFileMode(path));
+            });
+    }
+
+    [Fact]
     public async Task ManifestReplacementSucceedsWhileAnotherReaderIsOpen()
     {
         using var files = new TemporaryDirectory();

@@ -1,5 +1,10 @@
 # Package-only document library
 
+For a remote HTTPS origin, set `Protocol__PublicOrigin` to that fixed origin.
+Office challenges, protocol responses and library open links use it rather than
+an incoming Host header. Without a fixed origin, remote protocol requests need
+a specific `AllowedHosts` list; loopback is available for local testing.
+
 This example hosts CellBridge from NuGet packages. It keeps CellBridge state and content in PostgreSQL. A separate destination directory stores immutable Office files. Each document has one atomically replaced manifest that selects the current file revision and retains delivery receipts.
 
 This is separate from the repository's Razor Pages demo at `/library`. Both

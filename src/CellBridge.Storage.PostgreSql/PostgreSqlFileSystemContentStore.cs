@@ -33,8 +33,8 @@ public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBu
         try
         {
             var temporary = Path.Combine(Path.GetTempPath(), "cellbridge-reservation-" + Guid.NewGuid().ToString("N"));
-            await using var spool = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite,
-                FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+            await using var spool = ConfidentialFileSystem.CreateFile(temporary, FileAccess.ReadWrite,
+                FileOptions.Asynchronous | FileOptions.DeleteOnClose);
             var buffer = new byte[65536];
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             long length = 0;

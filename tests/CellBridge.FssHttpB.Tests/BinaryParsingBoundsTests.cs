@@ -2,6 +2,44 @@ namespace CellBridge.FssHttpB.Tests;
 
 public sealed class BinaryParsingBoundsTests
 {
+    [Fact]
+    public void PutChangesRejectsAuthorCountBeforeAllocatingEntries()
+    {
+        var wire = PutChangesWithAuthors(
+            (ulong)PutChangesSubRequestData.MaximumAuthorLogins + 1, []);
+
+        var error = Assert.Throws<InvalidDataException>(() =>
+            PutChangesSubRequestData.Deserialize(new(wire)));
+
+        Assert.Contains("Author login count", error.Message);
+    }
+
+    [Fact]
+    public void PutChangesAcceptsAuthorCountAtLimit()
+    {
+        string[] authors = Enumerable.Repeat(string.Empty,
+            PutChangesSubRequestData.MaximumAuthorLogins).ToArray();
+
+        var parsed = PutChangesSubRequestData.Deserialize(new(PutChangesWithAuthors(
+            (ulong)authors.Length, authors)));
+
+        Assert.Equal(authors.Length, parsed.AuthorLogins.Count);
+    }
+
+    [Fact]
+    public void PutChangesRejectsCumulativeAuthorCharactersBeforeDecodingOversizedEntry()
+    {
+        string[] authors = [
+            new('a', PutChangesSubRequestData.MaximumAuthorLoginCharacters),
+            "b",
+        ];
+
+        var error = Assert.Throws<InvalidDataException>(() =>
+            PutChangesSubRequestData.Deserialize(new(PutChangesWithAuthors(2, authors))));
+
+        Assert.Contains("character limit", error.Message);
+    }
+
     [Theory]
     [InlineData(33)]
     [InlineData(34)]
@@ -153,5 +191,23 @@ public sealed class BinaryParsingBoundsTests
         for (int i = 0; i < levels; i++)
             new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.ObjectGroupDeclarations).Serialize(payload);
         return new((DataElementType)99, new(1, Guid.NewGuid()), SerialNumber.Null) { Data = payload.ToArray() };
+    }
+
+    private static byte[] PutChangesWithAuthors(ulong declaredCount, IEnumerable<string> authors)
+    {
+        var payload = new BinaryWriterEx();
+        ExGuid.Null.Serialize(payload);
+        ExGuid.Null.Serialize(payload);
+        payload.WriteByte(0);
+        new BinaryItem().Serialize(payload);
+        new Compact64bitInt(declaredCount).Serialize(payload);
+        foreach (string author in authors) new StringItem(author).Serialize(payload);
+        payload.WriteByte(0);
+
+        var wire = new BinaryWriterEx();
+        new StreamObjectHeaderStart32Bit(
+            StreamObjectTypeHeaderStart.PutChangesRequest, payload.Length).Serialize(wire);
+        wire.WriteBytes(payload.ToArray());
+        return wire.ToArray();
     }
 }

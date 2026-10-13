@@ -29,7 +29,7 @@ public sealed class FileSystemContentStore : IContentStore
             missing.Push(path);
         while (missing.TryPop(out var path))
         {
-            Directory.CreateDirectory(path);
+            ConfidentialFileSystem.CreateDirectory(path);
             FlushDirectory(Path.GetDirectoryName(path)!);
         }
         FlushDirectory(_root);
@@ -41,8 +41,8 @@ public sealed class FileSystemContentStore : IContentStore
         {
             long length = 0;
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write,
-                FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            await using (var output = ConfidentialFileSystem.CreateFile(temporary, FileAccess.Write,
+                FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
                 var buffer = new byte[65536];
                 int read;

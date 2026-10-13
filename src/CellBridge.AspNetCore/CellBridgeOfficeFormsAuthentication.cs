@@ -114,7 +114,12 @@ public static class CellBridgeOfficeFormsAuthentication
             if (context.HttpContext.GetEndpoint()?.Metadata.GetMetadata<OfficeEndpointMetadata>() is null)
                 return original.RedirectToLogin(context);
             var request = context.Request;
-            var origin = registration.PublicOrigin ?? $"{request.Scheme}://{request.Host}";
+            var origin = CellBridgePublicOrigin.Resolve(context.HttpContext);
+            if (origin is null)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return Task.CompletedTask;
+            }
             var completion = (request.PathBase + registration.CompletionPath).ToUriComponent();
             var packaged = context.HttpContext.RequestServices.GetService<CellBridgeLogin.LoginRegistration>();
             var login = origin + request.PathBase + (packaged?.Options.OfficeLoginPath ?? context.Options.LoginPath);

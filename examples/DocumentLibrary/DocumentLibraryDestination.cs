@@ -20,9 +20,14 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         _root = Path.GetFullPath(root);
-        Directory.CreateDirectory(_root);
-        _hostLock = new FileStream(Path.Combine(_root, ".cellbridge-document-library.lock"),
-            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
+        ConfidentialFileSystem.CreateDirectory(_root);
+        var lockOptions = new FileStreamOptions
+        {
+            Mode = FileMode.OpenOrCreate, Access = FileAccess.ReadWrite, Share = FileShare.None,
+            BufferSize = 1, Options = FileOptions.WriteThrough,
+        };
+        if (!OperatingSystem.IsWindows()) lockOptions.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        _hostLock = new FileStream(Path.Combine(_root, ".cellbridge-document-library.lock"), lockOptions);
         _faults = faults ?? new NoDestinationFaults();
     }
 
@@ -63,7 +68,7 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
                 throw new DocumentNameConflictException("A document with this file name already exists.");
             var manifestPath = ManifestPath(resourceId);
             if (File.Exists(manifestPath)) throw new IOException("The destination document already exists.");
-            Directory.CreateDirectory(RevisionsRoot(resourceId));
+            ConfidentialFileSystem.CreateDirectory(RevisionsRoot(resourceId));
             var revision = NewRevision();
             var relativeFile = RevisionRelativePath(revision, fileName);
             var stored = await WriteRevisionAsync(resourceId, relativeFile, content, null, cancellationToken);
@@ -209,19 +214,13 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
         Stream source, ContentHandle? expected, CancellationToken cancellationToken)
     {
         var path = ResolveDocumentPath(resourceId, relativeFile);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        ConfidentialFileSystem.CreateDirectory(Path.GetDirectoryName(path)!);
         long length = 0;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         try
         {
-            await using var destination = new FileStream(path, new FileStreamOptions
-            {
-                Mode = FileMode.CreateNew,
-                Access = FileAccess.Write,
-                Share = FileShare.Read,
-                BufferSize = 65536,
-                Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
-            });
+            await using var destination = ConfidentialFileSystem.CreateFile(path, FileAccess.Write,
+                FileOptions.Asynchronous | FileOptions.WriteThrough, share: FileShare.Read);
             var buffer = new byte[65536];
             int read;
             while ((read = await source.ReadAsync(buffer, cancellationToken)) != 0)
@@ -255,18 +254,12 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
         CancellationToken cancellationToken)
     {
         var path = ManifestPath(manifest.ResourceId);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        ConfidentialFileSystem.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await using (var stream = new FileStream(temporary, new FileStreamOptions
-            {
-                Mode = FileMode.CreateNew,
-                Access = FileAccess.Write,
-                Share = FileShare.None,
-                BufferSize = 16384,
-                Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
-            }))
+            await using (var stream = ConfidentialFileSystem.CreateFile(temporary, FileAccess.Write,
+                FileOptions.Asynchronous | FileOptions.WriteThrough, bufferSize: 16384))
             {
                 await JsonSerializer.SerializeAsync(stream, manifest, JsonOptions, cancellationToken);
                 await stream.FlushAsync(cancellationToken);

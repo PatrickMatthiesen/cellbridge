@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import threading
 import time
 import uuid
@@ -18,8 +19,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from private_files import private_directory, private_open, private_write
+
 
 REDACTED_HEADERS = {"authorization", "proxy-authorization", "www-authenticate", "proxy-authenticate", "cookie", "set-cookie"}
+URL_HEADERS = {"location", "content-location", "referer", "destination"}
+
+
+def _redact_url(value: str) -> str:
+    """Remove URL credentials from metadata without changing forwarded traffic."""
+    path, fragment, _ = value.partition("#")
+    path, query, _ = path.partition("?")
+    path = re.sub(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/]*@", r"\1[REDACTED]@", path)
+    return path + ("?[REDACTED]" if query else "") + ("#[REDACTED]" if fragment else "")
 
 
 def _now() -> str:
@@ -41,14 +53,17 @@ def _replace_file(source: Path, target: Path) -> None:
 
 
 def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".tmp")
-    with temp.open("w", encoding="utf-8", newline="\n") as f:
-        json.dump(value, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    _replace_file(temp, path)
+    private_directory(path.parent)
+    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with private_open(temp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(value, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _replace_file(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _headers(headers: Any) -> list[list[str]]:
@@ -64,7 +79,12 @@ def _headers(headers: Any) -> list[list[str]]:
             name = name.decode("latin-1")
         if isinstance(value, bytes):
             value = value.decode("latin-1")
-        result.append([str(name), "[REDACTED]" if str(name).lower() in REDACTED_HEADERS else str(value)])
+        name, value = str(name), str(value)
+        if name.lower() in REDACTED_HEADERS:
+            value = "[REDACTED]"
+        elif name.lower() in URL_HEADERS:
+            value = _redact_url(value)
+        result.append([name, value])
     return result
 
 
@@ -84,8 +104,8 @@ class BodySink:
         self.closed = False
         self.file = None
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.file = self.temp.open("wb")
+            private_directory(self.path.parent)
+            self.file = private_open(self.temp)
         except OSError as ex:
             self._fail(ex)
 
@@ -135,8 +155,8 @@ class BodySink:
             if self.original_bytes == 0 and self.file is None and not self.error and not self.path.exists():
                 # Empty bodies are valid and get a real empty file.
                 try:
-                    self.path.parent.mkdir(parents=True, exist_ok=True)
-                    self.path.write_bytes(b"")
+                    private_directory(self.path.parent)
+                    private_write(self.path, b"")
                 except OSError as ex:
                     self._fail(ex)
         return {
@@ -181,9 +201,9 @@ class CaptureAddon:
         self.recording_errors: list[str] = []
         self.recording_error_details: list[dict[str, Any]] = []
         self.started_at = _now()
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "flows").mkdir(exist_ok=True)
-        (self.root / "files").mkdir(exist_ok=True)
+        private_directory(self.root)
+        private_directory(self.root / "flows")
+        private_directory(self.root / "files")
         if (self.root / "manifest.json").exists():
             raise ValueError("CAPTURE_OUTPUT already contains a manifest; use a new run directory")
         self._write_manifest("running")
@@ -308,7 +328,7 @@ class CaptureAddon:
             "request": {
                 "timestamp": _now(), "method": str(getattr(req, "method", "")),
                 "scheme": str(getattr(req, "scheme", "")), "host": self._host(flow),
-                "port": getattr(req, "port", None), "path": str(getattr(req, "path", "")),
+                "port": getattr(req, "port", None), "path": _redact_url(str(getattr(req, "path", ""))),
                 "http_version": str(getattr(req, "http_version", "")), "headers": _headers(req.headers),
                 "original_host_header": original_host_header,
                 "client_connection_id": str(getattr(conn, "id", "")),

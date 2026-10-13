@@ -170,6 +170,18 @@ public class CellStorageRequestParserTests
         Assert.Throws<InvalidDataException>(() =>
             CellStorageRequestParser.Parse("<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"/>"));
     }
+
+    [Theory]
+    [InlineData("<!DOCTYPE soap:Envelope [<!ENTITY target 'https://example.test/expanded.docx'>]>")]
+    [InlineData("<!DOCTYPE soap:Envelope SYSTEM 'file:///not-read-by-the-parser'>")]
+    public void DocumentTypeDeclarationsAreRejected(string documentType)
+    {
+        string envelope = SampleQueryAccessEnvelope
+            .Replace("?>", $"?>\n{documentType}", StringComparison.Ordinal)
+            .Replace("https://example.com/shared/test.docx", "&target;", StringComparison.Ordinal);
+
+        Assert.Throws<System.Xml.XmlException>(() => CellStorageRequestParser.Parse(envelope));
+    }
 }
 
 public class CellStorageResponseTests

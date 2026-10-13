@@ -22,7 +22,7 @@ builder.Services.AddHttpClient<DocumentCatalogClient>(client =>
 var app = builder.Build();
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
-    ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
 });
 
 if (!app.Environment.IsDevelopment())
@@ -37,6 +37,8 @@ app.UseStaticFiles();
 app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
+app.UseRequestTimeouts();
 app.UseAntiforgery();
 await AuthenticationDatabase.CheckSchemaAsync(app.Configuration.GetConnectionString("cellbridge")!);
 

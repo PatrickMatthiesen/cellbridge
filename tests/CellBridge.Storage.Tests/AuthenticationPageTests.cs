@@ -5,8 +5,10 @@ using CellBridge.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace CellBridge.Storage.Tests;
@@ -59,6 +61,35 @@ public sealed class AuthenticationPageTests
         await Assert.ThrowsAsync<OptionsValidationException>(() => Start(" "));
     }
 
+    [Fact]
+    public async Task OversizedLoginFormIsRejectedBeforeAccountLookup()
+    {
+        await using var app = await Start("Example");
+        using var client = app.GetTestClient();
+        client.BaseAddress = new("https://localhost");
+        using var response = await client.PostAsync("/auth/login", new FormUrlEncodedContent(
+            new Dictionary<string, string> { ["login"] = new('a', 17 * 1024) }));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task LoginAttemptsAreRateLimitedByRemoteAddress()
+    {
+        await using var app = await Start("Example");
+        using var client = app.GetTestClient();
+        client.BaseAddress = new("https://localhost");
+        for (int i = 0; i < 20; i++)
+        {
+            using var rejectedForm = await client.PostAsync("/auth/login", new StringContent(""));
+            Assert.Equal(HttpStatusCode.BadRequest, rejectedForm.StatusCode);
+        }
+
+        using var limited = await client.PostAsync("/auth/login", new StringContent(""));
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+    }
+
     private static async Task<WebApplication> Start(string applicationName,
         Func<LoginPageContext, string>? renderer = null)
     {
@@ -72,10 +103,16 @@ public sealed class AuthenticationPageTests
             ["Authentication:ApplicationName"] = applicationName,
         });
         builder.Services.AddCellBridgeAuthentication(builder.Configuration);
+        var keyValidationService = builder.Services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IHostedService) &&
+            descriptor.ImplementationType == typeof(AuthenticationKeyValidationService));
+        builder.Services.Remove(keyValidationService);
         builder.Services.AddSingleton<IDataProtectionProvider>(new EphemeralDataProtectionProvider());
         var app = builder.Build();
         app.UseAuthentication();
         app.UseAuthorization();
+        app.UseRateLimiter();
+        app.UseRequestTimeouts();
         app.UseAntiforgery();
         app.MapCellBridgeAuthentication(renderer);
         try

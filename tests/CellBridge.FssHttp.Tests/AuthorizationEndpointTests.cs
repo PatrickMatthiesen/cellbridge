@@ -59,7 +59,7 @@ public sealed class AuthorizationEndpointTests
             using var client = fixture.CreateClient(user);
             using var request = new HttpRequestMessage(new(method), "/shared/secret.bin");
             using var result = await client.SendAsync(request);
-            Assert.Equal(user == "reader" ? HttpStatusCode.OK : HttpStatusCode.Forbidden, result.StatusCode);
+            Assert.Equal(user == "reader" ? HttpStatusCode.OK : HttpStatusCode.NotFound, result.StatusCode);
             if (user == "other") { Assert.Null(result.Headers.ETag); Assert.Null(result.Content.Headers.LastModified); }
             else if (method == "GET") Assert.Equal(new byte[] { 1, 2, 3 }, await result.Content.ReadAsByteArrayAsync());
         }
@@ -75,7 +75,7 @@ public sealed class AuthorizationEndpointTests
         await Task.WhenAll(Enumerable.Range(0, 10).SelectMany(_ => new[]
         {
             Check(reader, HttpStatusCode.OK),
-            Check(other, HttpStatusCode.Forbidden),
+            Check(other, HttpStatusCode.NotFound),
             Check(fixture.Client, HttpStatusCode.Unauthorized),
         }));
 

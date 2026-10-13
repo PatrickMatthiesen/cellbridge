@@ -1,14 +1,17 @@
 using System.Security.Claims;
 using CellBridge.AspNetCore;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using System.Threading.RateLimiting;
 
 namespace CellBridge.Authentication;
 
@@ -17,6 +20,7 @@ public static class AuthenticationServices
     public const string CookieName = "CellBridge.Authentication";
     public const string AntiforgeryCookie = "CellBridge.Antiforgery";
     public const string AntiforgeryHeader = "X-CellBridge-CSRF";
+    public const string LoginRateLimitPolicy = "CellBridge.Authentication.Login";
 
     public static IServiceCollection AddCellBridgeAuthentication(this IServiceCollection services,
         IConfiguration configuration, bool renewCookies = true, bool serveOffice = true)
@@ -94,7 +98,55 @@ public static class AuthenticationServices
             o.Cookie.SameSite = SameSiteMode.Lax;
             o.HeaderName = AntiforgeryHeader;
         });
-        services.AddDataProtection().SetApplicationName("CellBridge.Authentication.v1");
+        services.AddRequestTimeouts();
+        services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+            {
+                var rateLimit = context.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>();
+                if (rateLimit?.PolicyName != LoginRateLimitPolicy)
+                    return RateLimitPartition.GetNoLimiter("non-login");
+
+                return RateLimitPartition.Get("login", _ => RateLimiter.CreateChained(
+                    new FixedWindowRateLimiter(new()
+                    {
+                        PermitLimit = 100,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        AutoReplenishment = true,
+                    }),
+                    new ConcurrencyLimiter(new()
+                    {
+                        PermitLimit = 8,
+                        QueueLimit = 0,
+                    })));
+            });
+            options.AddPolicy(LoginRateLimitPolicy, context =>
+            {
+                string address = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                return RateLimitPartition.Get(address, _ => RateLimiter.CreateChained(
+                    new FixedWindowRateLimiter(new()
+                    {
+                        PermitLimit = 20,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        AutoReplenishment = true,
+                    }),
+                    new ConcurrencyLimiter(new()
+                    {
+                        PermitLimit = 2,
+                        QueueLimit = 0,
+                    })));
+            });
+        });
+        var keyCertificate = AuthenticationKeyCertificate.Load(configuration);
+        services.AddSingleton<AuthenticationKeyCertificate>(_ => keyCertificate);
+        services.AddSingleton<AuthenticationKeyProtector>();
+        services.AddHostedService<AuthenticationKeyValidationService>();
+        services.AddDataProtection()
+            .SetApplicationName("CellBridge.Authentication.v1")
+            .ProtectKeysWithCertificate(keyCertificate.Certificate);
         services.AddSingleton<DatabaseKeyRepository>();
         services.AddOptions<KeyManagementOptions>().Configure<DatabaseKeyRepository>((o, repository) => o.XmlRepository = repository);
         return services;

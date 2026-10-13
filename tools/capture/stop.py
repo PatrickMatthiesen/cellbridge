@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import time
 
+from private_files import private_open
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -16,7 +18,11 @@ def main() -> int:
     if data.get("status") != "running":
         print(f"Run already stopped: {data.get('status', 'unknown')}")
         return 0
-    (args.run / "stop.request").touch()
+    try:
+        with private_open(args.run / "stop.request"):
+            pass
+    except FileExistsError:
+        pass
     for _ in range(40):
         time.sleep(0.25)
         data = json.loads(manifest.read_text(encoding="utf-8"))

@@ -28,8 +28,8 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
         string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
-                65536, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            await using (var output = ConfidentialFileSystem.CreateFile(temporary, FileAccess.ReadWrite,
+                FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
                 using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
                 {
@@ -265,13 +265,12 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
         public bool Durable => false; public bool Shared => false;
         public StageContent()
         {
-            if (OperatingSystem.IsWindows()) Directory.CreateDirectory(_root);
-            else Directory.CreateDirectory(_root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            ConfidentialFileSystem.CreateDirectory(_root);
         }
         public Stream Create(ContentHandle handle, int ordinal)
         {
             var path = Path.Combine(_root, ordinal.ToString("D8")); _paths.Add(handle.Key, (handle, path));
-            return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous);
+            return ConfidentialFileSystem.CreateFile(path, FileAccess.Write);
         }
         public ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default)
         {

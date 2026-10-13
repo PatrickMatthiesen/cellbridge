@@ -157,8 +157,8 @@ public sealed partial class PortableArchive
         var state = owner with { Content = package, Partitions = partitions, Revisions = [], Receipts = [], RestoreReceipts = [], Publication = null };
         var graph = await DocumentPartition.RestoreFileGraphAsync(state, content, _storage, cancellationToken);
         string temporary = Path.Combine(Path.GetTempPath(), "cellbridge-recovered-package-" + Guid.NewGuid().ToString("N"));
-        await using var reconstructed = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
-            65536, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+        await using var reconstructed = ConfidentialFileSystem.CreateFile(temporary, FileAccess.ReadWrite,
+            FileOptions.Asynchronous | FileOptions.DeleteOnClose);
         await graph.MaterializeToAsync(reconstructed, _storage.MaxDocumentBytes, cancellationToken);
         reconstructed.Position = 0;
         if (reconstructed.Length != package.Length || file.Content != package ||

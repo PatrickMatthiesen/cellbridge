@@ -67,17 +67,35 @@ public sealed class AuthenticationDatabase(DbContextOptions<AuthenticationDataba
     }
 }
 
-internal sealed class DatabaseKeyRepository(IDbContextFactory<AuthenticationDatabase> factory) : IXmlRepository
+internal sealed class DatabaseKeyRepository(
+    IDbContextFactory<AuthenticationDatabase> factory,
+    AuthenticationKeyProtector protector) : IXmlRepository
 {
     public IReadOnlyCollection<XElement> GetAllElements()
     {
         using var context = factory.CreateDbContext();
-        return context.Keys.AsNoTracking().OrderBy(k => k.Id).Select(k => k.Xml).AsEnumerable().Select(XElement.Parse).ToArray();
+        using var transaction = context.Database.BeginTransaction();
+        var rows = context.Keys
+            .FromSqlRaw("SELECT * FROM cellbridge_auth_keys ORDER BY \"Id\" FOR UPDATE")
+            .ToArray();
+        var elements = new XElement[rows.Length];
+        for (int i = 0; i < rows.Length; i++)
+        {
+            XElement original = XElement.Parse(rows[i].Xml, LoadOptions.PreserveWhitespace);
+            XElement protectedElement = protector.Protect(original);
+            string protectedXml = protectedElement.ToString(SaveOptions.DisableFormatting);
+            if (!string.Equals(rows[i].Xml, protectedXml, StringComparison.Ordinal))
+                rows[i].Xml = protectedXml;
+            elements[i] = protectedElement;
+        }
+        context.SaveChanges();
+        transaction.Commit();
+        return elements;
     }
     public void StoreElement(XElement element, string friendlyName)
     {
         using var context = factory.CreateDbContext();
-        context.Keys.Add(new() { Xml = element.ToString(SaveOptions.DisableFormatting) });
+        context.Keys.Add(new() { Xml = protector.Protect(element).ToString(SaveOptions.DisableFormatting) });
         context.SaveChanges();
     }
 }

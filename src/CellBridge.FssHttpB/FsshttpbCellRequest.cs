@@ -793,6 +793,12 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
 /// </summary>
 public sealed class PutChangesSubRequestData : ISubRequestData
 {
+    /// <summary>Maximum number of author login entries accepted in one Put Changes request.</summary>
+    public const int MaximumAuthorLogins = 1_024;
+
+    /// <summary>Maximum combined UTF-16 character count for all author logins.</summary>
+    public const int MaximumAuthorLoginCharacters = 64 * 1_024;
+
     /// <summary>The storage index containing the proposed mappings.</summary>
     public ExGuid StorageIndex { get; set; } = ExGuid.Null;
 
@@ -870,16 +876,23 @@ public sealed class PutChangesSubRequestData : ISubRequestData
             throw new InvalidDataException("Expected a 32-bit noncompound Put Changes request.");
         }
 
-        var payload = new BinaryReaderEx(reader.ReadBytes(putHeader.Length));
+        var payload = new BinaryReaderEx(reader.ReadMemory(putHeader.Length));
         data.StorageIndex = ExGuid.Deserialize(payload);
         data.ExpectedStorageIndex = ExGuid.Deserialize(payload);
         data.Flags = payload.ReadByte();
         data.ContentVersionCoherencyCheck = BinaryItem.Deserialize(payload).Content;
         var count = Compact64bitInt.Deserialize(payload).Value;
+        if (count > MaximumAuthorLogins)
+            throw new InvalidDataException($"Author login count exceeds the {MaximumAuthorLogins}-entry limit.");
         if (count > (ulong)payload.Remaining)
             throw new InvalidDataException("Author login count exceeds the Put Changes payload.");
+        int remainingAuthorCharacters = MaximumAuthorLoginCharacters;
         for (ulong i = 0; i < count; i++)
-            data.AuthorLogins.Add(StringItem.Deserialize(payload).Value);
+        {
+            string author = StringItem.Deserialize(payload, remainingAuthorCharacters).Value;
+            remainingAuthorCharacters -= author.Length;
+            data.AuthorLogins.Add(author);
+        }
         payload.ReadByte(); // Reserved; ignored on receipt.
         if (payload.Remaining != 0)
             throw new InvalidDataException("Unexpected trailing bytes in Put Changes fixed fields.");
