@@ -118,8 +118,9 @@ public sealed class FssHttpLockCoordinator
                     if (_exclusive is not null || _schemaLockId is not null && !Same(_schemaLockId, schemaId))
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
                     // MS-FSSHTTP 3.1.4.4.3: the coauthoring-enabled profile
-                    // reacquires an expired shared lock through GetLock.
-                    if (_schemaLockId is null)
+                    // reacquires the client's expired lease through GetLock,
+                    // including when compatible same-schema peers remain.
+                    if (_schemaLockId is null || client is not null && !_schemaOwners.ContainsKey(client))
                         goto case "GetLock";
                     if (client is null || !Same(_schemaLockId, schemaId) || !_schemaOwners.ContainsKey(client))
                         return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");

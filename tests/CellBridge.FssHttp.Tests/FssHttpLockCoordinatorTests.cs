@@ -149,7 +149,7 @@ public sealed class FssHttpLockCoordinatorTests
     }
 
     [Fact]
-    public void SchemaRefreshDoesNotRejoinExpiredClientWhilePeerStillHoldsLock()
+    public void SchemaRefreshReacquiresExpiredClientWhilePeerStillHoldsLock()
     {
         var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var schema = Guid.NewGuid().ToString();
@@ -161,12 +161,18 @@ public sealed class FssHttpLockCoordinatorTests
                 ("ClientID", id), ("SchemaLockID", schema), ("SchemaLockRequestType", "GetLock"), ("Timeout", timeout)), new(), now));
         var response = new FssHttpSubResponse();
 
-        Assert.Equal(LockOperationResult.Conflict, coordinator.ApplySchemaLock(Request(
+        Assert.Equal(LockOperationResult.Granted, coordinator.ApplySchemaLock(Request(
             ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "RefreshLock")), response, now.AddSeconds(3600)));
 
-        Assert.Equal("InvalidCoauthSession", response.ErrorCode);
-        Assert.Equal(peer, Assert.Single(coordinator.Capture().SchemaOwners).Client);
-        Assert.Equal(now.AddSeconds(7200), Assert.Single(coordinator.Capture().SchemaOwners).ExpiresUtc);
+        Assert.Null(response.ErrorCode);
+        Assert.Equal("SchemaLock", response.SubResponseDataAttributes["LockType"]);
+        var leases = coordinator.Capture().SchemaOwners;
+        Assert.Equal(2, leases.Length);
+        Assert.Equal(now.AddSeconds(7200), Assert.Single(leases, lease => lease.Client == peer).ExpiresUtc);
+        var renewed = Assert.Single(leases, lease => lease.Client == client);
+        Assert.Equal(now.AddSeconds(7200), renewed.ExpiresUtc);
+        Assert.Equal(3600, renewed.TimeoutSeconds);
+        Assert.Equal(TestActor.Value.Identity.Subject, renewed.OwnerSubject);
     }
 
     [Theory]
