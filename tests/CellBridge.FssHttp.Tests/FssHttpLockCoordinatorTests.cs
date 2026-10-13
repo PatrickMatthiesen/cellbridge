@@ -1,6 +1,9 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
+using CellBridge.Storage.Abstractions;
 using CellBridge.Web;
 
 namespace CellBridge.FssHttp.Tests;
@@ -64,6 +67,131 @@ public sealed class FssHttpLockCoordinatorTests
         Assert.Equal(LockOperationResult.Granted, granted);
         Assert.Equal(LockOperationResult.Granted, conflict);
         Assert.Null(conflictResponse.ErrorCode);
+    }
+
+    [Fact]
+    public void SchemaRefreshReacquiresExpiredLockAfterCoordinatorRecreation()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var client = Guid.NewGuid().ToString();
+        var schema = Guid.NewGuid().ToString();
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
+        Assert.Equal(LockOperationResult.Granted, coordinator.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "GetLock")), new(), now));
+        var expiredAt = now.AddSeconds(3600);
+        var restored = FssHttpLockCoordinator.Restore(NewDocument(), coordinator.Capture(), expiredAt, TestActor.Value.Identity);
+        var response = new FssHttpSubResponse();
+
+        Assert.Equal(LockOperationResult.Granted, restored.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "RefreshLock")), response));
+
+        Assert.Null(response.ErrorCode);
+        Assert.Equal("SchemaLock", response.SubResponseDataAttributes["LockType"]);
+        var lease = Assert.Single(restored.Capture().SchemaOwners);
+        Assert.Equal(client, lease.Client);
+        Assert.Equal(schema, lease.Id);
+        Assert.Equal(TestActor.Value.Identity.Subject, lease.OwnerSubject);
+        Assert.Equal(expiredAt.AddSeconds(3600), lease.ExpiresUtc);
+        Assert.Equal(3600, lease.TimeoutSeconds);
+        Assert.Empty(restored.Capture().CoauthorClients);
+    }
+
+    [Theory]
+    [InlineData(60)]
+    [InlineData(4000)]
+    public void SchemaRefreshWithLowerTimeoutIsNoOpAfterPersistence(int elapsedSeconds)
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var client = Guid.NewGuid().ToString();
+        var schema = Guid.NewGuid().ToString();
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
+        Assert.Equal(LockOperationResult.Granted, coordinator.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "GetLock"),
+            ("Timeout", "7200")), new(), now));
+        var state = JsonSerializer.Deserialize<CoordinationState>(
+            JsonSerializer.Serialize(coordinator.Capture()))!;
+        coordinator = FssHttpLockCoordinator.Restore(NewDocument(), state, actor: TestActor.Value.Identity);
+
+        Assert.Equal(LockOperationResult.Refreshed, coordinator.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "RefreshLock")), new(), now.AddSeconds(elapsedSeconds)));
+        Assert.Equal(now.AddSeconds(7200), Assert.Single(coordinator.Capture().SchemaOwners).ExpiresUtc);
+        Assert.Equal(7200, Assert.Single(coordinator.Capture().SchemaOwners).TimeoutSeconds);
+
+        Assert.Equal(LockOperationResult.Refreshed, coordinator.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "RefreshLock"),
+            ("Timeout", "7200")), new(), now.AddSeconds(elapsedSeconds + 60)));
+        Assert.Equal(now.AddSeconds(elapsedSeconds + 7260), Assert.Single(coordinator.Capture().SchemaOwners).ExpiresUtc);
+    }
+
+    [Theory]
+    [InlineData(60, false)]
+    [InlineData(4000, true)]
+    public void LegacySchemaLeaseRefreshPreservesExpiryAndLearnsDurationOnExtension(int elapsedSeconds, bool extends)
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var client = Guid.NewGuid().ToString();
+        var schema = Guid.NewGuid().ToString();
+        var legacy = new LeaseState(schema, client, now.AddSeconds(7200), 0, null,
+            TestActor.Value.Identity.Subject);
+        var json = JsonNode.Parse(JsonSerializer.Serialize(legacy))!;
+        json.AsObject().Remove("TimeoutSeconds");
+        legacy = json.Deserialize<LeaseState>()!;
+        Assert.Null(legacy.TimeoutSeconds);
+        var state = new CoordinationState(schema, [legacy], null, 0);
+        var coordinator = FssHttpLockCoordinator.Restore(NewDocument(), state, actor: TestActor.Value.Identity);
+
+        Assert.Equal(LockOperationResult.Refreshed, coordinator.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "RefreshLock")), new(), now.AddSeconds(elapsedSeconds)));
+
+        var lease = Assert.Single(coordinator.Capture().SchemaOwners);
+        Assert.Equal(now.AddSeconds(extends ? elapsedSeconds + 3600 : 7200), lease.ExpiresUtc);
+        Assert.Equal(extends ? 3600 : (int?)null, lease.TimeoutSeconds);
+    }
+
+    [Fact]
+    public void SchemaRefreshDoesNotRejoinExpiredClientWhilePeerStillHoldsLock()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var schema = Guid.NewGuid().ToString();
+        var client = Guid.NewGuid().ToString();
+        var peer = Guid.NewGuid().ToString();
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
+        foreach (var (id, timeout) in new[] { (client, "3600"), (peer, "7200") })
+            Assert.Equal(LockOperationResult.Granted, coordinator.ApplySchemaLock(Request(
+                ("ClientID", id), ("SchemaLockID", schema), ("SchemaLockRequestType", "GetLock"), ("Timeout", timeout)), new(), now));
+        var response = new FssHttpSubResponse();
+
+        Assert.Equal(LockOperationResult.Conflict, coordinator.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "RefreshLock")), response, now.AddSeconds(3600)));
+
+        Assert.Equal("InvalidCoauthSession", response.ErrorCode);
+        Assert.Equal(peer, Assert.Single(coordinator.Capture().SchemaOwners).Client);
+        Assert.Equal(now.AddSeconds(7200), Assert.Single(coordinator.Capture().SchemaOwners).ExpiresUtc);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SchemaRefreshRejectsCompetingLockWithoutChangingAuthority(bool exclusive)
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
+        var schema = Guid.NewGuid().ToString();
+        var client = Guid.NewGuid().ToString();
+        var granted = exclusive
+            ? coordinator.ApplyExclusiveLock(Request(("ExclusiveLockID", Guid.NewGuid().ToString()),
+                ("ExclusiveLockRequestType", "GetLock")), new(), now)
+            : coordinator.ApplySchemaLock(Request(("ClientID", Guid.NewGuid().ToString()),
+                ("SchemaLockID", Guid.NewGuid().ToString()), ("SchemaLockRequestType", "GetLock")), new(), now);
+        Assert.Equal(LockOperationResult.Granted, granted);
+        var before = JsonSerializer.Serialize(coordinator.Capture());
+        var response = new FssHttpSubResponse();
+
+        Assert.Equal(LockOperationResult.Conflict, coordinator.ApplySchemaLock(Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("SchemaLockRequestType", "RefreshLock")), response, now));
+
+        Assert.Equal("FileAlreadyLockedOnServer", response.ErrorCode);
+        Assert.Equal(before, JsonSerializer.Serialize(coordinator.Capture()));
     }
 
     [Fact]

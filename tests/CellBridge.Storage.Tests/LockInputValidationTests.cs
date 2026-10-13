@@ -83,6 +83,52 @@ public sealed class LockInputValidationTests
     }
 
     [Fact]
+    public async Task SchemaRefreshReacquiresPersistedExpiredLeaseThroughNewProcessor()
+    {
+        var provider = Memory();
+        var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/schema-refresh.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var attrs = Attributes(SubRequestType.SchemaLock, "GetLock");
+        var processor = new CellBridgeRequestProcessor(service);
+        var granted = await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId,
+            SubRequestType.SchemaLock, attrs)), "https://host.test", TestActor.Value);
+        Assert.Equal("Success", Assert.Single(Assert.Single(granted.Response.Responses).SubResponses).ErrorCode);
+        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
+        {
+            Coordination = current.Coordination with
+            {
+                SchemaOwners = [Assert.Single(current.Coordination.SchemaOwners) with { ExpiresUtc = now.AddSeconds(-1) }],
+            },
+        }, true));
+        var expired = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        attrs["SchemaLockRequestType"] = "RefreshLock";
+        // Refresh has no GetLock-only fallback identifier requirement, even
+        // when the expired lease is reacquired.
+        attrs["AllowFallbackToExclusive"] = "true";
+        attrs.Remove("ExclusiveLockID");
+
+        var next = new CellBridgeRequestProcessor(new CellBridgeDocumentService(provider));
+        var refreshed = await next.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId,
+            SubRequestType.SchemaLock, attrs)), "https://host.test", TestActor.Value);
+
+        var response = Assert.Single(Assert.Single(refreshed.Response.Responses).SubResponses);
+        Assert.Equal("Success", response.ErrorCode);
+        Assert.Equal("SchemaLock", response.SubResponseDataAttributes["LockType"]);
+        MicrosoftResponseSchema.Validate(refreshed.Response.ToSoapEnvelope());
+        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var lease = Assert.Single(after.Coordination.SchemaOwners);
+        Assert.Equal(attrs["ClientID"], lease.Client);
+        Assert.Equal(attrs["SchemaLockID"], lease.Id);
+        Assert.Equal(TestActor.Value.Identity.Subject, lease.OwnerSubject);
+        Assert.True(lease.ExpiresUtc > Assert.Single(expired.Coordination.SchemaOwners).ExpiresUtc);
+        Assert.True(after.Coordination.Generation > expired.Coordination.Generation);
+        Assert.Equal(state.Content, after.Content);
+        Assert.Equal(state.ContentVersion, after.ContentVersion);
+        Assert.Empty(after.Coordination.CoauthorClients);
+        Assert.Empty(refreshed.AcceptedSaves);
+    }
+
+    [Fact]
     public async Task RefreshIgnoresJoinFallbackRequirementBeforeAndAfterExpiry()
     {
         var doc = new DocumentStore().GetOrAdd("/refresh-fallback.docx");

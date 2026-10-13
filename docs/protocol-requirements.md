@@ -106,7 +106,7 @@ separate completion gate.
 | O05 | Coauth ConvertToExclusive | Requires active owned membership, matching schema and valid conversion inputs. Other schema owners block conversion; requested failure release removes only caller. `LockTransitionTests`. [Conversion rules][Oconvert]. | Implemented; source/reference fixtures and HTTP qualification remain #29. |
 | O06 | Coauth MarkTransitionComplete | Valid owned member acknowledges the pending transition; repeated acknowledgement succeeds. It emits no CoauthStatus and requires no invented TransitionID request attribute. `LockTransitionTests`. [Mark rules][Omark]. | Implemented; qualify captured transition lifecycle under #29. |
 | O07 | Coauth GetCoauthoringStatus / CheckLockAvailability | Status counts coauthors independently of editors-table readers; availability checks locks. `LockTransitionTests`, `FssHttpLockCoordinatorTests`. | Audit optional/required inputs separately; no membership requirement inferred for status. #18/#29. |
-| O08 | SchemaLock GetLock / RefreshLock / ReleaseLock / CheckLockAvailability / ConvertToExclusive | Shared leases, exact actor ownership, schema identity and exclusive conversion. `FssHttpLockCoordinatorTests`. | Implemented profile behavior; audit normative timeout/default/error differences under #18/#29. |
+| O08 | SchemaLock GetLock / RefreshLock / ReleaseLock / CheckLockAvailability / ConvertToExclusive | Shared leases, exact actor ownership, schema identity and exclusive conversion. Refresh reacquires an expired shared lock in the coauthoring-enabled profile, treats a lower timeout duration as a no-op, and rejects conflicting exclusive/schema locks with `FileAlreadyLockedOnServer`, per [3.1.4.4.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/41182c0d-fc5a-4bf5-975b-00e84a6cbce6). `FssHttpLockCoordinatorTests`, `LockInputValidationTests` cover recreated coordinators and persisted SOAP execution. | Implemented profile behavior with legacy expiry-only migration policy below; remaining independent reference differences under #18/#29. |
 | O09 | ExclusiveLock GetLock / RefreshLock / ReleaseLock / CheckLockAvailability | Exclusive lease and actor checks; ordinary GetLock emits no unrelated coauthor status/transition ID. `FssHttpLockCoordinatorTests`, `LockTransitionTests`. | Implemented profile behavior; remaining input/error audit #18. |
 | O10 | ExclusiveLock ConvertToSchema / ConvertToSchemaJoinCoauth | Atomic exclusive-to-schema conversion. Only the Join variant creates membership and reports stable file transition identity. Existing foreign editor identity cannot be overwritten. `LockTransitionTests`. [Conversion rules][Otoschema]. | Implemented; full reference/desktop acceptance remains #29. |
 | O11 | EditorsTable JoinEditingSession / LeaveEditingSession / RefreshEditingSession / UpdateEditorMetadata / RemoveEditorMetadata | Independent presence/metadata and knowledge advancement, actor-bound GUID editor keys. `EditorsTableStateTests`, authorization tests. | Audit every attribute, timeout and invalid metadata response under #18. |
@@ -200,6 +200,17 @@ complete teardown clears it. The file's ResourceID remains its TransitionID.
 `LockTransitionPersistenceTests` exercises detached coordinators across persisted
 transactions and old JSON without the additive fields. The PostgreSQL case is
 opt-in in the full runner.
+
+New shared leases persist their normalized `TimeoutSeconds` so schema refresh can
+compare duration values after host recreation. A lower duration is a no-op even
+when adding it to the current time would extend the old expiry. Older lease JSON
+has no duration and remains readable. For these legacy leases, schema refresh
+preserves the existing expiry unless it extends it; an extending refresh records
+the requested duration for subsequent comparisons. The original legacy duration
+cannot be recovered from expiry alone. Reacquiring an expired lease records the
+new duration. Coauthor refresh retains the duration along with an older lease
+when it preserves that lease's later expiry. This additive state requires all
+writers sharing a provider to upgrade together; older writers can discard it.
 
 Older persisted editors-table entries alone do not prove coauthor membership.
 An explicit owner-matching RefreshCoauthoring request promotes a legacy schema
