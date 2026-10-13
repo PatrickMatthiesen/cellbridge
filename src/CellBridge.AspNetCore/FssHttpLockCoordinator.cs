@@ -59,8 +59,10 @@ public sealed class FssHttpLockCoordinator
             };
     }
 
-    private static Lease RestoreLease(LeaseState state) => new(state.Id, state.Client, state.ExpiresUtc, (LockKind)state.Kind, state.SchemaId, state.OwnerSubject);
-    private static LeaseState CaptureLease(Lease state) => new(state.Id, state.Client, state.ExpiresUtc, (int)state.Kind, state.SchemaId, state.OwnerSubject);
+    private static Lease RestoreLease(LeaseState state) => new(state.Id, state.Client, state.ExpiresUtc, (LockKind)state.Kind, state.SchemaId, state.OwnerSubject)
+        { TimeoutSeconds = state.TimeoutSeconds };
+    private static LeaseState CaptureLease(Lease state) => new(state.Id, state.Client, state.ExpiresUtc, (int)state.Kind, state.SchemaId, state.OwnerSubject)
+        { TimeoutSeconds = state.TimeoutSeconds };
 
     public static FssHttpLockCoordinator For(StoredDocument document, SubjectIdentity? actor = null)
     {
@@ -108,15 +110,31 @@ public sealed class FssHttpLockCoordinator
                     _schemaLockId ??= schemaId;
                     var refreshed = _schemaOwners.ContainsKey(client);
                     _schemaOwners[client] = new Lease(schemaId, client,
-                        instant.AddSeconds(timeout), LockKind.Schema, OwnerSubject: _actor.Subject);
+                        instant.AddSeconds(timeout), LockKind.Schema, OwnerSubject: _actor.Subject) { TimeoutSeconds = timeout };
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return refreshed ? LockOperationResult.Refreshed : LockOperationResult.Granted;
 
                 case "RefreshLock":
+                    if (_exclusive is not null || _schemaLockId is not null && !Same(_schemaLockId, schemaId))
+                        return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    // MS-FSSHTTP 3.1.4.4.3: the coauthoring-enabled profile
+                    // reacquires the client's expired lease through GetLock,
+                    // including when compatible same-schema peers remain.
+                    if (_schemaLockId is null || client is not null && !_schemaOwners.ContainsKey(client))
+                        goto case "GetLock";
                     if (client is null || !Same(_schemaLockId, schemaId) || !_schemaOwners.ContainsKey(client))
                         return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
-                    _schemaOwners[client] = new Lease(schemaId, client,
-                        instant.AddSeconds(timeout), LockKind.Schema, OwnerSubject: _actor.Subject);
+                    var expires = instant.AddSeconds(timeout);
+                    var previousLease = _schemaOwners[client];
+                    if (previousLease.TimeoutSeconds is { } previousTimeout)
+                    {
+                        if (timeout >= previousTimeout)
+                            _schemaOwners[client] = previousLease with { ExpiresUtc = expires, TimeoutSeconds = timeout };
+                    }
+                    // Legacy leases do not record their original duration. Never
+                    // shorten their expiry; an extending refresh records its duration.
+                    else if (expires > previousLease.ExpiresUtc)
+                        _schemaOwners[client] = previousLease with { ExpiresUtc = expires, TimeoutSeconds = timeout };
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return LockOperationResult.Refreshed;
 
@@ -209,7 +227,7 @@ public sealed class FssHttpLockCoordinator
                     _exclusive = null;
                     _schemaLockId = schemaId;
                     _schemaOwners[client] = new Lease(schemaId, client, instant.AddSeconds(timeout),
-                        LockKind.Schema, OwnerSubject: _actor.Subject);
+                        LockKind.Schema, OwnerSubject: _actor.Subject) { TimeoutSeconds = timeout };
                     if (operation == "ConvertToSchemaJoinCoauth")
                     {
                         JoinCoauthor(client, timeout);
@@ -347,7 +365,7 @@ public sealed class FssHttpLockCoordinator
                     var result = ApplySchemaLock(refresh, response, instant);
                     if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed)) return result;
                     if (previous is not null && previous.ExpiresUtc > _schemaOwners[clientText].ExpiresUtc)
-                        _schemaOwners[clientText] = _schemaOwners[clientText] with { ExpiresUtc = previous.ExpiresUtc };
+                        _schemaOwners[clientText] = previous;
                     JoinCoauthor(clientText, Math.Max(timeout,
                         (int)Math.Ceiling((_schemaOwners[clientText].ExpiresUtc - instant).TotalSeconds)));
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
@@ -624,7 +642,10 @@ public sealed class FssHttpLockCoordinator
     private static bool Same(string? left, string? right) =>
         left is not null && right is not null && EquivalentId(left, right);
 
-    private sealed record Lease(string Id, string? Client, DateTime ExpiresUtc, LockKind Kind, string? SchemaId = null, string? OwnerSubject = null);
+    private sealed record Lease(string Id, string? Client, DateTime ExpiresUtc, LockKind Kind, string? SchemaId = null, string? OwnerSubject = null)
+    {
+        public int? TimeoutSeconds { get; init; }
+    }
     private enum LockKind { Schema, Exclusive }
 }
 

@@ -23,7 +23,11 @@ public sealed record EditorState(Guid ClientId, string? UserName, DateTime Joine
     DateTime LastSeenUtc, DateTime ExpiresUtc, int TimeoutSeconds, bool AsEditor, int EditorNumber,
     ImmutableDictionary<string, ImmutableArray<byte>> Metadata, SubjectIdentity? Owner = null);
 public sealed record LeaseState(string Id, string? Client, DateTime ExpiresUtc, int Kind, string? SchemaId,
-    string? OwnerSubject = null);
+    string? OwnerSubject = null)
+{
+    // Older persisted leases have only an expiry and deserialize with null.
+    public int? TimeoutSeconds { get; init; }
+}
 public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseState> SchemaOwners,
     LeaseState? Exclusive, long Generation)
 {
