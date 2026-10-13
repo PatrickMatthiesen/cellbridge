@@ -18,10 +18,13 @@ public sealed partial class PostgreSqlListEngine
             await LockWorkspaceMutationAsync(connection, transaction, workspaceId, ct);
 
             var receipt = await GetReceiptAsync(connection, transaction, workspaceId, listId, request.Id, ct);
-            if (receipt is not null && receipt.ExpiresUtc > DateTimeOffset.UtcNow)
+            if (receipt is { Live: true })
             {
                 if (receipt.Actor != actor.Subject || receipt.Digest != digest || receipt.SchemaVersion != request.SchemaVersion)
                     throw Conflict("That record ID has a different create receipt.");
+                var originalDefinition = await GetDefinitionVersionAsync(connection, transaction, workspaceId,
+                    listId, receipt.SchemaVersion, ct);
+                ListValidation.ValidateValues(originalDefinition, request.Values, _limits);
                 return new CreateRecordResult(request.Id, receipt.Revision, receipt.Number, true);
             }
 
@@ -99,7 +102,8 @@ public sealed partial class PostgreSqlListEngine
             var current = await ReadRecordAsync(connection, transaction, workspaceId, listId, recordId, true, ct) ?? throw NotFound();
             if (current.Revision != request.ExpectedRevision) throw Conflict("The record revision changed.");
             var values = ListValidation.ApplyChanges(definition, current.Values, request.Changes, _limits);
-            await ValidateReferencesAsync(connection, transaction, actor.Subject, definition, values, ct);
+            await ValidateReferencesAsync(connection, transaction, actor.Subject, definition, values, ct,
+                request.Changes.Where(x => !x.Remove).Select(x => x.FieldId).ToHashSet());
             var json = values.ToJsonString();
             var nextBytes = await CanonicalJsonBytesAsync(connection, transaction, json, ct);
             if (nextBytes > _limits.MaxRecordBytes) throw Limit("The normalized record exceeds the configured byte limit.");
@@ -194,9 +198,11 @@ public sealed partial class PostgreSqlListEngine
     }, ct);
 
     private async Task ValidateReferencesAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        string subject, ListDefinition definition, JsonObject values, CancellationToken ct)
+        string subject, ListDefinition definition, JsonObject values, CancellationToken ct,
+        IReadOnlySet<Guid>? includedFields = null)
     {
-        foreach (var field in definition.Fields.Where(x => x.Type == ListFieldType.Reference))
+        foreach (var field in definition.Fields.Where(x => x.Type == ListFieldType.Reference &&
+            (includedFields is null || includedFields.Contains(x.Id))))
         {
             if (values[field.Id.ToString("D")] is not JsonValue value) continue;
             var targetId = Guid.Parse(value.GetValue<string>());
@@ -252,14 +258,26 @@ public sealed partial class PostgreSqlListEngine
         Guid workspaceId, Guid listId, Guid recordId, CancellationToken ct)
     {
         await using var command = Command(connection, transaction, """
-            SELECT actor,schema_version,request_digest,revision,number,expires_utc
+            SELECT actor,schema_version,request_digest,revision,number,expires_utc>clock_timestamp()
             FROM cellbridge_lists.create_receipts WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3
             """, workspaceId, listId, recordId);
         await using var reader = await command.ExecuteReaderAsync(ct);
         return await reader.ReadAsync(ct)
             ? new Receipt(reader.GetString(0), reader.GetInt64(1), reader.GetString(2), reader.GetInt64(3),
-                reader.GetInt64(4), new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero))
+                reader.GetInt64(4), reader.GetBoolean(5))
             : null;
+    }
+
+    private static async Task<ListDefinition> GetDefinitionVersionAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, Guid workspaceId, Guid listId, long schemaVersion, CancellationToken ct)
+    {
+        var json = await ScalarAsync<string?>(connection, transaction, """
+            SELECT definition::text FROM cellbridge_lists.list_schemas
+            WHERE workspace_id=$1 AND list_id=$2 AND schema_version=$3
+            """, ct, workspaceId, listId, schemaVersion);
+        return json is null
+            ? throw new ListException(ListFailure.Unavailable, "The receipt schema version is missing.")
+            : PostgreSqlListJson.Deserialize<ListDefinition>(json);
     }
 
     private static async Task<ListRecord?> ReadRecordAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
@@ -280,5 +298,5 @@ public sealed partial class PostgreSqlListEngine
         reader.GetString(7), reader.GetString(8));
 
     private sealed record Receipt(string Actor, long SchemaVersion, string Digest, long Revision, long Number,
-        DateTimeOffset ExpiresUtc);
+        bool Live);
 }

@@ -107,6 +107,8 @@ target-list read access. Resolution rechecks that access and returns the target
 UUID, number and optional label. Queries and extracts retain the UUID without
 expanding related records. Deletion fails while another record references the
 target; provider mutation locks serialize assignment against deletion.
+An unrelated patch preserves stored references without requiring target read
+access again. Assigning a reference in a patch still checks that access.
 
 Each successful create gets an immutable server-assigned per-list `Number`,
 starting at 1. `NumberPrefix`, at most 32 characters, is presentation metadata and
@@ -172,7 +174,9 @@ digest sorts field keys and canonicalizes accepted numeric scalars; absence and
 null differ. An authorized identical retry returns the original ID, revision and
 number, even after edits, schema changes or deletion. It does not restore data or
 return current values. Changed payloads or actors conflict. Authorization occurs
-before receipt lookup. Expiry does not permit ID reuse; lifetime tombstones retain
+before receipt lookup. Replays validate field constraints against the retained
+original schema, and PostgreSQL's clock determines expiry. Expiry does not
+permit ID reuse; lifetime tombstones retain
 every used record ID. Updates have conditional revisions, not create-style retry
 receipts.
 
@@ -341,7 +345,9 @@ Deleting records frees their value bytes, not lifetime identity capacity.
 
 Logical accounting includes value bytes and defined charges for retained schemas,
 views, receipts, tombstones and ordinary audit metadata. It is not a PostgreSQL
-physical-size estimate. Monitor table/index/WAL growth and actual disk separately.
+physical-size estimate. Membership and grant removal releases their row charges,
+including grants cascaded by membership removal. Retained audits keep their charges.
+Monitor table/index/WAL growth and actual disk separately.
 Permission reductions use their separately bounded security-audit reserve rather
 than ordinary storage/audit capacity. Exhausting that reserve prevents further
 audited reductions and fails closed for subsequent workspace data operations.

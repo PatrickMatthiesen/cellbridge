@@ -69,7 +69,8 @@ public static class PostgreSqlListSetup
             GRANT SELECT ON cellbridge_lists.schema_version, cellbridge_lists.templates TO {quotedRole};
             GRANT SELECT, UPDATE ON cellbridge_lists.workspaces TO {quotedRole};
             GRANT SELECT, INSERT, UPDATE, DELETE ON cellbridge_lists.memberships, cellbridge_lists.list_grants,
-              cellbridge_lists.create_receipts, cellbridge_lists.saved_views TO {quotedRole};
+              cellbridge_lists.saved_views TO {quotedRole};
+            GRANT SELECT, INSERT, DELETE ON cellbridge_lists.create_receipts TO {quotedRole};
             GRANT SELECT, INSERT, UPDATE ON cellbridge_lists.lists, cellbridge_lists.records TO {quotedRole};
             GRANT SELECT, INSERT ON cellbridge_lists.list_schemas, cellbridge_lists.record_tombstones,
               cellbridge_lists.audit_events TO {quotedRole};
@@ -98,11 +99,24 @@ public static class PostgreSqlListSetup
             workspace.Parameters.AddWithValue(name);
             await workspace.ExecuteNonQueryAsync(cancellationToken);
         }
-        await using (var member = new NpgsqlCommand("INSERT INTO cellbridge_lists.memberships(workspace_id,subject,can_create_lists,can_manage_grants) VALUES ($1,$2,true,true) ON CONFLICT (workspace_id,subject) DO UPDATE SET can_create_lists=true,can_manage_grants=true", connection, transaction))
+        await using (var member = new NpgsqlCommand("""
+            WITH inserted AS (
+              INSERT INTO cellbridge_lists.memberships(workspace_id,subject,can_create_lists,can_manage_grants)
+              VALUES ($1,$2,true,true) ON CONFLICT (workspace_id,subject) DO NOTHING RETURNING subject
+            )
+            UPDATE cellbridge_lists.workspaces SET stored_bytes=stored_bytes+128+octet_length($2::text)
+            WHERE workspace_id=$1 AND EXISTS (SELECT 1 FROM inserted)
+            """, connection, transaction))
         {
             member.Parameters.AddWithValue(workspaceId);
             member.Parameters.AddWithValue(administratorSubject);
             await member.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var privileges = new NpgsqlCommand("UPDATE cellbridge_lists.memberships SET can_create_lists=true,can_manage_grants=true WHERE workspace_id=$1 AND subject=$2", connection, transaction))
+        {
+            privileges.Parameters.AddWithValue(workspaceId);
+            privileges.Parameters.AddWithValue(administratorSubject);
+            await privileges.ExecuteNonQueryAsync(cancellationToken);
         }
         await transaction.CommitAsync(cancellationToken);
     }

@@ -36,9 +36,17 @@ public sealed partial class PostgreSqlListEngine
                     SET can_create_lists=EXCLUDED.can_create_lists,can_manage_grants=EXCLUDED.can_manage_grants
                     """, ct, workspaceId, subject, canCreateLists, canManageGrants);
             }
-            else
+            else if (oldCreate is not null)
+            {
+                var grantCount = await ScalarAsync<long>(connection, transaction,
+                    "SELECT count(*) FROM cellbridge_lists.list_grants WHERE workspace_id=$1 AND subject=$2", ct,
+                    workspaceId, subject);
                 await ExecuteAsync(connection, transaction,
                     "DELETE FROM cellbridge_lists.memberships WHERE workspace_id=$1 AND subject=$2", ct, workspaceId, subject);
+                var subjectBytes = System.Text.Encoding.UTF8.GetByteCount(subject);
+                await ReserveStorageAsync(connection, transaction, workspaceId,
+                    -(128 + subjectBytes + grantCount * (80 + subjectBytes)), ct);
+            }
             await AuditAsync(connection, transaction, workspaceId, actor.Subject,
                 member ? "membership.set" : "membership.remove", null, null, null, Array.Empty<Guid>(), reduction, ct, subject);
             return true;
@@ -68,9 +76,14 @@ public sealed partial class PostgreSqlListEngine
                 workspaceId, listId, subject) ?? 0);
             var reduction = (old & access) != old;
             if (access == ListAccess.None)
+            {
                 await ExecuteAsync(connection, transaction,
                     "DELETE FROM cellbridge_lists.list_grants WHERE workspace_id=$1 AND list_id=$2 AND subject=$3", ct,
                     workspaceId, listId, subject);
+                if (old != ListAccess.None)
+                    await ReserveStorageAsync(connection, transaction, workspaceId,
+                        -(80 + System.Text.Encoding.UTF8.GetByteCount(subject)), ct);
+            }
             else
             {
                 if (old == ListAccess.None) await ReserveStorageAsync(connection, transaction, workspaceId, 80 + System.Text.Encoding.UTF8.GetByteCount(subject), ct);

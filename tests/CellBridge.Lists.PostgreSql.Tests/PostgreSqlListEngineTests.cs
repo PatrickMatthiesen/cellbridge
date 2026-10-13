@@ -169,14 +169,13 @@ public sealed class PostgreSqlListEngineTests(ListDatabaseFixture database)
         Assert.Equal(ListFailure.NotFound, (await Assert.ThrowsAsync<ListException>(() =>
             database.Engine.CreateRecordAsync(other, workspace, list.Id, request))).Failure);
 
-        await database.SetWorkspaceContextAsync(workspace, async (connection, transaction) =>
+        await using (var expire = database.AdminSource!.CreateCommand("UPDATE cellbridge_lists.create_receipts SET expires_utc=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3"))
         {
-            await using var expire = new NpgsqlCommand("UPDATE cellbridge_lists.create_receipts SET expires_utc=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3", connection, transaction);
             expire.Parameters.AddWithValue(workspace);
             expire.Parameters.AddWithValue(list.Id);
             expire.Parameters.AddWithValue(request.Id);
             await expire.ExecuteNonQueryAsync();
-        });
+        }
         Assert.Equal(ListFailure.Conflict, (await Assert.ThrowsAsync<ListException>(() =>
             database.Engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, request))).Failure);
     }

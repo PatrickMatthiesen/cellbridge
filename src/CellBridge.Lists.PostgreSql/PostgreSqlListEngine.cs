@@ -76,7 +76,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
             if (listCount >= _limits.MaxLists) throw Limit("The workspace list limit has been reached.");
             var json = PostgreSqlListJson.Serialize(definition);
             await ReserveStorageAsync(connection, transaction, workspaceId,
-                await CanonicalJsonBytesAsync(connection, transaction, json, ct) + 256, ct);
+                await CanonicalJsonBytesAsync(connection, transaction, json, ct) + 256 + 80 + Encoding.UTF8.GetByteCount(actor.Subject), ct);
 
             try
             {
@@ -237,27 +237,49 @@ public sealed partial class PostgreSqlListEngine : IListEngine
             if (_healthy) return;
             await using var connection = await _source.OpenConnectionAsync(ct);
             await using var command = new NpgsqlCommand("""
+                WITH expected(table_name, allowed) AS (VALUES
+                  ('schema_version', ARRAY['SELECT']),
+                  ('templates', ARRAY['SELECT']),
+                  ('workspaces', ARRAY['SELECT','UPDATE']),
+                  ('memberships', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
+                  ('lists', ARRAY['SELECT','INSERT','UPDATE']),
+                  ('list_schemas', ARRAY['SELECT','INSERT']),
+                  ('list_grants', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
+                  ('records', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
+                  ('record_tombstones', ARRAY['SELECT','INSERT']),
+                  ('create_receipts', ARRAY['SELECT','INSERT','DELETE']),
+                  ('saved_views', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
+                  ('audit_events', ARRAY['SELECT','INSERT'])
+                )
                 SELECT v.version,
                   EXISTS (SELECT 1 FROM pg_roles inherited WHERE pg_has_role(current_user,inherited.oid,'MEMBER') AND (inherited.rolsuper OR inherited.rolbypassrls)),
-                  has_schema_privilege(current_user,'cellbridge_lists','CREATE'),
-                  pg_has_role(current_user,c.relowner,'MEMBER'),
+                  EXISTS (SELECT 1 FROM pg_roles inherited WHERE pg_has_role(current_user,inherited.oid,'MEMBER') AND
+                    has_schema_privilege(inherited.oid,'cellbridge_lists','CREATE')),
+                  EXISTS (SELECT 1 FROM pg_class owned JOIN pg_namespace ns ON ns.oid=owned.relnamespace
+                    WHERE ns.nspname='cellbridge_lists' AND pg_has_role(current_user,owned.relowner,'MEMBER')),
                   pg_has_role(current_user,n.nspowner,'MEMBER'),
-                  has_table_privilege(current_user,'cellbridge_lists.schema_version','SELECT') AND
-                  has_table_privilege(current_user,'cellbridge_lists.templates','SELECT') AND
-                  has_table_privilege(current_user,'cellbridge_lists.workspaces','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.workspaces','UPDATE') AND
-                  has_table_privilege(current_user,'cellbridge_lists.memberships','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.memberships','INSERT') AND has_table_privilege(current_user,'cellbridge_lists.memberships','UPDATE') AND has_table_privilege(current_user,'cellbridge_lists.memberships','DELETE') AND
-                  has_table_privilege(current_user,'cellbridge_lists.lists','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.lists','INSERT') AND has_table_privilege(current_user,'cellbridge_lists.lists','UPDATE') AND
-                  has_table_privilege(current_user,'cellbridge_lists.list_schemas','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.list_schemas','INSERT') AND
-                  has_table_privilege(current_user,'cellbridge_lists.list_grants','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.list_grants','INSERT') AND has_table_privilege(current_user,'cellbridge_lists.list_grants','UPDATE') AND has_table_privilege(current_user,'cellbridge_lists.list_grants','DELETE') AND
-                  has_table_privilege(current_user,'cellbridge_lists.records','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.records','INSERT') AND has_table_privilege(current_user,'cellbridge_lists.records','UPDATE') AND has_table_privilege(current_user,'cellbridge_lists.records','DELETE') AND
-                  has_table_privilege(current_user,'cellbridge_lists.record_tombstones','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.record_tombstones','INSERT') AND
-                  has_table_privilege(current_user,'cellbridge_lists.create_receipts','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.create_receipts','INSERT') AND has_table_privilege(current_user,'cellbridge_lists.create_receipts','DELETE') AND
-                  has_table_privilege(current_user,'cellbridge_lists.saved_views','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.saved_views','INSERT') AND has_table_privilege(current_user,'cellbridge_lists.saved_views','UPDATE') AND has_table_privilege(current_user,'cellbridge_lists.saved_views','DELETE') AND
-                  has_table_privilege(current_user,'cellbridge_lists.audit_events','SELECT') AND has_table_privilege(current_user,'cellbridge_lists.audit_events','INSERT'),
-                  has_table_privilege(current_user,'cellbridge_lists.schema_version','INSERT') OR has_table_privilege(current_user,'cellbridge_lists.schema_version','UPDATE') OR has_table_privilege(current_user,'cellbridge_lists.schema_version','DELETE') OR has_table_privilege(current_user,'cellbridge_lists.schema_version','TRUNCATE') OR has_table_privilege(current_user,'cellbridge_lists.schema_version','REFERENCES') OR has_table_privilege(current_user,'cellbridge_lists.schema_version','TRIGGER') OR
-                  has_table_privilege(current_user,'cellbridge_lists.templates','INSERT') OR has_table_privilege(current_user,'cellbridge_lists.templates','UPDATE') OR has_table_privilege(current_user,'cellbridge_lists.templates','DELETE') OR has_table_privilege(current_user,'cellbridge_lists.templates','TRUNCATE') OR has_table_privilege(current_user,'cellbridge_lists.templates','REFERENCES') OR has_table_privilege(current_user,'cellbridge_lists.templates','TRIGGER') OR
-                  has_table_privilege(current_user,'cellbridge_lists.workspaces','INSERT') OR has_table_privilege(current_user,'cellbridge_lists.workspaces','DELETE') OR has_table_privilege(current_user,'cellbridge_lists.workspaces','TRUNCATE') OR has_table_privilege(current_user,'cellbridge_lists.workspaces','REFERENCES') OR has_table_privilege(current_user,'cellbridge_lists.workspaces','TRIGGER') OR
-                  has_table_privilege(current_user,'cellbridge_lists.audit_events','UPDATE') OR has_table_privilege(current_user,'cellbridge_lists.audit_events','DELETE') OR has_table_privilege(current_user,'cellbridge_lists.audit_events','TRUNCATE') OR has_table_privilege(current_user,'cellbridge_lists.audit_events','REFERENCES') OR has_table_privilege(current_user,'cellbridge_lists.audit_events','TRIGGER')
+                  (SELECT bool_and(COALESCE(has_table_privilege(current_user,
+                    to_regclass('cellbridge_lists.' || e.table_name), privilege), false))
+                    FROM expected e CROSS JOIN LATERAL unnest(e.allowed) privilege) AND
+                  has_sequence_privilege(current_user,'cellbridge_lists.audit_events_id_seq','USAGE') AND
+                  has_sequence_privilege(current_user,'cellbridge_lists.audit_events_id_seq','SELECT'),
+                  EXISTS (
+                    SELECT 1 FROM expected e
+                    JOIN pg_class tbl ON tbl.oid=to_regclass('cellbridge_lists.' || e.table_name)
+                    CROSS JOIN LATERAL aclexplode(acldefault('r', tbl.relowner)) acl
+                    WHERE NOT (acl.privilege_type=ANY(e.allowed)) AND EXISTS (
+                      SELECT 1 FROM pg_roles inherited
+                      WHERE pg_has_role(current_user,inherited.oid,'MEMBER') AND
+                        (has_table_privilege(inherited.oid,tbl.oid,acl.privilege_type) OR
+                          CASE WHEN acl.privilege_type IN ('SELECT','INSERT','UPDATE','REFERENCES')
+                            THEN has_any_column_privilege(inherited.oid,tbl.oid,acl.privilege_type)
+                            ELSE false END)
+                    )
+                  ) OR EXISTS (
+                    SELECT 1 FROM pg_roles inherited
+                    WHERE pg_has_role(current_user,inherited.oid,'MEMBER') AND
+                      has_sequence_privilege(inherited.oid,'cellbridge_lists.audit_events_id_seq','UPDATE')
+                  )
                 FROM cellbridge_lists.schema_version v
                 CROSS JOIN pg_roles r
                 CROSS JOIN pg_class c
