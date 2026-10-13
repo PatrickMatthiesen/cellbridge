@@ -16,6 +16,11 @@ to your own ASP.NET Core application.
 CellBridge is experimental. The APIs may change, and production-scale operation
 has not been qualified.
 
+Optional [customer workspace list libraries](docs/lists.md) provide typed schemas,
+company templates, custom fields, record merge previews, references and authorized
+extracts. They use independent PostgreSQL storage and a native HTTP API. Hosts
+provide their own customer lifecycle and user interface.
+
 ## Features
 
 | Feature | Current support |

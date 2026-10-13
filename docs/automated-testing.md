@@ -53,7 +53,7 @@ python3 tools/verify_packages.py
 This packs the libraries, builds the [consumer example](../examples/NuGetConsumer/README.md)
 and runs [package tests](../tests/CellBridge.Packages.Tests/README.md) using an
 isolated local feed/cache. Verification clears its own package output, checks
-all nine packages and symbol packages, validates embedded readmes, license,
+all twelve packages and symbol packages, validates embedded readmes, license,
 repository metadata and internal versions, and writes `artifacts/packages/manifest.json`.
 `python3 tools/check_release.py --version <version> --commit <sha>` checks the
 same archive metadata and hashes before release authentication. Artifact tests
@@ -79,7 +79,7 @@ python3 tools/testing/run.py --packages
 python3 tools/check_release.py --version <version> --commit <sha>
 ```
 
-Check `artifacts/packages/manifest.json` for nine matching package versions,
+Check `artifacts/packages/manifest.json` for twelve matching package versions,
 repository commits, archive hashes and `sourceDirty: false`. Require the durable
 consumer check to pass without a database skip. Use a new version for changed
 source; NuGet versions are immutable.

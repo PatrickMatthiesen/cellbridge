@@ -75,7 +75,7 @@ internal static class DocumentLibraryPage
             """ : "";
 
         var body = $$"""
-            <section class="workspace-heading"><div class="workspace-icon">{{Icon("folder")}}</div><h1>Documents</h1></section>
+            <section class="workspace-heading"><div class="workspace-icon">{{Icon("folder")}}</div><h1>Documents</h1>{{(context.RequestServices.GetService<CellBridge.Lists.IListEngine>() is null ? "" : "<a class=\"button secondary\" href=\"/lists\">Customer lists</a>")}}</section>
             <section class="library" aria-label="Document library">
               <div class="toolbar"><div class="toolbar-actions">{{creation}}<a class="button quiet refresh" href="/">{{Icon("refresh")}}Refresh</a></div>
                 <label class="sort-control" hidden data-enhanced>Sort by<select id="sort"><option value="name">Name</option><option value="modified">Last modified</option><option value="size">File size</option></select></label>

@@ -33,6 +33,8 @@ internal static class DocumentLibraryStorage
         {
             var connectionString = configuration.GetConnectionString("cellbridge")
                 ?? throw new InvalidOperationException("ConnectionStrings:cellbridge is required.");
+            if (configuration["DocumentLibrary:RuntimePassword"] is { } password)
+                connectionString = new NpgsqlConnectionStringBuilder(connectionString) { Password = password }.ConnectionString;
             var dataSource = NpgsqlDataSource.Create(connectionString);
             services.AddSingleton(dataSource);
             provider = new(new PostgreSqlStateStore(dataSource), new PostgreSqlContentStore(dataSource));

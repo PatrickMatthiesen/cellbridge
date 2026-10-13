@@ -1,5 +1,8 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/CellBridge.Lists/CellBridge.Lists.csproj" />
+    <Project Path="src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
+    <Project Path="src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
     <Project Path="src/CellBridge.OfficeInspectors/CellBridge.OfficeInspectors.csproj" />
     <Project Path="src/CellBridge.Authentication/CellBridge.Authentication.csproj" />
     <Project Path="src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
@@ -15,6 +18,9 @@
     <Project Path="src/CellBridge.Web/CellBridge.Web.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/CellBridge.Lists.Tests/CellBridge.Lists.Tests.csproj" />
+    <Project Path="tests/CellBridge.Lists.PostgreSql.Tests/CellBridge.Lists.PostgreSql.Tests.csproj" />
+    <Project Path="tests/CellBridge.Lists.AspNetCore.Tests/CellBridge.Lists.AspNetCore.Tests.csproj" />
     <Project Path="tests/CellBridge.Storage.Tests/CellBridge.Storage.Tests.csproj" />
     <Project Path="tests/CellBridge.FssHttp.Tests/CellBridge.FssHttp.Tests.csproj" />
     <Project Path="tests/CellBridge.FssHttpB.Tests/CellBridge.FssHttpB.Tests.csproj" />
@@ -22,6 +28,7 @@
     <Project Path="tests/OfficeInspectors.Adapter/OfficeInspectors.Adapter.csproj" />
   </Folder>
   <Folder Name="/tools/">
+    <Project Path="tools/CellBridge.Lists.Setup/CellBridge.Lists.Setup.csproj" />
     <Project Path="tools/OfficeInspectors.Dump/OfficeInspectors.Dump.csproj" />
     <Project Path="tools/CellBridge.Admin/CellBridge.Admin.csproj" />
     <Project Path="tools/CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />

@@ -45,6 +45,9 @@ See [authentication and permissions](authentication.md).
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
 | `CellBridge.Storage.Conformance` | Provider contract checks for consumers |
 | `CellBridge.AspNetCore` | Save orchestration, discovery, download and cellstorage endpoints |
+| `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
+| `CellBridge.Lists.PostgreSql` | Independent list schema, JSONB records, workspace isolation and list grants |
+| `CellBridge.Lists.AspNetCore` | Opt-in list APIs, protected paging, CSV/XLSX and read-only OData subset |
 | `CellBridge.Web` | Sample host, package generation and catalog APIs |
 | `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |
 | `tools/CellBridge.Admin` | Operator account provisioning, explicit file imports and document permission updates |
@@ -54,6 +57,10 @@ See [authentication and permissions](authentication.md).
 
 The binary library is independent of ASP.NET Core and storage. Provider contracts
 are independent of the protocols. The sample owns file creation and Aspire setup.
+
+The optional [list engine](lists.md) uses separate database tables, setup and
+runtime credentials. Hosts supply validated identities and customer workspaces.
+Its APIs and state are independent of Office document synchronization.
 
 ## Document identity and partitions
 

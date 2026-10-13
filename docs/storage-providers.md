@@ -145,7 +145,7 @@ request permission limits and accepted-save receipts.
 supported binary operations. The sample's catalog, Office file generation and
 Aspire setup live outside these packages.
 
-Build the nine packages, the [consumer example](../examples/NuGetConsumer/README.md)
+Build the protocol and optional list packages, the [consumer example](../examples/NuGetConsumer/README.md)
 and its [tests](../tests/CellBridge.Packages.Tests/README.md) with Aspire stopped:
 
 ```sh

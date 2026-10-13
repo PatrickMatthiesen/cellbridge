@@ -6,7 +6,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 PROJECTS = ["FssHttpB", "Storage.Abstractions", "Storage", "FssHttp", "Storage.InMemory",
-            "Storage.PostgreSql", "Storage.FileSystem", "Storage.Conformance", "AspNetCore"]
+            "Storage.PostgreSql", "Storage.FileSystem", "Storage.Conformance", "AspNetCore",
+            "Lists", "Lists.PostgreSql", "Lists.AspNetCore"]
 
 
 def build_manifest(output, version, source_commit, source_dirty):
