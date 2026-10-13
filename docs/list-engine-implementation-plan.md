@@ -265,6 +265,9 @@ HTTP writes using cookies require antiforgery protection. Bearer integrations us
 an explicitly configured authentication scheme and permission scope. Bound request
 bodies before parsing, encode displayed labels and text, use private/no-store
 responses for customer data, and return controlled validation/conflict errors.
+Bound HTTP admission globally and independently by actor and workspace. Apply an
+absolute deadline before admission through response execution. Abort transport
+on expiry and retain leases until outstanding work finishes.
 
 ## Implementation sequence and acceptance criteria
 

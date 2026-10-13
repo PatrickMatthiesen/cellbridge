@@ -23,7 +23,7 @@ using DocumentFormat.OpenXml.Validation;
 
 namespace CellBridge.Lists.AspNetCore.Tests;
 
-public sealed class HttpTests
+public sealed partial class HttpTests
 {
     [Fact]
     public async Task Concurrent_limit_covers_native_exports_and_odata_and_recovers_after_failure()
@@ -57,6 +57,7 @@ public sealed class HttpTests
         Assert.Equal(HttpStatusCode.OK, (await host.Post("/records/query", "{\"query\":{\"limit\":1}}")).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await host.Post("/records/query", "{\"query\":null}")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(host.Path + "/export.csv")).StatusCode);
+        AssertPartitionsEmpty(host);
     }
 
     [Theory]
@@ -97,6 +98,7 @@ public sealed class HttpTests
             if (status == HttpStatusCode.ServiceUnavailable) await Task.Delay(10);
         }
         Assert.Equal(HttpStatusCode.OK, status);
+        AssertPartitionsEmpty(host);
     }
 
     [Fact]
@@ -355,7 +357,8 @@ public sealed class HttpTests
         public FakeEngine Engine { get; } = engine;
         public string Path => $"/api/workspaces/{Engine.Workspace}/lists/{Engine.Definition.Id}";
         public Task<HttpResponseMessage> Post(string path, string body) => Client.PostAsync(Path + path, new StringContent(body, Encoding.UTF8, "application/json"));
-        public static async Task<Host> Create(Action<CellBridgeListsOptions>? configure = null)
+        public IServiceProvider Services => app.Services;
+        public static async Task<Host> Create(Action<CellBridgeListsOptions>? configure = null, Action<HttpContext>? requestSetup = null)
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
@@ -373,6 +376,7 @@ public sealed class HttpTests
             var app = builder.Build();
             app.Use(async (context, next) =>
             {
+                requestSetup?.Invoke(context);
                 if (context.Request.Headers["X-Test-Actor"].ToString() is { Length: > 0 } subject)
                     context.User = new ClaimsPrincipal(new ClaimsIdentity([new Claim("sub", subject)], "test"));
                 await next(context);
@@ -412,6 +416,7 @@ public sealed class HttpTests
         public int Queries { get; private set; }
         public ListQuery? LastQuery { get; private set; }
         public Func<CancellationToken, Task>? QueryWait { get; set; }
+        public Func<ListActor, Guid, CancellationToken, Task>? ListsWait { get; set; }
         public FakeEngine()
         {
             Definition = new ListDefinition(Guid.NewGuid(), Workspace, "Test", 1,
@@ -427,7 +432,8 @@ public sealed class HttpTests
         }
         public async Task<RecordPage> QueryAsync(ListActor actor, Guid workspaceId, Guid listId, ListQuery query, CancellationToken ct = default)
         { Calls++; Queries++; LastQuery = query; if (QueryWait is { } wait) await wait(ct); return new RecordPage([Record], query.AfterRecordId is null ? Record.Id : null, Definition.SchemaVersion); }
-        public Task<IReadOnlyList<ListDefinition>> GetListsAsync(ListActor actor, Guid workspaceId, CancellationToken ct = default) { Calls++; return Task.FromResult<IReadOnlyList<ListDefinition>>([Definition]); }
+        public async Task<IReadOnlyList<ListDefinition>> GetListsAsync(ListActor actor, Guid workspaceId, CancellationToken ct = default)
+        { Calls++; if (ListsWait is { } wait) await wait(actor, workspaceId, ct); return [Definition]; }
         public Task<ListDefinition> CreateListAsync(ListActor actor, Guid workspaceId, CreateListRequest request, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<ListDefinition> PublishSchemaAsync(ListActor actor, Guid workspaceId, Guid listId, PublishSchemaRequest request, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<CreateRecordResult> CreateRecordAsync(ListActor actor, Guid workspaceId, Guid listId, CreateRecordRequest request, CancellationToken ct = default) => throw new NotImplementedException();

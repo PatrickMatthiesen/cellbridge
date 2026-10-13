@@ -339,8 +339,22 @@ Default budgets are 64 fields, 100 lists per workspace, 64 KiB record JSON,
 100,000 ordinary audit events and 10,000 reserved security events. HTTP bodies
 are bounded at 128 KiB; SQL statement/lock timeouts default to 10 seconds.
 The HTTP adapter admits at most eight concurrent requests by default through
-`MaxConcurrentRequests`, including response serialization and extraction. Excess
-requests return 503. Direct engine consumers must bound their own concurrency.
+`MaxConcurrentRequests`, including response serialization and extraction.
+`MaxConcurrentRequestsPerActor` defaults to two across all workspaces, and
+`MaxConcurrentRequestsPerWorkspace` defaults to four across all actors. Each
+partition limit is capped by the global limit. Admission has no waiting queue;
+excess requests return 503. Only active requests retain partition entries.
+
+`RequestTimeout` defaults to 30 seconds and starts before admission. It covers
+body reading, authentication checks inside the adapter, backend calls and response
+execution. Expiry cancels the request and aborts its connection. A timed-out write
+may already have committed; retry a create with the same ID and payload to recover
+its receipt. Hosts still own connection/header limits and any distributed rate
+limiting. Direct engine consumers must bound their own concurrency.
+
+Custom engine and response implementations must honor cancellation. If custom
+work ignores it, the adapter waits for that work to finish and retains its lease
+so outstanding work stays bounded and request dependencies remain alive.
 Deleting records frees their value bytes, not lifetime identity capacity.
 
 Logical accounting includes value bytes and defined charges for retained schemas,

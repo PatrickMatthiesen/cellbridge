@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -23,7 +24,10 @@ public static class CellBridgeListsExtensions
         configure(options);
         options.Limits.Validate();
         if (options.MaxRequestBodyBytes is < 1024 or > 16 * 1024 * 1024 || options.Limits.MaxPageSize is < 1 or > 10000
-            || options.MaxConcurrentRequests is < 1 or > 1024)
+            || options.MaxConcurrentRequests is < 1 or > 1024
+            || options.MaxConcurrentRequestsPerActor is < 1 or > 1024
+            || options.MaxConcurrentRequestsPerWorkspace is < 1 or > 1024
+            || options.RequestTimeout <= TimeSpan.Zero || options.RequestTimeout > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(configure));
         services.AddSingleton(options);
         services.AddSingleton<ListRequestGate>();
@@ -88,16 +92,19 @@ public static class CellBridgeListsExtensions
         {
             context.Response.Headers.CacheControl = "private, no-store";
             var gate = context.RequestServices.GetRequiredService<ListRequestGate>();
-            if (!gate.TryEnter()) return (IResult)Results.Json(new { error = "Unavailable" }, statusCode: 503);
-            return new GatedListResult(gate, async () =>
+            var options = context.RequestServices.GetRequiredService<CellBridgeListsOptions>();
+            return (IResult)new GatedListResult(gate, options, async admission =>
             {
                 try
                 {
-                    var options = context.RequestServices.GetRequiredService<CellBridgeListsOptions>();
+                    context.RequestAborted.ThrowIfCancellationRequested();
                     if (context.User.Identity?.IsAuthenticated != true || options.ActorResolver is null)
                         return Results.StatusCode(401);
                     var actor = options.ActorResolver(context);
                     if (actor is null || string.IsNullOrWhiteSpace(actor.Subject)) return Results.StatusCode(401);
+                    if (!admission.Enter(actor.Subject, Guid.Parse(context.Request.RouteValues["workspaceId"]!.ToString()!)))
+                        return Results.Json(new { error = "Unavailable" }, statusCode: 503);
+                    context.RequestAborted.ThrowIfCancellationRequested();
                     if (method != "GET")
                     {
                         if (context.Request.ContentLength > options.MaxRequestBodyBytes)
@@ -127,6 +134,7 @@ public static class CellBridgeListsExtensions
                 }
                 catch (JsonException) { return Results.Json(new { error = "Validation" }, statusCode: 400); }
                 catch (BadHttpRequestException) { return Results.StatusCode(400); }
+                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { throw; }
                 catch (Exception) { return Results.Json(new { error = "Unavailable" }, statusCode: 503); }
             });
         });
@@ -141,25 +149,119 @@ public static class CellBridgeListsExtensions
 
 }
 
-internal sealed class ListRequestGate(CellBridgeListsOptions options) : IDisposable
+internal sealed class ListRequestGate(CellBridgeListsOptions options)
 {
-    private readonly SemaphoreSlim semaphore = new(options.MaxConcurrentRequests, options.MaxConcurrentRequests);
-    public bool TryEnter() => semaphore.Wait(0);
-    public void Release() => semaphore.Release();
-    public void Dispose() => semaphore.Dispose();
+    private readonly object sync = new();
+    // Entries exist only while requests are active. Random workspace IDs cannot
+    // grow a persistent cache, and changing workspaces does not bypass actor limits.
+    private readonly Dictionary<string, int> actors = new(StringComparer.Ordinal);
+    private readonly Dictionary<Guid, int> workspaces = new();
+    private int active;
+
+    public Lease? TryEnter(string actor, Guid workspace)
+    {
+        lock (sync)
+        {
+            var actorCount = actors.GetValueOrDefault(actor);
+            var workspaceCount = workspaces.GetValueOrDefault(workspace);
+            if (active >= options.MaxConcurrentRequests
+                || actorCount >= Math.Min(options.MaxConcurrentRequests, options.MaxConcurrentRequestsPerActor)
+                || workspaceCount >= Math.Min(options.MaxConcurrentRequests, options.MaxConcurrentRequestsPerWorkspace)) return null;
+            active++;
+            actors[actor] = actorCount + 1;
+            workspaces[workspace] = workspaceCount + 1;
+            return new Lease(this, actor, workspace);
+        }
+    }
+
+    private void Release(string actor, Guid workspace)
+    {
+        lock (sync)
+        {
+            active--;
+            if (actors[actor] == 1) actors.Remove(actor); else actors[actor]--;
+            if (workspaces[workspace] == 1) workspaces.Remove(workspace); else workspaces[workspace]--;
+        }
+    }
+
+    internal sealed class Lease(ListRequestGate gate, string actor, Guid workspace) : IDisposable
+    {
+        private int released;
+        public void Dispose() { if (Interlocked.Exchange(ref released, 1) == 0) gate.Release(actor, workspace); }
+    }
 }
 
-internal sealed class GatedListResult(ListRequestGate gate, Func<Task<IResult>> action) : IResult
+internal sealed class GatedListResult(ListRequestGate gate, CellBridgeListsOptions options, Func<GatedListResult, Task<IResult>> action) : IResult
 {
+    private ListRequestGate.Lease? lease;
+    public bool Enter(string actor, Guid workspace) => (lease = gate.TryEnter(actor, workspace)) is not null;
+
     public async Task ExecuteAsync(HttpContext context)
     {
-        try
+        var originalAbort = context.RequestAborted;
+        var originalResponse = context.Features.Get<IHttpResponseBodyFeature>()!;
+        var deadline = new CancellationTokenSource(options.RequestTimeout);
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(originalAbort, deadline.Token);
+        context.RequestAborted = cancellation.Token;
+        // Some framework results flush BodyWriter without passing RequestAborted.
+        // Apply the deadline at the stream boundary as well.
+        context.Response.Body = new DeadlineResponseStream(originalResponse.Stream, cancellation.Token);
+        // Cancellation alone does not bound an uncooperative stream or response
+        // writer. Abort the transport at the absolute deadline, even after headers.
+        var abort = deadline.Token.Register(context.Abort);
+        try { await ExecuteResponse(context); }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { context.Abort(); }
+        finally
         {
-            var result = await action();
-            await result.ExecuteAsync(context);
+            // Hosts must honor cancellation. If custom code does not, abort still
+            // bounds the client connection, while awaiting it keeps request-scoped
+            // dependencies alive and retains admission until the work ends.
+            lease?.Dispose();
+            abort.Dispose();
+            cancellation.Dispose();
+            deadline.Dispose();
+            context.RequestAborted = originalAbort;
+            context.Features.Set(originalResponse);
         }
-        finally { gate.Release(); }
     }
+
+    private async Task ExecuteResponse(HttpContext context)
+    {
+        var result = await action(this);
+        context.RequestAborted.ThrowIfCancellationRequested();
+        await result.ExecuteAsync(context);
+    }
+}
+
+internal sealed class DeadlineResponseStream(Stream inner, CancellationToken requestCancellation) : Stream
+{
+    public override bool CanRead => inner.CanRead;
+    public override bool CanSeek => inner.CanSeek;
+    public override bool CanWrite => inner.CanWrite;
+    public override long Length => inner.Length;
+    public override long Position { get => inner.Position; set => inner.Position = value; }
+    public override void Flush() { requestCancellation.ThrowIfCancellationRequested(); inner.Flush(); }
+    public override async Task FlushAsync(CancellationToken cancellationToken)
+    {
+        using var linked = Link(cancellationToken);
+        await inner.FlushAsync(linked?.Token ?? requestCancellation);
+    }
+    public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+    public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+    public override void SetLength(long value) => inner.SetLength(value);
+    public override void Write(byte[] buffer, int offset, int count)
+    { requestCancellation.ThrowIfCancellationRequested(); inner.Write(buffer, offset, count); }
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        using var linked = Link(cancellationToken);
+        await inner.WriteAsync(buffer, linked?.Token ?? requestCancellation);
+    }
+    private CancellationTokenSource? Link(CancellationToken supplied) => supplied.CanBeCanceled && supplied != requestCancellation
+        ? CancellationTokenSource.CreateLinkedTokenSource(supplied, requestCancellation) : null;
+    // The host owns the underlying response stream.
+    protected override void Dispose(bool disposing) { }
 }
 
 internal sealed class HttpState(HttpContext context, ListActor actor, CellBridgeListsOptions options)
