@@ -118,7 +118,13 @@ public sealed partial class PostgreSqlListEngine : IListEngine
             if (previous.SchemaVersion != request.ExpectedVersion) throw Conflict("The list schema changed.");
             var next = previous with { Name = request.Name, SchemaVersion = checked(previous.SchemaVersion + 1), Fields = request.Fields };
             ListValidation.ValidateEvolution(previous, next, _limits);
-            await ValidateReferenceDefinitionsAsync(connection, transaction, workspaceId, actor.Subject, next, ct);
+            var previousFieldIds = previous.Fields.Select(x => x.Id).ToHashSet();
+            var addedReferenceFieldIds = next.Fields
+                .Where(x => x.Type == ListFieldType.Reference && !previousFieldIds.Contains(x.Id))
+                .Select(x => x.Id)
+                .ToHashSet();
+            await ValidateReferenceDefinitionsAsync(connection, transaction, workspaceId, actor.Subject, next, ct,
+                addedReferenceFieldIds);
             await LockQuotaAsync(connection, transaction, workspaceId, ct);
             var versions = await ScalarAsync<long>(connection, transaction,
                 "SELECT count(*) FROM cellbridge_lists.list_schemas WHERE workspace_id=$1 AND list_id=$2", ct, workspaceId, listId);
@@ -346,9 +352,11 @@ public sealed partial class PostgreSqlListEngine : IListEngine
     }
 
     private static async Task ValidateReferenceDefinitionsAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, Guid workspaceId, string subject, ListDefinition definition, CancellationToken ct)
+        NpgsqlTransaction transaction, Guid workspaceId, string subject, ListDefinition definition, CancellationToken ct,
+        IReadOnlySet<Guid>? fieldIds = null)
     {
-        foreach (var field in definition.Fields.Where(x => x.Type == ListFieldType.Reference))
+        foreach (var field in definition.Fields.Where(x => x.Type == ListFieldType.Reference &&
+                     (fieldIds is null || fieldIds.Contains(x.Id))))
         {
             var targetListId = field.ReferenceListId!.Value;
             await RequireAccessAsync(connection, transaction, workspaceId, targetListId, subject, ListAccess.Read, ct);

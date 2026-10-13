@@ -153,6 +153,79 @@ public sealed class RecordReviewRegressionTests(ListDatabaseFixture database)
         Assert.Equal(0, receiptCount);
     }
 
+    [PostgreSqlFact]
+    public async Task UnrelatedSchemaPublicationPreservesReferenceAfterTargetReadIsRevoked()
+    {
+        var workspace = await database.NewWorkspaceAsync("reference-schema-revocation");
+        var label = new ListField(Guid.NewGuid(), "Label", ListFieldType.Text);
+        var target = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Targets", [label]));
+        var otherLabel = new ListField(Guid.NewGuid(), "Label", ListFieldType.Text);
+        var otherTarget = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Other targets", [otherLabel]));
+        var reference = new ListField(Guid.NewGuid(), "Target", ListFieldType.Reference,
+            ReferenceListId: target.Id, ReferenceDisplayFieldId: label.Id);
+        var source = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Sources", [reference]));
+
+        var designer = new ListActor("test:schema-designer:" + Guid.NewGuid().ToString("N"));
+        await database.Engine.SetMembershipAsync(database.AdminActor, workspace, designer.Subject, true, false, false);
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, source.Id, designer.Subject, ListAccess.Design);
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, target.Id, designer.Subject, ListAccess.Read);
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, target.Id, designer.Subject, ListAccess.None);
+
+        var note = new ListField(Guid.NewGuid(), "Note", ListFieldType.Text);
+        var renamedReference = reference with { Name = "Related target" };
+        var published = await database.Engine.PublishSchemaAsync(designer, workspace, source.Id,
+            new PublishSchemaRequest(1, "Renamed sources", [renamedReference, note]));
+        Assert.Equal(2, published.SchemaVersion);
+        Assert.Equal(target.Id, published.Fields[0].ReferenceListId);
+        Assert.Equal(label.Id, published.Fields[0].ReferenceDisplayFieldId);
+
+        var changedTarget = renamedReference with
+        {
+            ReferenceListId = otherTarget.Id,
+            ReferenceDisplayFieldId = otherLabel.Id
+        };
+        var immutable = await Assert.ThrowsAsync<ListException>(() => database.Engine.PublishSchemaAsync(designer,
+            workspace, source.Id, new PublishSchemaRequest(2, published.Name, [changedTarget, note])));
+        Assert.Equal(ListFailure.Validation, immutable.Failure);
+    }
+
+    [PostgreSqlFact]
+    public async Task NewReferencePublicationRequiresTargetReadAndValidDisplayField()
+    {
+        var workspace = await database.NewWorkspaceAsync("new-reference-schema-access");
+        var label = new ListField(Guid.NewGuid(), "Label", ListFieldType.Text);
+        var target = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Targets", [label]));
+        var title = new ListField(Guid.NewGuid(), "Title", ListFieldType.Text);
+        var source = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Sources", [title]));
+
+        var designer = new ListActor("test:new-reference-designer:" + Guid.NewGuid().ToString("N"));
+        await database.Engine.SetMembershipAsync(database.AdminActor, workspace, designer.Subject, true, false, false);
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, source.Id, designer.Subject, ListAccess.Design);
+        var reference = new ListField(Guid.NewGuid(), "Target", ListFieldType.Reference,
+            ReferenceListId: target.Id, ReferenceDisplayFieldId: label.Id);
+
+        var inaccessible = await Assert.ThrowsAsync<ListException>(() => database.Engine.PublishSchemaAsync(designer,
+            workspace, source.Id, new PublishSchemaRequest(1, source.Name, [title, reference])));
+        Assert.Equal(ListFailure.NotFound, inaccessible.Failure);
+
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, target.Id, designer.Subject, ListAccess.Read);
+        var invalidReference = reference with { ReferenceDisplayFieldId = Guid.NewGuid() };
+        var invalidDisplay = await Assert.ThrowsAsync<ListException>(() => database.Engine.PublishSchemaAsync(designer,
+            workspace, source.Id, new PublishSchemaRequest(1, source.Name, [title, invalidReference])));
+        Assert.Equal(ListFailure.Validation, invalidDisplay.Failure);
+
+        var published = await database.Engine.PublishSchemaAsync(designer, workspace, source.Id,
+            new PublishSchemaRequest(1, source.Name, [title, reference]));
+        Assert.Equal(2, published.SchemaVersion);
+        Assert.Equal(target.Id, published.Fields[1].ReferenceListId);
+        Assert.Equal(label.Id, published.Fields[1].ReferenceDisplayFieldId);
+    }
+
     private static JsonObject Values(ListField field, string value) =>
         new() { [field.Id.ToString("D")] = value };
 

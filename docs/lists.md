@@ -109,6 +109,9 @@ expanding related records. Deletion fails while another record references the
 target; provider mutation locks serialize assignment against deletion.
 An unrelated patch preserves stored references without requiring target read
 access again. Assigning a reference in a patch still checks that access.
+Schema publication checks target read access and the display field for newly
+added references. Retaining an unchanged reference does not require that access
+again.
 
 Each successful create gets an immutable server-assigned per-list `Number`,
 starting at 1. `NumberPrefix`, at most 32 characters, is presentation metadata and
