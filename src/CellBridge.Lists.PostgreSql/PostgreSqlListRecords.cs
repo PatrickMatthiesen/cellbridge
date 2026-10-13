@@ -71,7 +71,7 @@ public sealed partial class PostgreSqlListEngine
                 INSERT INTO cellbridge_lists.create_receipts(workspace_id,list_id,record_id,actor,schema_version,request_digest,revision,number,created_utc,expires_utc)
                 VALUES ($1,$2,$3,$4,$5,$6,1,$7,clock_timestamp(),clock_timestamp()+$8::interval)
                 """, ct, workspaceId, listId, request.Id, actor.Subject, request.SchemaVersion, digest, number,
-                $"{_limits.ReceiptLifetime.TotalSeconds} seconds");
+                _limits.ReceiptLifetime);
             await AuditAsync(connection, transaction, workspaceId, actor.Subject, "record.create", listId, request.Id, 1,
                 request.Values.Select(x => Guid.Parse(x.Key)), false, ct);
             return new CreateRecordResult(request.Id, 1, number);

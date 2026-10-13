@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
 using CellBridge.Lists;
 using CellBridge.Lists.PostgreSql;
@@ -8,6 +9,46 @@ namespace CellBridge.Lists.PostgreSql.Tests;
 [Collection("lists-postgresql")]
 public sealed class RecordReviewRegressionTests(ListDatabaseFixture database)
 {
+    [PostgreSqlFact]
+    public async Task FractionalReceiptLifetimeIsIndependentOfHostCulture()
+    {
+        var originalCulture = CultureInfo.CurrentCulture;
+        var originalUiCulture = CultureInfo.CurrentUICulture;
+        try
+        {
+            foreach (var name in new[] { "de-DE", "da-DK" })
+            {
+                CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(name);
+                CultureInfo.CurrentUICulture = CultureInfo.CurrentCulture;
+                var lifetime = TimeSpan.FromSeconds(1.5);
+                var engine = new PostgreSqlListEngine(database.RuntimeSource!, new ListLimits { ReceiptLifetime = lifetime });
+                var workspace = await database.NewWorkspaceAsync("fractional-receipt-" + name);
+                var title = new ListField(Guid.NewGuid(), "Title", ListFieldType.Text);
+                var list = await engine.CreateListAsync(database.AdminActor, workspace,
+                    new CreateListRequest(Guid.NewGuid(), "Receipts", [title]));
+                var request = new CreateRecordRequest(Guid.NewGuid(), 1, Values(title, "Created under " + name));
+                var created = await engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, request);
+                Assert.False(created.Replayed);
+
+                await using var command = database.AdminSource!.CreateCommand("""
+                    SELECT expires_utc-created_utc FROM cellbridge_lists.create_receipts
+                    WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3
+                    """);
+                command.Parameters.AddWithValue(workspace);
+                command.Parameters.AddWithValue(list.Id);
+                command.Parameters.AddWithValue(request.Id);
+                var retention = Assert.IsType<TimeSpan>(await command.ExecuteScalarAsync());
+                // Separate clock_timestamp calls may add scheduling time.
+                Assert.InRange(retention.TotalSeconds, lifetime.TotalSeconds, lifetime.TotalSeconds + 1);
+            }
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            CultureInfo.CurrentUICulture = originalUiCulture;
+        }
+    }
+
     [PostgreSqlFact]
     public async Task UnrelatedPatchPreservesReferenceAfterTargetReadIsRevoked()
     {
