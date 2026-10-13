@@ -102,7 +102,16 @@ internal static class ListExtract
         }
         return stream.ToArray();
 
-        XElement Inline(string text) => new(ns + "c", new XAttribute("t", "inlineStr"), new XElement(ns + "is", new XElement(ns + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), SafeXml(text))));
+        XElement Inline(string text)
+        {
+            // Excel's cell limit applies to the original text. SpreadsheetML
+            // escapes can expand its XML representation without adding characters.
+            // Count UTF-16 units conservatively so supplementary characters cannot
+            // exceed the limit on readers which count surrogate pairs separately.
+            if (text.Length > 32767)
+                throw new ListException(ListFailure.Limit, "XLSX cell text exceeds 32767 UTF-16 units.");
+            return new XElement(ns + "c", new XAttribute("t", "inlineStr"), new XElement(ns + "is", new XElement(ns + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), SafeXml(text))));
+        }
         XElement Numeric(string text) => new(ns + "c", new XElement(ns + "v", text));
     }
 

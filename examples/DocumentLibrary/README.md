@@ -124,10 +124,12 @@ does not edit numeric fields; applications can supply their own precision-aware
 controls through the same API. See the [list guide](../../docs/lists.md) for host
 responsibilities, permissions and limits.
 
-Existing seeded workspaces preserve edited records and revoked access when setup
-runs again. The seed is an initial local demonstration, not a customer-management
-workflow. Workspace creation and recovery of an interrupted seed belong to the
-operator. Normal record changes remain transactional in the list engine.
+Setup resumes an interrupted initial seed and records completion in an
+operator-owned table. Completed workspaces preserve edited records, deleted seed
+records and revoked access on subsequent runs. Previously completed seeds without
+a marker are recognized through their lists and durable record identities.
+The seed is an initial local demonstration. Keep provisioning separate from
+customer management; normal record changes remain transactional in the list engine.
 
 The Status column shows whether the downloadable file has caught up with the
 saved content in CellBridge. A committed save may remain pending if the

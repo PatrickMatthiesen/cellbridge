@@ -229,6 +229,14 @@ Response headers `X-CellBridge-Export-Limit`, `X-CellBridge-Export-Has-More` and
 fields. CSV prefixes formula-triggering text; XLSX stores text as strings,
 booleans as boolean cells and dates/timestamps as date cells where representable.
 Numbers with more than 15 significant digits become text to preserve precision.
+
+XLSX rejects an export with HTTP 413 if a selected text cell exceeds 32,767
+UTF-16 units before XML escaping. This conservative bound follows
+[Excel's cell character limit](https://support.microsoft.com/en-us/excel/excel-specifications-and-limits).
+The adapter never truncates cell text. Use CSV, native reads or a narrower field
+projection for those values. Hidden fields omitted by the projection do not block
+the export.
+
 Choice values and references retain stable IDs. Neither format is a backup or
 lossless absent-versus-null transport.
 
