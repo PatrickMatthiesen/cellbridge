@@ -77,12 +77,17 @@ public sealed class StringItem
     }
 
     /// <summary>Deserializes a string item from the reader.</summary>
-    public static StringItem Deserialize(BinaryReaderEx reader)
+    public static StringItem Deserialize(BinaryReaderEx reader) => Deserialize(reader, int.MaxValue / 2);
+
+    /// <summary>Deserializes a string item while limiting its UTF-16 character count.</summary>
+    public static StringItem Deserialize(BinaryReaderEx reader, int maximumCharacters)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumCharacters);
         ulong length = Compact64bitInt.Deserialize(reader).Value;
-        if (length > int.MaxValue / 2)
+        if (length > (ulong)maximumCharacters)
         {
-            throw new InvalidDataException($"String item length {length} exceeds int.MaxValue.");
+            throw new InvalidDataException(
+                $"String item length {length} exceeds the {maximumCharacters}-character limit.");
         }
 
         var bytes = reader.ReadMemory(checked((int)length * 2));

@@ -1,7 +1,7 @@
 # Capture Word and SharePoint traffic
 
-The kit uses mitmproxy 12.2.3 to record Office traffic for comparison with
-SharePoint. It streams HTTP application bodies unchanged, records WebSocket
+The kit uses a pinned mitmproxy source revision to record Office traffic for
+comparison with SharePoint. It streams HTTP application bodies unchanged, records WebSocket
 application messages and provides offline validation and SOAP/MTOM extraction.
 
 Choose reverse mode through Aspire to open a local HTTPS URL, or standalone
@@ -19,6 +19,22 @@ Use Python 3.12 or newer. Aspire prepares the virtual environment and installs
 Copy the `tools/capture` source directory to another client and run setup there.
 Virtual environments, captures and generated certificate authorities stay local.
 Setup does not alter proxy settings or certificate trust.
+
+The current pin is upstream commit
+`5253dcbd1d8f0522de097bfe56918fe12a0f267a`, version `13.0.0.dev0`.
+The published `12.2.3` release excludes patched transitive dependencies through
+its version bounds. The source revision accepts the patched graph without
+package metadata overrides. `requirements.txt` and `requirements-dev.txt` lock
+source/dependency versions and hashes for Python 3.12 or newer on Linux and
+Windows. Install with `--require-hashes`. The launcher verifies the engine's
+source URL and archive hash. Input requirements live in the matching `.in`
+files; regenerate and test both platforms when changing the pins.
+
+This is an unreleased transport engine. Package advisory tools do not match its
+source version against PyPI advisories. The isolated source-build backend is
+selected by upstream's build configuration. Local process tests cover forwarding
+and evidence recording, but a dependency update still needs live Office capture
+validation before replacing an established reference setup.
 
 ## Capture the CellBridge server
 
@@ -52,10 +68,11 @@ running host. Existing recordings remain on disk. Reusable hosts set
 `CellBridgeOptions.CaptureDirectory` through the `AddCellBridge` configure
 callback; they must bind configuration themselves.
 
-Normal logs retain request URLs/tokens, operation types, sizes, response IDs
+Application logs retain document paths, request tokens, operation types, sizes, response IDs
 and error diagnostics without full SOAP envelopes or base64 document chunks.
 Debug response inspection records graph identifiers, lengths and hashes.
-These diagnostics remain available with capture disabled. URLs and identifiers
+Application logs omit URL authority, credentials, query strings and fragments and
+cap path length. These diagnostics remain available with capture disabled. Paths and identifiers
 can still be sensitive. The response log's `id` matches the capture filename
 prefix; individual request diagnostic lines do not all carry that ID.
 
@@ -84,12 +101,19 @@ when preparing automated cases.
 The operator owns access and retention. Before enabling capture, create the
 directory with permissions or an ACL limited to the host identity and authorized
 investigators. Keep it outside the web root and in ignored `artifacts/` or other
-local output. The host creates missing directories using OS defaults; it does
-not install a private ACL. Raw bodies can contain document contents and embedded
+local output. On Unix the host creates missing directories with mode `0700` and new files
+with mode `0600`. Existing files/directories keep their permissions. Windows
+creation inherits ACLs; restrict the parent directory before recording. Raw bodies can contain document contents and embedded
 identity metadata. Restrict backups and copies as well as the original files.
 
-Server capture has no automatic rotation, expiration or total-disk quota.
-Choose a retention period and monitor free space. After disabling capture and
+`Protocol:MaxCaptureBytes` defaults to 1 GiB. A process includes existing files
+when initializing its capture budget and skips further writes at the limit.
+Failed or cancelled writes remove their partial file and release its reservation.
+If cleanup fails, the retained bytes remain counted toward the budget.
+Skipped or failed diagnostic writes do not fail a save. Concurrent processes
+must use separate capture directories; this limit is not a shared-volume quota.
+There is no automatic rotation or expiration. Choose a retention period and
+monitor free space. After disabling capture and
 finishing outstanding requests, manually remove expired evidence sets by their
 common ID or remove a completed trial's directory. Sanitize decoded content
 before retaining reviewed fixtures in `testdata/`; keep raw files out of source
@@ -253,7 +277,7 @@ unhealthy rather than silently discarding evidence.
 
 ## WebSocket capture
 
-No extra switch is required. The kit uses mitmproxy 12.2.3's `websocket_start`,
+No extra switch is required. The kit uses the pinned engine's `websocket_start`,
 `websocket_message` and `websocket_end` hooks. The HTTP upgrade remains an
 ordinary recorded flow, including its request/response headers and bodies.
 Negotiation, rejected upgrades and HTTP fallback requests are also recorded
@@ -332,9 +356,11 @@ On Windows, replacement retries brief sharing locks for up to 140 ms.
 Persistent errors mark the run unhealthy. `recording_error_details` and console
 diagnostics identify the failing operation, path and OS error.
 
-Authentication/cookie header values are redacted from metadata, while forwarded
-traffic remains unchanged. URLs, SOAP, document content, embedded usernames and
-other headers can still be sensitive. Keep raw captures local and sanitize
+Authentication/cookie header values are redacted from metadata. Request query
+strings/fragments and credentials in URL-valued metadata headers are also
+redacted. Forwarded traffic remains unchanged. Raw SOAP, document content,
+WebSocket payloads, path names, embedded usernames and other headers can still
+be sensitive. Keep raw captures local and sanitize
 metadata and decoded content before publishing a fixture. Capture validation
 checks recorded-file integrity; desktop outcomes establish client behavior.
 
@@ -342,10 +368,18 @@ The default capture directory and virtual environment are ignored by Git.
 Keep custom output directories outside version control. Old-run deletion is
 manual; raw captures should not be uploaded as CI artifacts.
 
+On Unix, the launcher and capture/extraction helpers create missing directories
+with mode `0700` and new files with mode `0600`. The dedicated transport process
+also uses `umask 077` while the engine runs, including certificate-cache writes.
+Existing directories and older files keep their permissions. Restrict them
+before resuming an old capture setup, and protect backups and copies separately.
+Windows creation inherits ACLs; limit the output and certificate-cache roots to
+the service identity and authorized investigators.
+
 ## Tests
 
 ```powershell
-./tools/capture/.venv/Scripts/python.exe -m pip install -r tools/capture/requirements-dev.txt
+./tools/capture/.venv/Scripts/python.exe -m pip install --require-hashes -r tools/capture/requirements-dev.txt
 ./tools/capture/.venv/Scripts/python.exe -m pytest tools/capture -q
 ```
 
@@ -357,7 +391,7 @@ same checks:
 
 ```sh
 python3 -m venv tools/capture/.venv
-tools/capture/.venv/bin/python -m pip install -r tools/capture/requirements-dev.txt
+tools/capture/.venv/bin/python -m pip install --require-hashes -r tools/capture/requirements-dev.txt
 tools/capture/.venv/bin/python -m pytest tools/capture -q
 ```
 
@@ -367,6 +401,6 @@ References: [Aspire certificates](https://aspire.dev/app-host/certificate-config
 [options](https://docs.mitmproxy.org/stable/concepts/options/) and
 [certificates](https://docs.mitmproxy.org/stable/concepts/certificates/).
 WebSocket behavior follows the pinned engine's
-[relay hooks](https://github.com/mitmproxy/mitmproxy/blob/v12.2.3/mitmproxy/proxy/layers/websocket.py)
-and [message model](https://github.com/mitmproxy/mitmproxy/blob/v12.2.3/mitmproxy/websocket.py),
+[relay hooks](https://github.com/mitmproxy/mitmproxy/blob/5253dcbd1d8f0522de097bfe56918fe12a0f267a/mitmproxy/proxy/layers/websocket.py)
+and [message model](https://github.com/mitmproxy/mitmproxy/blob/5253dcbd1d8f0522de097bfe56918fe12a0f267a/mitmproxy/websocket.py),
 with [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455) as the transport reference.

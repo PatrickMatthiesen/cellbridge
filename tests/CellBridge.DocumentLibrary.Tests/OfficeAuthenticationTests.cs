@@ -98,9 +98,27 @@ public sealed class OfficeAuthenticationTests
         Assert.False(adminDenied.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
         await library.SetPermissionAsync(state.ResourceId, DocumentLibraryService.ReaderSubject, DocumentAccess.None);
         using var revoked = await reader.GetAsync("/shared/welcome.docx");
-        Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, revoked.StatusCode);
         Assert.Null(revoked.Headers.Location);
         Assert.False(revoked.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+    }
+
+    [Fact]
+    public async Task LibraryOfficeLinksUseTheConfiguredOriginWhenHostChanges()
+    {
+        using var files = new TemporaryDirectory();
+        await using var factory = new LibraryFactory(files.Path);
+        using var owner = Client(factory);
+        using var login = await SignIn(owner, "/_cellbridge/auth/login", "owner", "/_cellbridge/auth/complete");
+        var library = factory.Services.GetRequiredService<DocumentLibraryService>();
+        await library.UploadAsync("origin.docx", new MemoryStream(TestOfficeFile.Docx("origin")), DocumentLibraryHarness.Owner);
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/");
+        request.Headers.Host = "attacker.example";
+        using var response = await owner.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("ms-word:ofe|u|" + Origin + "shared/origin.docx", html);
+        Assert.DoesNotContain("attacker.example", html);
     }
 
     [Fact]
@@ -266,6 +284,7 @@ public sealed class OfficeAuthenticationTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseSetting("Protocol:PublicOrigin", Origin.GetLeftPart(UriPartial.Authority));
             builder.UseEnvironment("Testing");
             builder.UseSetting("DocumentLibrary:StorageProvider", "InMemory");
             builder.UseSetting("DocumentLibrary:DestinationRoot", destination);

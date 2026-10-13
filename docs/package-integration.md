@@ -1,5 +1,25 @@
 # Embed CellBridge in another host
 
+Document responses preserve the native media type only for `.docx`, `.xlsx` and
+`.pptx`. Other formats download as `application/octet-stream` attachments, even
+after rename or move. Responses include `nosniff` and a sandbox CSP. Direct
+downloads and history return HTTP 404 for unreadable documents; SOAP retains its
+protocol-specific permission errors.
+
+Set `CellBridgeOptions.PublicOrigin` to the external HTTPS origin, or configure
+Office forms authentication's fixed origin. Without a fixed origin, remote
+requests require a specific `AllowedHosts` list. A universal `*` does not establish
+trust; only loopback hosts work without a specific list. Keep forwarded headers
+restricted to known proxies.
+
+Protocol admission defaults to eight requests per process and two per subject,
+including response delivery. The absolute deadline defaults to two minutes.
+Large request bodies spool to private temporary files before parsing. SOAP XML
+is limited to 16 Mi characters, so use MTOM attachments for large binary payloads.
+Binary PutChanges accepts at most 1,024 author logins with 65,536 cumulative
+UTF-16 characters. Configure `CellBridgeOptions` for HTTP admission limits and
+keep host/proxy upload and response limits aligned with them.
+
 The beta targets .NET 10. Use `CellBridge.AspNetCore` with a storage provider;
 the protocol and provider packages can also be consumed separately. See
 [provider composition](storage-providers.md#consume-the-packages) and the

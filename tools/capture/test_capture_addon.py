@@ -52,8 +52,32 @@ def test_streaming_preserves_binary_and_redacts_auth_headers(tmp_path):
     redacted = {key: value for key, value in entry["request"]["headers"]}
     assert redacted["Authorization"] == "[REDACTED]"
     assert redacted["Cookie"] == "[REDACTED]"
+    assert entry["request"]["path"] == "/_vti_bin/cellstorage.svc?[REDACTED]"
+    assert flow.request.path.endswith("?secret=local-only")
     assert dict(entry["response"]["headers"])["WWW-Authenticate"] == "[REDACTED]"
     assert json.loads((tmp_path / "manifest.json").read_text())["status"] == "complete"
+
+
+@pytest.mark.parametrize("referer", [
+    "https://user:password@sharepoint.test/view?access_token=secret#private",
+    "https://user:pass@word@sharepoint.test/view?access_token=secret#private",
+])
+def test_url_credentials_are_redacted_in_metadata_without_changing_headers(tmp_path, referer):
+    addon = CaptureAddon(env(tmp_path))
+    flow = make_flow()
+    flow.request.headers["Referer"] = referer
+    addon.requestheaders(flow)
+    addon.request(flow)
+    location = "/document?unknown_credential=secret"
+    flow.response = http.Response.make(302, headers={"Location": location})
+    addon.responseheaders(flow)
+    addon.response(flow)
+    addon.done()
+    entry = json.loads(next((tmp_path / "flows").glob("*.json")).read_text())
+    assert dict(entry["request"]["headers"])["Referer"] == "https://[REDACTED]@sharepoint.test/view?[REDACTED]#[REDACTED]"
+    assert dict(entry["response"]["headers"])["Location"] == "/document?[REDACTED]"
+    assert flow.request.headers["Referer"] == referer
+    assert flow.response.headers["Location"] == location
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])

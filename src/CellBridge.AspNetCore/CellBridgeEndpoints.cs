@@ -40,10 +40,16 @@ public static class CellBridgeEndpoints
         ArgumentNullException.ThrowIfNull(options.Hashing);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxRequestBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequests);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequestsPerSubject);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxCaptureBytes);
+        if (options.RequestTimeout <= TimeSpan.Zero || options.RequestTimeout > TimeSpan.FromHours(1))
+            throw new ArgumentOutOfRangeException(nameof(options.RequestTimeout));
+        CellBridgePublicOrigin.Validate(options.PublicOrigin);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomParts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomHeaderBytes);
         if (options.MaxRequestBytes > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(options.MaxRequestBytes));
-        services.AddSingleton(new RequestAdmission(options.MaxConcurrentRequests));
+        services.AddSingleton(new ProtocolRequestAdmission(options));
+        services.AddSingleton<ProtocolCaptureStore>();
         services.AddSingleton(options);
         services.TryAddSingleton(options.Hashing);
         services.AddSingleton(provider);
@@ -59,6 +65,8 @@ public static class CellBridgeEndpoints
     {
         var office = CellBridgeOfficeFormsAuthentication.MapCompletion(app);
         var routes = app.MapGroup("").WithMetadata(new CellBridgeOfficeFormsAuthentication.OfficeEndpointMetadata());
+        routes.AddEndpointFilter(async (context, next) => CellBridgePublicOrigin.Resolve(context.HttpContext) is null
+            ? Results.BadRequest() : await next(context));
         if (office is null) routes.RequireAuthorization();
         else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.CookieScheme });
         routes.MapMethods("/_cellbridge/history/{resourceId:guid}/{generation:long}/{revisionNumber}", ["GET", "HEAD"],
@@ -70,12 +78,14 @@ public static class CellBridgeEndpoints
                 if (actor is null) return Results.Unauthorized();
                 DocumentRevision revision;
                 try { revision = await service.GetRevisionAsync(resourceId, number, actor, context.RequestAborted); }
-                catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+                catch (UnauthorizedAccessException) { return Results.NotFound(); }
                 catch (KeyNotFoundException) { return Results.NotFound(); }
                 if (revision.LifecycleGeneration != generation) return Results.NotFound();
                 context.Response.Headers.CacheControl = "private, no-store";
                 context.Response.Headers["X-Content-Type-Options"] = "nosniff";
                 context.Response.ContentType = "application/octet-stream";
+                context.Response.Headers.ContentDisposition = "attachment";
+                context.Response.Headers.ContentSecurityPolicy = "sandbox; default-src 'none'";
                 context.Response.ContentLength = revision.Content.Length;
                 context.Response.Headers.ETag = $"\"{resourceId:D}:{revision.LifecycleGeneration}:{number}\"";
                 context.Response.Headers.LastModified = revision.CreatedUtc.ToString("R");
@@ -115,17 +125,12 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
     var actor = CellBridgeActor.FromPrincipal(context.User);
     if (actor is null) return Results.Unauthorized();
     if (state is null) return Results.NotFound();
-    if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) return Results.StatusCode(403);
+    if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) return Results.NotFound();
     context.Response.Headers.CacheControl = "private, no-store";
     context.Response.ContentLength = state.Content.Length;
     context.Response.Headers.ETag = state.Etag;
     context.Response.Headers.LastModified = state.ModifiedUtc.ToString("R");
-    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
-    var contentTypes = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
-    context.Response.ContentType = contentTypes.TryGetContentType(state.Path, out var type) ? type : "application/octet-stream";
-    if (context.Request.Query["download"] == "true")
-        context.Response.Headers.ContentDisposition = new System.Net.Http.Headers.ContentDispositionHeaderValue("attachment")
-        { FileNameStar = Path.GetFileName(state.Path) }.ToString();
+    DocumentDelivery.Apply(context, state.Path);
     if (!HttpMethods.IsHead(context.Request.Method))
     {
         await using var source = await service.Provider.Content.OpenReadAsync(state.Content, context.RequestAborted);
@@ -135,9 +140,8 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
 
 }
 
-private static string PublicOrigin(HttpContext context) =>
-    context.RequestServices.GetService<CellBridgeOfficeFormsAuthentication.OfficeFormsRegistration>()?.PublicOrigin
-        ?? $"{context.Request.Scheme}://{context.Request.Host}";
+private static string PublicOrigin(HttpContext context) => CellBridgePublicOrigin.Resolve(context)
+    ?? throw new InvalidOperationException("Configure PublicOrigin or restrict AllowedHosts before advertising protocol URLs.");
 
 private static IResult Discovery(HttpContext context)
 {
@@ -157,30 +161,59 @@ static bool ProtocolRequestAllowed(HttpContext context)
         contentType.Equals("application/soap+xml", StringComparison.OrdinalIgnoreCase) ||
         contentType.Equals("multipart/related", StringComparison.OrdinalIgnoreCase))) return false;
     var origin = context.Request.Headers.Origin.ToString();
-    return origin.Length == 0 || string.Equals(origin, $"{context.Request.Scheme}://{context.Request.Host}", StringComparison.OrdinalIgnoreCase);
+    return origin.Length == 0 || string.Equals(origin, PublicOrigin(context), StringComparison.OrdinalIgnoreCase);
 }
 
 static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
 {
     if (!DocumentUrlPaths.TryRequestPath(ctx, out _)) return Results.BadRequest();
-    var admission = ctx.RequestServices.GetRequiredService<RequestAdmission>();
-    if (!await admission.Gate.WaitAsync(0, ctx.RequestAborted)) return Results.StatusCode(503);
-    try { return new AdmittedResult(await HandleAdmittedCellStoragePost(ctx, service), admission.Gate); }
-    catch { admission.Gate.Release(); throw; }
+    var actor = CellBridgeActor.FromPrincipal(ctx.User);
+    if (actor is null) return Results.Unauthorized();
+    var admission = ctx.RequestServices.GetRequiredService<ProtocolRequestAdmission>();
+    var lease = admission.TryAcquire(actor.Identity.Subject, out var rejection);
+    if (lease is null) return Results.StatusCode(rejection);
+    var originalToken = ctx.RequestAborted;
+    var deadline = CancellationTokenSource.CreateLinkedTokenSource(originalToken);
+    deadline.CancelAfter(ctx.RequestServices.GetRequiredService<CellBridgeOptions>().RequestTimeout);
+    ctx.RequestAborted = deadline.Token;
+    try
+    {
+        IResult result;
+        try { result = await HandleAdmittedCellStoragePost(ctx, service); }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !originalToken.IsCancellationRequested)
+        {
+            if (ctx.Response.HasStarted) { ctx.Abort(); result = Results.Empty; }
+            else result = Results.StatusCode(408);
+        }
+        return new AdmittedResult(result, lease, deadline, originalToken);
+    }
+    catch
+    {
+        ctx.RequestAborted = originalToken;
+        deadline.Dispose();
+        lease.Dispose();
+        throw;
+    }
 }
 
-private sealed class AdmittedResult(IResult result, SemaphoreSlim gate) : IResult
+private sealed class AdmittedResult(IResult result, ProtocolRequestAdmission.Lease lease,
+    CancellationTokenSource deadline, CancellationToken originalToken) : IResult
 {
     public async Task ExecuteAsync(HttpContext context)
     {
         try { await result.ExecuteAsync(context); }
-        finally { gate.Release(); }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !originalToken.IsCancellationRequested)
+        {
+            if (context.Response.HasStarted) context.Abort();
+            else { context.Response.Clear(); context.Response.StatusCode = 408; }
+        }
+        finally
+        {
+            context.RequestAborted = originalToken;
+            deadline.Dispose();
+            lease.Dispose();
+        }
     }
-}
-
-private sealed class RequestAdmission(int maximum)
-{
-    public SemaphoreSlim Gate { get; } = new(maximum);
 }
 
 static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
@@ -192,21 +225,15 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
     var log = ctx.RequestServices.GetRequiredService<ILogger<CellBridgeDocumentService>>();
     var options = ctx.RequestServices.GetRequiredService<CellBridgeOptions>();
     if (ctx.Request.ContentLength > options.MaxRequestBytes) return Results.StatusCode(413);
-    await using var body = new MemoryStream();
-    var buffer = new byte[65536];
-    int read;
-    while ((read = await ctx.Request.Body.ReadAsync(buffer, ctx.RequestAborted)) != 0)
-    {
-        if (body.Length + read > options.MaxRequestBytes) return Results.StatusCode(413);
-        await body.WriteAsync(buffer.AsMemory(0, read), ctx.RequestAborted);
-    }
-    var rawBody = body.GetBuffer().AsMemory(0, checked((int)body.Length));
+    ReadOnlyMemory<byte> rawBody;
+    try { rawBody = await ProtocolRequestBody.ReadAsync(ctx.Request.Body, options.MaxRequestBytes, ctx.RequestAborted); }
+    catch (ProtocolRequestBody.RequestBodyLimitException) { return Results.StatusCode(413); }
     var captureId = Guid.NewGuid().ToString("N");
-    if (options.CaptureDirectory is { } captureDirectory)
+    var captures = ctx.RequestServices.GetRequiredService<ProtocolCaptureStore>();
+    if (options.CaptureDirectory is not null)
     {
-        Directory.CreateDirectory(captureDirectory);
-        await File.WriteAllBytesAsync(Path.Combine(captureDirectory, captureId + ".request.bin"), rawBody, ctx.RequestAborted);
-        await File.WriteAllTextAsync(Path.Combine(captureDirectory, captureId + ".request.content-type.txt"), ctx.Request.ContentType ?? "", ctx.RequestAborted);
+        await captures.WriteAsync(captureId, ".request.bin", rawBody, ctx.RequestAborted);
+        await captures.WriteTextAsync(captureId, ".request.content-type.txt", ctx.Request.ContentType ?? "", ctx.RequestAborted);
     }
     string soapXml;
     IReadOnlyList<MtomPart>? parts = null;
@@ -238,7 +265,7 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
     }
 
     log.LogInformation("FSSHTTP request received: {Length} bytes, action={Action}",
-        rawBody.Length, ctx.Request.Headers["SOAPAction"].ToString());
+        rawBody.Length, ProtocolLogValues.Path(ctx.Request.Headers["SOAPAction"].ToString().Trim('"')));
 
     CellStorageRequest request;
     try
@@ -247,14 +274,13 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
     }
     catch (Exception ex)
     {
-        log.LogWarning(ex, "Failed to parse FSSHTTP request");
+        log.LogWarning("Failed to parse FSSHTTP request ({ErrorType})", ex.GetType().Name);
         return Results.BadRequest();
     }
 
     if (parts is not null)
     {
-        log.LogInformation("MTOM parts: {Parts}", string.Join("; ", parts.Select(p =>
-            $"id={p.ContentId ?? "<none>"}, type={p.ContentType}, bytes={p.ContentMemory.Length}")));
+        log.LogInformation("MTOM request contains {PartCount} parts", parts.Count);
         foreach (var subRequest in request.Requests.SelectMany(r => r.SubRequests))
         {
             if (subRequest.SubRequestDataAttributes.TryGetValue("IncludeHref", out var href))
@@ -267,8 +293,8 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
 
                 subRequest.SubRequestDataBinaryMemory = parts
                     .FirstOrDefault(p => string.Equals(p.ContentId, contentId, StringComparison.OrdinalIgnoreCase))?.ContentMemory;
-                log.LogInformation("MTOM reference {Href} resolved={Resolved} bytes={Bytes}",
-                    href, subRequest.SubRequestDataBinaryMemory is not null,
+                log.LogInformation("MTOM reference resolved={Resolved} bytes={Bytes}",
+                    subRequest.SubRequestDataBinaryMemory is not null,
                     subRequest.SubRequestDataBinaryMemory?.Length ?? 0);
             }
         }
@@ -278,7 +304,7 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
     foreach (var fileRequest in request.Requests)
     {
         log.LogInformation("Request url={Url} token={Token} subrequests={Subrequests}",
-            fileRequest.Url,
+            ProtocolLogValues.Path(fileRequest.Url),
             fileRequest.RequestToken,
             string.Join(",", fileRequest.SubRequests.Select(s => s.Type)));
 
@@ -296,19 +322,18 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
         .ExecuteAsync(request, PublicOrigin(ctx), actor, ctx.RequestAborted, ctx.Request.PathBase.Value ?? "");
     var response = execution.Response;
 
-    if (options.CaptureDirectory is { } summaryDirectory)
-        await File.WriteAllTextAsync(Path.Combine(summaryDirectory, captureId + ".summary.json"),
+    if (options.CaptureDirectory is not null)
+        await captures.WriteTextAsync(captureId, ".summary.json",
             WireCaptureSummary.Create(request, response), ctx.RequestAborted);
 
     if (ctx.Request.ContentType?.StartsWith("multipart/", StringComparison.OrdinalIgnoreCase) == true)
     {
         var mtom = response.PrepareMtomMessage();
-        if (options.CaptureDirectory is { } responseCaptureDirectory)
+        if (options.CaptureDirectory is not null)
         {
-            await using (var capture = new FileStream(Path.Combine(responseCaptureDirectory, captureId + ".response.bin"),
-                FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous))
-                await mtom.WriteToAsync(capture, ctx.RequestAborted);
-            await File.WriteAllTextAsync(Path.Combine(responseCaptureDirectory, captureId + ".response.content-type.txt"), mtom.ContentType, ctx.RequestAborted);
+            await captures.WriteStreamingAsync(captureId, ".response.bin", mtom.ContentLength,
+                stream => mtom.WriteToAsync(stream, ctx.RequestAborted).AsTask(), ctx.RequestAborted);
+            await captures.WriteTextAsync(captureId, ".response.content-type.txt", mtom.ContentType, ctx.RequestAborted);
         }
         ctx.Response.ContentType = mtom.ContentType;
         ctx.Response.ContentLength = mtom.ContentLength;
@@ -319,12 +344,22 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
 
     string envelope = response.ToSoapEnvelope();
     log.LogInformation("FSSHTTP response id={CaptureId} chars={Length}", captureId, envelope.Length);
-    if (options.CaptureDirectory is { } soapCaptureDirectory)
+    if (options.CaptureDirectory is not null)
     {
-        await File.WriteAllTextAsync(Path.Combine(soapCaptureDirectory, captureId + ".response.bin"), envelope);
-        await File.WriteAllTextAsync(Path.Combine(soapCaptureDirectory, captureId + ".response.content-type.txt"), "text/xml; charset=utf-8");
+        await captures.WriteTextAsync(captureId, ".response.bin", envelope, ctx.RequestAborted);
+        await captures.WriteTextAsync(captureId, ".response.content-type.txt", "text/xml; charset=utf-8", ctx.RequestAborted);
     }
-    return Results.Content(envelope, "text/xml; charset=utf-8");
+    return new SoapResponseResult(envelope);
+}
+
+private sealed class SoapResponseResult(string envelope) : IResult
+{
+    public async Task ExecuteAsync(HttpContext context)
+    {
+        context.Response.ContentType = "text/xml; charset=utf-8";
+        context.Response.ContentLength = Encoding.UTF8.GetByteCount(envelope);
+        await context.Response.WriteAsync(envelope, Encoding.UTF8, context.RequestAborted);
+    }
 }
 
 }

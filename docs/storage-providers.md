@@ -43,8 +43,13 @@ data stays intact when a limit is reduced. See [external host reliability](exter
 | `Storage:MaxObjectBytes` | Maximum bytes per binary object, default 512 MiB. This is a quota, not a tested document-size promise. |
 | `Storage:MultipleInstances` | Require shared state and content; reject incompatible provider combinations. |
 | `Storage:SharedContent` | Operator declaration that the filesystem root is shared with verified flush/rename semantics. Default false. |
-| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM request size, default 128 MiB. Requests and retained graph payloads still occupy memory. |
+| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM request size, default 128 MiB. Large bodies spool to private temporary files before one parsing allocation. Requests and retained graph payloads still occupy memory. |
+| SOAP XML limit | Fixed 16 Mi characters before parsing, independent of the HTTP body limit. Inline base64 reaches this ceiling before a 128 MiB transport body; use MTOM for larger binary payloads. |
 | `Protocol:MaxConcurrentRequests` | Maximum cellstorage requests per host, including response delivery, default 8; excess requests return HTTP 503. |
+| `Protocol:MaxConcurrentRequestsPerSubject` | Maximum active protocol requests per authenticated subject, default 2; excess requests return HTTP 429. |
+| `Protocol:RequestTimeout` | Absolute deadline through body reading and response delivery, default `00:02:00`. |
+| `Protocol:PublicOrigin` | Optional fixed external HTTPS origin. Without a fixed Office/Protocol origin, remote hosts must configure a specific `AllowedHosts` list; loopback remains available for local tests. |
+| `Protocol:MaxCaptureBytes` | Per-process capture byte budget including existing evidence, default 1 GiB. Use a separate directory per process. |
 | `Protocol:MaxMtomParts` | Maximum MIME parts per request, default 128. |
 | `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
 | `Protocol:CaptureDirectory` | Opt-in directory for correlated raw requests/responses. Default disabled. Restrict access and manage retention. |
@@ -67,6 +72,17 @@ Filesystem content must be visible to every host and recovery environment.
 Separate local directories on separate machines cannot provide shared content.
 `SharedContent` declares an actual shared root with suitable flush/rename
 semantics; it does not make local content shared.
+
+New content directories, content files, spool files and portable recovery files
+use owner-only Unix permissions at creation, `0700` for directories and `0600`
+for files. Existing directory permissions are preserved. Review existing storage
+roots and old objects before deployment; this change does not repair their ACLs.
+Shared filesystem deployments should run under the same operating-system
+identity. If distinct identities need access, the operator must configure
+restricted ACLs for those trusted identities, including access to newly published
+files. `SharedContent` does not broaden permissions. On Windows, files inherit
+the parent directory ACL, so restrict the content, recovery output and service
+temporary directories to the service identity and trusted administrators.
 
 Use one content configuration for each database. Changing providers requires
 an explicit data migration; changing settings alone does not move objects.

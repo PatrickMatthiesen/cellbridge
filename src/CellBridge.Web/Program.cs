@@ -44,6 +44,10 @@ builder.Services.AddCellBridge(provider, requireDurability: storageKind.Equals("
     {
         options.MaxRequestBytes = builder.Configuration.GetValue("Protocol:MaxRequestBytes", options.MaxRequestBytes);
         options.MaxConcurrentRequests = builder.Configuration.GetValue("Protocol:MaxConcurrentRequests", options.MaxConcurrentRequests);
+        options.MaxConcurrentRequestsPerSubject = builder.Configuration.GetValue("Protocol:MaxConcurrentRequestsPerSubject", options.MaxConcurrentRequestsPerSubject);
+        options.RequestTimeout = builder.Configuration.GetValue("Protocol:RequestTimeout", options.RequestTimeout);
+        options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"];
+        options.MaxCaptureBytes = builder.Configuration.GetValue("Protocol:MaxCaptureBytes", options.MaxCaptureBytes);
         options.MaxMtomParts = builder.Configuration.GetValue("Protocol:MaxMtomParts", options.MaxMtomParts);
         options.MaxMtomHeaderBytes = builder.Configuration.GetValue("Protocol:MaxMtomHeaderBytes", options.MaxMtomHeaderBytes);
         options.CaptureDirectory = builder.Configuration["Protocol:CaptureDirectory"];
@@ -55,10 +59,12 @@ var app = builder.Build();
 // default trusts loopback proxies only; keep that restriction for forwarded origins.
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
-    ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
 });
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
+app.UseRequestTimeouts();
 app.UseAntiforgery();
 await AuthenticationDatabase.CheckSchemaAsync(app.Configuration.GetConnectionString("cellbridge")!);
 await provider.CheckHealthAsync();

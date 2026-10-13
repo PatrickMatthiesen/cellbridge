@@ -7,6 +7,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Python version check failed.' }
 & $Python -m venv $venv
 if ($LASTEXITCODE -ne 0) { throw 'Virtual environment creation failed.' }
 $capturePython = Join-Path $venv 'Scripts/python.exe'
-& $capturePython -m pip install -r (Join-Path $PSScriptRoot 'requirements.txt')
+& $capturePython -m pip install --require-hashes -r (Join-Path $PSScriptRoot 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Capture dependency installation failed.' }
 Write-Host "Ready. Run $capturePython tools/capture/run.py --help from the repo root."

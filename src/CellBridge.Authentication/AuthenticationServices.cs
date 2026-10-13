@@ -1,10 +1,13 @@
 using System.Security.Claims;
+using System.Threading.RateLimiting;
 using CellBridge.AspNetCore;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -17,6 +20,7 @@ public static class AuthenticationServices
     public const string CookieName = "CellBridge.Authentication";
     public const string AntiforgeryCookie = "CellBridge.Antiforgery";
     public const string AntiforgeryHeader = "X-CellBridge-CSRF";
+    public const string LoginRateLimitPolicy = "CellBridge.Authentication.Login";
 
     public static IServiceCollection AddCellBridgeAuthentication(this IServiceCollection services,
         IConfiguration configuration, bool renewCookies = true, bool serveOffice = true)
@@ -94,13 +98,185 @@ public static class AuthenticationServices
             o.Cookie.SameSite = SameSiteMode.Lax;
             o.HeaderName = AntiforgeryHeader;
         });
-        services.AddDataProtection().SetApplicationName("CellBridge.Authentication.v1");
+        services.AddRequestTimeouts();
+        services.AddSingleton<AuthenticationLoginRateLimitPolicy>();
+        services.AddRateLimiter();
+        services.AddOptions<RateLimiterOptions>()
+            .Configure<AuthenticationLoginRateLimitPolicy>((options, policy) =>
+                options.AddPolicy(LoginRateLimitPolicy, policy));
+        var keyCertificate = AuthenticationKeyCertificate.Load(configuration);
+        services.AddSingleton<AuthenticationKeyCertificate>(_ => keyCertificate);
+        services.AddSingleton<AuthenticationKeyProtector>();
+        services.AddHostedService<AuthenticationKeyValidationService>();
+        services.AddDataProtection()
+            .SetApplicationName("CellBridge.Authentication.v1")
+            .ProtectKeysWithCertificate(keyCertificate.Certificate);
         services.AddSingleton<DatabaseKeyRepository>();
         services.AddOptions<KeyManagementOptions>().Configure<DatabaseKeyRepository>((o, repository) => o.XmlRepository = repository);
         return services;
     }
 
 
+}
+
+internal sealed class AuthenticationLoginRateLimitPolicy : IRateLimiterPolicy<string>, IDisposable
+{
+    private readonly RateLimiter _aggregate = CreateAggregateLimiter();
+
+    public Func<OnRejectedContext, CancellationToken, ValueTask>? OnRejected { get; } =
+        static (context, _) =>
+        {
+            context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            return ValueTask.CompletedTask;
+        };
+
+    public RateLimitPartition<string> GetPartition(HttpContext httpContext)
+    {
+        string address = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.Get(address, _ => CreateRemoteAddressLimiter());
+    }
+
+    public void Dispose() => _aggregate.Dispose();
+
+    private static RateLimiter CreateAggregateLimiter()
+    {
+        var window = new FixedWindowRateLimiter(new()
+        {
+            PermitLimit = 100,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+        var concurrency = new ConcurrencyLimiter(new()
+        {
+            PermitLimit = 8,
+            QueueLimit = 0,
+        });
+        return new OwnedChainedRateLimiter([window, concurrency], [window, concurrency]);
+    }
+
+    private RateLimiter CreateRemoteAddressLimiter()
+    {
+        var window = new FixedWindowRateLimiter(new()
+        {
+            PermitLimit = 20,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+        var concurrency = new ConcurrencyLimiter(new()
+        {
+            PermitLimit = 2,
+            QueueLimit = 0,
+        });
+        return new OwnedChainedRateLimiter(
+            [window, concurrency, new NonDisposingRateLimiter(_aggregate)],
+            [window, concurrency]);
+    }
+
+    private sealed class NonDisposingRateLimiter(RateLimiter inner) : RateLimiter
+    {
+        public override TimeSpan? IdleDuration => inner.IdleDuration;
+
+        public override RateLimiterStatistics? GetStatistics() => inner.GetStatistics();
+
+        protected override RateLimitLease AttemptAcquireCore(int permitCount) =>
+            inner.AttemptAcquire(permitCount);
+
+        protected override ValueTask<RateLimitLease> AcquireAsyncCore(
+            int permitCount, CancellationToken cancellationToken) =>
+            inner.AcquireAsync(permitCount, cancellationToken);
+
+        protected override void Dispose(bool disposing)
+        {
+        }
+
+        protected override ValueTask DisposeAsyncCore() => ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Wraps a framework chained limiter while retaining ownership of its local
+/// components. Borrowed components do not affect partition idleness.
+/// </summary>
+internal sealed class OwnedChainedRateLimiter : RateLimiter
+{
+    private readonly RateLimiter _chain;
+    private readonly RateLimiter[] _ownedLimiters;
+    private bool _disposed;
+
+    public OwnedChainedRateLimiter(RateLimiter[] limiters, RateLimiter[] ownedLimiters)
+    {
+        _chain = RateLimiter.CreateChained(limiters);
+        _ownedLimiters = (RateLimiter[])ownedLimiters.Clone();
+    }
+
+    public override TimeSpan? IdleDuration
+    {
+        get
+        {
+            ThrowIfDisposed();
+            TimeSpan? lowest = null;
+            foreach (var limiter in _ownedLimiters)
+            {
+                if (limiter.IdleDuration is not { } idle) return null;
+                if (lowest is null || idle < lowest) lowest = idle;
+            }
+            return lowest;
+        }
+    }
+
+    public override RateLimiterStatistics? GetStatistics()
+    {
+        ThrowIfDisposed();
+        return _chain.GetStatistics();
+    }
+
+    protected override RateLimitLease AttemptAcquireCore(int permitCount)
+    {
+        ThrowIfDisposed();
+        return _chain.AttemptAcquire(permitCount);
+    }
+
+    protected override ValueTask<RateLimitLease> AcquireAsyncCore(
+        int permitCount, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        return _chain.AcquireAsync(permitCount, cancellationToken);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (!disposing || _disposed) return;
+        _disposed = true;
+
+        List<Exception>? errors = null;
+        Dispose(_chain, ref errors);
+        foreach (var limiter in _ownedLimiters)
+            Dispose(limiter, ref errors);
+        if (errors is not null) throw new AggregateException(errors);
+    }
+
+    protected override ValueTask DisposeAsyncCore()
+    {
+        Dispose(true);
+        return ValueTask.CompletedTask;
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(OwnedChainedRateLimiter));
+    }
+
+    private static void Dispose(RateLimiter limiter, ref List<Exception>? errors)
+    {
+        try { limiter.Dispose(); }
+        catch (Exception error)
+        {
+            errors ??= [];
+            errors.Add(error);
+        }
+    }
 }
 
 public sealed record AuthenticationOrigin(string Value);

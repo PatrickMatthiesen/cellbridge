@@ -18,6 +18,8 @@ from pathlib import Path, PurePosixPath
 from datetime import datetime
 from typing import Any
 
+from private_files import private_directory, private_open, private_write
+
 MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024
 
 
@@ -338,7 +340,7 @@ def extract_flow(run: Path, flow: dict[str, Any], side: str, out: Path) -> int:
         raise CaptureError(f"malformed multipart {side}")
     if not msg.is_multipart():
         ext = ".xml" if "xml" in ctype.lower() or raw.lstrip().startswith(b"<") else ".bin"
-        (out / f"{side}{ext}").write_bytes(raw)
+        private_write(out / f"{side}{ext}", raw)
         return 1
 
     parts: list[tuple[bytes, str, str]] = []
@@ -381,7 +383,7 @@ def extract_flow(run: Path, flow: dict[str, Any], side: str, out: Path) -> int:
         raise CaptureError(f"unresolved xop content-id reference in {side}")
     for i, (payload, _, content_type) in enumerate(parts):
         suffix = ".xml" if "xml" in content_type or payload.lstrip().startswith(b"<") else ".bin"
-        (out / f"{side}-{i:03d}{suffix}").write_bytes(payload)
+        private_write(out / f"{side}-{i:03d}{suffix}", payload)
     return len(parts)
 
 
@@ -396,7 +398,7 @@ def inspect_run(run: Path, output: Path) -> tuple[int, list[str]]:
     if output_resolved == run_resolved or run_resolved in output_resolved.parents:
         return count, ["output directory must be outside the capture run"]
     try:
-        output.mkdir(parents=True, exist_ok=False)
+        private_directory(output, exist_ok=False)
     except OSError as exc:
         return count, [f"cannot create output directory: {exc}"]
     created_output = output.resolve()
@@ -407,17 +409,21 @@ def inspect_run(run: Path, output: Path) -> tuple[int, list[str]]:
         for flow_file in sorted((run / "flows").glob("*.json")):
             flow = _json(flow_file)
             target = output / flow_file.stem
-            target.mkdir()
+            private_directory(target, exist_ok=False)
             for side in ("request", "response"):
                 extracted += extract_flow(run, flow, side, target)
             if "websocket" in flow:
                 ws_target = target / "websocket"
-                ws_target.mkdir()
+                private_directory(ws_target, exist_ok=False)
                 for path in sorted((run / "websockets" / flow_file.stem).glob("*.json")):
                     msg = _json(path)
                     suffix = ".txt" if msg["type"] == "text" else ".bin"
-                    shutil.copyfile(_safe_file(run, msg["payload"]["file"]), ws_target / (path.stem + suffix))
-                    shutil.copyfile(path, ws_target / path.name)
+                    for source, destination in (
+                        (_safe_file(run, msg["payload"]["file"]), ws_target / (path.stem + suffix)),
+                        (path, ws_target / path.name),
+                    ):
+                        with source.open("rb") as incoming, private_open(destination) as outgoing:
+                            shutil.copyfileobj(incoming, outgoing)
                     extracted += 1
     except (CaptureError, OSError) as exc:
         # Do not leave a partial export that could be mistaken for a complete one.

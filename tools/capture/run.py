@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -14,8 +15,12 @@ from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from private_files import private_directory, private_write
+
 ROOT = Path(__file__).resolve().parent
-MITMPROXY_VERSION = "12.2.3"
+MITMPROXY_VERSION = "13.0.0.dev0"
+MITMPROXY_SOURCE_URL = "https://github.com/mitmproxy/mitmproxy/archive/5253dcbd1d8f0522de097bfe56918fe12a0f267a.tar.gz"
+MITMPROXY_SOURCE_HASH = "1060a52f22a3e9097767c49fe9f72b6efb072fdbe87c87fc83ab62c0047f7748"
 
 
 def positive_int(value: str) -> int:
@@ -106,9 +111,21 @@ def main() -> int:
         parser.error("run setup.ps1 first, then use .venv/Scripts/python.exe")
     if installed != MITMPROXY_VERSION:
         parser.error(f"requires mitmproxy {MITMPROXY_VERSION}; run setup.ps1")
+    try:
+        source = json.loads(importlib.metadata.distribution("mitmproxy").read_text("direct_url.json") or "{}")
+        if not isinstance(source, dict) or not isinstance(source.get("archive_info", {}), dict):
+            raise ValueError()
+        hashes = source.get("archive_info", {}).get("hashes", {})
+        if not isinstance(hashes, dict):
+            raise ValueError()
+        if source.get("url") != MITMPROXY_SOURCE_URL or hashes.get("sha256") != MITMPROXY_SOURCE_HASH:
+            raise ValueError()
+    except (TypeError, ValueError):
+        parser.error("requires the hash-verified mitmproxy source from requirements.txt; run setup.ps1")
 
     output_root = args.output_root.resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
+    private_directory(output_root)
+    private_directory(output_root / ".mitmproxy")
     run = output_root / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{args.name}-{uuid4().hex[:8]}"
     os.environ.update({
         "CAPTURE_OUTPUT": str(run),
@@ -122,6 +139,15 @@ def main() -> int:
 
     from mitmproxy import ctx
     from mitmproxy.tools.main import mitmdump
+
+    def start_transport(options: list[str]) -> int:
+        # This launcher owns the transport process. Restrict files created by
+        # the engine too, including its generated certificate authority keys.
+        previous_umask = os.umask(0o077)
+        try:
+            return mitmdump(options) or 0
+        finally:
+            os.umask(previous_umask)
 
     # Windows test runners can request a clean shutdown of this process group.
     if hasattr(signal, "SIGBREAK"):
@@ -144,11 +170,11 @@ def main() -> int:
         # outside the evidence directory, and remove it on normal shutdown.
         with tempfile.TemporaryDirectory(prefix="office-capture-tls-") as tls_dir:
             combined = Path(tls_dir) / "server.pem"
-            combined.write_bytes(args.tls_cert.read_bytes() + b"\n" + args.tls_key.read_bytes())
+            private_write(combined, args.tls_cert.read_bytes() + b"\n" + args.tls_key.read_bytes())
             options.extend(["--certs", f"*={combined}", "--set", "upstream_cert=false",
                             "--set", "keep_host_header=true"])
-            return mitmdump(options) or 0
-    return mitmdump(options) or 0
+            return start_transport(options)
+    return start_transport(options)
 
 
 if __name__ == "__main__":

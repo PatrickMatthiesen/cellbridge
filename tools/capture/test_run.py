@@ -1,8 +1,21 @@
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 import run
+
+
+@pytest.mark.parametrize("source", [None, "[]", "{}", '{"archive_info": []}',
+    '{"url": "https://unreviewed.test/mitmproxy.tar.gz", "archive_info": {"hashes": {"sha256": "wrong"}}}'])
+def test_launcher_rejects_unverified_source(monkeypatch, capsys, source):
+    monkeypatch.setattr(sys, "argv", ["run.py", "--hosts", "sharepoint.test"])
+    monkeypatch.setattr(run.importlib.metadata, "version", lambda _: run.MITMPROXY_VERSION)
+    monkeypatch.setattr(run.importlib.metadata, "distribution", lambda _: SimpleNamespace(read_text=lambda _: source))
+    with pytest.raises(SystemExit) as error:
+        run.main()
+    assert error.value.code == 2
+    assert "hash-verified mitmproxy source" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("upstream", [

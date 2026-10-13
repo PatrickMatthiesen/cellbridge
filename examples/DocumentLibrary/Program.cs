@@ -13,7 +13,8 @@ builder.Services.AddAuthorization(options => options.AddPolicy("permission-admin
     policy => policy.RequireClaim("document-library:permission-admin", "true")));
 
 builder.Services.AddCellBridge<DocumentLibraryPermissionPolicy>(provider,
-    requireDurability: !builder.Environment.IsEnvironment("Testing"));
+    requireDurability: !builder.Environment.IsEnvironment("Testing"),
+    configure: options => options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"]);
 builder.Services.AddCellBridgeExternalPublishing<DocumentLibraryDestination>(options =>
     options.PollingInterval = builder.Configuration.GetValue("DocumentLibrary:PublicationInterval", TimeSpan.FromSeconds(1)));
 
@@ -25,8 +26,12 @@ builder.Services.AddCellBridgeCookieLogin<LocalLoginAuthenticator>(
         cookie.Cookie.Name = "CellBridge.DocumentLibrary.Local";
         cookie.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
     },
-    configure: login => login.IsRequestAllowed = context =>
-        DocumentLibraryAuthentication.IsRequestAllowed(context, builder.Environment));
+    configure: login =>
+    {
+        login.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"];
+        login.IsRequestAllowed = context =>
+            DocumentLibraryAuthentication.IsRequestAllowed(context, builder.Environment);
+    });
 
 var app = builder.Build();
 app.Use(async (context, next) =>

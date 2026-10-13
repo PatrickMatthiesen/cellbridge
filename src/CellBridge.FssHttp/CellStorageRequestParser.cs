@@ -1,3 +1,4 @@
+using System.Xml;
 using System.Xml.Linq;
 
 namespace CellBridge.FssHttp;
@@ -8,6 +9,9 @@ namespace CellBridge.FssHttp;
 /// </summary>
 public static class CellStorageRequestParser
 {
+    /// <summary>Maximum number of characters accepted in a SOAP request document.</summary>
+    public const long MaximumSoapCharacters = 16 * 1024 * 1024;
+
     private static readonly XNamespace Tns = "http://schemas.microsoft.com/sharepoint/soap/";
     private static readonly XNamespace XopIncludeNs = "http://www.w3.org/2004/08/xop/include";
 
@@ -17,7 +21,16 @@ public static class CellStorageRequestParser
     /// </summary>
     public static CellStorageRequest Parse(string soapXml)
     {
-        var doc = XDocument.Parse(soapXml);
+        ArgumentNullException.ThrowIfNull(soapXml);
+        var settings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            XmlResolver = null,
+            MaxCharactersInDocument = MaximumSoapCharacters,
+        };
+        using var textReader = new StringReader(soapXml);
+        using var xmlReader = XmlReader.Create(textReader, settings);
+        var doc = XDocument.Load(xmlReader);
         // Word has used both SOAP 1.1 and SOAP 1.2 envelopes. The protocol
         // payload is identical, so identify the envelope elements by local
         // name rather than rejecting the SOAP 1.2 namespace.

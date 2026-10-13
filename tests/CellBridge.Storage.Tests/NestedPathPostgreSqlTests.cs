@@ -77,7 +77,7 @@ public sealed class NestedPathPostgreSqlTests
         Assert.Equal(HttpStatusCode.NotFound, oldGet.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, oldHead.StatusCode);
         using var isolatedGet = await client.GetAsync(duplicateUrl);
-        Assert.Equal(HttpStatusCode.Forbidden, isolatedGet.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, isolatedGet.StatusCode);
 
         using var stale = await Soap(client, oldUrl + "/_vti_bin/cellstorage.svc", oldUrl,
             "GetDocMetaInfo", true, id.ToString("D"));
@@ -110,8 +110,8 @@ public sealed class NestedPathPostgreSqlTests
             .UpdateAuthorizationAsync(id, policy.Binding(1), policy.Binding(2)));
         using var revokedCurrent = await client.GetAsync(newUrl);
         using var revokedHistory = await client.GetAsync(historyUrl);
-        Assert.Equal(HttpStatusCode.Forbidden, revokedCurrent.StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, revokedHistory.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, revokedCurrent.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, revokedHistory.StatusCode);
         using var revokedSoap = await Soap(client, oldUrl + "/_vti_bin/cellstorage.svc", oldUrl,
             "GetDocMetaInfo", true, id.ToString("D"));
         Assert.Equal("FileUnauthorizedAccess", FileError(XDocument.Parse(await revokedSoap.Content.ReadAsStringAsync())));

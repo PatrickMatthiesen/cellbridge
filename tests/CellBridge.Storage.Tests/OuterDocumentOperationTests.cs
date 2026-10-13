@@ -56,7 +56,7 @@ public sealed class OuterDocumentOperationTests
         await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
             { Security = current.Security with { Owner = "revoked" } }, true));
         using var revoked = await client.GetAsync(oldUrl.PathAndQuery);
-        Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, revoked.StatusCode);
     }
 
     [Fact]

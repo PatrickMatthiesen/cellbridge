@@ -22,8 +22,8 @@ public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long max
     private async ValueTask<ContentHandle> WriteCoreAsync(Stream source, CancellationToken cancellationToken)
     {
         var temporary = Path.Combine(Path.GetTempPath(), "cellbridge-" + Guid.NewGuid().ToString("N"));
-        await using var spool = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
-            65536, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+        await using var spool = ConfidentialFileSystem.CreateFile(temporary, FileAccess.ReadWrite,
+            FileOptions.Asynchronous | FileOptions.DeleteOnClose);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long length = 0;
         var buffer = new byte[65536];

@@ -73,7 +73,7 @@ public static class DocumentLibraryEndpoints
                 return Results.Stream(stream, ContentType(manifest.FileName), manifest.FileName,
                     enableRangeProcessing: true);
             }
-            catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+            catch (UnauthorizedAccessException) { return Results.NotFound(); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
             catch (FileNotFoundException) { return Results.NotFound(); }
         }).RequireAuthorization();
@@ -87,7 +87,7 @@ public static class DocumentLibraryEndpoints
                 var token = antiforgery.GetAndStoreTokens(context).RequestToken!;
                 return Html(DocumentLibraryPage.History(context, resourceId, revisions, token));
             }
-            catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+            catch (UnauthorizedAccessException) { return Results.NotFound(); }
             catch (KeyNotFoundException) { return Results.NotFound(); }
         }).RequireAuthorization();
 

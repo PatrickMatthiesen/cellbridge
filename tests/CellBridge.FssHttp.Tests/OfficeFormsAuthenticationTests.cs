@@ -118,7 +118,7 @@ public sealed class OfficeFormsAuthenticationTests
         using var mappedLogin = await fixture.Client.GetAsync("/sign-in");
         fixture.Client.DefaultRequestHeaders.Add("Cookie", mappedLogin.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
         using var denied = await fixture.Client.GetAsync("/shared/secret.docx");
-        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
         Assert.Null(denied.Headers.Location);
         Assert.False(denied.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
     }

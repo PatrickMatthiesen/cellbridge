@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
+using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Http.Extensions;
 
@@ -16,7 +17,10 @@ internal static class DocumentLibraryPage
         foreach (var document in documents)
         {
             var type = Path.GetExtension(document.FileName).TrimStart('.').ToLowerInvariant();
-            var url = UriHelper.BuildAbsolute(context.Request.Scheme, context.Request.Host,
+            var configuredOrigin = context.RequestServices.GetRequiredService<CellBridgeOptions>().PublicOrigin;
+            var origin = configuredOrigin is null ? null : new Uri(configuredOrigin);
+            var url = UriHelper.BuildAbsolute(origin?.Scheme ?? context.Request.Scheme,
+                origin is null ? context.Request.Host : HostString.FromUriComponent(origin),
                 context.Request.PathBase, document.CellBridgePath);
             var office = type switch { "docx" => "ms-word", "xlsx" => "ms-excel", "pptx" => "ms-powerpoint", _ => null };
             var openUrl = office is null ? $"/library/files/{document.ResourceId:D}/download" : $"{office}:ofe|u|{url}";

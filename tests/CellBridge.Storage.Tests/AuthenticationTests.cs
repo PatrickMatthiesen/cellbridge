@@ -121,7 +121,7 @@ public sealed class AuthenticationTests
         builder.Services.Configure<SecurityStampValidatorOptions>(o => o.TimeProvider = clock);
         builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
         var app = builder.Build();
-        app.UseAuthentication(); app.UseAuthorization(); app.UseAntiforgery();
+        app.UseAuthentication(); app.UseAuthorization(); app.UseRateLimiter(); app.UseRequestTimeouts(); app.UseAntiforgery();
         app.MapCellBridgeAuthentication();
         app.MapCellBridge();
         app.MapGet("/protected", (System.Security.Claims.ClaimsPrincipal user) => CellBridgeActor.FromPrincipal(user)!.Identity.Subject).RequireAuthorization();
