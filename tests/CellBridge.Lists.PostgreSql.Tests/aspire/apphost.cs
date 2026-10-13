@@ -3,8 +3,9 @@
 #:property AspireUseCliBundle=true
 
 var builder = DistributedApplication.CreateBuilder(args);
+var testDirectory = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, ".."));
 var database = builder.AddPostgres("lists-postgres").AddDatabase("lists");
-builder.AddExecutable("lists-tests", "dotnet", builder.AppHostDirectory,
+builder.AddExecutable("lists-tests", "dotnet", testDirectory,
         "test", "CellBridge.Lists.PostgreSql.Tests.csproj", "--no-build", "--nologo",
         "--logger", "trx", "--results-directory", "../../artifacts/lists-tests")
     .WithReference(database)

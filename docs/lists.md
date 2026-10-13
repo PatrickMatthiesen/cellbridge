@@ -369,10 +369,10 @@ dotnet test tests/CellBridge.Lists.Tests/CellBridge.Lists.Tests.csproj
 dotnet test tests/CellBridge.Lists.AspNetCore.Tests/CellBridge.Lists.AspNetCore.Tests.csproj
 node tools/testing/test-list-example-ui.cjs
 dotnet build tests/CellBridge.Lists.PostgreSql.Tests/CellBridge.Lists.PostgreSql.Tests.csproj
-aspire start --apphost tests/CellBridge.Lists.PostgreSql.Tests/apphost.cs --non-interactive
-aspire resource lists-tests start --apphost tests/CellBridge.Lists.PostgreSql.Tests/apphost.cs --non-interactive
-aspire describe --apphost tests/CellBridge.Lists.PostgreSql.Tests/apphost.cs --non-interactive
-aspire stop --apphost tests/CellBridge.Lists.PostgreSql.Tests/apphost.cs --non-interactive
+aspire start --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/apphost.cs --non-interactive
+aspire resource lists-tests start --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/apphost.cs --non-interactive
+aspire describe --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/apphost.cs --non-interactive
+aspire stop --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/apphost.cs --non-interactive
 ```
 
 The example regression script uses Node 24 and checks retained drafts, exact
