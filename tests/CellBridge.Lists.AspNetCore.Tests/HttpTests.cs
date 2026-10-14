@@ -26,53 +26,24 @@ namespace CellBridge.Lists.AspNetCore.Tests;
 public sealed partial class HttpTests
 {
     [Fact]
-    public async Task Concurrent_limit_covers_native_exports_and_odata_and_recovers_after_failure()
+    public async Task Backend_failure_returns_controlled_error_without_affecting_other_requests()
     {
-        await using var host = await Host.Create(configure: o => o.MaxConcurrentRequests = 1);
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        host.Engine.QueryWait = async ct =>
-        {
-            entered.SetResult();
-            await release.Task.WaitAsync(ct);
-            throw new ListException(ListFailure.Unavailable, "secret backend details");
-        };
-        var held = host.Post("/records/query", "{\"query\":{\"limit\":1}}");
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var calls = host.Engine.Calls;
-        try
-        {
-            foreach (var suffix in new[] { "", "/export.csv", "/export.xlsx", "/odata/$metadata", "/odata/Records" })
-            {
-                var saturated = await host.Client.GetAsync(host.Path + suffix);
-                Assert.Equal(HttpStatusCode.ServiceUnavailable, saturated.StatusCode);
-                Assert.Equal("{\"error\":\"Unavailable\"}", await saturated.Content.ReadAsStringAsync());
-                Assert.Contains("no-store", saturated.Headers.CacheControl!.ToString());
-            }
-            Assert.Equal(calls, host.Engine.Calls);
-        }
-        finally { release.TrySetResult(); }
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await held).StatusCode);
+        await using var host = await Host.Create();
+        host.Engine.QueryWait = _ => throw new ListException(ListFailure.Unavailable, "secret backend details");
+        var failed = await host.Post("/records/query", "{\"query\":{\"limit\":1}}");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
+        Assert.Equal("{\"error\":\"Unavailable\"}", await failed.Content.ReadAsStringAsync());
+        Assert.Contains("no-store", failed.Headers.CacheControl!.ToString());
         host.Engine.QueryWait = null;
         Assert.Equal(HttpStatusCode.OK, (await host.Post("/records/query", "{\"query\":{\"limit\":1}}")).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await host.Post("/records/query", "{\"query\":null}")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(host.Path + "/export.csv")).StatusCode);
-        AssertPartitionsEmpty(host);
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    [InlineData(1025)]
-    public void Concurrent_request_limit_requires_bounded_positive_configuration(int limit)
-    {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new ServiceCollection().AddCellBridgeLists(o => o.MaxConcurrentRequests = limit));
     }
 
     [Fact]
-    public async Task Cancelled_request_releases_concurrency_slot()
+    public async Task Client_cancellation_reaches_backend_and_does_not_affect_other_requests()
     {
-        await using var host = await Host.Create(configure: o => o.MaxConcurrentRequests = 1);
+        await using var host = await Host.Create();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         host.Engine.QueryWait = async ct =>
@@ -89,16 +60,7 @@ public sealed partial class HttpTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await held);
         await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         host.Engine.QueryWait = null;
-        // The client cancellation can complete before the server's response
-        // execution finishes. Bound the wait for its finally block to run.
-        HttpStatusCode status = HttpStatusCode.ServiceUnavailable;
-        for (var attempt = 0; attempt < 20 && status == HttpStatusCode.ServiceUnavailable; attempt++)
-        {
-            status = (await host.Client.GetAsync(host.Path)).StatusCode;
-            if (status == HttpStatusCode.ServiceUnavailable) await Task.Delay(10);
-        }
-        Assert.Equal(HttpStatusCode.OK, status);
-        AssertPartitionsEmpty(host);
+        Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(host.Path)).StatusCode);
     }
 
     [Fact]
@@ -357,8 +319,8 @@ public sealed partial class HttpTests
         public FakeEngine Engine { get; } = engine;
         public string Path => $"/api/workspaces/{Engine.Workspace}/lists/{Engine.Definition.Id}";
         public Task<HttpResponseMessage> Post(string path, string body) => Client.PostAsync(Path + path, new StringContent(body, Encoding.UTF8, "application/json"));
-        public IServiceProvider Services => app.Services;
-        public static async Task<Host> Create(Action<CellBridgeListsOptions>? configure = null, Action<HttpContext>? requestSetup = null)
+        public static async Task<Host> Create(Action<CellBridgeListsOptions>? configure = null, Action<HttpContext>? requestSetup = null,
+            Action<IServiceCollection>? configureServices = null)
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
@@ -373,6 +335,7 @@ public sealed partial class HttpTests
                 o.IntegrationAuthenticationScheme = "integration";
                 configure?.Invoke(o);
             });
+            configureServices?.Invoke(builder.Services);
             var app = builder.Build();
             app.Use(async (context, next) =>
             {

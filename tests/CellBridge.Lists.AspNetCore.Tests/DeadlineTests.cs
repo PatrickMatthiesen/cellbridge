@@ -1,6 +1,4 @@
-using System.Collections;
 using System.Net;
-using System.Reflection;
 using CellBridge.Lists.AspNetCore;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -13,76 +11,43 @@ public sealed partial class HttpTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    [InlineData(1025)]
-    public void Partition_limits_require_bounded_positive_configuration(int limit)
-    {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new ServiceCollection().AddCellBridgeLists(o => o.MaxConcurrentRequestsPerActor = limit));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new ServiceCollection().AddCellBridgeLists(o => o.MaxConcurrentRequestsPerWorkspace = limit));
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
     [InlineData(3601)]
     public void Request_deadline_requires_finite_positive_configuration(int seconds)
         => Assert.Throws<ArgumentOutOfRangeException>(() => new ServiceCollection().AddCellBridgeLists(o => o.RequestTimeout = TimeSpan.FromSeconds(seconds)));
 
     [Fact]
-    public async Task Actor_cap_cannot_be_bypassed_by_changing_workspaces_and_other_actor_is_served()
+    public async Task Parallel_requests_for_same_actor_and_workspace_are_not_rejected_by_library()
     {
-        await using var host = await Host.Create(configure: o => o.MaxConcurrentRequestsPerActor = 2);
+        await using var host = await Host.Create();
         var entered = new SemaphoreSlim(0);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        host.Engine.ListsWait = async (actor, _, ct) =>
+        host.Engine.ListsWait = async (_, _, ct) =>
         {
-            if (actor.Subject != "issuer:reader") return;
             entered.Release();
             await release.Task.WaitAsync(ct);
         };
-        var held = Enumerable.Range(0, 2).Select(_ => GetWorkspace(host, Guid.NewGuid(), "issuer:reader")).ToArray();
-        await entered.WaitAsync(TimeSpan.FromSeconds(5));
-        await entered.WaitAsync(TimeSpan.FromSeconds(5));
+        var held = Enumerable.Range(0, 16).Select(_ => GetWorkspace(host, host.Engine.Workspace, "issuer:reader")).ToArray();
         try
         {
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, (await GetWorkspace(host, Guid.NewGuid(), "issuer:reader")).StatusCode);
-            Assert.Equal(HttpStatusCode.OK, (await GetWorkspace(host, Guid.NewGuid(), "issuer:other")).StatusCode);
+            for (var request = 0; request < held.Length; request++)
+                Assert.True(await entered.WaitAsync(TimeSpan.FromSeconds(5)), "Every parallel request must reach the engine.");
+            foreach (var suffix in new[] { "", "/export.csv", "/export.xlsx", "/odata/$metadata", "/odata/Records" })
+            {
+                var response = await host.Client.GetAsync(host.Path + suffix);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                Assert.Contains("no-store", response.Headers.CacheControl!.ToString());
+            }
         }
         finally { release.TrySetResult(); }
-        foreach (var response in await Task.WhenAll(held)) Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        AssertPartitionsEmpty(host);
+        foreach (var response in await Task.WhenAll(held).WaitAsync(TimeSpan.FromSeconds(5)))
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     [Fact]
-    public async Task Workspace_cap_applies_across_actors_while_another_workspace_is_served()
-    {
-        await using var host = await Host.Create(configure: o => o.MaxConcurrentRequestsPerWorkspace = 2);
-        var entered = new SemaphoreSlim(0);
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var workspace = Guid.NewGuid();
-        host.Engine.ListsWait = async (_, id, ct) =>
-        {
-            if (id != workspace) return;
-            entered.Release();
-            await release.Task.WaitAsync(ct);
-        };
-        var held = Enumerable.Range(0, 2).Select(i => GetWorkspace(host, workspace, "issuer:" + i)).ToArray();
-        await entered.WaitAsync(TimeSpan.FromSeconds(5));
-        await entered.WaitAsync(TimeSpan.FromSeconds(5));
-        try
-        {
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, (await GetWorkspace(host, workspace, "issuer:third")).StatusCode);
-            Assert.Equal(HttpStatusCode.OK, (await GetWorkspace(host, Guid.NewGuid(), "issuer:third")).StatusCode);
-        }
-        finally { release.TrySetResult(); }
-        await Task.WhenAll(held);
-        AssertPartitionsEmpty(host);
-    }
-
-    [Fact]
-    public async Task Deadline_aborts_chunked_body_without_entering_engine_and_releases_admission()
+    public async Task Deadline_aborts_chunked_body_before_engine_call_and_other_requests_still_succeed()
     {
         using var body = new HeldStream(read: true);
-        await using var host = await Host.Create(configure: o => { o.RequestTimeout = TimeSpan.FromMilliseconds(200); o.MaxConcurrentRequests = 1; },
+        await using var host = await Host.Create(configure: o => o.RequestTimeout = TimeSpan.FromMilliseconds(200),
             requestSetup: context =>
             {
                 if (context.Request.Headers.ContainsKey("X-Slow-Body"))
@@ -99,13 +64,13 @@ public sealed partial class HttpTests
         await AssertAborted(response);
         await body.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(0, host.Engine.Calls);
-        await AssertReusable(host);
+        Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(host.Path)).StatusCode);
     }
 
     [Fact]
-    public async Task Deadline_cancels_backend_and_releases_admission()
+    public async Task Deadline_cancels_backend_without_affecting_other_requests()
     {
-        await using var host = await Host.Create(configure: o => { o.RequestTimeout = TimeSpan.FromMilliseconds(200); o.MaxConcurrentRequests = 1; });
+        await using var host = await Host.Create(configure: o => o.RequestTimeout = TimeSpan.FromMilliseconds(200));
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         host.Engine.QueryWait = async ct =>
@@ -119,7 +84,7 @@ public sealed partial class HttpTests
         await AssertAborted(response);
         await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         host.Engine.QueryWait = null;
-        await AssertReusable(host);
+        Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(host.Path)).StatusCode);
     }
 
     [Theory]
@@ -129,7 +94,7 @@ public sealed partial class HttpTests
     {
         using var responseBody = new HeldStream(read: false);
         var headersAtAbort = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var host = await Host.Create(configure: o => { o.RequestTimeout = TimeSpan.FromMilliseconds(200); o.MaxConcurrentRequests = 1; },
+        await using var host = await Host.Create(configure: o => o.RequestTimeout = TimeSpan.FromMilliseconds(200),
             requestSetup: context =>
             {
                 if (context.Request.Headers.ContainsKey("X-Slow-Response"))
@@ -148,39 +113,54 @@ public sealed partial class HttpTests
         await AssertAborted(response);
         await responseBody.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(started, await headersAtAbort.Task.WaitAsync(TimeSpan.FromSeconds(5)));
-        await AssertReusable(host);
+        Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(host.Path)).StatusCode);
     }
 
     [Fact]
-    public async Task Noncooperative_backend_keeps_lease_and_request_scope_until_work_finishes()
+    public async Task Noncooperative_backend_keeps_request_scope_alive_after_transport_abort_until_work_finishes()
     {
         var aborted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var host = await Host.Create(configure: o => { o.RequestTimeout = TimeSpan.FromMilliseconds(200); o.MaxConcurrentRequestsPerActor = 1; },
+        var resolvedScope = new TaskCompletionSource<RequestScope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var host = await Host.Create(configure: o => o.RequestTimeout = TimeSpan.FromMilliseconds(200),
             requestSetup: context =>
             {
-                if (context.Request.Headers["X-Test-Actor"] == "issuer:reader")
+                if (context.Request.Headers.ContainsKey("X-Held-Request"))
+                {
+                    resolvedScope.TrySetResult(context.RequestServices.GetRequiredService<RequestScope>());
                     context.RequestAborted.Register(() => aborted.TrySetResult());
-            });
+                }
+            }, configureServices: services => services.AddScoped<RequestScope>());
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        host.Engine.ListsWait = async (actor, _, _) =>
+        var first = 0;
+        host.Engine.ListsWait = async (_, _, _) =>
         {
-            if (actor.Subject != "issuer:reader") return;
+            if (Interlocked.Increment(ref first) != 1) return;
             entered.SetResult();
             await release.Task;
         };
-        var held = GetWorkspace(host, Guid.NewGuid(), "issuer:reader");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/workspaces/{host.Engine.Workspace}/lists");
+        request.Headers.Add("X-Held-Request", "true");
+        var held = host.Client.SendAsync(request);
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var scope = await resolvedScope.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await aborted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         try
         {
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, (await GetWorkspace(host, Guid.NewGuid(), "issuer:reader")).StatusCode);
-            Assert.Equal(HttpStatusCode.OK, (await GetWorkspace(host, Guid.NewGuid(), "issuer:other")).StatusCode);
+            Assert.False(scope.Disposed.Task.IsCompleted);
+            Assert.Equal(HttpStatusCode.OK, (await GetWorkspace(host, host.Engine.Workspace, "issuer:reader")).StatusCode);
         }
         finally { release.TrySetResult(); }
         await AssertAborted(held);
+        await scope.Disposed.Task.WaitAsync(TimeSpan.FromSeconds(5));
         host.Engine.ListsWait = null;
-        await AssertReusable(host);
+        Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(host.Path)).StatusCode);
+    }
+
+    private sealed class RequestScope : IDisposable
+    {
+        public TaskCompletionSource Disposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void Dispose() => Disposed.TrySetResult();
     }
 
     private static async Task<HttpResponseMessage> GetWorkspace(Host host, Guid workspace, string actor)
@@ -196,27 +176,6 @@ public sealed partial class HttpTests
         Assert.NotNull(failure);
         Assert.IsNotType<TimeoutException>(failure);
         Assert.True(failure is OperationCanceledException or HttpRequestException or IOException, failure.ToString());
-    }
-
-    private static async Task AssertReusable(Host host)
-    {
-        HttpStatusCode status = HttpStatusCode.ServiceUnavailable;
-        for (var attempt = 0; attempt < 50 && status == HttpStatusCode.ServiceUnavailable; attempt++)
-        {
-            status = (await host.Client.GetAsync(host.Path)).StatusCode;
-            if (status == HttpStatusCode.ServiceUnavailable) await Task.Delay(10);
-        }
-        Assert.Equal(HttpStatusCode.OK, status);
-        AssertPartitionsEmpty(host);
-    }
-
-    private static void AssertPartitionsEmpty(Host host)
-    {
-        // Inspect only active admission bookkeeping, not transport state.
-        var type = typeof(CellBridgeListsOptions).Assembly.GetType("CellBridge.Lists.AspNetCore.ListRequestGate")!;
-        var gate = host.Services.GetRequiredService(type);
-        foreach (var name in new[] { "actors", "workspaces" })
-            Assert.Empty((IDictionary)type.GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(gate)!);
     }
 
     private sealed class HeldStream(bool read) : Stream

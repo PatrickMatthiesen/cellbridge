@@ -106,7 +106,7 @@ requires the target record to exist in the same workspace and the caller to have
 target-list read access. Resolution rechecks that access and returns the target
 UUID, number and optional label. Queries and extracts retain the UUID without
 expanding related records. Deletion fails while another record references the
-target; provider mutation locks serialize assignment against deletion.
+target. Database foreign keys coordinate reference assignment against deletion.
 An unrelated patch preserves stored references without requiring target read
 access again. Assigning a reference in a patch still checks that access.
 Schema publication checks target read access and the display field for newly
@@ -185,6 +185,9 @@ receipts.
 
 ## Queries and reporting
 
+For repeatable write and large-list measurements, see
+[measuring list performance](list-performance.md).
+
 `ListQuery` supports conjunctions of `Equal`, `NotEqual`, `GreaterThan`,
 `GreaterOrEqual`, `LessThan` and `LessOrEqual`. Boolean, choice and reference fields
 support only equality and inequality. Null supports only equality and inequality;
@@ -217,11 +220,12 @@ Pages are not snapshots across requests. Concurrent edits can move records betwe
 pages; a deleted anchor or one no longer matching the filter rejects pagination,
 so restart the query.
 
-The initial PostgreSQL provider reads at most 5,000 candidate records per list
-and evaluates filters/sorting in memory. It rejects excessive candidates instead
-of truncating them. Workspace mutations serialize. Raising limits does not qualify
-larger workloads; database query compilation, indexing and measured latency/memory
-work remain follow-up tasks.
+The PostgreSQL provider compiles filters, typed ordering and keyset pagination
+into parameterized SQL. Only one page and its look-ahead row cross the database
+connection. Queries preserve exact integer/decimal values, 100 ns timestamp
+precision and UTF-16 ordinal text comparison. Ordered text expressions have a
+higher database cost than UUID/numeric paging. Index selection remains an
+operator decision based on the actual fields and query workload.
 
 GET `/{listId}/export.csv` or `/{listId}/export.xlsx` below the list API root.
 Only `limit` and `fields` query parameters are supported; `fields` is a
@@ -280,6 +284,22 @@ only its required list access; it does not create the login. All workspace table
 have forced RLS with matching read/write checks. The provider sets verified
 workspace context transaction-locally and checks schema version/runtime privileges
 before use. Runtime credentials cannot register operator templates.
+
+The current provider requires list schema version 2. Before upgrading a version 1
+installation, stop every old list host and integration worker, back up the list
+schema, and run `InitializeAsync` with operator credentials. Setup creates
+per-list counters and normalized reference links, backfills them once, then
+records version 2 transactionally. Repeated setup on version 2 does not scan
+record history again. Start only version 2 providers afterward. Running old
+providers during this migration can leave the new counters or links incomplete.
+
+Record mutations use shared schema locks, record row locks and foreign keys.
+Creates atomically allocate the next per-list number and lifetime identity count.
+Updates preserve conditional revisions. Number allocation and shared workspace
+accounting still coordinate through their counter rows near commit; they do not
+take an exclusive workspace mutation lock for the whole operation. The separate
+authorization lock remains shared for data operations and exclusive for permission
+changes, so revocation and writes retain their transaction ordering.
 
 Run provisioning separately from the web host using the actual public setup APIs:
 
@@ -344,28 +364,31 @@ use the current `ListDefinition.SchemaVersion` while preserving the loaded
 record's original values and revision. Text must contain valid Unicode and cannot
 include U+0000, which PostgreSQL text/JSONB cannot store.
 
-Default budgets are 64 fields, 100 lists per workspace, 64 KiB record JSON,
-5,000 lifetime record identities per list, 64 MiB logical workspace storage,
-500 rows per page, 12 predicates, 32 views per list, 128 schema versions,
-100,000 ordinary audit events and 10,000 reserved security events. HTTP bodies
-are bounded at 128 KiB; SQL statement/lock timeouts default to 10 seconds.
-The HTTP adapter admits at most eight concurrent requests by default through
-`MaxConcurrentRequests`, including response serialization and extraction.
-`MaxConcurrentRequestsPerActor` defaults to two across all workspaces, and
-`MaxConcurrentRequestsPerWorkspace` defaults to four across all actors. Each
-partition limit is capped by the global limit. Admission has no waiting queue;
-excess requests return 503. Only active requests retain partition entries.
+Default bounds are 64 fields, 100 lists per workspace, 64 KiB record JSON,
+500 rows per page, 12 predicates, 32 views per list, 128 schema versions and
+10,000 reserved security events. HTTP bodies are bounded at 128 KiB; SQL
+statement/lock timeouts default to 10 seconds. Lifetime record identities,
+logical workspace bytes and ordinary audit-event quotas are optional host
+settings through `MaxRecordsPerList`, `MaxWorkspaceBytes` and `MaxAuditEvents`.
+Their defaults are null, which disables those volume quotas. Setting a positive
+value enforces the corresponding quota transactionally. Lists with 100,000 or
+more records are supported without loading the entire list into the host.
 
-`RequestTimeout` defaults to 30 seconds and starts before admission. It covers
+The list adapter has no fixed concurrency admission cap. Configure host-level
+ASP.NET Core rate limiting, connection limits or integration queues for the
+deployment. Database locks coordinate changes to data; they do not bound the
+number of waiting HTTP requests or database connections.
+
+`RequestTimeout` defaults to 30 seconds and starts before adapter processing. It covers
 body reading, authentication checks inside the adapter, backend calls and response
 execution. Expiry cancels the request and aborts its connection. A timed-out write
 may already have committed; retry a create with the same ID and payload to recover
 its receipt. Hosts still own connection/header limits and any distributed rate
-limiting. Direct engine consumers must bound their own concurrency.
+limiting. Direct engine consumers own their connection-pool and workload settings.
 
 Custom engine and response implementations must honor cancellation. If custom
-work ignores it, the adapter waits for that work to finish and retains its lease
-so outstanding work stays bounded and request dependencies remain alive.
+work ignores it, the adapter waits for that work to finish after aborting the
+transport, keeping request-scoped dependencies alive until that work ends.
 Deleting records frees their value bytes, not lifetime identity capacity.
 
 Logical accounting includes value bytes and defined charges for retained schemas,

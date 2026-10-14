@@ -9,7 +9,7 @@ public static class ListQueryEvaluator
     public static RecordPage Query(ListDefinition definition, IReadOnlyList<ListRecord> records, ListQuery query, ListLimits limits)
     {
         ListValidation.ValidateQuery(definition, query, limits);
-        ListValidation.Budget(records.Count <= limits.MaxRecordsPerList, "Query candidate count exceeds the configured limit.");
+        ListValidation.Budget(limits.MaxRecordsPerList is null || records.Count <= limits.MaxRecordsPerList, "Query candidate count exceeds the configured limit.");
         var fields = definition.Fields.ToDictionary(f => f.Id);
         foreach (var record in records)
             ListValidation.Require(record.WorkspaceId == definition.WorkspaceId && record.ListId == definition.Id, "Query candidates must belong to the list.");

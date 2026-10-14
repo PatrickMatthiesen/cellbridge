@@ -5,8 +5,7 @@ using Npgsql;
 namespace CellBridge.Lists.PostgreSql;
 
 /// <summary>
-/// PostgreSQL list storage. Version 1 evaluates queries in memory after a bounded read of at
-/// most <see cref="ListLimits.MaxRecordsPerList"/> records. Workspace writes are serialized.
+/// PostgreSQL list storage. Record writes coordinate through list, record, counter and quota rows.
 /// </summary>
 public sealed partial class PostgreSqlListEngine : IListEngine
 {
@@ -87,6 +86,9 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                     "INSERT INTO cellbridge_lists.list_schemas(workspace_id,list_id,schema_version,definition) VALUES ($1,$2,1,$3::jsonb)", ct,
                     workspaceId, request.Id, json);
                 await ExecuteAsync(connection, transaction,
+                    "INSERT INTO cellbridge_lists.list_counters(workspace_id,list_id) VALUES ($1,$2)", ct,
+                    workspaceId, request.Id);
+                await ExecuteAsync(connection, transaction,
                     "INSERT INTO cellbridge_lists.list_grants(workspace_id,list_id,subject,access) VALUES ($1,$2,$3,$4)", ct,
                     workspaceId, request.Id, actor.Subject, (int)(ListAccess.Read | ListAccess.Write | ListAccess.Design));
             }
@@ -98,12 +100,18 @@ public sealed partial class PostgreSqlListEngine : IListEngine
         }, ct);
     }
 
-    public Task<ListDefinition> GetListAsync(ListActor actor, Guid workspaceId, Guid listId,
-        CancellationToken ct = default) => ReadAsync(actor, workspaceId, async (connection, transaction, member) =>
+    public async Task<ListDefinition> GetListAsync(ListActor actor, Guid workspaceId, Guid listId,
+        CancellationToken ct = default)
     {
-        await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Read, ct);
-        return await GetDefinitionAsync(connection, transaction, workspaceId, listId, false, ct);
-    }, ct);
+        ValidateActor(actor);
+        return await InRecordTransactionAsync(workspaceId, async (connection, transaction) =>
+        {
+            var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
+                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct);
+            RequireWriteContext(context, ListAccess.Read);
+            return context.Definition!;
+        }, ct);
+    }
 
     public async Task<ListDefinition> PublishSchemaAsync(ListActor actor, Guid workspaceId, Guid listId,
         PublishSchemaRequest request, CancellationToken ct = default)
@@ -250,10 +258,12 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                   ('memberships', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
                   ('lists', ARRAY['SELECT','INSERT','UPDATE']),
                   ('list_schemas', ARRAY['SELECT','INSERT']),
+                  ('list_counters', ARRAY['SELECT','INSERT','UPDATE']),
                   ('list_grants', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
                   ('records', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
-                  ('record_tombstones', ARRAY['SELECT','INSERT']),
+                  ('record_tombstones', ARRAY['INSERT']),
                   ('create_receipts', ARRAY['SELECT','INSERT','DELETE']),
+                  ('record_references', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
                   ('saved_views', ARRAY['SELECT','INSERT','UPDATE','DELETE']),
                   ('audit_events', ARRAY['SELECT','INSERT'])
                 )
@@ -293,7 +303,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                 WHERE v.singleton AND r.rolname=current_user AND n.nspname='cellbridge_lists' AND c.relname='records'
                 """, connection);
             await using var reader = await command.ExecuteReaderAsync(ct);
-            if (!await reader.ReadAsync(ct) || reader.GetInt32(0) != 1)
+            if (!await reader.ReadAsync(ct) || reader.GetInt32(0) != 2)
                 throw new ListException(ListFailure.Unavailable, "The list schema version is missing or unsupported.");
             if (reader.GetBoolean(1) || reader.GetBoolean(2) || reader.GetBoolean(3) || reader.GetBoolean(4) ||
                 !reader.GetBoolean(5) || reader.GetBoolean(6))
@@ -385,7 +395,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
             return;
         }
         await using var command = Command(connection, transaction,
-            "UPDATE cellbridge_lists.workspaces SET stored_bytes=stored_bytes+$2 WHERE workspace_id=$1 AND stored_bytes+$2<=$3 RETURNING workspace_id",
+            "UPDATE cellbridge_lists.workspaces SET stored_bytes=stored_bytes+$2 WHERE workspace_id=$1 AND ($3::bigint IS NULL OR stored_bytes+$2<=$3) RETURNING workspace_id",
             workspaceId, bytes, _limits.MaxWorkspaceBytes);
         if (await command.ExecuteScalarAsync(ct) is null)
             throw Limit("The workspace storage limit has been reached.");
@@ -407,7 +417,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
             var bytes = 96 + Encoding.UTF8.GetByteCount(actor) + Encoding.UTF8.GetByteCount(action) +
                 (targetSubject is null ? 0 : Encoding.UTF8.GetByteCount(targetSubject)) + fieldIds.Count() * 16;
             await using var reserve = Command(connection, transaction,
-                "UPDATE cellbridge_lists.workspaces SET stored_bytes=stored_bytes+$2,audit_count=audit_count+1 WHERE workspace_id=$1 AND stored_bytes+$2<=$3 AND audit_count<$4 RETURNING workspace_id",
+                "UPDATE cellbridge_lists.workspaces SET stored_bytes=stored_bytes+$2,audit_count=audit_count+1 WHERE workspace_id=$1 AND ($3::bigint IS NULL OR stored_bytes+$2<=$3) AND ($4::bigint IS NULL OR audit_count<$4) RETURNING workspace_id",
                 workspaceId, bytes, _limits.MaxWorkspaceBytes, _limits.MaxAuditEvents);
             if (await reserve.ExecuteScalarAsync(ct) is null) throw Limit("The workspace storage or audit limit has been reached.");
         }

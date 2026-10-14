@@ -279,10 +279,14 @@ public sealed class PostgreSqlListEngineTests(ListDatabaseFixture database)
             fill.Parameters.AddWithValue(workspace);
             await fill.ExecuteNonQueryAsync();
         });
-        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, target.Id, subject.Subject, ListAccess.None);
+        var quotaEngine = new PostgreSqlListEngine(database.RuntimeSource!, new ListLimits
+        {
+            MaxWorkspaceBytes = 67108864
+        });
+        await quotaEngine.SetListGrantAsync(database.AdminActor, workspace, target.Id, subject.Subject, ListAccess.None);
         Assert.Equal(ListFailure.Limit, (await Assert.ThrowsAsync<ListException>(() =>
-            database.Engine.SetListGrantAsync(database.AdminActor, workspace, target.Id, subject.Subject, ListAccess.Read))).Failure);
-        var audit = await database.Engine.GetAuditAsync(database.AdminActor, workspace);
+            quotaEngine.SetListGrantAsync(database.AdminActor, workspace, target.Id, subject.Subject, ListAccess.Read))).Failure);
+        var audit = await quotaEngine.GetAuditAsync(database.AdminActor, workspace);
         Assert.Contains(audit, x => x.Action == "grant.set" && x.TargetSubject == subject.Subject);
     }
 

@@ -36,7 +36,7 @@ public static class PostgreSqlListSetup
             {
                 await using var version = new NpgsqlCommand("SELECT version FROM cellbridge_lists.schema_version", connection, transaction);
                 var value = await version.ExecuteScalarAsync(cancellationToken);
-                if (value is not int schemaVersion || schemaVersion != 1)
+                if (value is not int schemaVersion || schemaVersion is not (1 or 2))
                     throw new InvalidOperationException("The list schema version is missing or unsupported.");
             }
 
@@ -72,8 +72,10 @@ public static class PostgreSqlListSetup
               cellbridge_lists.saved_views TO {quotedRole};
             GRANT SELECT, INSERT, DELETE ON cellbridge_lists.create_receipts TO {quotedRole};
             GRANT SELECT, INSERT, UPDATE ON cellbridge_lists.lists, cellbridge_lists.records TO {quotedRole};
-            GRANT SELECT, INSERT ON cellbridge_lists.list_schemas, cellbridge_lists.record_tombstones,
-              cellbridge_lists.audit_events TO {quotedRole};
+            GRANT SELECT, INSERT, UPDATE ON cellbridge_lists.list_counters TO {quotedRole};
+            GRANT INSERT ON cellbridge_lists.record_tombstones TO {quotedRole};
+            GRANT SELECT, INSERT, UPDATE, DELETE ON cellbridge_lists.record_references TO {quotedRole};
+            GRANT SELECT, INSERT ON cellbridge_lists.list_schemas, cellbridge_lists.audit_events TO {quotedRole};
             GRANT DELETE ON cellbridge_lists.records TO {quotedRole};
             GRANT USAGE, SELECT ON SEQUENCE cellbridge_lists.audit_events_id_seq TO {quotedRole};
             """;

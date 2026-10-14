@@ -93,6 +93,20 @@ public class ValidationTests
     }
 
     [Fact]
+    public void Volume_quotas_are_optional_and_configured_quotas_must_be_positive()
+    {
+        var limits = new ListLimits();
+        Assert.Null(limits.MaxRecordsPerList);
+        Assert.Null(limits.MaxWorkspaceBytes);
+        Assert.Null(limits.MaxAuditEvents);
+        limits.Validate();
+        new ListLimits { MaxRecordsPerList = 200000, MaxWorkspaceBytes = 4L * 1024 * 1024 * 1024, MaxAuditEvents = 1000000 }.Validate();
+        Assert.Throws<ArgumentException>(() => new ListLimits { MaxRecordsPerList = 0 }.Validate());
+        Assert.Throws<ArgumentException>(() => new ListLimits { MaxWorkspaceBytes = -1 }.Validate());
+        Assert.Throws<ArgumentException>(() => new ListLimits { MaxAuditEvents = 0 }.Validate());
+    }
+
+    [Fact]
     public void Limits_count_utf8_bytes_and_bound_metadata()
     {
         var values = Values("\"☃☃☃\"");

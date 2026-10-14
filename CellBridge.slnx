@@ -29,6 +29,7 @@
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/CellBridge.Lists.Setup/CellBridge.Lists.Setup.csproj" />
+    <Project Path="tools/CellBridge.Lists.Benchmark/CellBridge.Lists.Benchmark.csproj" />
     <Project Path="tools/OfficeInspectors.Dump/OfficeInspectors.Dump.csproj" />
     <Project Path="tools/CellBridge.Admin/CellBridge.Admin.csproj" />
     <Project Path="tools/CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />

@@ -10,12 +10,6 @@ public sealed class CellBridgeListsOptions
     /// <summary>An explicitly configured non-cookie integration scheme. Its handler must validate bearer credentials.</summary>
     public string? IntegrationAuthenticationScheme { get; set; }
     public int MaxRequestBodyBytes { get; set; } = 128 * 1024;
-    /// <summary>Maximum active list API requests per service provider, including response execution.</summary>
-    public int MaxConcurrentRequests { get; set; } = 8;
-    /// <summary>Maximum active requests for one authenticated subject, across all workspaces.</summary>
-    public int MaxConcurrentRequestsPerActor { get; set; } = 2;
-    /// <summary>Maximum active requests targeting one workspace, across all actors.</summary>
-    public int MaxConcurrentRequestsPerWorkspace { get; set; } = 4;
     /// <summary>Absolute adapter deadline, including authentication checks, body reads, engine calls, and response writes. Expiry aborts the request.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
     public ListLimits Limits { get; set; } = new();

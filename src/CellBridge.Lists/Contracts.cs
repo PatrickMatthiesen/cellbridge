@@ -56,25 +56,28 @@ public sealed class ListLimits
     public int MaxFields { get; init; } = 64;
     public int MaxLists { get; init; } = 100;
     public int MaxRecordBytes { get; init; } = 64 * 1024;
-    public int MaxRecordsPerList { get; init; } = 5000;
-    public long MaxWorkspaceBytes { get; init; } = 64 * 1024 * 1024;
+    /// <summary>Optional host quota for lifetime record identities. Null disables this quota.</summary>
+    public long? MaxRecordsPerList { get; init; }
+    /// <summary>Optional logical workspace storage quota. Null disables this quota.</summary>
+    public long? MaxWorkspaceBytes { get; init; }
     public int MaxPageSize { get; init; } = 500;
     public int MaxFilters { get; init; } = 12;
     public int MaxViewsPerList { get; init; } = 32;
     public int MaxSchemaVersions { get; init; } = 128;
-    public int MaxAuditEvents { get; init; } = 100000;
+    /// <summary>Optional ordinary audit-event quota. Null disables this quota.</summary>
+    public long? MaxAuditEvents { get; init; }
     public int MaxSecurityAuditEvents { get; init; } = 10000;
     public TimeSpan ReceiptLifetime { get; init; } = TimeSpan.FromDays(7);
     public TimeSpan StatementTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     public void Validate()
     {
-        if (MaxFields <= 0 || MaxLists <= 0 || MaxRecordBytes <= 0 || MaxRecordsPerList <= 0 ||
-            MaxWorkspaceBytes <= 0 || MaxPageSize <= 0 || MaxFilters <= 0 || MaxViewsPerList <= 0 ||
-            MaxSchemaVersions <= 0 || MaxAuditEvents <= 0 || MaxSecurityAuditEvents <= 0 ||
+        if (MaxFields <= 0 || MaxLists <= 0 || MaxRecordBytes <= 0 || MaxRecordsPerList is <= 0 ||
+            MaxWorkspaceBytes is <= 0 || MaxPageSize <= 0 || MaxFilters <= 0 || MaxViewsPerList <= 0 ||
+            MaxSchemaVersions <= 0 || MaxAuditEvents is <= 0 || MaxSecurityAuditEvents <= 0 ||
             ReceiptLifetime <= TimeSpan.Zero || StatementTimeout <= TimeSpan.Zero ||
             StatementTimeout.TotalMilliseconds > int.MaxValue)
-            throw new ArgumentException("List limits and retention must be positive and statement timeout must fit a millisecond integer.");
+            throw new ArgumentException("Configured list limits and retention must be positive and statement timeout must fit a millisecond integer.");
     }
 }
 

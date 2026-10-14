@@ -135,6 +135,10 @@ Normal development includes the explicitly started [SharePoint proxy](capture-ki
 
 ## Performance measurements
 
+For customer-workspace list writes, database-filtered pages and the 4,000-writes/minute
+baseline, see [measuring list performance](list-performance.md). That runner uses
+public provider calls and authenticated HTTP against disposable PostgreSQL.
+
 For isolated inbound parsing, eager restore and nested builder allocations, see
 [measuring request allocations](allocation-measurements.md). The stage benchmark
 uses synthetic inputs and reviewed fixture bytes without a running app.

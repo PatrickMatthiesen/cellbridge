@@ -24,13 +24,9 @@ public static class CellBridgeListsExtensions
         configure(options);
         options.Limits.Validate();
         if (options.MaxRequestBodyBytes is < 1024 or > 16 * 1024 * 1024 || options.Limits.MaxPageSize is < 1 or > 10000
-            || options.MaxConcurrentRequests is < 1 or > 1024
-            || options.MaxConcurrentRequestsPerActor is < 1 or > 1024
-            || options.MaxConcurrentRequestsPerWorkspace is < 1 or > 1024
             || options.RequestTimeout <= TimeSpan.Zero || options.RequestTimeout > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(configure));
         services.AddSingleton(options);
-        services.AddSingleton<ListRequestGate>();
         services.AddDataProtection();
         services.AddAntiforgery();
         return services;
@@ -91,9 +87,8 @@ public static class CellBridgeListsExtensions
         group.MapMethods(path, [method], (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "private, no-store";
-            var gate = context.RequestServices.GetRequiredService<ListRequestGate>();
             var options = context.RequestServices.GetRequiredService<CellBridgeListsOptions>();
-            return (IResult)new GatedListResult(gate, options, async admission =>
+            return (IResult)new DeadlineListResult(options, async () =>
             {
                 try
                 {
@@ -102,9 +97,6 @@ public static class CellBridgeListsExtensions
                         return Results.StatusCode(401);
                     var actor = options.ActorResolver(context);
                     if (actor is null || string.IsNullOrWhiteSpace(actor.Subject)) return Results.StatusCode(401);
-                    if (!admission.Enter(actor.Subject, Guid.Parse(context.Request.RouteValues["workspaceId"]!.ToString()!)))
-                        return Results.Json(new { error = "Unavailable" }, statusCode: 503);
-                    context.RequestAborted.ThrowIfCancellationRequested();
                     if (method != "GET")
                     {
                         if (context.Request.ContentLength > options.MaxRequestBodyBytes)
@@ -149,53 +141,8 @@ public static class CellBridgeListsExtensions
 
 }
 
-internal sealed class ListRequestGate(CellBridgeListsOptions options)
+internal sealed class DeadlineListResult(CellBridgeListsOptions options, Func<Task<IResult>> action) : IResult
 {
-    private readonly object sync = new();
-    // Entries exist only while requests are active. Random workspace IDs cannot
-    // grow a persistent cache, and changing workspaces does not bypass actor limits.
-    private readonly Dictionary<string, int> actors = new(StringComparer.Ordinal);
-    private readonly Dictionary<Guid, int> workspaces = new();
-    private int active;
-
-    public Lease? TryEnter(string actor, Guid workspace)
-    {
-        lock (sync)
-        {
-            var actorCount = actors.GetValueOrDefault(actor);
-            var workspaceCount = workspaces.GetValueOrDefault(workspace);
-            if (active >= options.MaxConcurrentRequests
-                || actorCount >= Math.Min(options.MaxConcurrentRequests, options.MaxConcurrentRequestsPerActor)
-                || workspaceCount >= Math.Min(options.MaxConcurrentRequests, options.MaxConcurrentRequestsPerWorkspace)) return null;
-            active++;
-            actors[actor] = actorCount + 1;
-            workspaces[workspace] = workspaceCount + 1;
-            return new Lease(this, actor, workspace);
-        }
-    }
-
-    private void Release(string actor, Guid workspace)
-    {
-        lock (sync)
-        {
-            active--;
-            if (actors[actor] == 1) actors.Remove(actor); else actors[actor]--;
-            if (workspaces[workspace] == 1) workspaces.Remove(workspace); else workspaces[workspace]--;
-        }
-    }
-
-    internal sealed class Lease(ListRequestGate gate, string actor, Guid workspace) : IDisposable
-    {
-        private int released;
-        public void Dispose() { if (Interlocked.Exchange(ref released, 1) == 0) gate.Release(actor, workspace); }
-    }
-}
-
-internal sealed class GatedListResult(ListRequestGate gate, CellBridgeListsOptions options, Func<GatedListResult, Task<IResult>> action) : IResult
-{
-    private ListRequestGate.Lease? lease;
-    public bool Enter(string actor, Guid workspace) => (lease = gate.TryEnter(actor, workspace)) is not null;
-
     public async Task ExecuteAsync(HttpContext context)
     {
         var originalAbort = context.RequestAborted;
@@ -215,8 +162,7 @@ internal sealed class GatedListResult(ListRequestGate gate, CellBridgeListsOptio
         {
             // Hosts must honor cancellation. If custom code does not, abort still
             // bounds the client connection, while awaiting it keeps request-scoped
-            // dependencies alive and retains admission until the work ends.
-            lease?.Dispose();
+            // dependencies alive until the work ends.
             abort.Dispose();
             cancellation.Dispose();
             deadline.Dispose();
@@ -227,7 +173,7 @@ internal sealed class GatedListResult(ListRequestGate gate, CellBridgeListsOptio
 
     private async Task ExecuteResponse(HttpContext context)
     {
-        var result = await action(this);
+        var result = await action();
         context.RequestAborted.ThrowIfCancellationRequested();
         await result.ExecuteAsync(context);
     }

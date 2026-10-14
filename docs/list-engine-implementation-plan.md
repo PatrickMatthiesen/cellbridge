@@ -192,8 +192,11 @@ is separate from an immutable server-assigned per-list number and optional displ
 prefix. Numbers never repeat and committed create retries preserve the assignment;
 gap-free fiscal numbering is outside this library's contract.
 
-Schema publication and new record mutation serialize through the current list
-schema row. Recheck schema version, authorization, revision and quotas before commit.
+Schema publication exclusively locks the current list schema row. Record writes
+share-lock that row to stabilize the schema, coordinate individual records and
+reference targets through database row locks/foreign keys, and allocate numbers
+through a separate atomic per-list counter. Recheck schema version, authorization,
+revision and configured quotas before commit.
 Use conditional updates to prevent lost changes. Create IDs are client-generated
 UUIDs scoped to a list. Authorize with current permissions first, then look up the
 create receipt before applying current-schema validation. Bind the receipt to
@@ -208,7 +211,8 @@ denied before receipt lookup. Validate the current schema only for a new mutatio
 Keep a record-ID tombstone for the lifetime of the list so IDs cannot be reused
 after deletion or receipt expiry. After receipt expiry, a repeated ID conflicts
 instead of being recreated; callers resolve uncertainty through an authorized read.
-Tombstones consume quota and count against a total record-identity limit. Retried
+Tombstones consume configured quota and an atomic counter tracks lifetime identities
+without counting the table on each insert. Volume quotas are optional host settings. Retried
 updates with stale revisions return a conflict and require rereading. Define
 lost-response behavior rather than claiming all writes are exactly-once.
 
@@ -231,10 +235,11 @@ unbounded totals and aggregations initially. Index workspace/list/record keys;
 benchmark declared JSONB filter and sort operations before selecting additional
 indexes. Index creation is an operator action, never user-triggered DDL.
 
-The initial provider may evaluate supported filters/sorts over a bounded list
-snapshot of at most 5,000 records. Reject further growth explicitly; do not silently
-truncate query inputs. Qualify this limit and document memory/latency tradeoffs.
-Database query compilation and larger workloads require measured follow-up work.
+Execute supported filters, typed sorting and keyset pagination in PostgreSQL.
+Transfer only the requested page and one look-ahead row. Support lists with at
+least 100,000 records, and measure aggregate integration traffic against a baseline
+of 4,000 committed writes per minute across customer workspaces. Target at most
+three warm write SQL execution round trips, with durable commit measured separately.
 
 Exports use one bounded authorized query snapshot and report their extraction
 limit and whether more records remain. CSV protects untrusted text from spreadsheet
@@ -265,9 +270,10 @@ HTTP writes using cookies require antiforgery protection. Bearer integrations us
 an explicitly configured authentication scheme and permission scope. Bound request
 bodies before parsing, encode displayed labels and text, use private/no-store
 responses for customer data, and return controlled validation/conflict errors.
-Bound HTTP admission globally and independently by actor and workspace. Apply an
-absolute deadline before admission through response execution. Abort transport
-on expiry and retain leases until outstanding work finishes.
+Let the host configure rate limiting, request admission and integration queues.
+The library imposes no fixed concurrency caps. Apply an absolute adapter deadline
+through response execution. Abort transport on expiry and keep request-scoped
+dependencies alive until outstanding work finishes.
 
 ## Implementation sequence and acceptance criteria
 
