@@ -33,12 +33,16 @@ Stop another AppHost from this checkout before starting this one if their dashbo
 ports conflict. Leave unrelated checkouts' AppHosts alone.
 
 Set `Benchmark__Clients`, `Benchmark__Workspaces`, `Benchmark__Iterations`,
-`Benchmark__Modes`, `Benchmark__Records` and `Benchmark__Output` before `aspire start`.
+`Benchmark__Modes`, `Benchmark__Records`, `Benchmark__PayloadBytes` and
+`Benchmark__Output` before `aspire start`.
 Defaults are 1/8/32 writers, 1/16 workspaces, 200 iterations per writer, both provider
 and HTTP modes, and 1,000 records for the separate query workload. Each writer
 cycles through the requested customer workspaces. Cases measure creates and patches
 separately. Warm-up, setup and final persisted-record checks are outside the timed
-write interval.
+write interval. Records have a title, integer counter and deterministic ASCII
+payload. The payload defaults to 1,024 bytes and supports 0 through 60,000 bytes;
+the report also records the complete serialized values size. Payload generation
+occurs once before the timed cases.
 
 For 100,000-record query qualification, set `Benchmark__Records=100000`. Preparation
 uses `CreateRecordAsync` for every row and records its elapsed time separately.

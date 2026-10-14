@@ -15,18 +15,26 @@ internal static class Benchmark
     private static readonly ListActor Actor = new("benchmark:integration");
     private static readonly Guid Title = Guid.Parse("ba000000-0000-0000-0000-000000000001");
     private static readonly Guid Counter = Guid.Parse("ba000000-0000-0000-0000-000000000002");
+    private static readonly Guid Payload = Guid.Parse("ba000000-0000-0000-0000-000000000003");
+    // Assigned once before setup; all concurrent operations reuse this immutable string.
+    private static string payloadValue = "";
     private static readonly JsonSerializerOptions ReportJson = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public static async Task<int> RunAsync(string[] args)
     {
         if (args.Contains("--help"))
         {
-            Console.WriteLine("--clients 1,8,32 --workspaces 1,16 --iterations 200 --target-per-minute 0 --records 1000 --records-skip --modes provider,http --output artifacts/lists-performance/report.json");
+            Console.WriteLine("--clients 1,8,32 --workspaces 1,16 --iterations 200 --target-per-minute 0 --payload-bytes 1024 --records 1000 --records-skip --modes provider,http --output artifacts/lists-performance/report.json");
             return 0;
         }
         Options options;
         try { options = Options.Parse(args); }
         catch (ArgumentException error) { Console.Error.WriteLine(error.Message); return 2; }
+        payloadValue = string.Create(options.PayloadBytes, new Random(42), static (text, random) =>
+        {
+            const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            for (var i = 0; i < text.Length; i++) text[i] = alphabet[random.Next(alphabet.Length)];
+        });
         var connection = Environment.GetEnvironmentVariable("ConnectionStrings__lists");
         if (string.IsNullOrWhiteSpace(connection))
         { Console.Error.WriteLine("ConnectionStrings__lists must supply an administrative disposable PostgreSQL connection."); return 2; }
@@ -152,7 +160,8 @@ internal static class Benchmark
                     {
                         var list = lists[workspace];
                         var actual = await engine.GetRecordAsync(Actor, list.WorkspaceId, list.Id, expected.Id);
-                        Require(actual.Revision == expected.Revision && actual.Values[Counter.ToString("D")]!.GetValue<long>() == expected.Counter,
+                        Require(actual.Revision == expected.Revision && actual.Values[Counter.ToString("D")]!.GetValue<long>() == expected.Counter
+                            && actual.Values[Payload.ToString("D")]!.GetValue<string>() == payloadValue,
                             "Persisted record verification failed.");
                     }
                     catch { verificationErrors++; }
@@ -181,7 +190,8 @@ internal static class Benchmark
         var updated = mode == "http" ? await http!.SendAsync<ListRecord>($"{path}/{record.Id:D}", HttpMethod.Patch, patch, metrics)
             : await ProviderAsync(() => engine.UpdateRecordAsync(Actor, list.WorkspaceId, list.Id, record.Id, patch), metrics);
         Require(updated.Id == record.Id && updated.WorkspaceId == list.WorkspaceId && updated.ListId == list.Id
-            && updated.Revision == record.Revision + 1 && updated.Values[Counter.ToString("D")]!.GetValue<long>() == counter,
+            && updated.Revision == record.Revision + 1 && updated.Values[Counter.ToString("D")]!.GetValue<long>() == counter
+            && updated.Values[Payload.ToString("D")]!.GetValue<string>() == payloadValue,
             "Patch response verification failed.");
         Require(metrics.SqlExecutions > 0 && metrics.SqlCommits == 1, "SQL instrumentation did not observe the patch and its commit.");
         return new(updated.Id, updated.Revision, counter);
@@ -224,7 +234,8 @@ internal static class Benchmark
                 var start = firstCounter + (page == "second-page" ? query.Limit : 0);
                 for (var j = 0; j < records.Count; j++)
                     Require(records[j].WorkspaceId == list.WorkspaceId && records[j].ListId == list.Id
-                        && records[j].Values[Counter.ToString("D")]!.GetValue<long>() == start + j, "Query order/value verification failed.");
+                        && records[j].Values[Counter.ToString("D")]!.GetValue<long>() == start + j
+                        && records[j].Values[Payload.ToString("D")]!.GetValue<string>() == payloadValue, "Query order/value verification failed.");
             }
             catch (Exception failure) { error = ErrorKind(failure); }
             timer.Stop(); samples[i] = new(timer.Elapsed.TotalMilliseconds, error, metrics);
@@ -248,9 +259,11 @@ internal static class Benchmark
         var workspace = Guid.NewGuid();
         await PostgreSqlListSetup.RegisterWorkspaceAsync(database.Admin, workspace, name, Actor.Subject);
         return await engine.CreateListAsync(Actor, workspace,
-            new(Guid.NewGuid(), name, [new(Title, "Title", ListFieldType.Text, Required: true), new(Counter, "Counter", ListFieldType.Integer, Required: true)]));
+            new(Guid.NewGuid(), name, [new(Title, "Title", ListFieldType.Text, Required: true), new(Counter, "Counter", ListFieldType.Integer, Required: true),
+                new(Payload, "Payload", ListFieldType.Text, Required: true, MaxLength: 60000)]));
     }
-    private static JsonObject Values(string title, long counter) => new() { [Title.ToString("D")] = title, [Counter.ToString("D")] = counter };
+    private static JsonObject Values(string title, long counter) => new()
+    { [Title.ToString("D")] = title, [Counter.ToString("D")] = counter, [Payload.ToString("D")] = payloadValue };
     private static void Require(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
     private static string ErrorKind(Exception error) => error switch
     {
@@ -303,6 +316,9 @@ internal static class Benchmark
             architecture = RuntimeInformation.ProcessArchitecture.ToString(),
             configuredCpuSet = Environment.GetEnvironmentVariable("CELLBRIDGE_BENCHMARK_CPU_SET"),
             configuredPostgresMemory = Environment.GetEnvironmentVariable("CELLBRIDGE_BENCHMARK_POSTGRES_MEMORY"),
+            payloadBytes = payloadValue.Length,
+            exampleValuesJsonBytes = JsonSerializer.SerializeToUtf8Bytes(Values("Measured create", 0), BenchmarkHttpHost.Json).Length,
+            payloadFormat = "Deterministic ASCII alphanumeric text, seed 42, reused across records; zero bytes stores an empty string. Field UUID keys are included in exampleValuesJsonBytes.",
             availableMemoryBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
             source = SourceInformation(),
             postgresVersion = (string)(await version.ExecuteScalarAsync())!, postgresSettings = settings,
@@ -366,7 +382,7 @@ internal static class Benchmark
                 process.TotalProcessorTime.TotalMilliseconds, process.WorkingSet64, process.PrivateMemorySize64, process.PeakWorkingSet64);
         }
     }
-    private sealed record Options(int[] Clients, int[] Workspaces, int Iterations, int TargetPerMinute, int Records, bool SkipRecords, string[] Modes, string Output)
+    private sealed record Options(int[] Clients, int[] Workspaces, int Iterations, int TargetPerMinute, int PayloadBytes, int Records, bool SkipRecords, string[] Modes, string Output)
     {
         public static Options Parse(string[] args)
         {
@@ -375,7 +391,7 @@ internal static class Benchmark
             for (var i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--records-skip") { skip = true; continue; }
-                if (!new[] { "--clients", "--workspaces", "--iterations", "--target-per-minute", "--records", "--modes", "--output" }.Contains(args[i]) || i + 1 == args.Length)
+                if (!new[] { "--clients", "--workspaces", "--iterations", "--target-per-minute", "--payload-bytes", "--records", "--modes", "--output" }.Contains(args[i]) || i + 1 == args.Length)
                     throw new ArgumentException("Unknown argument or missing value. Run with --help.");
                 if (!values.TryAdd(args[i], args[++i])) throw new ArgumentException("Duplicate benchmark argument.");
             }
@@ -388,6 +404,7 @@ internal static class Benchmark
             if (modes.Any(m => m is not ("provider" or "http"))) throw new ArgumentException("Modes must be provider and/or http.");
             return new(clients, workspaces, Number(Value("--iterations", "200"), 1, 10000),
                 Number(Value("--target-per-minute", "0"), 0, 10000000),
+                Number(Value("--payload-bytes", "1024"), 0, 60000),
                 Number(Value("--records", "1000"), 4, 1000000), skip, modes, Value("--output", "artifacts/lists-performance/report.json"));
         }
     }

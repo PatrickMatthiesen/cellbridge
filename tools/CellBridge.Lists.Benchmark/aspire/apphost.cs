@@ -20,6 +20,7 @@ var benchmarkArgs = new List<string>
     "--workspaces", builder.Configuration["Benchmark:Workspaces"] ?? "1,16",
     "--iterations", builder.Configuration["Benchmark:Iterations"] ?? "200",
     "--target-per-minute", builder.Configuration["Benchmark:TargetPerMinute"] ?? "0",
+    "--payload-bytes", builder.Configuration["Benchmark:PayloadBytes"] ?? "1024",
     "--records", builder.Configuration["Benchmark:Records"] ?? "1000",
     "--modes", builder.Configuration["Benchmark:Modes"] ?? "provider,http",
     "--output", builder.Configuration["Benchmark:Output"] ?? "artifacts/lists-performance/report.json"
