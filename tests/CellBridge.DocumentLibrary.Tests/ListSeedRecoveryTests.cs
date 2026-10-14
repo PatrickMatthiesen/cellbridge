@@ -87,7 +87,12 @@ public sealed class ListSeedRecoveryTests
         var task = await database.Engine.GetRecordAsync(Owner, Workspace, Tasks, TaskRecord);
         Assert.False(task.Values.ContainsKey(DocumentLibraryListIds.TaskWorkPackageFieldId.ToString("D")));
         Assert.Equal(1L, await database.ScalarAsync<long>("SELECT count(*) FROM cellbridge_lists.record_tombstones WHERE workspace_id=$1 AND list_id=$2", Packages));
-        Assert.Equal(2L, await database.ScalarAsync<long>("SELECT next_number FROM cellbridge_lists.lists WHERE workspace_id=$1 AND list_id=$2", Packages));
+        var replacement = await database.Engine.CreateRecordAsync(Owner, Workspace, Packages,
+            new CreateRecordRequest(Guid.NewGuid(), 1, new JsonObject
+            {
+                [DocumentLibraryListIds.WorkPackageTitleFieldId.ToString("D")] = "Replacement package"
+            }));
+        Assert.Equal(2L, replacement.Number);
     }
 
     [PostgreSqlFact]
