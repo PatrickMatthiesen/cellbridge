@@ -103,8 +103,8 @@ unrelated authority domain or scope.
 A staged upload whose Create commit is uncertain remains marked pending. Startup
 can finish publication binding when the authorized CellBridge state exists. It
 refuses to import a pending upload with missing state, because trusted recovery
-must not bypass a failed user Create check. A definitive Create denial discards
-only its newly staged, unaccepted upload.
+must not bypass a failed user Create check. A definitive Create denial or returned
+path/resource conflict discards only its newly staged, unaccepted upload.
 
 ## Run the example
 

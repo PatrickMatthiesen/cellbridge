@@ -126,12 +126,11 @@ public sealed class DocumentLibraryService(
             .SetItem(actor.Identity.Subject, DocumentAccess.Write);
         var manifest = await destination.CreateAsync(resourceId, bindingId, fileName, path,
             new MemoryStream(bytes, writable: false), initialPermissions, cancellationToken, pendingCreation: true);
-        DocumentState state;
+        DocumentState? state;
         try
         {
             state = await documents.CreateExternalAsync(resourceId, path, bytes,
-                DocumentLibraryPermissionProvider.Scope, actor, cancellationToken)
-                ?? throw new InvalidOperationException("CellBridge rejected the document path or resource ID.");
+                DocumentLibraryPermissionProvider.Scope, actor, cancellationToken);
         }
         catch (UnauthorizedAccessException)
         {
@@ -143,6 +142,14 @@ public sealed class DocumentLibraryService(
                 authorizationCache?.InvalidateResource(resourceId);
             }
             throw;
+        }
+        if (state is null)
+        {
+            // A returned rejection is definitive. Exceptions may hide a successful commit and
+            // must retain their staged upload for the recovery checks in InitializeAsync.
+            await destination.DiscardRejectedCreationAsync(resourceId, CancellationToken.None);
+            authorizationCache?.InvalidateResource(resourceId);
+            throw new InvalidOperationException("CellBridge rejected the document path or resource ID.");
         }
         if (!await publisher.BindAsync(resourceId, state.LifecycleGeneration, state.StateVersion,
             bindingId, manifest.DestinationId, manifest.CurrentRevision, cancellationToken))
