@@ -208,15 +208,18 @@ public sealed partial class PortableArchive
             for (int i = 1; i < ordered.Length; i++)
             {
                 var previous = ordered[i - 1]; var next = ordered[i];
+                // Receipt order is not identity. Every earlier accepted record must remain unchanged.
+                var wholeFileReceipts = next.WholeFileSaveReceipts.ToHashSet();
                 if (previous.LifecycleGeneration != next.LifecycleGeneration || previous.CreatedUtc != next.CreatedUtc ||
                     previous.ContentVersion > next.ContentVersion ||
                     previous.RetiredPathKeys.Any(k => !next.RetiredPathKeys.Contains(k)) ||
                     previous.PathKey != next.PathKey && !next.RetiredPathKeys.Contains(previous.PathKey) ||
                     previous.IsDeleted && (!next.IsDeleted || previous.DeletedFromStateVersion != next.DeletedFromStateVersion) ||
                     previous.ReplacedBy is not null && previous.ReplacedBy != next.ReplacedBy ||
+                    previous.WholeFileSaveReceipts.Any(r => !wholeFileReceipts.Contains(r)) ||
                     previous.Revisions.Any(r => !next.Revisions.Any(n => n.RevisionNumber == r.RevisionNumber &&
                         JsonSerializer.Serialize(n) == JsonSerializer.Serialize(r))))
-                    throw new StorageCorruptionException("Retained snapshots disagree on identity, lifecycle, history or permanent path reservations.");
+                    throw new StorageCorruptionException("Retained snapshots disagree on identity, lifecycle, history, whole-file receipts or permanent path reservations.");
             }
         }
         var parents = new Dictionary<Guid, Guid>();
