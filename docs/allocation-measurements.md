@@ -94,6 +94,47 @@ restore 50,348,883 bytes before and after. Restore read six unique handles total
 but this measurement does not justify changing defensive ownership or adopting
 a lazy graph architecture. Filesystem restore allocations stayed within 0.01%.
 
+## Measured restore comparison reduction
+
+Eager restore previously compared the document bytes with
+`FilePartition.Content`. That public getter returns a defensive copy, so the
+comparison allocated another complete file buffer. Restore now compares spans
+under the partition lock. Public getters still return independent arrays, and
+different verified document and partition bytes still reject as corruption.
+
+The October 17, 2026 run used source `465ffd749461c92a048f61ef347eb8d71664baae`
+plus this comparison change, Windows build 26200, x64, .NET SDK 10.0.401 and
+runtime 10.0.13, 16 reported processors, workstation GC and disabled tiered
+compilation. Both batches used the runner above with three repetitions and 30
+measured operations after five warmups. A disposable Aspire test host was idle
+during both batches. This was an offline stage benchmark, not an HTTP load test.
+
+These are median batch means in allocated bytes per eager restore, rounded to
+the nearest byte:
+
+| Input | Content provider | Before | After | Reduction |
+| --- | --- | ---: | ---: | ---: |
+| Synthetic 1 KiB | In-memory | 22,896 | 21,848 | 4.58% |
+| Synthetic 1 MiB | In-memory | 6,309,757 | 5,261,121 | 16.62% |
+| Synthetic 8 MiB | In-memory | 50,348,883 | 41,960,522 | 16.66% |
+| Synthetic 8 MiB | Filesystem | 50,758,069 | 42,366,653 | 16.53% |
+| First save's 13,506 file bytes | In-memory | 131,344 | 117,808 | 10.31% |
+| Second save's 14,005 file bytes | In-memory | 171,448 | 157,416 | 8.18% |
+
+At 8 MiB the change removes about one payload-sized allocation per restore.
+In-memory allocation falls from about six to five times payload size. Logical
+read counts and bytes, graph sizes, workload hashes and generated wire hashes
+matched across all 90 before/after stage pairs. Parser and nested-builder
+allocation controls remained effectively unchanged. Wall times varied, so this
+run establishes the allocation reduction without a latency claim.
+
+`ContentStoreReaderTests` covers same-length corruption using distinct verified
+handles and mutation isolation of restored document/partition content views and
+graph materialization. Raw reports, executable snapshots and source manifests
+are retained locally under ignored `artifacts/allocations/issue33-before` and
+`issue33-after`. Inbound streaming, eager graph construction and loading retained
+graphs for explicit multi-cell queries remain separate work under #33.
+
 ## Semantic checks and evidence limits
 
 `NestedSerializationTests` compares baseline SHA-256 wire goldens for both

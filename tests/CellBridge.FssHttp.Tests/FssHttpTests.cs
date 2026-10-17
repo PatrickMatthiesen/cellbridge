@@ -48,6 +48,18 @@ public class CellStorageRequestParserTests
         Assert.Equal("6B29FC40-CA47-1067-B31D-00DD010662DB", subRequest.SubRequestDataAttributes["CoauthID"]);
     }
 
+    [Fact]
+    public void ParsesUseResourceIdWithOmittedResourceId()
+    {
+        var envelope = SampleQueryAccessEnvelope.Replace(
+            "RequestToken=\"1\"", "RequestToken=\"1\" UseResourceID=\"true\"");
+
+        var fileRequest = Assert.Single(CellStorageRequestParser.Parse(envelope).Requests);
+
+        Assert.True(fileRequest.UseResourceId);
+        Assert.Null(fileRequest.ResourceId);
+    }
+
     [Theory]
     [InlineData("Cell", SubRequestType.Cell)]
     [InlineData("Coauth", SubRequestType.Coauth)]

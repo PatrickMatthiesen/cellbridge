@@ -603,6 +603,14 @@ public sealed partial class DocumentPartition
         }
     }
 
+    internal bool ContentEquals(ReadOnlySpan<byte> content)
+    {
+        lock (_gate)
+        {
+            return _content.AsSpan().SequenceEqual(content);
+        }
+    }
+
     private ulong _knowledgeSequence = 73507;
     private byte[] _content = Array.Empty<byte>();
 

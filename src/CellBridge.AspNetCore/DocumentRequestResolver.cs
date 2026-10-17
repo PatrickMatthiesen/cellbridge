@@ -8,8 +8,9 @@ namespace CellBridge.AspNetCore;
 ///
 /// ResourceID is the stable identity for a document. When the request supplies
 /// that identity and enables its use, the URL is only an echoed hint and must not
-/// be used as a fallback. This preserves the document's lock and coauthoring
-/// state when a client sends a stale or differently escaped URL.
+/// be used as a fallback. If UseResourceID is true but ResourceID is omitted,
+/// the URL identifies the initial request and the response can establish the ID.
+/// This preserves document state when a client later sends a stale URL.
 /// </summary>
 public static class DocumentRequestResolver
 {
@@ -19,10 +20,9 @@ public static class DocumentRequestResolver
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(request);
 
-        if (request.UseResourceId)
+        if (request.UseResourceId && request.ResourceId is not null)
         {
-            if (string.IsNullOrWhiteSpace(request.ResourceId) ||
-                !Guid.TryParse(request.ResourceId, out var resourceId))
+            if (!Guid.TryParse(request.ResourceId, out var resourceId))
             {
                 return null;
             }
