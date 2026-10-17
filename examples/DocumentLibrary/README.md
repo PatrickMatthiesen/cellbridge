@@ -111,6 +111,9 @@ templates. Task records link to a work package, receive a `TASK-` number and hav
 an External ID hidden from ordinary forms. Owner can add optional text fields and
 create list J. Editor can edit records; reader can browse and download extracts.
 These local account hints affect the UI only; the engine checks current grants.
+An uncertain field addition retains its field ID, name and target list. Retry
+checks the current schema for that ID before sending another update, so a lost
+response cannot turn the same addition into a second field.
 
 Open the same task in two tabs to try merging. Save a change in one tab, then
 save another in the other tab. The second tab retains its draft, shows original,

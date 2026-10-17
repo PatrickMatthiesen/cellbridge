@@ -10,6 +10,87 @@ namespace CellBridge.Lists.PostgreSql.Tests;
 public sealed class RecordReviewRegressionTests(ListDatabaseFixture database)
 {
     [PostgreSqlFact]
+    public async Task DecimalZeroSpellingsPersistAsExactZeroWithoutMutatingRequests()
+    {
+        var workspace = await database.NewWorkspaceAsync("decimal-zero-persistence");
+        var spellings = new[] { "0.0000000000000", "-0e-20000", "0e-28", "-0" };
+        var fields = spellings.Select((_, index) =>
+            new ListField(Guid.NewGuid(), "Zero " + index, ListFieldType.Decimal)).ToArray();
+        var list = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Decimal zeros", fields));
+        var values = new JsonObject();
+        foreach (var (field, spelling) in fields.Zip(spellings))
+            values[field.Id.ToString("D")] = JsonNode.Parse(spelling);
+        var originalNodes = fields.ToDictionary(field => field.Id,
+            field => values[field.Id.ToString("D")]);
+        var request = new CreateRecordRequest(Guid.NewGuid(), 1, values);
+        var originalJson = values.ToJsonString();
+        var originalDigest = ListValidation.CreateDigest(request);
+
+        var created = await database.Engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, request);
+        Assert.False(created.Replayed);
+        Assert.Equal(originalJson, values.ToJsonString());
+        Assert.Equal(originalDigest, ListValidation.CreateDigest(request));
+        foreach (var field in fields)
+            Assert.Same(originalNodes[field.Id], values[field.Id.ToString("D")]);
+
+        var replay = await database.Engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, request);
+        Assert.True(replay.Replayed);
+        Assert.Equal((created.Revision, created.Number), (replay.Revision, replay.Number));
+        Assert.Equal(originalJson, values.ToJsonString());
+        Assert.Equal(originalDigest, ListValidation.CreateDigest(request));
+
+        var read = await database.Engine.GetRecordAsync(database.AdminActor, workspace, list.Id, request.Id);
+        foreach (var field in fields)
+            Assert.Equal("0", read.Values[field.Id.ToString("D")]!.ToJsonString());
+
+        var patchValue = JsonNode.Parse("-0e-20000")!;
+        var patch = new UpdateRecordRequest(1, 1, [new FieldChange(fields[0].Id, patchValue)]);
+        var updated = await database.Engine.UpdateRecordAsync(database.AdminActor, workspace, list.Id, request.Id, patch);
+        Assert.Equal("-0e-20000", patchValue.ToJsonString());
+        Assert.Same(patchValue, patch.Changes[0].Value);
+        Assert.Equal("0", updated.Values[fields[0].Id.ToString("D")]!.ToJsonString());
+        var reread = await database.Engine.GetRecordAsync(database.AdminActor, workspace, list.Id, request.Id);
+        Assert.Equal(2, reread.Revision);
+        Assert.All(fields, field => Assert.Equal("0", reread.Values[field.Id.ToString("D")]!.ToJsonString()));
+
+        var firstFilterValue = JsonNode.Parse("0e-20000")!;
+        var secondFilterValue = JsonNode.Parse("-0e-20000")!;
+        var filters = new[]
+        {
+            new RecordFilter(fields[0].Id, FilterOperator.Equal, firstFilterValue),
+            new RecordFilter(fields[1].Id, FilterOperator.Equal, secondFilterValue)
+        };
+        var viewRequest = new SaveViewRequest(Guid.NewGuid(), "Exact zeros", new ListQuery(filters),
+            fields.Select(field => field.Id).ToArray());
+        var savedView = await database.Engine.SaveViewAsync(database.AdminActor, workspace, list.Id, viewRequest);
+        Assert.Equal("0e-20000", firstFilterValue.ToJsonString());
+        Assert.Equal("-0e-20000", secondFilterValue.ToJsonString());
+        Assert.Same(firstFilterValue, filters[0].Value);
+        Assert.Same(secondFilterValue, filters[1].Value);
+        Assert.All(savedView.Query.Filters!, filter => Assert.Equal("0", filter.Value!.ToJsonString()));
+        var readView = Assert.Single(await database.Engine.GetViewsAsync(database.AdminActor, workspace, list.Id));
+        Assert.All(readView.Query.Filters!, filter => Assert.Equal("0", filter.Value!.ToJsonString()));
+
+        var invalidCreateValues = new JsonObject
+        {
+            [fields[0].Id.ToString("D")] = JsonNode.Parse("1.0000000000001")
+        };
+        var createFailure = await Assert.ThrowsAsync<ListException>(() => database.Engine.CreateRecordAsync(
+            database.AdminActor, workspace, list.Id, new CreateRecordRequest(Guid.NewGuid(), 1, invalidCreateValues)));
+        Assert.Equal(ListFailure.Validation, createFailure.Failure);
+        Assert.Equal("1.0000000000001", invalidCreateValues[fields[0].Id.ToString("D")]!.ToJsonString());
+
+        var invalidPatchValue = JsonNode.Parse("1.0000000000001")!;
+        var patchFailure = await Assert.ThrowsAsync<ListException>(() => database.Engine.UpdateRecordAsync(
+            database.AdminActor, workspace, list.Id, request.Id,
+            new UpdateRecordRequest(2, 1, [new FieldChange(fields[0].Id, invalidPatchValue)])));
+        Assert.Equal(ListFailure.Validation, patchFailure.Failure);
+        Assert.Equal("1.0000000000001", invalidPatchValue.ToJsonString());
+        Assert.Equal(2, (await database.Engine.GetRecordAsync(database.AdminActor, workspace, list.Id, request.Id)).Revision);
+    }
+
+    [PostgreSqlFact]
     public async Task FractionalReceiptLifetimeIsIndependentOfHostCulture()
     {
         var originalCulture = CultureInfo.CurrentCulture;

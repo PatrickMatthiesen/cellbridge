@@ -177,10 +177,59 @@ responses=[{status:200,body:definition},{status:409},{status:200,body:definition
   let unblockSchema;const blockedSchema=new Promise(resolve=>{unblockSchema=resolve});
   responses=[blockedSchema,{status:200,body:definition}];const schemaOffset=calls.length;
   const designing=test.run(()=>test.addField(form));
+  assert.equal(form.elements.name.disabled,true);
   get('workspace').value='different-customer';form.elements.name.value='Changed during request';
   unblockSchema({status:200,body:definition});await designing;
   assert.equal(calls[schemaOffset+1].path,originalContext.listRoot+'/schema');
   assert.equal(JSON.parse(calls[schemaOffset+1].body).fields.at(-1).name,'Notes');
+  // A committed schema change with a lost response is confirmed by its retained field ID.
+  const fieldButton=get('add-field').querySelector('button');
+  const pendingForm={elements:{name:{value:'Automation note'}},reset(){this.resets=(this.resets||0)+1;}};
+  test.state.context=originalContext;test.state.definition=definition;
+  responses=[{status:200,body:definition},new Error('schema response lost')];const fieldOffset=calls.length;
+  await test.run(()=>test.addField(pendingForm),fieldButton);
+  const addedField=JSON.parse(calls[fieldOffset+1].body).fields.at(-1);
+  const pendingField=test.state.pendingField;
+  assert.equal(pendingField.field.id,addedField.id);assert.equal(pendingForm.elements.name.disabled,true);
+  assert.equal(get('workspace').disabled,true);assert.equal(get('list').disabled,true);
+  assert.equal(get('create-list').querySelector('button').disabled,true);assert.equal(fieldButton.disabled,false);
+  // Failed confirmation, including revoked access, cannot discard an uncertain field identity.
+  responses=[{status:404}];const confirmationOffset=calls.length;
+  await test.run(()=>test.addField(pendingForm),fieldButton);
+  assert.equal(calls.length,confirmationOffset+1);assert.equal(test.state.pendingField,pendingField);
+  assert.equal(pendingForm.elements.name.disabled,true);
+  pendingForm.elements.name.value='Changed after response loss';get('workspace').value='other-customer';
+  const committedDefinition={...definition,schemaVersion:4,fields:[...definition.fields,addedField]};
+  responses=[{status:200,body:committedDefinition}];const confirmedOffset=calls.length;
+  await test.run(()=>test.addField(pendingForm),fieldButton);
+  assert.equal(calls.length,confirmedOffset+1,'Confirmation must not publish another field.');
+  assert.equal(calls[confirmedOffset].path,originalContext.listRoot);
+  assert.equal(test.state.pendingField,null);assert.equal(pendingForm.elements.name.disabled,false);
+  assert.equal(pendingForm.resets,1);
+  // If the first PUT never committed, retry uses the same field alongside current schema changes.
+  const retryFieldForm={elements:{name:{value:'Retry field'}},reset(){}};
+  responses=[{status:200,body:definition},new Error('request outcome unknown')];const absentOffset=calls.length;
+  await test.run(()=>test.addField(retryFieldForm),fieldButton);
+  const retryField=JSON.parse(calls[absentOffset+1].body).fields.at(-1);
+  retryFieldForm.elements.name.value='Do not create a second field';
+  const concurrentField={id:'73000000-0000-0000-0000-000000000003',name:'Other designer',type:'Text'};
+  const latestDefinition={...definition,schemaVersion:5,fields:[...definition.fields,concurrentField]};
+  responses=[{status:200,body:latestDefinition},{status:409}];const conflictOffset=calls.length;
+  await test.run(()=>test.addField(retryFieldForm),fieldButton);
+  const retryBody=JSON.parse(calls[conflictOffset+1].body);
+  assert.deepEqual(retryBody.fields.at(-1),retryField);assert.equal(retryBody.expectedVersion,5);
+  assert.ok(retryBody.fields.some(field=>field.id===concurrentField.id));
+  assert.equal(test.state.pendingField.field.id,retryField.id);
+  responses=[{status:200,body:latestDefinition},{status:200,body:{...latestDefinition,schemaVersion:6,fields:[...latestDefinition.fields,retryField]}}];
+  const finalFieldOffset=calls.length;await test.run(()=>test.addField(retryFieldForm),fieldButton);
+  assert.deepEqual(JSON.parse(calls[finalFieldOffset+1].body).fields.at(-1),retryField);
+  assert.equal(test.state.pendingField,null);assert.equal(retryFieldForm.elements.name.disabled,false);
+  // Confirmed validation failures and schema-read failures before any PUT restore editable input.
+  for (const queued of [[{status:200,body:definition},{status:400}],[new Error('schema unavailable')]]) {
+    responses=queued;await test.run(()=>test.addField(retryFieldForm),fieldButton);
+    assert.equal(test.state.pendingField,null);assert.equal(retryFieldForm.elements.name.disabled,false);
+    assert.equal(get('workspace').disabled,false);
+  }
   // A reference target uses the captured draft workspace for every page.
   let unblockReference;const blockedReference=new Promise(resolve=>{unblockReference=resolve});
   responses=[blockedReference,{status:200,body:{records:[],nextCursor:null}}];const referenceOffset=calls.length;

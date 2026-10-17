@@ -147,12 +147,13 @@ CREATE INDEX IF NOT EXISTS record_references_by_target
 DROP INDEX IF EXISTS cellbridge_lists.audit_by_workspace;
 
 DO $migration_rls$
+DECLARE table_name text;
 BEGIN
   IF (SELECT version FROM cellbridge_lists.schema_version WHERE singleton) = 1 THEN
-    ALTER TABLE cellbridge_lists.lists NO FORCE ROW LEVEL SECURITY;
-    ALTER TABLE cellbridge_lists.list_schemas NO FORCE ROW LEVEL SECURITY;
-    ALTER TABLE cellbridge_lists.records NO FORCE ROW LEVEL SECURITY;
-    ALTER TABLE cellbridge_lists.record_tombstones NO FORCE ROW LEVEL SECURITY;
+    FOREACH table_name IN ARRAY ARRAY['workspaces','memberships','lists','list_schemas','list_grants','records','record_tombstones','create_receipts','saved_views','audit_events']
+    LOOP
+      EXECUTE format('ALTER TABLE cellbridge_lists.%I NO FORCE ROW LEVEL SECURITY', table_name);
+    END LOOP;
   END IF;
 END $migration_rls$;
 
@@ -189,6 +190,40 @@ BEGIN
         THEN (r.values_json->>(field->>'id'))::uuid END
     WHERE field->>'type'='7'
       AND jsonb_typeof(r.values_json->(field->>'id'))='string';
+
+    WITH logical_usage(workspace_id,bytes) AS (
+      SELECT workspace_id,128::bigint+octet_length(subject)::bigint
+      FROM cellbridge_lists.memberships
+      UNION ALL
+      SELECT workspace_id,160::bigint FROM cellbridge_lists.lists
+      UNION ALL
+      SELECT workspace_id,96::bigint+octet_length(definition::text)::bigint
+      FROM cellbridge_lists.list_schemas
+      UNION ALL
+      SELECT workspace_id,80::bigint+octet_length(subject)::bigint
+      FROM cellbridge_lists.list_grants
+      UNION ALL
+      SELECT workspace_id,octet_length(values_json::text)::bigint
+      FROM cellbridge_lists.records
+      UNION ALL
+      SELECT workspace_id,128::bigint FROM cellbridge_lists.record_tombstones
+      UNION ALL
+      SELECT workspace_id,192::bigint+octet_length(actor)::bigint+octet_length(request_digest)::bigint
+      FROM cellbridge_lists.create_receipts
+      UNION ALL
+      SELECT workspace_id,64::bigint+octet_length(definition::text)::bigint
+      FROM cellbridge_lists.saved_views
+      UNION ALL
+      SELECT workspace_id,96::bigint+octet_length(actor)::bigint+octet_length(action)::bigint+
+        COALESCE(octet_length(target_subject),0)::bigint+cardinality(field_ids)::bigint*16
+      FROM cellbridge_lists.audit_events WHERE NOT security
+    ), workspace_usage AS (
+      SELECT workspace_id,sum(bytes) AS bytes FROM logical_usage GROUP BY workspace_id
+    )
+    UPDATE cellbridge_lists.workspaces w SET stored_bytes=COALESCE(u.bytes,0)
+    FROM (SELECT w2.workspace_id,wu.bytes FROM cellbridge_lists.workspaces w2
+      LEFT JOIN workspace_usage wu USING(workspace_id)) u
+    WHERE w.workspace_id=u.workspace_id;
   END IF;
 END $migration$;
 

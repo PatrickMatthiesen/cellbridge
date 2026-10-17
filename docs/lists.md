@@ -66,6 +66,9 @@ collections. Nested objects and arrays are not record values.
 | `Choice` | String matching a declared stable choice ID, not its label |
 | `Reference` | Nonempty target record UUID string in canonical lowercase `D` form |
 
+PostgreSQL persists accepted numeric zero spellings as `0`, including exponent
+notation. This preserves the numeric value and leaves caller request objects unchanged.
+
 An optional value can be absent or explicitly `null`. Both are valid but remain
 distinct in stored records and merge previews. Required values reject absence and
 null. `FieldChange.Remove=true` removes an optional key; assigning `Value=null`
@@ -293,10 +296,15 @@ before use. Runtime credentials cannot register operator templates.
 The current provider requires list schema version 2. Before upgrading a version 1
 installation, stop every old list host and integration worker, back up the list
 schema, and run `InitializeAsync` with operator credentials. Setup creates
-per-list counters and normalized reference links, backfills them once, then
-records version 2 transactionally. Repeated setup on version 2 does not scan
-record history again. Start only version 2 providers afterward. Running old
-providers during this migration can leave the new counters or links incomplete.
+per-list counters and normalized reference links, then recalculates each
+workspace's logical byte usage from its retained version 1 rows. This one-time
+recalculation charges memberships and creator grants that early version 1 code
+did not charge, without charging rows again if a later version 1 build already
+corrected them. Setup records version 2 in the same transaction. Repeated setup
+on version 2 does not scan retained rows again. A workspace whose recalculated
+usage exceeds its configured quota cannot add storage until its usage falls
+below the limit. Start only version 2 providers afterward. Running old providers
+during this migration can leave the new counters or links incomplete.
 
 Record mutations use shared schema locks, record row locks and foreign keys.
 Creates atomically allocate the next per-list number and lifetime identity count.

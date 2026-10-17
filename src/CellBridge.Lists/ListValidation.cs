@@ -252,7 +252,9 @@ public static class ListValidation
         var coefficient = parts[0].TrimStart('-');
         var fraction = coefficient.Contains('.') ? coefficient.Length - coefficient.IndexOf('.') - 1 : 0;
         var digits = coefficient.Replace(".", "").TrimStart('0');
-        if (digits.Length == 0) return exponent is >= -12 and <= 28 && fraction <= DecimalScale;
+        // Zero has no significant fractional scale. Keep syntactic/exponent parsing and decimal
+        // range checks above, but accept equivalent zero spellings regardless of trailing zeros.
+        if (digits.Length == 0) return true;
         var trailingZeros = digits.Length - digits.TrimEnd('0').Length;
         var effectiveScale = (long)fraction - exponent - trailingZeros;
         var precision = digits.Length - trailingZeros + Math.Max(0L, -effectiveScale);

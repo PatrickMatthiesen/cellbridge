@@ -23,6 +23,12 @@ public class ValidationTests
     [InlineData(ListFieldType.Decimal, "-1234567890123456.123456789012")]
     [InlineData(ListFieldType.Decimal, "1e3")]
     [InlineData(ListFieldType.Decimal, "1.00000000000000")]
+    [InlineData(ListFieldType.Decimal, "0.0000000000000")]
+    [InlineData(ListFieldType.Decimal, "-0.000000000000000000")]
+    [InlineData(ListFieldType.Decimal, "0e-28")]
+    [InlineData(ListFieldType.Decimal, "-0e+28")]
+    [InlineData(ListFieldType.Decimal, "0e-20000")]
+    [InlineData(ListFieldType.Decimal, "-0e-20000")]
     [InlineData(ListFieldType.Date, "\"2024-02-29\"")]
     [InlineData(ListFieldType.Timestamp, "\"2024-02-29T00:00:00Z\"")]
     [InlineData(ListFieldType.Timestamp, "\"2024-02-29T00:00:00.1234567Z\"")]
@@ -142,5 +148,19 @@ public class ValidationTests
         Assert.NotEqual(ListValidation.CreateDigest(request), ListValidation.CreateDigest(request with { SchemaVersion = 2 }));
         Assert.NotEqual(ListValidation.CreateDigest(request), ListValidation.CreateDigest(request with { Id = Workspace }));
         Reject(() => ListValidation.CreateDigest(request with { Values = Values("1.00000000000000000000000000001") }));
+    }
+
+    [Fact]
+    public void Canonical_digest_normalizes_zero_spellings_and_decimal_scale_limits_nonzero_values()
+    {
+        var zero = new CreateRecordRequest(List, 1, Values("0"));
+        foreach (var spelling in new[] { "-0", "0.0000000000000", "-0.000000000000000000", "0e-28", "-0e+28", "0e-20000", "-0e-20000" })
+        {
+            var equivalent = zero with { Values = Values(spelling) };
+            ListValidation.ValidateValues(Definition(ListFieldType.Decimal), equivalent.Values, new ListLimits());
+            Assert.Equal(ListValidation.CreateDigest(zero), ListValidation.CreateDigest(equivalent));
+        }
+
+        Reject(() => ListValidation.ValidateValues(Definition(ListFieldType.Decimal), Values("1.0000000000001"), new ListLimits()));
     }
 }

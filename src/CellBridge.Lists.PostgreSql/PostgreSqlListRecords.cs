@@ -54,7 +54,7 @@ public sealed partial class PostgreSqlListEngine
             try
             {
                 return await InsertRecordAsync(connection, transaction, workspaceId, listId, request, actor.Subject,
-                    digest, request.Values.ToJsonString(), references,
+                    digest, PostgreSqlListJson.RecordValues(request.Values), references,
                     request.Values.Select(x => Guid.Parse(x.Key)).ToArray(), ct);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation &&
@@ -98,7 +98,7 @@ public sealed partial class PostgreSqlListEngine
             try
             {
                 return await PersistUpdateAsync(connection, transaction, workspaceId, listId, current,
-                    definition.SchemaVersion, values.ToJsonString(), actor.Subject, request.Changes,
+                    definition.SchemaVersion, PostgreSqlListJson.RecordValues(values), actor.Subject, request.Changes,
                     changedReferenceIds, references, context.RecordBytes, ct);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation &&

@@ -188,7 +188,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                 "SELECT octet_length(definition::text)::bigint FROM cellbridge_lists.saved_views WHERE workspace_id=$1 AND list_id=$2 AND view_id=$3", ct,
                 workspaceId, listId, request.Id);
             if (previousBytes is null && count >= _limits.MaxViewsPerList) throw Limit("The saved view limit has been reached.");
-            var view = new SavedListView(request.Id, listId, request.Name, request.Query, request.VisibleFields);
+            var view = new SavedListView(request.Id, listId, request.Name, PostgreSqlListJson.NormalizeQuery(request.Query), request.VisibleFields);
             var json = PostgreSqlListJson.Serialize(view);
             var nextBytes = await CanonicalJsonBytesAsync(connection, transaction, json, ct);
             await ReserveStorageAsync(connection, transaction, workspaceId,

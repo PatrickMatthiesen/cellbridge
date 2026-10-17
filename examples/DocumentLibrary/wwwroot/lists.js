@@ -4,7 +4,7 @@
   const app = $('lists-app');
   const canEdit = app.dataset.canEdit === 'true';
   let busy = false;
-  const state = { definition: null, records: [], cursor: null, context: null, draft: null, preview: null, pendingList: null, pendingListContext: null };
+  const state = { definition: null, records: [], cursor: null, context: null, draft: null, preview: null, pendingField: null, pendingList: null, pendingListContext: null };
   const token = document.querySelector('meta[name="list-csrf-token"]').content;
   const tokenHeader = document.querySelector('meta[name="list-csrf-header"]').content;
   function captureContext(workspaceId = $('workspace').value, listId = $('list').value) {
@@ -71,7 +71,7 @@
     return valueText(value);
   }
   function lockNavigation(locked) {
-    locked ||= busy || Boolean(state.draft) || Boolean(state.pendingList);
+    locked ||= busy || Boolean(state.draft) || Boolean(state.pendingField) || Boolean(state.pendingList);
     const ready = Boolean(state.context && state.definition);
     // run() locks before taking a save snapshot. The fieldset preserves each
     // control's own read-only/unconfirmed-create state when it unlocks.
@@ -83,7 +83,11 @@
     $('list').disabled = locked || !$('list').options.length;
     $('refresh').disabled = busy || !ready;
     if ($('new-record')) $('new-record').disabled = locked || !ready;
-    if ($('add-field')) $('add-field').querySelector('button').disabled = locked || !ready;
+    if ($('add-field')) {
+      const retryField = Boolean(state.pendingField) && !busy && !state.draft;
+      $('add-field').querySelector('button').disabled = !retryField && (locked || !ready);
+      $('add-field').querySelector('input').disabled = busy || Boolean(state.pendingField);
+    }
     if ($('create-list')) {
       const retryCreate = Boolean(state.pendingList) && !busy && !state.draft;
       $('create-list').querySelector('button').disabled = !retryCreate && (locked || !ready);
@@ -309,22 +313,46 @@
     }
   }
   async function addField(form) {
-    if (state.draft || !state.context) return;
-    const context = state.context;
-    const fieldName = form.elements.name.value;
-    const definition = await api(context.listRoot);
-    const field = { id: crypto.randomUUID(), name: fieldName, type: 'Text', required: false, maxLength: 1024 };
+    if (state.draft || state.pendingList || (!state.context && !state.pendingField)) return;
+    if (!state.pendingField) state.pendingField = {
+      context: state.context,
+      field: { id: crypto.randomUUID(), name: form.elements.name.value, type: 'Text', required: false, maxLength: 1024 },
+      sent: false
+    };
+    const pending = state.pendingField, { context, field } = pending;
+    form.elements.name.disabled = true;
+    function clearPending() {
+      state.pendingField = null; form.elements.name.disabled = false;
+      $('add-field').querySelector('button').textContent = 'Add field';
+    }
+    function complete(definition, confirmed) {
+      state.definition = definition; clearPending(); form.reset(); renderDefinition(); renderRecords();
+      status(confirmed ? 'Field addition confirmed. Existing records remain unchanged.' : 'Optional text field added. Existing records remain unchanged.');
+    }
+    let sending = false;
     try {
-      state.definition = await api(`${context.listRoot}/schema`, 'PUT', { expectedVersion: definition.schemaVersion,
+      const definition = await api(context.listRoot);
+      // A lost PUT response must not turn a retry into a second field.
+      if (definition.fields.some(existing => existing.id === field.id)) { complete(definition, true); return; }
+      pending.sent = true; sending = true;
+      const updated = await api(`${context.listRoot}/schema`, 'PUT', { expectedVersion: definition.schemaVersion,
         name: definition.name, fields: [...definition.fields, field] });
-      form.reset(); renderDefinition(); renderRecords(); status('Optional text field added. Existing records remain unchanged.');
+      complete(updated, false);
     } catch (error) {
-      if (error.status === 409) { status('The schema changed. Your field name is still in the form; retry to add it to the current schema.'); return; }
+      if (!pending.sent || sending && [400, 404, 413].includes(error.status)) clearPending();
+      else {
+        $('add-field').querySelector('button').textContent = 'Retry same field';
+        if (error.status === 409) {
+          status('The schema changed. Retry checks for this field before adding it to the current schema.'); return;
+        }
+        status('The field change was not confirmed. Retry checks the same field ID before sending another update.');
+        return;
+      }
       throw error;
     }
   }
   async function createList(form) {
-    if (state.draft || (!state.context && !state.pendingList)) return;
+    if (state.draft || state.pendingField || (!state.context && !state.pendingList)) return;
     if (!state.pendingList) {
       state.pendingListContext = captureContext();
       state.pendingList = { id: crypto.randomUUID(), name: form.elements.name.value,
