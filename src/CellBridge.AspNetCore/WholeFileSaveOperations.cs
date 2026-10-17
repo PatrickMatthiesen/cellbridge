@@ -67,13 +67,13 @@ public sealed partial class CellBridgeDocumentService
             }, cancellationToken);
 
         StorageLimits.Check("whole-file save receipts", before.WholeFileSaveReceipts.Length + 1L, provider.Limits.MaxWholeFileSaveReceipts);
+        staged.Position = 0;
+        await FilePartitionSaveHandler.ValidateDocumentAsync(staged, before.Path, provider.Limits.MaxDocumentBytes, cancellationToken);
         bool changed = before.Content.Length != length || before.Content.Sha256 != sha256;
         PartitionState? preparedFile = null;
         ContentHandle preparedContent = before.Content;
         if (changed)
         {
-            staged.Position = 0;
-            await FilePartitionSaveHandler.ValidateDocumentAsync(staged, before.Path, provider.Limits.MaxDocumentBytes, cancellationToken);
             staged.Position = 0;
             var bytes = new byte[checked((int)length)];
             await staged.ReadExactlyAsync(bytes, cancellationToken);

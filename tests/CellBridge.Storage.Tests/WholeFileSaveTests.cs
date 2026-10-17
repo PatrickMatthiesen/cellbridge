@@ -111,6 +111,82 @@ public sealed class WholeFileSaveTests
     }
 
     [Theory]
+    [InlineData("empty", false)]
+    [InlineData("empty", true)]
+    [InlineData("malformed", false)]
+    [InlineData("malformed", true)]
+    [InlineData("unsupported", false)]
+    [InlineData("unsupported", true)]
+    public async Task UnchangedInvalidInputCannotCommitANewReceipt(string kind, bool import)
+    {
+        var provider = Memory();
+        var service = new CellBridgeDocumentService(provider);
+        byte[] bytes = kind switch
+        {
+            "empty" => [],
+            "malformed" => [1, 2, 3],
+            _ => MinimalDocx.Create("unsupported extension"),
+        };
+        var path = kind == "unsupported" ? "/unchanged.txt" : "/unchanged.docx";
+        var state = (import
+            ? await service.ImportAsync(path, bytes, TestActor.Value.Identity, TestActor.Value)
+            : await service.CreateAsync(path, bytes, TestActor.Value))!;
+        Assert.True(await new ExternalRevisionPublisher(provider, new UnusedDestination()).BindAsync(
+            state.ResourceId, state.LifecycleGeneration, state.StateVersion, Guid.NewGuid(), "external", "baseline"));
+        if (bytes.Length > 0)
+            Assert.True((await new SharedDocumentLocks(service).ApplyAsync(state.ResourceId,
+                HostLockOperation.Acquire, "lock", TestActor.Value)).Success);
+        var before = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => Save(service, state.ResourceId, bytes, "new-no-op",
+            bytes.Length == 0 ? null : "lock"));
+
+        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(after));
+        Assert.Empty(after.WholeFileSaveReceipts);
+        Assert.Empty(after.Publication!.Pending);
+    }
+
+    [Fact]
+    public async Task ValidNoOpRecordsOneReceiptAndReplaysAfterLockExpiry()
+    {
+        var provider = Memory();
+        var service = new CellBridgeDocumentService(provider);
+        var bytes = MinimalDocx.Create("valid unchanged package");
+        var state = (await service.CreateAsync("/unchanged.docx", bytes, TestActor.Value))!;
+        Assert.True(await new ExternalRevisionPublisher(provider, new UnusedDestination()).BindAsync(
+            state.ResourceId, state.LifecycleGeneration, state.StateVersion, Guid.NewGuid(), "external", "baseline"));
+        Assert.True((await new SharedDocumentLocks(service).ApplyAsync(state.ResourceId,
+            HostLockOperation.Acquire, "lock", TestActor.Value)).Success);
+        var before = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+
+        var accepted = await Save(service, state.ResourceId, bytes, "no-op");
+
+        Assert.False(accepted.IsReplay);
+        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.Equal(before.Content, after.Content);
+        Assert.Equal(before.ContentVersion, after.ContentVersion);
+        Assert.Equal(before.ModifiedUtc, after.ModifiedUtc);
+        Assert.Equal(JsonSerializer.Serialize(before.Partitions), JsonSerializer.Serialize(after.Partitions));
+        Assert.Equal(JsonSerializer.Serialize(before.Revisions), JsonSerializer.Serialize(after.Revisions));
+        Assert.Equal(JsonSerializer.Serialize(before.Revisions[^1]), JsonSerializer.Serialize(accepted.Revision));
+        Assert.Single(after.WholeFileSaveReceipts);
+        Assert.Empty(after.Publication!.Pending);
+
+        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
+        { Coordination = current.Coordination with { HostLock = current.Coordination.HostLock! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
+        var expired = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var replay = await Save(service, state.ResourceId, bytes, "no-op");
+        Assert.True(replay.IsReplay);
+        Assert.Equal(JsonSerializer.Serialize(accepted.Revision), JsonSerializer.Serialize(replay.Revision));
+        // Receipt identity still takes precedence over validation of different retry bytes.
+        await Assert.ThrowsAsync<WholeFileSaveConflictException>(() => Save(service, state.ResourceId, [], "no-op"));
+        await Assert.ThrowsAsync<DocumentOperationLockException>(() => Save(service, state.ResourceId, bytes, "new-no-op"));
+        Assert.Equal(JsonSerializer.Serialize(expired),
+            JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId)));
+    }
+
+    [Theory]
     [InlineData("refresh")]
     [InlineData("reacquire")]
     [InlineData("expire")]
