@@ -15,13 +15,18 @@ namespace CellBridge.Storage.Tests;
 
 public sealed class OuterDocumentOperationTests
 {
-    [Fact]
-    public async Task SoapHistoryUrlsAreDownloadableAfterRenameAndRevocationDeniesHistory()
+    [Theory]
+    [InlineData("/shared/original.docx", "/shared/renamed #%.docx", "/shared/renamed%20%23%25.docx")]
+    [InlineData("/shared/team%20space/%E6%9D%B1%E4%BA%AC/original.docx",
+        "/shared/team space/東京/renamed #%.docx",
+        "/shared/team%20space/%E6%9D%B1%E4%BA%AC/renamed%20%23%25.docx")]
+    public async Task SoapHistoryUrlsAreDownloadableAfterRenameAndRevocationDeniesHistory(
+        string originalUrl, string expectedRenamedPath, string renamedUrl)
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
         var originalBytes = MinimalDocx.Create("first");
-        var state = (await service.CreateAsync("/shared/original.docx", originalBytes, TestActor.Value))!;
+        var state = (await service.CreateAsync(originalUrl, originalBytes, TestActor.Value))!;
         state = await RevisionHistoryTests.Save(service, state, "second");
         var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
         builder.Services.AddCellBridge(provider, requireDurability: false); TestActor.Register(builder.Services);
@@ -44,9 +49,11 @@ public sealed class OuterDocumentOperationTests
             ("FileOperation", "Rename"), ("NewFileName", "renamed #%.docx"));
         Assert.Equal("Success", rename.ErrorCode);
         var changed = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal("/shared/renamed #%.docx", changed.Path);
+        Assert.Equal(expectedRenamedPath, changed.Path);
         Assert.Null(await provider.State.FindByPathKeyAsync(state.PathKey));
-        using var renamedDownload = await client.GetAsync("/shared/renamed%20%23%25.docx");
+        using var oldDownload = await client.GetAsync(originalUrl);
+        Assert.Equal(HttpStatusCode.NotFound, oldDownload.StatusCode);
+        using var renamedDownload = await client.GetAsync(renamedUrl);
         Assert.Equal(HttpStatusCode.OK, renamedDownload.StatusCode);
         var oldUrl = new Uri((string)results[1].Attribute("url")!);
         Assert.Equal(originalBytes, await client.GetByteArrayAsync(oldUrl.PathAndQuery));
