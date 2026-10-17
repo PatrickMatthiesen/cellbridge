@@ -104,6 +104,37 @@ public sealed class ContentStoreReaderTests
         Assert.Null(store.LastStream);
     }
 
+    [Fact]
+    public async Task RestoreRejectsDifferentVerifiedDocumentAndPartitionContent()
+    {
+        var content = new InMemoryContentStore();
+        var state = await new DocumentStore().Put("/mismatched-content.docx", MinimalDocx.Create()).CaptureAsync(content);
+        var replacementBytes = await content.ReadVerifiedAsync(state.Content);
+        replacementBytes[0] ^= 0xff;
+        using var source = new MemoryStream(replacementBytes, writable: false);
+        var replacement = await content.WriteAsync(source);
+
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => StoredDocument.RestoreAsync(
+            state with { Content = replacement }, content).AsTask());
+    }
+
+    [Fact]
+    public async Task RestoredDocumentAndPartitionContentViewsRemainDefensiveCopies()
+    {
+        var expected = MinimalDocx.Create();
+        var content = new InMemoryContentStore();
+        var state = await new DocumentStore().Put("/restore-ownership.docx", expected).CaptureAsync(content);
+        var restored = await StoredDocument.RestoreAsync(state, content);
+        var documentView = restored.Content;
+        var partitionView = restored.FilePartition.Content;
+        documentView[0] ^= 0xff;
+        partitionView[0] ^= 0xff;
+
+        Assert.Equal(expected, restored.Content);
+        Assert.Equal(expected, restored.FilePartition.Content);
+        Assert.Equal(expected, restored.FilePartition.FileGraph.Materialize());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

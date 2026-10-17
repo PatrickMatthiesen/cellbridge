@@ -39,7 +39,7 @@ public sealed partial class StoredDocument
         FilePartition = new DocumentPartition(state.Partitions.Single(p => p.Kind == 0), payloads, metadataOnly);
         MetadataPartition = new DocumentPartition(state.Partitions.Single(p => p.Kind == 1), payloads, metadataOnly);
         EditorsTablePartition = new DocumentPartition(state.Partitions.Single(p => p.Kind == 2), payloads, metadataOnly);
-        if (!metadataOnly && !_content.SequenceEqual(FilePartition.Content))
+        if (!metadataOnly && !FilePartition.ContentEquals(_content))
             throw new StorageCorruptionException("Document and file partition content disagree.");
         _sessions.AddRange(state.Editors.Select(CoauthSession.Restore));
     }
