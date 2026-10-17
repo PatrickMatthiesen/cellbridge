@@ -17,6 +17,7 @@ public sealed class ListAuthorizationCacheOptions
 public sealed class CachedListAuthorizationProvider : IListBatchAuthorizationProvider, IListQueryAuthorizationProvider
 {
     private readonly IListAuthorizationProvider _provider;
+    private readonly string _policyDomain;
     private readonly BoundedAuthorizationCache<ListAuthorizationDecision> _decisions;
     private readonly BoundedAuthorizationCache<ListQueryAuthorizationDecision> _queries;
 
@@ -25,7 +26,7 @@ public sealed class CachedListAuthorizationProvider : IListBatchAuthorizationPro
     {
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         ArgumentNullException.ThrowIfNull(options);
-        ListAuthorizationValidation.ValidateDomain(provider.PolicyDomain, nameof(provider));
+        _policyDomain = ListAuthorizationValidation.ValidateDomain(provider.PolicyDomain, nameof(provider));
         var cacheOptions = new BoundedAuthorizationCacheOptions(options.Capacity,
             options.MaximumKeyLength, options.DecisionTtl, options.MaximumInvalidationRetries);
         _decisions = new(cacheOptions, static () => new(false, default, default), timeProvider);
@@ -33,12 +34,14 @@ public sealed class CachedListAuthorizationProvider : IListBatchAuthorizationPro
             string.Empty, null, Guid.Empty, default, default), timeProvider);
     }
 
-    public string PolicyDomain => _provider.PolicyDomain;
+    public string PolicyDomain => _policyDomain;
 
     public ValueTask<ListAuthorizationDecision> AuthorizeAsync(ListAuthorizationRequest request,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (!StringComparer.Ordinal.Equals(request.PolicyDomain, PolicyDomain))
+            return ValueTask.FromResult(new ListAuthorizationDecision(false));
         return _decisions.AuthorizeAsync(Key(request, request.ListId?.ToString("D") ?? "workspace"),
             async token =>
             {
@@ -62,6 +65,9 @@ public sealed class CachedListAuthorizationProvider : IListBatchAuthorizationPro
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (!StringComparer.Ordinal.Equals(request.PolicyDomain, PolicyDomain))
+            return ValueTask.FromResult(new ListQueryAuthorizationDecision(ListQueryAuthorizationScope.None,
+                request.PolicyDomain, request.Subject, request.TenantId, request.WorkspaceId));
         if (_provider is not IListQueryAuthorizationProvider queryProvider)
             return ValueTask.FromResult(new ListQueryAuthorizationDecision(ListQueryAuthorizationScope.CheckCandidates,
                 request.PolicyDomain, request.Subject, request.TenantId, request.WorkspaceId));

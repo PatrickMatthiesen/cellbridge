@@ -52,6 +52,68 @@ public sealed class AsyncAuthorizationTests
         Assert.Equal(1, provider.Calls);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Domain_mismatch_cannot_reuse_a_point_allow_or_poison_a_cold_cache(bool warm)
+    {
+        var provider = new CountingProvider();
+        var cached = new CachedListAuthorizationProvider(provider, new());
+        var valid = Request("subject", Guid.NewGuid());
+        if (warm) Assert.True((await cached.AuthorizeAsync(valid)).Allowed);
+        var expectedCalls = warm ? 1 : 0;
+        foreach (var domain in InvalidDomains())
+        {
+            var wrong = valid with { PolicyDomain = domain! };
+            Assert.False((await cached.AuthorizeAsync(wrong)).Allowed);
+            Assert.Equal(expectedCalls, provider.Calls);
+            var deniedBatch = await cached.AuthorizeBatchAsync([wrong, wrong]);
+            Assert.All(deniedBatch, decision => Assert.False(decision.Allowed));
+            Assert.Equal(expectedCalls, provider.Calls);
+        }
+
+        var mixed = await cached.AuthorizeBatchAsync([valid with { PolicyDomain = "another-domain" }, valid, valid]);
+        Assert.False(mixed[0].Allowed);
+        Assert.True(mixed[1].Allowed);
+        Assert.True(mixed[2].Allowed);
+        Assert.Equal(1, provider.Calls);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Domain_mismatch_cannot_reuse_query_scope_or_query_fallback(bool queryCapable, bool warm)
+    {
+        var point = new CountingProvider();
+        var query = new QueryProvider();
+        var cached = new CachedListAuthorizationProvider(queryCapable ? query : point, new());
+        var valid = Request("subject", Guid.NewGuid()) with { ListId = null };
+        var expected = queryCapable ? ListQueryAuthorizationScope.All : ListQueryAuthorizationScope.CheckCandidates;
+        if (warm) Assert.Equal(expected, (await cached.AuthorizeQueryAsync(valid)).Scope);
+        foreach (var domain in InvalidDomains())
+        {
+            var wrong = valid with { PolicyDomain = domain! };
+            var denied = await cached.AuthorizeQueryAsync(wrong);
+            Assert.Equal(ListQueryAuthorizationScope.None, denied.Scope);
+            Assert.Equal(wrong.PolicyDomain, denied.PolicyDomain);
+            Assert.Equal(wrong.Subject, denied.Subject);
+            Assert.Equal(wrong.TenantId, denied.TenantId);
+            Assert.Equal(wrong.WorkspaceId, denied.WorkspaceId);
+            Assert.Equal(queryCapable && warm ? 1 : 0, query.QueryCalls);
+            Assert.Equal(0, point.Calls);
+        }
+
+        Assert.Equal(expected, (await cached.AuthorizeQueryAsync(valid)).Scope);
+        Assert.Equal(expected, (await cached.AuthorizeQueryAsync(valid)).Scope);
+        Assert.Equal(queryCapable ? 1 : 0, query.QueryCalls);
+        Assert.Equal(0, point.Calls);
+    }
+
+    private static string?[] InvalidDomains() =>
+        ["another-domain", "TEST-DOMAIN", "test-doma\u0131n", null, "", " ", "test-domain\n", new string('x', 201)];
+
     [Fact]
     public async Task List_invalidation_also_discards_workspace_wide_query_scope()
     {
@@ -85,7 +147,9 @@ public sealed class AsyncAuthorizationTests
         {
             Calls++;
             var now = DateTimeOffset.UtcNow;
-            return ValueTask.FromResult(Decision ?? new ListAuthorizationDecision(true, now, now.AddMinutes(5)));
+            return ValueTask.FromResult(request.PolicyDomain != PolicyDomain
+                ? new ListAuthorizationDecision(false)
+                : Decision ?? new ListAuthorizationDecision(true, now, now.AddMinutes(5)));
         }
     }
 
@@ -101,8 +165,8 @@ public sealed class AsyncAuthorizationTests
             ListAuthorizationRequest request, CancellationToken ct = default)
         {
             QueryCalls++;
-            return ValueTask.FromResult(new ListQueryAuthorizationDecision(ListQueryAuthorizationScope.All,
-                request.PolicyDomain, request.Subject, request.TenantId, request.WorkspaceId));
+            return ValueTask.FromResult(new ListQueryAuthorizationDecision(request.PolicyDomain == PolicyDomain
+                ? ListQueryAuthorizationScope.All : ListQueryAuthorizationScope.None, request.PolicyDomain, request.Subject, request.TenantId, request.WorkspaceId));
         }
     }
 }
