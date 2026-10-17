@@ -95,8 +95,12 @@ bounded candidate set again. An empty or short authorized page can still have a 
 consume the bounded scan.
 
 The engine creates an ephemeral 256-bit continuation key by default. Tokens then stop working after process restart.
-Pass the same 32-byte `continuationKey` to each engine instance when a host needs continuations to survive restarts or
-move between instances. Keep that key in the host's secret store.
+Pass the same 32-byte `continuationKey` to the native or host-authorized engine constructor when continuations need to
+survive restarts or move between instances. Keep that key in the host's secret store. For example, native engines can
+use `new PostgreSqlListEngine(runtimeSource, limits: null, continuationKey: sharedKey)`.
+Tokens have a 512-character limit and store a fingerprint of the exact identity and authorization context.
+The private token encoding is not a release compatibility contract. This unreleased prototype changes its encoding
+from v2 to v3, so v2 tokens are invalid even when the host retains the same key.
 
 The existing `GetListsAsync` method retains the native SQL behavior. In host mode it follows bounded pages up to the
 configured `ListLimits.MaxLists`, then sorts the accumulated definitions by name. Hosts serving large workspaces should use the

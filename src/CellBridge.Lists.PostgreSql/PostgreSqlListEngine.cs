@@ -15,10 +15,21 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
     private bool _healthy;
 
     public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits = null)
+        : this(runtimeSource, limits, continuationKey: null)
+    {
+    }
+
+    /// <summary>Creates a native engine with an optional shared 32-byte continuation key.</summary>
+    public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits, byte[]? continuationKey)
     {
         _source = runtimeSource ?? throw new ArgumentNullException(nameof(runtimeSource));
         _limits = limits ?? new ListLimits();
         _limits.Validate();
+        if (continuationKey is not null)
+        {
+            if (continuationKey.Length != 32) throw new ArgumentException("The continuation key must contain 32 bytes.", nameof(continuationKey));
+            _continuationKey = continuationKey.ToArray();
+        }
     }
 
     public Task CheckHealthAsync(CancellationToken cancellationToken = default) => EnsureHealthyAsync(cancellationToken);

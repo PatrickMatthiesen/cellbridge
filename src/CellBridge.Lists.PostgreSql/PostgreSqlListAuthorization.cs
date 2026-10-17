@@ -16,15 +16,10 @@ public sealed partial class PostgreSqlListEngine
 
     public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits,
         IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null)
-        : this(runtimeSource, limits)
+        : this(runtimeSource, limits, continuationKey)
     {
         _authorizationProvider = authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider));
         _authorizationDomain = ValidateDomain(authorizationProvider.PolicyDomain);
-        if (continuationKey is not null)
-        {
-            if (continuationKey.Length != 32) throw new ArgumentException("The continuation key must contain 32 bytes.", nameof(continuationKey));
-            _continuationKey = continuationKey.ToArray();
-        }
     }
 
     private async Task<OperationAuthorization?> AuthorizeOperationAsync(ListActor actor, Guid workspaceId,

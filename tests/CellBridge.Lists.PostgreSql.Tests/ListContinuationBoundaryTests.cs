@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -37,14 +36,45 @@ public sealed class ListContinuationBoundaryTests(ListDatabaseFixture database, 
         await Invalid(() => fixture.Engine.GetListsPageAsync(fixture.Actor, Guid.NewGuid(), token, 1));
         var differentDomain = new PostgreSqlListEngine(database.RuntimeSource!, null, new AllowAuthority("different-domain"), fixture.Key);
         await Invalid(() => differentDomain.GetListsPageAsync(fixture.Actor, fixture.Workspace, token, 1));
-        var differentMode = host ? new PostgreSqlListEngine(database.RuntimeSource!)
+        var differentMode = host ? new PostgreSqlListEngine(database.RuntimeSource!, null, fixture.Key)
             : new PostgreSqlListEngine(database.RuntimeSource!, null, new AllowAuthority(domain), fixture.Key);
-        CopyKey(differentMode, fixture.Key);
         await Invalid(() => differentMode.GetListsPageAsync(fixture.Actor, fixture.Workspace, token, 1));
         // Default keys are ephemeral per engine; the private encoding is not a release compatibility contract.
         var recreated = host ? new PostgreSqlListEngine(database.RuntimeSource!, null, new AllowAuthority(domain))
             : new PostgreSqlListEngine(database.RuntimeSource!);
         await Invalid(() => recreated.GetListsPageAsync(fixture.Actor, fixture.Workspace, token, 1));
+    }
+
+    [PostgreSqlTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Shared_key_allows_another_engine_to_continue_and_is_defensively_copied(bool host)
+    {
+        await using var fixture = await Fixture.CreateAsync(database, host, new("subject", "tenant"), "domain");
+        var token = (await fixture.Engine.GetListsPageAsync(fixture.Actor, fixture.Workspace, candidateLimit: 1)).Continuation!;
+        var suppliedKey = fixture.Key.ToArray();
+        var other = host ? new PostgreSqlListEngine(database.RuntimeSource!, null, new AllowAuthority("domain"), suppliedKey)
+            : new PostgreSqlListEngine(database.RuntimeSource!, null, suppliedKey);
+        suppliedKey[0] ^= 1;
+
+        var next = await other.GetListsPageAsync(fixture.Actor, fixture.Workspace, token, 1);
+
+        Assert.Single(next.Lists);
+        Assert.Null(next.Continuation);
+        var differentKey = host ? new PostgreSqlListEngine(database.RuntimeSource!, null, new AllowAuthority("domain"), suppliedKey)
+            : new PostgreSqlListEngine(database.RuntimeSource!, null, suppliedKey);
+        await Invalid(() => differentKey.GetListsPageAsync(fixture.Actor, fixture.Workspace, token, 1));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(31)]
+    [InlineData(33)]
+    public void Shared_keys_must_have_exactly_32_bytes(int length)
+    {
+        using var source = NpgsqlDataSource.Create("Host=localhost;Database=unused");
+        Assert.Throws<ArgumentException>(() => new PostgreSqlListEngine(source, null, new byte[length]));
+        Assert.Throws<ArgumentException>(() => new PostgreSqlListEngine(source, null, new AllowAuthority("domain"), new byte[length]));
     }
 
     [PostgreSqlTheory]
@@ -104,10 +134,6 @@ public sealed class ListContinuationBoundaryTests(ListDatabaseFixture database, 
         return Convert.ToBase64String(nonce.Concat(tag).Concat(ciphertext).ToArray());
     }
 
-    // Seed native engines with the same key to exercise context checks independently of key mismatch.
-    private static void CopyKey(PostgreSqlListEngine engine, byte[] key) => key.CopyTo(
-        (byte[])typeof(PostgreSqlListEngine).GetField("_continuationKey", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(engine)!, 0);
-
     private sealed class Fixture(ListDatabaseFixture database, ListActor actor) : IAsyncDisposable
     {
         public Guid Workspace { get; } = Guid.NewGuid();
@@ -127,8 +153,7 @@ public sealed class ListContinuationBoundaryTests(ListDatabaseFixture database, 
                     await database.Engine.SetMembershipAsync(database.AdminActor, fixture.Workspace, actor.Subject, true, false, false);
                 }
                 fixture.Engine = host ? new(database.RuntimeSource!, null, new AllowAuthority(domain), fixture.Key)
-                    : new(database.RuntimeSource!);
-                CopyKey(fixture.Engine, fixture.Key);
+                    : new(database.RuntimeSource!, null, fixture.Key);
                 for (var index = 0; index < 2; index++)
                 {
                     var field = new ListField(Guid.NewGuid(), "Title", ListFieldType.Text);
