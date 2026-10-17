@@ -70,8 +70,9 @@ document-relative cellstorage endpoint can still resolve the unchanged resource
 ID. It enforces the resource's current permissions and returns its current URL.
 Unknown IDs cannot use the stale URL to target another document.
 
-One tested Word session continued saving by resource ID after a move, as recorded
-below. This does not guarantee that every already-open Office session survives a move.
+Tested Word, Excel and PowerPoint sessions continued saving by resource ID after
+a move, as recorded below. This does not guarantee that every already-open Office
+session survives a move.
 Office may issue another request using only the old path. Such a client must
 reopen the document at its current URL. Resource-ID requests continuing after a
 move have both automated protocol coverage and the bounded live evidence below.
@@ -134,11 +135,22 @@ the optional ID attribute is absent, then returns the stable ID, following
 [MS-FSSHTTP section 2.2.3.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/91fb9fd5-ef2d-4484-b57c-f0aedf7d0f00).
 Explicit empty, malformed and unknown IDs still fail without URL fallback.
 
+On the same date and desktop, Excel and PowerPoint each opened
+`/shared/issue72-office/team space/東京/Project plan æ.xlsx` or `.pptx` as editable.
+Each application saved an edit, kept the document open while its resource moved
+to `/shared/issue72-office/moved team/東京/`, and saved another edit. Independent
+HTTP downloads contained both edits, with content versions advancing from 1 to 3.
+Fresh application processes reopened the current URLs and displayed both edits.
+Both retired path-only downloads returned 404. Excel also displayed a prompt to
+save to finish moving the file; confirming Save completed that client step.
+PowerPoint completed without that prompt.
+
 Raw requests/responses, downloaded packages, native results and UI captures are
-retained locally under ignored `artifacts/issue72-desktop`. These checks used one
+retained locally under ignored `artifacts/issue72-desktop` (Word) and
+`artifacts/issue72-office` (Excel and PowerPoint). These checks used one
 authenticated user and explicit sign-in for each fresh process. Automated
-`Close(0)` discarded any unsaved changes, so it does not establish normal-close
-prompt behavior. Live permission revocation, other Office builds, mounted
+close calls do not establish normal-close prompt behavior. Live permission
+revocation, other Office builds, mounted
 applications and ShareBridge's metadata integration were not tested in this run.
 Follow the [desktop validation guide](demo-library.md) when qualifying another
 host or client configuration.

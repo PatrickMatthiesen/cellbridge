@@ -34,6 +34,7 @@ public sealed class BinaryWriterTests
         new BinaryWriterEx().WriteBytes(source);
         long minimumAllocated = long.MaxValue;
 
+        // Exclude one-time runtime overhead while still detecting a payload-sized copy on every write.
         for (var attempt = 0; attempt < 3; attempt++)
         {
             var writer = new BinaryWriterEx();
