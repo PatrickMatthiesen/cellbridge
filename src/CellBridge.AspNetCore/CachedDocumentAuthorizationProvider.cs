@@ -9,7 +9,7 @@ public sealed class DocumentAuthorizationCacheOptions
     /// <summary>Gets the maximum number of cached or pending keys.</summary>
     public int Capacity { get; init; } = 1024;
     /// <summary>Gets the maximum combined character count of a cache key.</summary>
-    public int MaximumKeyLength { get; init; } = 2048;
+    public int MaximumKeyLength { get; init; } = 4096;
     /// <summary>
     /// Gets the local decision lifetime. Source evaluation age and source freshness can shorten it.
     /// Provider callback time consumes this lifetime.

@@ -292,6 +292,22 @@ public sealed class AsyncAuthorizationCacheTests
     }
 
     [Fact]
+    public async Task DefaultKeyBudgetCachesMaximumValidDocumentIdentityFields()
+    {
+        var domain = new string('d', 256);
+        var scope = new DocumentAuthorizationScope(new string('t', 256), new string('w', 256));
+        var provider = new DelegateProvider((_, _, _) => ValueTask.FromResult(new DocumentAuthorizationDecision(true)), domain);
+        var cache = new CachedDocumentAuthorizationProvider(provider, new DocumentAuthorizationCacheOptions());
+        var request = new DocumentAuthorizationRequest(new string('s', 1024),
+            scope, Guid.NewGuid(), long.MaxValue,
+            new(domain, 2, long.MaxValue) { TenantId = scope.TenantId, WorkspaceId = scope.WorkspaceId }, DocumentAction.Create);
+
+        Assert.True((await cache.AuthorizeAsync(request)).Allowed);
+        Assert.True((await cache.AuthorizeAsync(request)).Allowed);
+        Assert.Equal(1, provider.Calls);
+    }
+
+    [Fact]
     public async Task OversizedKeyFailsClosedWithoutCallingTheProvider()
     {
         var clock = new ManualTimeProvider(Start);
@@ -325,12 +341,13 @@ public sealed class AsyncAuthorizationCacheTests
         DocumentAction.Read);
 
     private sealed class DelegateProvider(
-        Func<int, DocumentAuthorizationRequest, CancellationToken, ValueTask<DocumentAuthorizationDecision>> authorize)
+        Func<int, DocumentAuthorizationRequest, CancellationToken, ValueTask<DocumentAuthorizationDecision>> authorize,
+        string policyDomain = "documents")
         : IDocumentAuthorizationProvider
     {
         private int _calls;
         public int Calls => Volatile.Read(ref _calls);
-        public string PolicyDomain => "documents";
+        public string PolicyDomain => policyDomain;
 
         public ValueTask<DocumentAuthorizationDecision> AuthorizeAsync(
             DocumentAuthorizationRequest request,
