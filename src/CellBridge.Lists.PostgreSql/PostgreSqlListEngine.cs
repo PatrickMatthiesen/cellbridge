@@ -61,12 +61,11 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
                     FROM cellbridge_lists.lists l
                     JOIN cellbridge_lists.list_schemas s ON s.workspace_id=l.workspace_id AND s.list_id=l.list_id AND s.schema_version=l.schema_version
                     JOIN cellbridge_lists.list_grants g ON g.workspace_id=l.workspace_id AND g.list_id=l.list_id
-                    WHERE l.workspace_id=$1 AND g.subject=$2 AND (g.access & $3)=$3 AND ($4::uuid IS NULL OR l.list_id>$4)
-                    ORDER BY l.list_id LIMIT $5
+                    WHERE l.workspace_id=$1 AND g.subject=$2 AND g.access<>0 AND ($3::uuid IS NULL OR l.list_id>$3)
+                    ORDER BY l.list_id LIMIT $4
                     """, connection, transaction);
                 command.Parameters.AddWithValue(workspaceId);
                 command.Parameters.AddWithValue(actor.Subject);
-                command.Parameters.AddWithValue((int)ListAccess.Read);
                 command.Parameters.AddWithValue(after.HasValue ? after.Value : DBNull.Value);
                 command.Parameters.AddWithValue(candidateLimit + 1);
                 await using var reader = await command.ExecuteReaderAsync(ct);
@@ -104,7 +103,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
                     new ListAuthorizationDecision(true, queryDecision.EvaluatedAtUtc,
                         queryDecision.FreshUntilUtc))).ToArray());
 
-        var candidates = await ReadCandidateIdsAsync(workspaceId, after, candidateLimit + 1, authorization!, ct);
+        var candidates = await ReadCandidateIdsAsync(actor.Subject, workspaceId, after, candidateLimit + 1, authorization!, ct);
         var scanned = candidates.Take(candidateLimit).ToArray();
         IReadOnlySet<Guid> allowed;
         if (queryDecision.Scope == ListQueryAuthorizationScope.All) allowed = scanned.ToHashSet();
@@ -131,7 +130,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
                 authorization.Decisions.Concat(requests.Zip(decisions)).ToArray());
         }
 
-        var definitions = await ReadAuthorizedDefinitionsAsync(workspaceId, scanned, allowed, authorization!, ct);
+        var definitions = await ReadAuthorizedDefinitionsAsync(actor.Subject, workspaceId, allowed, authorization!, ct);
         var next = candidates.Count > candidateLimit && scanned.Length != 0
             ? ProtectContinuation(new(workspaceId, actor.Subject, actor.TenantId, "host", _authorizationDomain,
                 scanned[^1], DateTimeOffset.UtcNow.AddHours(1)))
@@ -150,13 +149,14 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         return new(page.Select(x => x.Definition).ToArray(), next);
     }
 
-    private async Task<IReadOnlyList<Guid>> ReadCandidateIdsAsync(Guid workspaceId, Guid? after, int limit,
+    private async Task<IReadOnlyList<Guid>> ReadCandidateIdsAsync(string subject, Guid workspaceId, Guid? after, int limit,
         OperationAuthorization authorization, CancellationToken ct)
     {
         await using var connection = await _source.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         await ConfigureAsync(connection, transaction, workspaceId, ct);
         await RequireAnchorAsync(connection, transaction, workspaceId, authorization, true, ct);
+        await AuthorizeMemberAsync(connection, transaction, workspaceId, subject, ct, authorization);
         await using var command = new NpgsqlCommand("""
             SELECT list_id FROM cellbridge_lists.lists
             WHERE workspace_id=$1 AND ($2::uuid IS NULL OR list_id>$2)
@@ -173,10 +173,11 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         return result;
     }
 
-    private Task<IReadOnlyList<ListDefinition>> ReadAuthorizedDefinitionsAsync(Guid workspaceId,
-        IReadOnlyList<Guid> scanned, IReadOnlySet<Guid> allowed, OperationAuthorization authorization, CancellationToken ct) =>
+    private Task<IReadOnlyList<ListDefinition>> ReadAuthorizedDefinitionsAsync(string subject, Guid workspaceId,
+        IReadOnlySet<Guid> allowed, OperationAuthorization authorization, CancellationToken ct) =>
         InTransactionAsync(workspaceId, false, authorization, async (connection, transaction) =>
         {
+            await AuthorizeMemberAsync(connection, transaction, workspaceId, subject, ct, authorization);
             if (allowed.Count == 0) return (IReadOnlyList<ListDefinition>)[];
             await using var command = new NpgsqlCommand("""
                 SELECT s.definition::text FROM cellbridge_lists.lists l
