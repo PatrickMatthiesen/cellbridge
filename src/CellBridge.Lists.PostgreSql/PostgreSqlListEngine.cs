@@ -132,8 +132,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
 
         var definitions = await ReadAuthorizedDefinitionsAsync(actor.Subject, workspaceId, allowed, authorization!, ct);
         var next = candidates.Count > candidateLimit && scanned.Length != 0
-            ? ProtectContinuation(new(workspaceId, actor.Subject, actor.TenantId, "host", _authorizationDomain,
-                scanned[^1], DateTimeOffset.UtcNow.AddHours(1)))
+            ? ProtectContinuation(actor, workspaceId, scanned[^1])
             : null;
         return new(definitions, next);
     }
@@ -143,8 +142,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
     {
         var page = rows.Take(limit).ToArray();
         var next = rows.Count > limit && page.Length != 0
-            ? ProtectContinuation(new(workspaceId, actor.Subject, actor.TenantId, "builtin", null,
-                page[^1].Id, DateTimeOffset.UtcNow.AddHours(1)))
+            ? ProtectContinuation(actor, workspaceId, page[^1].Id)
             : null;
         return new(page.Select(x => x.Definition).ToArray(), next);
     }
@@ -228,7 +226,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         {
             if (request.TemplateVersion is not { } preflightTemplateVersion)
                 throw Validation("A template version is required.");
-            var template = await ReadTemplatePreflightAsync(
+            var template = await ReadTemplatePreflightAsync(actor.Subject, workspaceId, authorization!,
                 preflightTemplateId, preflightTemplateVersion, ct);
             preflightDefinition = ListTemplates.Instantiate(template, workspaceId, request.Id, request.Name,
                 request.Fields, request.NumberPrefix, _limits);
@@ -322,7 +320,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         var authorization = await AuthorizeOperationAsync(actor, workspaceId, sourceRequirements, ct);
         if (_authorizationProvider is not null)
         {
-            var current = await ReadDefinitionPreflightAsync(workspaceId, listId, authorization!, ct);
+            var current = await ReadDefinitionPreflightAsync(actor.Subject, workspaceId, listId, authorization!, ct);
             var existing = current.Fields.Select(x => x.Id).ToHashSet();
             var requirements = request.Fields
                 .Where(x => x.Type == ListFieldType.Reference && !existing.Contains(x.Id))
@@ -620,20 +618,13 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         return json is null ? throw Validation("The template version does not exist.") : PostgreSqlListJson.Deserialize<ListTemplate>(json);
     }
 
-    private async Task<ListTemplate> ReadTemplatePreflightAsync(Guid templateId, long version,
-        CancellationToken ct)
-    {
-        await using var connection = await _source.OpenConnectionAsync(ct);
-        await using var command = new NpgsqlCommand(
-            "SELECT definition::text FROM cellbridge_lists.templates WHERE template_id=$1 AND version=$2",
-            connection);
-        command.Parameters.AddWithValue(templateId);
-        command.Parameters.AddWithValue(version);
-        var json = await command.ExecuteScalarAsync(ct) as string;
-        return json is null
-            ? throw Validation("The template version does not exist.")
-            : PostgreSqlListJson.Deserialize<ListTemplate>(json);
-    }
+    private Task<ListTemplate> ReadTemplatePreflightAsync(string subject, Guid workspaceId,
+        OperationAuthorization authorization, Guid templateId, long version, CancellationToken ct) =>
+        InTransactionAsync(workspaceId, false, authorization, async (connection, transaction) =>
+        {
+            await AuthorizeMemberAsync(connection, transaction, workspaceId, subject, ct, authorization);
+            return await GetTemplateAsync(connection, transaction, templateId, version, ct);
+        }, ct);
 
     private static async Task ValidateReferenceDefinitionsAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, Guid workspaceId, string subject, ListDefinition definition, CancellationToken ct,

@@ -10,6 +10,9 @@ public sealed partial class PostgreSqlListEngine
     private readonly IListAuthorizationProvider? _authorizationProvider;
     private readonly string? _authorizationDomain;
     private readonly byte[] _continuationKey = RandomNumberGenerator.GetBytes(32);
+    private const int MaximumContinuationLength = 512;
+    // Private encoding may change across releases; default keys are ephemeral per engine.
+    private const string ContinuationPurpose = "CellBridge.Lists.Page.v3";
 
     public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits,
         IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null)
@@ -149,34 +152,37 @@ public sealed partial class PostgreSqlListEngine
         else if (current.Mode != "builtin") throw NotFound();
     }
 
-    private string ProtectContinuation(ContinuationPayload payload)
+    private string ProtectContinuation(ListActor actor, Guid workspaceId, Guid afterCandidateId)
     {
+        var payload = new ContinuationPayload(workspaceId, ContinuationContextFingerprint(actor),
+            afterCandidateId, DateTimeOffset.UtcNow.AddHours(1));
         var plaintext = JsonSerializer.SerializeToUtf8Bytes(payload);
         var nonce = RandomNumberGenerator.GetBytes(12);
         var ciphertext = new byte[plaintext.Length];
         var tag = new byte[16];
         using var aes = new AesGcm(_continuationKey, tag.Length);
-        aes.Encrypt(nonce, plaintext, ciphertext, tag, Encoding.UTF8.GetBytes("CellBridge.Lists.Page.v2"));
-        return Convert.ToBase64String(nonce.Concat(tag).Concat(ciphertext).ToArray());
+        aes.Encrypt(nonce, plaintext, ciphertext, tag, Encoding.UTF8.GetBytes(ContinuationPurpose));
+        var token = Convert.ToBase64String(nonce.Concat(tag).Concat(ciphertext).ToArray());
+        if (token.Length > MaximumContinuationLength)
+            throw new InvalidOperationException("The generated list continuation exceeds its encoding bound.");
+        return token;
     }
 
     private ContinuationPayload UnprotectContinuation(string value, ListActor actor, Guid workspaceId)
     {
         try
         {
-            if (value.Length > 4096) throw Validation("The list continuation is invalid.");
+            if (value.Length > MaximumContinuationLength) throw Validation("The list continuation is invalid.");
             var bytes = Convert.FromBase64String(value);
             if (bytes.Length < 29) throw new CryptographicException();
             var plaintext = new byte[bytes.Length - 28];
             using var aes = new AesGcm(_continuationKey, 16);
             aes.Decrypt(bytes.AsSpan(0, 12), bytes.AsSpan(28), bytes.AsSpan(12, 16), plaintext,
-                Encoding.UTF8.GetBytes("CellBridge.Lists.Page.v2"));
+                Encoding.UTF8.GetBytes(ContinuationPurpose));
             var payload = JsonSerializer.Deserialize<ContinuationPayload>(plaintext) ?? throw new CryptographicException();
-            if (payload.WorkspaceId != workspaceId || !StringComparer.Ordinal.Equals(payload.Subject, actor.Subject) ||
-                !StringComparer.Ordinal.Equals(payload.TenantId, actor.TenantId) ||
-                !StringComparer.Ordinal.Equals(payload.AuthorizationMode,
-                    _authorizationProvider is null ? "builtin" : "host") ||
-                !StringComparer.Ordinal.Equals(payload.PolicyDomain, _authorizationDomain) ||
+            if (payload.WorkspaceId != workspaceId || payload.AfterCandidateId == Guid.Empty ||
+                payload.ContextFingerprint is not { Length: 32 } ||
+                !CryptographicOperations.FixedTimeEquals(payload.ContextFingerprint, ContinuationContextFingerprint(actor)) ||
                 payload.ExpiresUtc <= DateTimeOffset.UtcNow)
                 throw new CryptographicException();
             return payload;
@@ -184,6 +190,13 @@ public sealed partial class PostgreSqlListEngine
         catch (Exception exception) when (exception is FormatException or CryptographicException or JsonException)
         { throw Validation("The list continuation is invalid."); }
     }
+
+    private byte[] ContinuationContextFingerprint(ListActor actor) =>
+        // A JSON array preserves field boundaries, nulls and exact ordinal identity text.
+        SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new string?[]
+        {
+            actor.Subject, actor.TenantId, _authorizationProvider is null ? "builtin" : "host", _authorizationDomain
+        }));
 
     private static string ValidateDomain(string? domain)
     {
@@ -208,6 +221,6 @@ public sealed partial class PostgreSqlListEngine
             (!access.HasFlag(ListAccess.Write) || Allows(listId, ListAuthorizationAction.Write)) &&
             (!access.HasFlag(ListAccess.Design) || Allows(listId, ListAuthorizationAction.Design));
     }
-    private sealed record ContinuationPayload(Guid WorkspaceId, string Subject, string? TenantId,
-        string AuthorizationMode, string? PolicyDomain, Guid AfterCandidateId, DateTimeOffset ExpiresUtc);
+    private sealed record ContinuationPayload(Guid WorkspaceId, byte[] ContextFingerprint,
+        Guid AfterCandidateId, DateTimeOffset ExpiresUtc);
 }

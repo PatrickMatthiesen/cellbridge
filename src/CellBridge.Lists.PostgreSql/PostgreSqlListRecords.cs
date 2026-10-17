@@ -186,17 +186,19 @@ public sealed partial class PostgreSqlListEngine
         var sourceRequirements = sourceActions.Select(x => ((Guid?)listId, x)).ToArray();
         var sourceAuthorization = await AuthorizeOperationAsync(actor, workspaceId, sourceRequirements, ct);
         if (_authorizationProvider is null) return sourceAuthorization;
-        var definition = await ReadDefinitionPreflightAsync(workspaceId, listId, sourceAuthorization!, ct);
+        var definition = await ReadDefinitionPreflightAsync(actor.Subject, workspaceId, listId, sourceAuthorization!, ct);
         var requirements = definition.Fields.Where(x => x.Type == ListFieldType.Reference && referenceFieldIds.Contains(x.Id))
             .Select(x => ((Guid?)x.ReferenceListId, ListAuthorizationAction.Read));
         return await AuthorizeAdditionalAsync(actor, sourceAuthorization!, requirements.Distinct().ToArray(), ct);
     }
 
-    private async Task<ListDefinition> ReadDefinitionPreflightAsync(Guid workspaceId, Guid listId,
+    private Task<ListDefinition> ReadDefinitionPreflightAsync(string subject, Guid workspaceId, Guid listId,
         OperationAuthorization authorization, CancellationToken ct) =>
-        await InTransactionAsync(workspaceId, false, authorization,
-            (connection, transaction) => GetDefinitionAsync(
-                connection, transaction, workspaceId, listId, false, ct), ct);
+        InTransactionAsync(workspaceId, false, authorization, async (connection, transaction) =>
+        {
+            await AuthorizeMemberAsync(connection, transaction, workspaceId, subject, ct, authorization);
+            return await GetDefinitionAsync(connection, transaction, workspaceId, listId, false, ct);
+        }, ct);
 
     private async Task<T> InRecordTransactionAsync<T>(Guid workspaceId, OperationAuthorization? authorization,
         Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> operation, CancellationToken ct)
