@@ -107,12 +107,19 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
             queryDecision = new(ListQueryAuthorizationScope.CheckCandidates, queryRequest.PolicyDomain,
                 queryRequest.Subject, queryRequest.TenantId, queryRequest.WorkspaceId);
         }
-        if (queryDecision.Scope == ListQueryAuthorizationScope.None) return new([], null);
         if (hasQueryDecision)
             authorization = new OperationAuthorization(authorization.Anchor,
                 authorization.Decisions.Append((queryRequest,
                     new ListAuthorizationDecision(true, queryDecision.EvaluatedAtUtc,
                         queryDecision.FreshUntilUtc))).ToArray());
+
+        if (queryDecision.Scope == ListQueryAuthorizationScope.None)
+        {
+            // The empty set still checks the anchor and audit reserve, without reading list data.
+            var empty = await ReadAuthorizedDefinitionsAsync(actor.Subject, workspaceId,
+                new HashSet<Guid>(), authorization!, ct);
+            return new(empty, null);
+        }
 
         var candidates = await ReadCandidateIdsAsync(actor.Subject, workspaceId, after, candidateLimit + 1, authorization!, ct);
         var scanned = candidates.Take(candidateLimit).ToArray();

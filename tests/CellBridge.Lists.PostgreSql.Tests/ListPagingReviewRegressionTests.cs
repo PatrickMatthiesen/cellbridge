@@ -10,6 +10,7 @@ public sealed class ListPagingReviewRegressionTests(ListDatabaseFixture database
     [PostgreSqlTheory]
     [InlineData(ListQueryAuthorizationScope.All)]
     [InlineData(ListQueryAuthorizationScope.CheckCandidates)]
+    [InlineData(ListQueryAuthorizationScope.None)]
     public async Task Host_enumeration_rejects_an_exhausted_security_audit_reserve(ListQueryAuthorizationScope scope)
     {
         var host = await CreateHostAsync(scope);
@@ -26,6 +27,7 @@ public sealed class ListPagingReviewRegressionTests(ListDatabaseFixture database
     [PostgreSqlTheory]
     [InlineData(ListQueryAuthorizationScope.All)]
     [InlineData(ListQueryAuthorizationScope.CheckCandidates)]
+    [InlineData(ListQueryAuthorizationScope.None)]
     public async Task Host_enumeration_rechecks_reserve_after_candidate_authorization(ListQueryAuthorizationScope scope)
     {
         var host = await CreateHostAsync(scope);
@@ -43,13 +45,43 @@ public sealed class ListPagingReviewRegressionTests(ListDatabaseFixture database
             }
 
             var pending = host.Engine.GetListsPageAsync(host.Actor, host.Workspace, candidateLimit: 1);
-            // Candidate discovery and host callbacks finish before the definition transaction
+            // Query policy and any candidate callbacks finish before the definition transaction
             // waits on this workspace lock. Exhaust the reserve while that transaction waits.
             await database.WaitForAdvisoryWaitAsync();
             Assert.Equal(scope == ListQueryAuthorizationScope.CheckCandidates ? 1 : 0, host.Authority.CandidateReads);
             await SetReserveAsync(host.Workspace, 2, blocker, transaction);
             await transaction.CommitAsync();
             await Unavailable(async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally { await DeleteWorkspaceAsync(host.Workspace); }
+    }
+
+    [PostgreSqlFact]
+    public async Task None_query_scope_returns_empty_without_reading_candidates_or_definitions()
+    {
+        var host = await CreateHostAsync(ListQueryAuthorizationScope.None);
+        try
+        {
+            var engine = new PostgreSqlListEngine(database.RuntimeSource!, new()
+            {
+                MaxSecurityAuditEvents = 2,
+                StatementTimeout = TimeSpan.FromMilliseconds(100)
+            }, host.Authority);
+            await engine.CheckHealthAsync();
+            await using var blocker = await database.AdminSource!.OpenConnectionAsync();
+            await using var transaction = await blocker.BeginTransactionAsync();
+            await using (var command = new NpgsqlCommand(
+                "LOCK TABLE cellbridge_lists.lists, cellbridge_lists.list_schemas IN ACCESS EXCLUSIVE MODE",
+                blocker, transaction))
+                await command.ExecuteNonQueryAsync();
+
+            var page = await engine.GetListsPageAsync(host.Actor, host.Workspace);
+
+            Assert.Empty(page.Lists);
+            Assert.Null(page.Continuation);
+            Assert.Empty(await engine.GetListsAsync(host.Actor, host.Workspace));
+            Assert.Equal(0, host.Authority.CandidateReads);
+            await transaction.RollbackAsync();
         }
         finally { await DeleteWorkspaceAsync(host.Workspace); }
     }
