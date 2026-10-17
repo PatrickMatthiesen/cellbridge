@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
+using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
@@ -45,6 +46,14 @@ public sealed class WholeFileSaveTests
         var saved = (await peer.State.FindByResourceIdAsync(before.ResourceId))!;
         Assert.Equal(bytes, await peer.Content.ReadVerifiedAsync(saved.Content));
         Assert.Equal(bytes, (await DocumentPartition.RestoreFileGraphAsync(saved, peer.Content, peer.Limits)).Materialize());
+        var originalCell = (await DocumentPartition.RestoreFileGraphAsync(before, peer.Content, peer.Limits)).FileCell;
+        var selected = (await DocumentPartition.RestoreFileGraphAsync(saved, peer.Content, peer.Limits)).FileCell;
+        Assert.Equal(originalCell, selected);
+        var query = new FsshttpbCellRequest { SubRequests =
+        { new(RequestTypes.QueryChanges) { RequestId = 1, Data = new QueryChangesSubRequestData { CellId = originalCell } } } };
+        var queried = await new CellBridgeDocumentService(peer).ExecuteAsync(saved.ResourceId,
+            DocumentPartitionKind.FileContents, query, new Dictionary<string, string>(), TestActor.Value);
+        Assert.False(Assert.Single(queried.Response.SubResponses).Status);
         Assert.Equal(2, saved.Revisions.Length);
         Assert.Equal(JsonSerializer.Serialize(before.Revisions[0]), JsonSerializer.Serialize(saved.Revisions[0]));
         Assert.All(before.Partitions[0].Elements, e => Assert.Contains(saved.Partitions[0].Elements,
@@ -53,7 +62,8 @@ public sealed class WholeFileSaveTests
         Assert.True(saved.Partitions[0].Knowledge > before.Partitions[0].Knowledge);
         Assert.Single(saved.Publication!.Pending);
         Assert.Single(saved.WholeFileSaveReceipts);
-        var later = await Save(new(peer), before.ResourceId, MinimalDocx.Create("later"), "second");
+        var laterBytes = MinimalDocx.Create("later");
+        var later = await Save(new(peer), before.ResourceId, laterBytes, "second");
         var replay = await Save(new(peer), before.ResourceId, bytes, "first");
         Assert.True(replay.IsReplay);
         Assert.Equal(JsonSerializer.Serialize(accepted.Revision), JsonSerializer.Serialize(replay.Revision));
@@ -63,7 +73,7 @@ public sealed class WholeFileSaveTests
         Assert.Equal(2, saved.Publication!.Pending.Length);
         await Assert.ThrowsAsync<WholeFileSaveConflictException>(() => Save(service, before.ResourceId,
             MinimalDocx.Create("different retry"), "first"));
-        var noOp = await Save(service, before.ResourceId, MinimalDocx.Create("later"), "no-op");
+        var noOp = await Save(service, before.ResourceId, laterBytes, "no-op");
         Assert.Equal(later.Revision.ContentVersion, noOp.Revision.ContentVersion);
         Assert.Equal(3, (await provider.State.FindByResourceIdAsync(before.ResourceId))!.Revisions.Length);
         // A receipt replays after lock expiry without acquiring fresh write authority.
@@ -199,7 +209,7 @@ public sealed class WholeFileSaveTests
         Assert.Equal(saved.Content, refused.State.Content);
         var final = await RevisionHistoryTests.Save(service, saved, "new protocol bytes");
         Assert.Equal(3, final.Revisions.Length);
-        Assert.Equal(MinimalDocx.Create("new protocol bytes"),
+        Assert.Equal(await provider.Content.ReadVerifiedAsync(final.Content),
             (await DocumentPartition.RestoreFileGraphAsync(final, provider.Content, provider.Limits)).Materialize());
     }
 

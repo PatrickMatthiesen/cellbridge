@@ -77,15 +77,22 @@ public sealed partial class CellBridgeDocumentService
             staged.Position = 0;
             var bytes = new byte[checked((int)length)];
             await staged.ReadExactlyAsync(bytes, cancellationToken);
-            var imported = await new DocumentStore().Put(before.Path, bytes).CaptureAsync(provider.Content,
-                cancellationToken: cancellationToken);
             var currentFile = before.Partitions.Single(p => p.Kind == 0);
             var currentGraph = await DocumentPartition.RestoreGraphAsync(currentFile, provider.Content, provider.Limits, cancellationToken);
-            var importedGraph = await DocumentPartition.RestoreGraphAsync(imported.Partitions.Single(p => p.Kind == 0),
-                provider.Content, provider.Limits, cancellationToken);
+            // A replacement publishes new objects in the existing file cell. Changing the
+            // cell would invalidate scoped queries from clients retaining its identity.
+            var cell = PartitionGraphSnapshot.Create(currentGraph.Elements, currentGraph.StorageIndex).FileCell;
+            ExGuid Fresh() => new(1, Guid.NewGuid());
+            var identity = new StorageManifestBuilder.StableIdentity(Fresh(), Fresh(), Fresh(), Fresh(),
+                Fresh(), Fresh(), Fresh(), cell, Guid.NewGuid());
+            var imported = FileContentPartitionBuilder.BuildQueryChangesResponse(1, bytes, identity, currentFile.Knowledge);
+            var index = ((QueryChangesSubResponseData)imported.SubResponses[0].Data!).StorageIndexExtendedGuid;
+            var importedGraph = GenericPartitionGraphSnapshot.Create(imported.DataElementPackage!.DataElements, index,
+                new(MaxElements: provider.Limits.MaxGraphElements, MaxPayloadBytes: provider.Limits.MaxGraphBytes));
             var publication = HistoricalGraphRestorer.Rebase(currentGraph, importedGraph, currentFile.Identity.SerialGuid,
                 currentFile.Knowledge, new(MaxElements: provider.Limits.MaxGraphElements, MaxPayloadBytes: provider.Limits.MaxGraphBytes));
-            preparedContent = imported.Content;
+            staged.Position = 0;
+            preparedContent = await provider.Content.WriteAsync(staged, cancellationToken);
             preparedFile = await DocumentPartition.CaptureGraphAsync(currentFile, publication.Graph, publication.Knowledge,
                 provider.Content, provider.Limits, cancellationToken);
             preparedFile = preparedFile with { Content = preparedContent, InlineContent = [] };
