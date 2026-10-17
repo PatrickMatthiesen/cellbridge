@@ -120,7 +120,7 @@ public static class CellBridgeListsExtensions
                 catch (ListException e)
                 {
                     var code = e.Failure switch { ListFailure.Validation => 400, ListFailure.NotFound => 404, ListFailure.Forbidden => 404,
-                        ListFailure.Conflict => 409, ListFailure.Limit => 413, _ => 503 };
+                        ListFailure.Conflict => 409, ListFailure.Limit => 413, ListFailure.NotSupported => 501, _ => 503 };
                     var error = e.Failure is ListFailure.Forbidden or ListFailure.NotFound ? "NotFound" : e.Failure.ToString();
                     return Results.Json(new { error }, statusCode: code);
                 }

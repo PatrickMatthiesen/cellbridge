@@ -8,8 +8,9 @@ public sealed partial class PostgreSqlListEngine
         bool canCreateLists, bool canManageGrants, CancellationToken ct = default)
     {
         ValidateActor(actor);
+        if (_authorizationProvider is not null) throw HostAuthorityUnsupported();
         if (string.IsNullOrWhiteSpace(subject) || subject.Length > 1024 || !ListValidation.IsWellFormedText(subject)) throw Validation("The membership subject is invalid.");
-        await InTransactionAsync(workspaceId, true, async (connection, transaction) =>
+        await InTransactionAsync(actor, workspaceId, true, async (connection, transaction, authorization) =>
         {
             var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
             if (!administrator.CanManageGrants) throw Forbidden();
@@ -57,10 +58,11 @@ public sealed partial class PostgreSqlListEngine
         ListAccess access, CancellationToken ct = default)
     {
         ValidateActor(actor);
+        if (_authorizationProvider is not null) throw HostAuthorityUnsupported();
         if (string.IsNullOrWhiteSpace(subject) || subject.Length > 1024 || !ListValidation.IsWellFormedText(subject)) throw Validation("The grant subject is invalid.");
         if ((access & ~(ListAccess.Read | ListAccess.Write | ListAccess.Design)) != 0)
             throw Validation("The list access value is invalid.");
-        await InTransactionAsync(workspaceId, true, async (connection, transaction) =>
+        await InTransactionAsync(actor, workspaceId, true, async (connection, transaction, authorization) =>
         {
             var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
             if (!administrator.CanManageGrants) throw Forbidden();
@@ -104,7 +106,9 @@ public sealed partial class PostgreSqlListEngine
         if (limit is <= 0 or > 1000) throw Validation("The audit page size is invalid.");
         return ReadAsync(actor, workspaceId, async (connection, transaction, member) =>
         {
-            if (!member.CanManageGrants) throw Forbidden();
+            var authorization = member.Authorization;
+            if (authorization is null ? !member.CanManageGrants
+                : !authorization.WorkspaceAccess.HasFlag(ListWorkspaceAccess.ReadAudit)) throw Forbidden();
             await using var command = Command(connection, transaction, """
                 SELECT id,utc,actor,action,list_id,record_id,revision,field_ids,target_subject
                 FROM cellbridge_lists.audit_events WHERE workspace_id=$1 ORDER BY id DESC LIMIT $2

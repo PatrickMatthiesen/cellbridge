@@ -26,16 +26,29 @@ public sealed partial class PostgreSqlListEngine : IListEngine
     public async Task<IReadOnlyList<ListDefinition>> GetListsAsync(ListActor actor, Guid workspaceId,
         CancellationToken ct = default) => await ReadAsync(actor, workspaceId, async (connection, transaction, member) =>
     {
-        await using var command = new NpgsqlCommand("""
+        var authorization = member.Authorization;
+        var authorityJoin = authorization is null ? """
+            JOIN cellbridge_lists.list_grants g ON g.workspace_id=l.workspace_id AND g.list_id=l.list_id
+            """ : "";
+        var authorityPredicate = authorization is null ? "g.subject=@subject AND g.access<>0"
+            : "(l.list_id=ANY(@allowed) OR (@default_read AND NOT(l.list_id=ANY(@overridden))))";
+        await using var command = new NpgsqlCommand($$"""
             SELECT s.definition::text
             FROM cellbridge_lists.lists l
             JOIN cellbridge_lists.list_schemas s ON s.workspace_id=l.workspace_id AND s.list_id=l.list_id AND s.schema_version=l.schema_version
-            JOIN cellbridge_lists.list_grants g ON g.workspace_id=l.workspace_id AND g.list_id=l.list_id
-            WHERE l.workspace_id=$1 AND g.subject=$2 AND g.access<>0
+            {{authorityJoin}}
+            WHERE l.workspace_id=@workspace AND {{authorityPredicate}}
             ORDER BY l.name COLLATE "C", l.list_id
             """, connection, transaction);
-        command.Parameters.AddWithValue(workspaceId);
-        command.Parameters.AddWithValue(actor.Subject);
+        command.Parameters.AddWithValue("workspace", workspaceId);
+        if (authorization is null) command.Parameters.AddWithValue("subject", actor.Subject);
+        else
+        {
+            command.Parameters.AddWithValue("default_read", authorization.DefaultListAccess.HasFlag(ListAccess.Read));
+            command.Parameters.AddWithValue("overridden", authorization.ListOverrides.Keys.ToArray());
+            command.Parameters.AddWithValue("allowed", authorization.ListOverrides
+                .Where(x => x.Value.HasFlag(ListAccess.Read)).Select(x => x.Key).ToArray());
+        }
         await using var reader = await command.ExecuteReaderAsync(ct);
         var result = new List<ListDefinition>();
         while (await reader.ReadAsync(ct)) result.Add(PostgreSqlListJson.Deserialize<ListDefinition>(reader.GetString(0)));
@@ -47,9 +60,9 @@ public sealed partial class PostgreSqlListEngine : IListEngine
     {
         ValidateActor(actor);
         if (request.Id == Guid.Empty) throw Validation("A list ID is required.");
-        return await InTransactionAsync(workspaceId, false, async (connection, transaction) =>
+        return await InTransactionAsync(actor, workspaceId, false, async (connection, transaction, authorization) =>
         {
-            var member = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
+            var member = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, authorization);
             if (!member.CanCreateLists) throw Forbidden();
 
             ListDefinition definition;
@@ -67,7 +80,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                     request.Fields.Select(x => x with { Protected = false }).ToArray(), NumberPrefix: request.NumberPrefix);
             }
             ListValidation.ValidateDefinition(definition, _limits);
-            await ValidateReferenceDefinitionsAsync(connection, transaction, workspaceId, actor.Subject, definition, ct);
+            await ValidateReferenceDefinitionsAsync(connection, transaction, workspaceId, actor.Subject, definition, ct, authorization: authorization);
 
             await LockQuotaAsync(connection, transaction, workspaceId, ct);
             var listCount = await ScalarAsync<long>(connection, transaction,
@@ -75,7 +88,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
             if (listCount >= _limits.MaxLists) throw Limit("The workspace list limit has been reached.");
             var json = PostgreSqlListJson.Serialize(definition);
             await ReserveStorageAsync(connection, transaction, workspaceId,
-                await CanonicalJsonBytesAsync(connection, transaction, json, ct) + 256 + 80 + Encoding.UTF8.GetByteCount(actor.Subject), ct);
+                await CanonicalJsonBytesAsync(connection, transaction, json, ct) + 256 + (authorization is null ? 80 + Encoding.UTF8.GetByteCount(actor.Subject) : 0), ct);
 
             try
             {
@@ -88,7 +101,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                 await ExecuteAsync(connection, transaction,
                     "INSERT INTO cellbridge_lists.list_counters(workspace_id,list_id) VALUES ($1,$2)", ct,
                     workspaceId, request.Id);
-                await ExecuteAsync(connection, transaction,
+                if (authorization is null) await ExecuteAsync(connection, transaction,
                     "INSERT INTO cellbridge_lists.list_grants(workspace_id,list_id,subject,access) VALUES ($1,$2,$3,$4)", ct,
                     workspaceId, request.Id, actor.Subject, (int)(ListAccess.Read | ListAccess.Write | ListAccess.Design));
             }
@@ -104,10 +117,10 @@ public sealed partial class PostgreSqlListEngine : IListEngine
         CancellationToken ct = default)
     {
         ValidateActor(actor);
-        return await InRecordTransactionAsync(workspaceId, async (connection, transaction) =>
+        return await InRecordTransactionAsync(actor, workspaceId, async (connection, transaction, authorization) =>
         {
             var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
-                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct);
+                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct, authorization);
             RequireWriteContext(context, ListAccess.Read);
             return context.Definition!;
         }, ct);
@@ -117,10 +130,10 @@ public sealed partial class PostgreSqlListEngine : IListEngine
         PublishSchemaRequest request, CancellationToken ct = default)
     {
         ValidateActor(actor);
-        return await InTransactionAsync(workspaceId, false, async (connection, transaction) =>
+        return await InTransactionAsync(actor, workspaceId, false, async (connection, transaction, authorization) =>
         {
-            await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
-            await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Design, ct);
+            await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, authorization);
+            await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Design, ct, authorization);
             await LockWorkspaceMutationAsync(connection, transaction, workspaceId, ct);
             var previous = await GetDefinitionAsync(connection, transaction, workspaceId, listId, true, ct);
             if (previous.SchemaVersion != request.ExpectedVersion) throw Conflict("The list schema changed.");
@@ -132,7 +145,7 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                 .Select(x => x.Id)
                 .ToHashSet();
             await ValidateReferenceDefinitionsAsync(connection, transaction, workspaceId, actor.Subject, next, ct,
-                addedReferenceFieldIds);
+                addedReferenceFieldIds, authorization);
             await LockQuotaAsync(connection, transaction, workspaceId, ct);
             var versions = await ScalarAsync<long>(connection, transaction,
                 "SELECT count(*) FROM cellbridge_lists.list_schemas WHERE workspace_id=$1 AND list_id=$2", ct, workspaceId, listId);
@@ -155,7 +168,8 @@ public sealed partial class PostgreSqlListEngine : IListEngine
     public async Task<IReadOnlyList<SavedListView>> GetViewsAsync(ListActor actor, Guid workspaceId,
         Guid listId, CancellationToken ct = default) => await ReadAsync(actor, workspaceId, async (connection, transaction, member) =>
     {
-        await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Read, ct);
+        var authorization = member.Authorization;
+        await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Read, ct, authorization);
         await using var command = Command(connection, transaction,
             "SELECT definition::text FROM cellbridge_lists.saved_views WHERE workspace_id=$1 AND list_id=$2 ORDER BY view_id", workspaceId, listId);
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -168,10 +182,10 @@ public sealed partial class PostgreSqlListEngine : IListEngine
         SaveViewRequest request, CancellationToken ct = default)
     {
         ValidateActor(actor);
-        return await InTransactionAsync(workspaceId, false, async (connection, transaction) =>
+        return await InTransactionAsync(actor, workspaceId, false, async (connection, transaction, authorization) =>
         {
-            await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
-            await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Design, ct);
+            await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, authorization);
+            await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Design, ct, authorization);
             var definition = await GetDefinitionAsync(connection, transaction, workspaceId, listId, true, ct);
             ListValidation.ValidateQuery(definition, request.Query, _limits);
             if (request.Id == Guid.Empty || string.IsNullOrWhiteSpace(request.Name) || request.Name.Length > 200 ||
@@ -206,23 +220,26 @@ public sealed partial class PostgreSqlListEngine : IListEngine
         Func<NpgsqlConnection, NpgsqlTransaction, Membership, Task<T>> operation, CancellationToken ct)
     {
         ValidateActor(actor);
-        return await InTransactionAsync(workspaceId, false, async (connection, transaction) =>
+        return await InTransactionAsync(actor, workspaceId, false, async (connection, transaction, authorization) =>
         {
-            var member = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
+            var member = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, authorization);
             return await operation(connection, transaction, member);
         }, ct);
     }
 
-    private async Task<T> InTransactionAsync<T>(Guid workspaceId, bool exclusiveAuthorization,
-        Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> operation, CancellationToken ct)
+    private async Task<T> InTransactionAsync<T>(ListActor actor, Guid workspaceId, bool exclusiveAuthorization,
+        Func<NpgsqlConnection, NpgsqlTransaction, ListAuthorizationSnapshot?, Task<T>> operation, CancellationToken ct)
     {
         if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
         await EnsureHealthyAsync(ct);
+        await using var lease = _authorizationProvider is null ? null : await AcquireHostReadAsync(actor, workspaceId, ct);
+        var authorization = lease?.Snapshot;
         try
         {
             await using var connection = await _source.OpenConnectionAsync(ct);
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
             await ConfigureAsync(connection, transaction, workspaceId, ct);
+            if (authorization is not null) await LockHostDomainAsync(connection, transaction, false, ct);
             await using (var authLock = new NpgsqlCommand(exclusiveAuthorization
                 ? "SELECT pg_advisory_xact_lock(hashtextextended($1, 391813))"
                 : "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 391813))", connection, transaction))
@@ -230,7 +247,8 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                 authLock.Parameters.AddWithValue(workspaceId.ToString("D"));
                 await authLock.ExecuteNonQueryAsync(ct);
             }
-            var result = await operation(connection, transaction);
+            if (authorization is not null) await RequireHostWorkspaceAsync(connection, transaction, workspaceId, ct);
+            var result = await operation(connection, transaction, authorization);
             await transaction.CommitAsync(CancellationToken.None);
             return result;
         }
@@ -295,7 +313,11 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                     SELECT 1 FROM pg_roles inherited
                     WHERE pg_has_role(current_user,inherited.oid,'MEMBER') AND
                       has_sequence_privilege(inherited.oid,'cellbridge_lists.audit_events_id_seq','UPDATE')
-                  )
+                  ),
+                  EXISTS (SELECT 1 FROM pg_trigger t
+                    WHERE t.tgrelid='cellbridge_lists.workspaces'::regclass
+                      AND t.tgname='immutable_workspace_authority' AND t.tgenabled='O'
+                      AND t.tgfoid='cellbridge_lists.reject_authority_rebinding()'::regprocedure)
                 FROM cellbridge_lists.schema_version v
                 CROSS JOIN pg_roles r
                 CROSS JOIN pg_class c
@@ -303,10 +325,10 @@ public sealed partial class PostgreSqlListEngine : IListEngine
                 WHERE v.singleton AND r.rolname=current_user AND n.nspname='cellbridge_lists' AND c.relname='records'
                 """, connection);
             await using var reader = await command.ExecuteReaderAsync(ct);
-            if (!await reader.ReadAsync(ct) || reader.GetInt32(0) != 2)
+            if (!await reader.ReadAsync(ct) || reader.GetInt32(0) != 3)
                 throw new ListException(ListFailure.Unavailable, "The list schema version is missing or unsupported.");
             if (reader.GetBoolean(1) || reader.GetBoolean(2) || reader.GetBoolean(3) || reader.GetBoolean(4) ||
-                !reader.GetBoolean(5) || reader.GetBoolean(6))
+                !reader.GetBoolean(5) || reader.GetBoolean(6) || !reader.GetBoolean(7))
                 throw new ListException(ListFailure.Unavailable, "The list runtime role has unsafe database privileges.");
             _healthy = true;
         }
@@ -323,10 +345,18 @@ public sealed partial class PostgreSqlListEngine : IListEngine
     }
 
     private async Task<Membership> AuthorizeMemberAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, Guid workspaceId, string subject, CancellationToken ct)
+        NpgsqlTransaction transaction, Guid workspaceId, string subject, CancellationToken ct, ListAuthorizationSnapshot? authorization = null)
     {
+        if (authorization is not null)
+        {
+            if (!authorization.WorkspaceAccess.HasFlag(ListWorkspaceAccess.UseLists)) throw Forbidden();
+            var count = await ScalarAsync<int>(connection, transaction, "SELECT security_audit_count FROM cellbridge_lists.workspaces WHERE workspace_id=$1", ct, workspaceId);
+            if (count >= _limits.MaxSecurityAuditEvents) throw new ListException(ListFailure.Unavailable, "The workspace security audit reserve is exhausted.");
+            return new Membership(authorization.WorkspaceAccess.HasFlag(ListWorkspaceAccess.CreateLists),
+                authorization.WorkspaceAccess.HasFlag(ListWorkspaceAccess.ManagePermissions), authorization);
+        }
         await using var command = Command(connection, transaction,
-            "SELECT m.can_create_lists,m.can_manage_grants,w.security_audit_count FROM cellbridge_lists.memberships m JOIN cellbridge_lists.workspaces w USING(workspace_id) WHERE m.workspace_id=$1 AND m.subject=$2",
+            "SELECT m.can_create_lists,m.can_manage_grants,w.security_audit_count FROM cellbridge_lists.memberships m JOIN cellbridge_lists.workspaces w USING(workspace_id) WHERE m.workspace_id=$1 AND m.subject=$2 AND w.authorization_domain IS NULL",
             workspaceId, subject);
         await using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) throw Forbidden();
@@ -336,8 +366,13 @@ public sealed partial class PostgreSqlListEngine : IListEngine
     }
 
     private static async Task RequireAccessAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, Guid listId, string subject, ListAccess required, CancellationToken ct)
+        Guid workspaceId, Guid listId, string subject, ListAccess required, CancellationToken ct, ListAuthorizationSnapshot? authorization = null)
     {
+        if (authorization is not null)
+        {
+            if (listId == Guid.Empty || (authorization.AccessFor(listId) & required) != required) throw NotFound();
+            return;
+        }
         var access = await ScalarAsync<int?>(connection, transaction,
             "SELECT access FROM cellbridge_lists.list_grants WHERE workspace_id=$1 AND list_id=$2 AND subject=$3", ct,
             workspaceId, listId, subject);
@@ -363,13 +398,13 @@ public sealed partial class PostgreSqlListEngine : IListEngine
 
     private static async Task ValidateReferenceDefinitionsAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, Guid workspaceId, string subject, ListDefinition definition, CancellationToken ct,
-        IReadOnlySet<Guid>? fieldIds = null)
+        IReadOnlySet<Guid>? fieldIds = null, ListAuthorizationSnapshot? authorization = null)
     {
         foreach (var field in definition.Fields.Where(x => x.Type == ListFieldType.Reference &&
                      (fieldIds is null || fieldIds.Contains(x.Id))))
         {
             var targetListId = field.ReferenceListId!.Value;
-            await RequireAccessAsync(connection, transaction, workspaceId, targetListId, subject, ListAccess.Read, ct);
+            await RequireAccessAsync(connection, transaction, workspaceId, targetListId, subject, ListAccess.Read, ct, authorization);
             var target = await GetDefinitionAsync(connection, transaction, workspaceId, targetListId, false, ct);
             if (field.ReferenceDisplayFieldId is { } displayId && target.Fields.All(x => x.Id != displayId))
                 throw Validation("The reference display field does not exist in the target list.");
@@ -466,5 +501,5 @@ public sealed partial class PostgreSqlListEngine : IListEngine
     private static ListException NotFound() => new(ListFailure.NotFound, "The list resource was not found.");
     private static ListException Conflict(string message) => new(ListFailure.Conflict, message);
     private static ListException Limit(string message) => new(ListFailure.Limit, message);
-    private sealed record Membership(bool CanCreateLists, bool CanManageGrants);
+    private sealed record Membership(bool CanCreateLists, bool CanManageGrants, ListAuthorizationSnapshot? Authorization = null);
 }

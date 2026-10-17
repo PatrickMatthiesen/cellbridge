@@ -14,10 +14,10 @@ public sealed partial class PostgreSqlListEngine
         CancellationToken ct = default)
     {
         ValidateActor(actor);
-        return InRecordTransactionAsync(workspaceId, async (connection, transaction) =>
+        return InRecordTransactionAsync(actor, workspaceId, async (connection, transaction, authorization) =>
         {
             var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
-                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct);
+                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct, authorization);
             RequireWriteContext(context, ListAccess.Read);
             var definition = context.Definition!;
             ListValidation.ValidateQuery(definition, query, _limits);
