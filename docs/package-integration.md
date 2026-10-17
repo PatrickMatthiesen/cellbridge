@@ -156,8 +156,12 @@ Identity applications should use `AddCellBridgeIdentityLogin<TUser>` instead.
 
 ### Register document permissions and file delivery
 
-`AddCellBridge(provider)` supplies stored owner/grant authorization. For a host-owned
-policy, the typed overload registers one shared singleton for both the concrete
+`AddCellBridge(provider)` supplies stored owner/grant authorization. For ordinary
+async host permissions, use `AddCellBridgeWithExternalAuthorization<MyProvider>(provider)`.
+The provider implements `IDocumentAuthorizationProvider`; caching is off by default.
+See [async authorization and migration](async-document-authorization.md).
+
+For the existing versioned host-owned snapshot policy, the typed overload registers one shared singleton for both the concrete
 policy and `ICellBridgeAuthorizationPolicy`:
 
 ```csharp

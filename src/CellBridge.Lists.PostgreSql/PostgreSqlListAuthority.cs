@@ -8,10 +8,11 @@ public sealed partial class PostgreSqlListEngine
         bool canCreateLists, bool canManageGrants, CancellationToken ct = default)
     {
         ValidateActor(actor);
+        if (_authorizationProvider is not null) throw HostAuthorityUnsupported();
         if (string.IsNullOrWhiteSpace(subject) || subject.Length > 1024 || !ListValidation.IsWellFormedText(subject)) throw Validation("The membership subject is invalid.");
-        await InTransactionAsync(workspaceId, true, async (connection, transaction) =>
+        await InTransactionAsync(workspaceId, true, null, async (connection, transaction) =>
         {
-            var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
+            var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, null);
             if (!administrator.CanManageGrants) throw Forbidden();
             await LockQuotaAsync(connection, transaction, workspaceId, ct);
             await using var existingCommand = Command(connection, transaction,
@@ -57,12 +58,13 @@ public sealed partial class PostgreSqlListEngine
         ListAccess access, CancellationToken ct = default)
     {
         ValidateActor(actor);
+        if (_authorizationProvider is not null) throw HostAuthorityUnsupported();
         if (string.IsNullOrWhiteSpace(subject) || subject.Length > 1024 || !ListValidation.IsWellFormedText(subject)) throw Validation("The grant subject is invalid.");
         if ((access & ~(ListAccess.Read | ListAccess.Write | ListAccess.Design)) != 0)
             throw Validation("The list access value is invalid.");
-        await InTransactionAsync(workspaceId, true, async (connection, transaction) =>
+        await InTransactionAsync(workspaceId, true, null, async (connection, transaction) =>
         {
-            var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct);
+            var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, null);
             if (!administrator.CanManageGrants) throw Forbidden();
             await LockQuotaAsync(connection, transaction, workspaceId, ct);
             if (await ScalarAsync<long>(connection, transaction,
@@ -102,9 +104,9 @@ public sealed partial class PostgreSqlListEngine
         CancellationToken ct = default)
     {
         if (limit is <= 0 or > 1000) throw Validation("The audit page size is invalid.");
-        return ReadAsync(actor, workspaceId, async (connection, transaction, member) =>
+        return ReadAsync(actor, workspaceId, async (connection, transaction, member, authorization) =>
         {
-            if (!member.CanManageGrants) throw Forbidden();
+            if (authorization is null && !member.CanManageGrants) throw Forbidden();
             await using var command = Command(connection, transaction, """
                 SELECT id,utc,actor,action,list_id,record_id,revision,field_ids,target_subject
                 FROM cellbridge_lists.audit_events WHERE workspace_id=$1 ORDER BY id DESC LIMIT $2
@@ -117,6 +119,9 @@ public sealed partial class PostgreSqlListEngine
                     reader.IsDBNull(5) ? null : reader.GetGuid(5), reader.IsDBNull(6) ? null : reader.GetInt64(6),
                     reader.GetFieldValue<Guid[]>(7), reader.IsDBNull(8) ? null : reader.GetString(8)));
             return (IReadOnlyList<AuditEvent>)events;
-        }, ct);
+        }, [(null, ListAuthorizationAction.ReadAudit)], ct);
     }
+
+    private static ListException HostAuthorityUnsupported() => new(ListFailure.NotSupported,
+        "Host-authorized workspaces manage membership and grants in the host authority store.");
 }

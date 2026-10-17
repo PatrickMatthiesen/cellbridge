@@ -2,13 +2,17 @@ using System.Text.Json.Nodes;
 
 namespace CellBridge.Lists;
 
-public sealed record ListActor(string Subject);
+public sealed record ListActor(string Subject)
+{
+    public ListActor(string subject, string? tenantId) : this(subject) => TenantId = tenantId;
+    public string? TenantId { get; init; }
+}
 
 [Flags]
 public enum ListAccess { None = 0, Read = 1, Write = 2, Design = 4 }
 public enum ListFieldType { Text, Boolean, Integer, Decimal, Date, Timestamp, Choice, Reference }
 public enum FilterOperator { Equal, NotEqual, GreaterThan, GreaterOrEqual, LessThan, LessOrEqual }
-public enum ListFailure { Validation, NotFound, Forbidden, Conflict, Limit, Unavailable }
+public enum ListFailure { Validation, NotFound, Forbidden, Conflict, Limit, Unavailable, NotSupported }
 
 public sealed class ListException(ListFailure failure, string message) : Exception(message)
 {
@@ -50,6 +54,7 @@ public sealed record MergePreview(long CurrentRevision, long SchemaVersion, IRea
 public sealed record ReferenceLabel(Guid RecordId, long Number, JsonNode? Label);
 public sealed record AuditEvent(long Id, DateTimeOffset Utc, string Actor, string Action, Guid? ListId,
     Guid? RecordId, long? Revision, IReadOnlyList<Guid> FieldIds, string? TargetSubject = null);
+public sealed record ListDefinitionPage(IReadOnlyList<ListDefinition> Lists, string? Continuation);
 
 public sealed class ListLimits
 {
@@ -104,4 +109,14 @@ public interface IListEngine
     Task SetMembershipAsync(ListActor actor, Guid workspaceId, string subject, bool member, bool canCreateLists, bool canManageGrants, CancellationToken ct = default);
     Task SetListGrantAsync(ListActor actor, Guid workspaceId, Guid listId, string subject, ListAccess access, CancellationToken ct = default);
     Task<IReadOnlyList<AuditEvent>> GetAuditAsync(ListActor actor, Guid workspaceId, int limit = 100, CancellationToken ct = default);
+}
+
+/// <summary>
+/// Exposes bounded candidate paging for hosts that cannot authorize an entire workspace list set in one decision.
+/// Continuations must be opaque and authenticated; adapters pass them through without interpreting candidate IDs.
+/// </summary>
+public interface IPagedListEngine
+{
+    Task<ListDefinitionPage> GetListsPageAsync(ListActor actor, Guid workspaceId, string? continuation = null,
+        int candidateLimit = 256, CancellationToken ct = default);
 }

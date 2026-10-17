@@ -359,7 +359,7 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
     private static async Task AssertMigratedAsync(NpgsqlDataSource ownerSource, MigrationFixture fixture)
     {
         await using var version = ownerSource.CreateCommand("SELECT version FROM cellbridge_lists.schema_version");
-        Assert.Equal(2, await version.ExecuteScalarAsync());
+        Assert.Equal(3, await version.ExecuteScalarAsync());
         await using var connection = await ownerSource.OpenConnectionAsync();
         await using var transaction = await connection.BeginTransactionAsync();
         await using (var context = new NpgsqlCommand("SELECT set_config('cellbridge.workspace_id',$1,true)", connection, transaction))

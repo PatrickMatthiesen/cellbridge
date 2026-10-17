@@ -10,14 +10,15 @@ public sealed record HostLockResult(bool Success, HostWriteToken? WriteToken, st
 /// <summary>Authoritative base WOPI lock integration. Hosts must route both protocols through the same provider.</summary>
 public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
 {
-    public ValueTask<HostLockResult> ApplyAsync(Guid resourceId, HostLockOperation operation, string token,
+    public async ValueTask<HostLockResult> ApplyAsync(Guid resourceId, HostLockOperation operation, string token,
         CellBridgeActor actor, string? replacementToken = null, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
         if (token.Length > 1024) throw new ArgumentException("Lock tokens are limited to 1024 characters.", nameof(token));
         if (operation == HostLockOperation.Replace && (string.IsNullOrWhiteSpace(replacementToken) || replacementToken.Length > 1024))
             throw new ArgumentException("A replacement lock token is required.", nameof(replacementToken));
-        return service.Provider.State.TransitionAsync(resourceId, (current, now) =>
+        actor = await service.AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Write, cancellationToken);
+        return await service.Provider.State.TransitionAsync(resourceId, (current, now) =>
         {
             if (!service.Access(actor, current).HasFlag(DocumentAccess.Write)) throw new UnauthorizedAccessException("Write access denied.");
             var coordination = current.Coordination;
@@ -44,9 +45,11 @@ public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
     /// The trusted callback is bounded and performs no I/O. Preserve current-based independent state fields.
     /// Hosts stage package/graph handles before calling this method and publish externally through the journal.
     /// </summary>
-    public ValueTask<bool> TryCommitAsync(HostWriteToken token, long expectedStateVersion, CellBridgeActor actor,
-        Func<DocumentState, DateTime, DocumentState> commit, Guid operationId, CancellationToken cancellationToken = default) =>
-        service.Provider.State.TransitionAsync(token.ResourceId, (current, now) =>
+    public async ValueTask<bool> TryCommitAsync(HostWriteToken token, long expectedStateVersion, CellBridgeActor actor,
+        Func<DocumentState, DateTime, DocumentState> commit, Guid operationId, CancellationToken cancellationToken = default)
+    {
+        actor = await service.AuthorizeResourceActorAsync(actor, token.ResourceId, DocumentAccess.Write, cancellationToken);
+        return await service.Provider.State.TransitionAsync(token.ResourceId, (current, now) =>
         {
             if (!service.Access(actor, current).HasFlag(DocumentAccess.Write) || token.OwnerSubject != actor.Identity.Subject ||
                 current.LifecycleGeneration != token.LifecycleGeneration || current.StateVersion != expectedStateVersion ||
@@ -59,4 +62,5 @@ public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
             next = ExternalPublication.Append(current, next, operationId, service.Provider.Limits);
             return new StateTransition<bool>(next, true);
         }, cancellationToken);
+    }
 }

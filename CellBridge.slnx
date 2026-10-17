@@ -1,4 +1,8 @@
 <Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/HostAuthorizedDocuments/HostAuthorizedDocuments.csproj" />
+    <Project Path="examples/HostAuthorizedLists/HostAuthorizedLists.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/CellBridge.Lists/CellBridge.Lists.csproj" />
     <Project Path="src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />

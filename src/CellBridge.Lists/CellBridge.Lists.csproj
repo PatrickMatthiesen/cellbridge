@@ -3,5 +3,9 @@
   <PropertyGroup><Description>Experimental typed customer workspace lists with validation, authorized persistence and optional HTTP adapters.</Description></PropertyGroup>
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)../../docs/lists-package-readme.md" Pack="true" PackagePath="README.md" />
+    <Compile Include="../SharedAuthorization/BoundedAuthorizationCache.cs" Link="Authorization/BoundedAuthorizationCache.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="CellBridge.Lists.PostgreSql" />
   </ItemGroup>
 </Project>

@@ -21,8 +21,10 @@ public static class AuthorizedDocumentCatalog
             foreach (var candidate in candidates)
             {
                 var state = await service.Provider.State.FindByResourceIdAsync(candidate.ResourceId, cancellationToken);
-                if (state is null || !state.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase) ||
-                    !service.Access(actor, state).HasFlag(DocumentAccess.Read)) continue;
+                if (state is null || !state.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase)) continue;
+                var admitted = await service.AuthorizeActorAsync(actor, state, DocumentAccess.Read, cancellationToken, fresh: true);
+                state = await service.RevalidateReadStateAsync(state, cancellationToken);
+                if (state is null || !service.Access(admitted, state).HasFlag(DocumentAccess.Read)) continue;
                 if (skipped++ < offset) continue;
                 visible.Add(new(state.ResourceId, state.Path, state.Content.Length, state.ContentVersion,
                     state.ModifiedUtc, state.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow)) { Security = state.Security });

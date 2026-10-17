@@ -15,6 +15,22 @@ namespace CellBridge.AspNetCore;
 
 public static class CellBridgeEndpoints
 {
+    /// <summary>Registers ordinary operation-time external authority. Cross-operation caching is opt-in.</summary>
+    /// <remarks>The singleton provider can use an IDbContextFactory or another async host service.
+    /// Existing native/versioned bindings require explicit migration before this mode can use them.</remarks>
+    public static IServiceCollection AddCellBridgeWithExternalAuthorization<TProvider>(this IServiceCollection services,
+        StorageProvider provider, bool requireDurability = true, bool multipleInstances = false,
+        Action<CellBridgeOptions>? configure = null) where TProvider : class, IDocumentAuthorizationProvider
+    {
+        if (services.Any(x => !x.IsKeyedService && (x.ServiceType == typeof(CellBridgeOptions) ||
+            x.ServiceType == typeof(ICellBridgeAuthorizationPolicy) || x.ServiceType == typeof(IDocumentAuthorizationProvider))))
+            throw new InvalidOperationException("Select one document authority in the first CellBridge registration.");
+        CellBridgeHostingRegistration.RequireSingleton<TProvider>(services);
+        services.TryAddSingleton<TProvider>();
+        services.AddSingleton<IDocumentAuthorizationProvider>(sp => sp.GetRequiredService<TProvider>());
+        return services.AddCellBridge(provider, requireDurability, multipleInstances, configure);
+    }
+
     /// <summary>Registers CellBridge with a shared singleton host document-permission policy.</summary>
     /// <remarks>Call this overload instead of AddCellBridge when selecting a custom policy.
     /// An existing singleton registration for the concrete policy is reused.</remarks>
@@ -124,6 +140,9 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
     var state = await service.Provider.State.FindByPathKeyAsync(StorageIds.PathKey(path), context.RequestAborted);
     var actor = CellBridgeActor.FromPrincipal(context.User);
     if (actor is null) return Results.Unauthorized();
+    if (state is null) return Results.NotFound();
+    actor = await service.AuthorizeActorAsync(actor, state, DocumentAccess.Read, context.RequestAborted);
+    state = await service.RevalidateReadStateAsync(state, context.RequestAborted);
     if (state is null) return Results.NotFound();
     if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) return Results.NotFound();
     context.Response.Headers.CacheControl = "private, no-store";
