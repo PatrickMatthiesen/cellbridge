@@ -112,7 +112,48 @@ Sharing a token or subject does not allow one protocol to impersonate the other.
 WOPI extended/shared locks and cross-protocol lock conversion are unsupported.
 Existing FSSHTTP schema/exclusive conversions continue within their own domain.
 
-A host stages immutable package and graph handles before committing a write.
+For complete file replacement, use the document service directly:
+
+```csharp
+var saved = await documents.SaveWholeFileAsync(resourceId, uploadedStream,
+    operationKey, actor, hostLockToken, cancellationToken);
+```
+
+The service bounds and validates the upload, constructs the protocol graph,
+retains existing immutable graph elements and advances knowledge. It commits the
+file, history, retry receipt and external delivery entry in one transition.
+Hosts supply their storage, identity and authoritative authorization policy;
+they do not construct document state or graph objects.
+This API validates `.docx`, `.xlsx` and `.pptx` packages. Other file formats are
+unsupported. Hosts must keep their advertised file capabilities consistent with
+that restriction.
+
+An existing file requires an unexpired host lock belonging to the actor and
+matching the supplied opaque token. Without a token, only an empty file with no
+active host, FSSHTTP exclusive or schema lock can be saved. An explicit expired
+token never becomes an unlocked write. The service checks permission inside both
+transitions and fences preparation against the original lifecycle, state version
+and coordination generation. A competing edit or lock change rejects the save.
+
+Use a stable operation key for retries. The durable receipt records the subject,
+lifecycle, content and lock fingerprint, and accepted revision number. A repeat
+returns that original revision even after later saves; it still requires current
+write permission. Reusing a key with different bytes or a different lock fails.
+Identical bytes create a receipt without another history or delivery entry.
+`MaxWholeFileSaveReceipts` bounds receipt retention. A full receipt budget rejects
+new operations without dropping retry protection.
+All writers against this state must understand whole-file receipts. Stop older
+hosts before enabling the API; mixed hosting with released beta.4 writers is
+unsupported because older writers do not preserve the new receipt field.
+
+The result confirms protocol storage acceptance. A host whose download endpoint
+reads the external destination must separately confirm delivery before reporting
+read-back success. An uncertain destination acknowledgement retains the original
+queue entry and operation identity. A destination conflict retains both the
+remote bytes and the local accepted revision.
+
+For custom prepared mutations, a host stages immutable package and graph handles
+before committing a write.
 `TryCommitAsync` requires the `HostWriteToken` returned by acquisition or refresh,
 the prepared state's version, an actor, a bounded deterministic state callback,
 and a stable operation GUID. Inside the provider transaction it rechecks current

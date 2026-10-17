@@ -97,7 +97,7 @@ public static class ProviderRecovery
                 limits.CheckDocument(state);
                 foreach (var revision in state.Revisions)
                     limits.CheckDocument(state with { Content = revision.Content, Partitions = revision.Partitions,
-                        Revisions = [], Receipts = [], RestoreReceipts = [], Publication = null });
+                        Revisions = [], Receipts = [], RestoreReceipts = [], WholeFileSaveReceipts = [], Publication = null });
             }
             var current = states.Single(s => s.StateVersion == head.StateVersion);
             if (requireExpired && (current.Editors.Any(e => e.ExpiresUtc > now) || current.Coordination.SchemaOwners.Any(l => l.ExpiresUtc > now) ||

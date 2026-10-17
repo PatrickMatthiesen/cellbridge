@@ -30,7 +30,7 @@ public static class DocumentLifecycle
         replacement.LifecycleGeneration == checked(generation + 1) && !replacement.IsDeleted &&
         replacement.DeletedFromStateVersion is null && replacement.ReplacedBy is null &&
         replacement.Editors.IsEmpty && replacement.Receipts.IsEmpty && replacement.RetiredPathKeys.IsEmpty && replacement.Publication is null &&
-        replacement.RestoreReceipts.IsEmpty && HasCoherentInitialHistory(replacement) &&
+        replacement.RestoreReceipts.IsEmpty && replacement.WholeFileSaveReceipts.IsEmpty && HasCoherentInitialHistory(replacement) &&
         replacement.Coordination == CoordinationState.Empty;
 
     private static bool HasCoherentInitialHistory(DocumentState replacement)
