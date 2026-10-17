@@ -1,4 +1,3 @@
-using System.Text.Json;
 using CellBridge.Storage.Abstractions;
 using Npgsql;
 
@@ -24,6 +23,7 @@ public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, St
         // Schema initialization is an explicit deployment operation, not request/startup behavior.
         await using (var gate = new NpgsqlCommand("SELECT pg_advisory_xact_lock(748219351)", connection, transaction))
             await gate.ExecuteNonQueryAsync(cancellationToken);
+        int? previousSchema = null;
         await using (var existing = new NpgsqlCommand("SELECT to_regclass('cellbridge_schema')::text", connection, transaction))
             if (await existing.ExecuteScalarAsync(cancellationToken) is string)
             {
@@ -34,21 +34,31 @@ public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, St
                 await using var versions = await version.ExecuteReaderAsync(cancellationToken);
                 if (!await versions.ReadAsync(cancellationToken)) throw new StorageUnavailableException("Missing storage schema version.");
                 var schema = versions.GetInt32(0);
+                previousSchema = schema;
                 if (await versions.ReadAsync(cancellationToken)) throw new StorageUnavailableException("Multiple storage schema versions.");
-                if (schema is not (3 or 4))
-                    throw new StorageUnavailableException("Unsupported development storage schema. Recreate the development database; only schema 3 to 4 migration is supported.");
+                if (schema is not (3 or 4 or 5))
+                    throw new StorageUnavailableException("Unsupported storage schema. Only schema 3 or 4 to 5 migration is supported; persisted data was not changed.");
             }
         await using var source = typeof(PostgreSqlStateStore).Assembly.GetManifestResourceStream("CellBridge.Storage.PostgreSql.Schema.sql")!;
         using var reader = new StreamReader(source);
         await using var command = new NpgsqlCommand(await reader.ReadToEndAsync(cancellationToken), connection, transaction);
         await command.ExecuteNonQueryAsync(cancellationToken);
         await InitializeRecoveryAsync(connection, transaction, cancellationToken);
+        if (previousSchema is 3 or 4)
+            await MigrateGraphMetadataAsync(connection, transaction, cancellationToken);
         await ConfigureTransactionAsync(connection, transaction, cancellationToken);
         await using (var configure = new NpgsqlCommand("UPDATE cellbridge_usage SET stored_bytes=COALESCE((SELECT SUM(length) FROM cellbridge_objects),0)+COALESCE((SELECT SUM(octet_length(state_json)) FROM cellbridge_states),0)+COALESCE((SELECT SUM(octet_length(receipt_json)) FROM cellbridge_recovery_receipts),0),document_count=(SELECT COUNT(*) FROM cellbridge_documents),max_stored_bytes=$1,max_documents=$2 WHERE singleton=true", connection, transaction))
         {
             configure.Parameters.Add(new NpgsqlParameter { Value = _limits.MaxStoredBytes });
             configure.Parameters.Add(new NpgsqlParameter { Value = _limits.MaxDocuments });
             await configure.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var usage = new NpgsqlCommand("SELECT stored_bytes,document_count FROM cellbridge_usage WHERE singleton=true", connection, transaction))
+        await using (var totals = await usage.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await totals.ReadAsync(cancellationToken)) throw new StorageCorruptionException("Missing storage usage ledger.");
+            StorageLimits.Check("total stored bytes", totals.GetInt64(0), _limits.MaxStoredBytes);
+            StorageLimits.Check("document count", totals.GetInt64(1), _limits.MaxDocuments);
         }
         await transaction.CommitAsync(cancellationToken);
         await CheckHealthAsync(cancellationToken);
@@ -263,7 +273,7 @@ public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, St
     }
     private static async Task InsertStateAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DocumentState state, CancellationToken cancellationToken)
     {
-        string json = JsonSerializer.Serialize(state);
+        string json = DocumentStateJson.Serialize(state);
         await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, System.Text.Encoding.UTF8.GetByteCount(json), 0, cancellationToken);
         await using var command = new NpgsqlCommand("INSERT INTO cellbridge_states VALUES ($1,$2,$3)", connection, transaction);
         command.Parameters.Add(new NpgsqlParameter { Value = state.ResourceId });
@@ -275,8 +285,8 @@ public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, St
     {
         await using (var health = new NpgsqlCommand("SELECT current_setting('fsync'),version FROM cellbridge_schema", connection, transaction))
         await using (var reader = await health.ExecuteReaderAsync(cancellationToken))
-            if (!await reader.ReadAsync(cancellationToken) || reader.GetString(0) != "on" || reader.GetInt32(1) != 4 || await reader.ReadAsync(cancellationToken))
-                throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 4.");
+            if (!await reader.ReadAsync(cancellationToken) || reader.GetString(0) != "on" || reader.GetInt32(1) != 5 || await reader.ReadAsync(cancellationToken))
+                throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 5.");
         await using var command = new NpgsqlCommand("SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'", connection, transaction);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -284,20 +294,8 @@ public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, St
     {
         await using var command = dataSource.CreateCommand("SELECT current_setting('fsync'),version FROM cellbridge_schema");
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken) || reader.GetString(0) != "on" || reader.GetInt32(1) != 4 || await reader.ReadAsync(cancellationToken))
-            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 4.");
+        if (!await reader.ReadAsync(cancellationToken) || reader.GetString(0) != "on" || reader.GetInt32(1) != 5 || await reader.ReadAsync(cancellationToken))
+            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 5.");
     }
-    private static DocumentState Decode(string json)
-    {
-        try
-        {
-            var state = JsonSerializer.Deserialize<DocumentState>(json) ?? throw new JsonException("Empty state.");
-            if (state.FormatVersion != DocumentState.CurrentFormat)
-                throw new StorageCorruptionException("Unsupported document storage format.");
-            if (state.Security is null || state.Security.Grants is null)
-                throw new StorageCorruptionException("Missing document security state.");
-            return state;
-        }
-        catch (JsonException ex) { throw new StorageCorruptionException("Invalid persisted document state.", ex); }
-    }
+    private DocumentState Decode(string json) => DocumentStateJson.Deserialize(json, limits: _limits);
 }

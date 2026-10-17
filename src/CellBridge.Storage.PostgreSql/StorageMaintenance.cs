@@ -1,4 +1,3 @@
-using System.Text.Json;
 using CellBridge.Storage.Abstractions;
 using Npgsql;
 
@@ -11,8 +10,9 @@ public sealed record StorageMaintenanceReport(long StoredBytes, long Documents, 
 /// Quiescent maintenance only. All hosts, readers and writers must be stopped.
 /// Every historic snapshot remains a root; this does not expire protocol history.
 /// </summary>
-public sealed class StorageMaintenance(NpgsqlDataSource source)
+public sealed class StorageMaintenance(NpgsqlDataSource source, StorageLimits? limits)
 {
+    public StorageMaintenance(NpgsqlDataSource source) : this(source, null) { }
     public async Task<StorageMaintenanceReport> CollectOrphansAsync(bool apply = false,
         bool quiescent = false, string? fileSystemRoot = null, CancellationToken cancellationToken = default)
     {
@@ -31,7 +31,7 @@ public sealed class StorageMaintenance(NpgsqlDataSource source)
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                var state = JsonSerializer.Deserialize<DocumentState>(reader.GetString(0));
+                var state = DocumentStateJson.Deserialize(reader.GetString(0), strict: true, limits: limits);
                 if (state is null || state.FormatVersion != DocumentState.CurrentFormat)
                     throw new StorageCorruptionException("Unsupported state encountered during maintenance.");
                 snapshots++;

@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace CellBridge.Storage.Abstractions;
 
 /// <summary>Admission limits, not a claim about supported Office file sizes.</summary>
@@ -63,7 +61,7 @@ public sealed record StorageLimits
         Check("restore receipts", state.RestoreReceipts.Length, MaxRestoreReceipts);
         Check("whole-file save receipts", state.WholeFileSaveReceipts.Length, MaxWholeFileSaveReceipts);
         Check("retired path keys", state.RetiredPathKeys.Length, MaxRetiredPathKeys);
-        long stored = JsonSerializer.SerializeToUtf8Bytes(state).LongLength;
+        long stored = DocumentStateJson.GetSerializedSize(state);
         foreach (var handle in StorageReferences.Handles(state).DistinctBy(h => h.Key))
             stored = checked(stored + handle.Length);
         Check("document stored bytes", stored, MaxDocumentStoredBytes);

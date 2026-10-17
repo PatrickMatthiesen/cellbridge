@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using System.Text.Json;
 using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.InMemory;
@@ -56,7 +55,7 @@ public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentL
                     _documents.Values.Any(s => s.RetiredPathKeys.Contains(state.PathKey))) return ValueTask.FromResult(false);
                 var next = state with { StateVersion = 0 };
                 Budget.Limits.CheckDocument(next);
-                Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength, 1);
+                Budget.Adjust(DocumentStateJson.GetSerializedSize(next), 1);
                 _documents[state.ResourceId] = next;
                 _paths.Add(state.PathKey, state.ResourceId);
                 return ValueTask.FromResult(true);
