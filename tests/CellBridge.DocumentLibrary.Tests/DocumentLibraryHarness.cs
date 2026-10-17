@@ -10,21 +10,24 @@ namespace CellBridge.DocumentLibrary.Tests;
 internal sealed class DocumentLibraryHarness : IAsyncDisposable
 {
     public DocumentLibraryHarness(string root, StorageProvider? provider = null,
-        IDestinationFaults? destinationFaults = null)
+        IDestinationFaults? destinationFaults = null, bool cached = false)
     {
         Destination = new(root, destinationFaults);
         Provider = provider ?? new(new InMemoryStateStore(), new InMemoryContentStore());
         Permissions = new(Destination);
-        Documents = new(Provider, authorizationPolicy: Permissions);
+        Cache = cached ? new CachedDocumentAuthorizationProvider(Permissions,
+            new() { Capacity = 32, DecisionTtl = TimeSpan.FromMinutes(1) }) : null;
+        Documents = new(Provider, documentAuthorizationProvider: (IDocumentAuthorizationProvider?)Cache ?? Permissions);
         Publisher = new(Provider, Destination);
         Worker = new(Provider, Publisher, new() { PollingInterval = Options.PublicationInterval }, NullLogger<ExternalRevisionPublicationWorker>.Instance);
-        Library = new(Documents, Destination, Permissions, Publisher, Worker, Options);
+        Library = new(Documents, Destination, Publisher, Worker, Options, Cache);
     }
 
     public DocumentLibraryOptions Options { get; } = new() { PublicationInterval = TimeSpan.FromMilliseconds(25) };
     public DocumentLibraryDestination Destination { get; }
     public StorageProvider Provider { get; }
-    public DocumentLibraryPermissionPolicy Permissions { get; }
+    public DocumentLibraryPermissionProvider Permissions { get; }
+    public CachedDocumentAuthorizationProvider? Cache { get; }
     public CellBridgeDocumentService Documents { get; }
     public ExternalRevisionPublisher Publisher { get; }
     public ExternalRevisionPublicationWorker Worker { get; }

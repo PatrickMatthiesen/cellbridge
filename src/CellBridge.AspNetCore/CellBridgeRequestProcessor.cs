@@ -82,7 +82,10 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 }
 
                 // Every subrequest, including lock release, targets the resolved file.
-                var canRead = service.Access(actor, initial!).HasFlag(DocumentAccess.Read);
+                var fileActor = await service.AuthorizeActorAsync(actor, initial!, DocumentAccess.Read, cancellationToken, fresh: true);
+                var currentIdentity = await service.RevalidateReadStateAsync(initial!, cancellationToken);
+                var canRead = currentIdentity is not null && service.Access(fileActor, currentIdentity).HasFlag(DocumentAccess.Read);
+                if (currentIdentity is not null) doc = StoredDocument.RestoreMetadata(currentIdentity, DateTime.UtcNow);
                 var fileResponse = new FssHttpResponse
                 {
                     Url = canRead ? DocumentRequestResolver.CanonicalUrl(doc, publicBase) : fileRequest.Url,
@@ -108,6 +111,11 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
 
                     try
                     {
+                        // Cell payloads admit each binary suboperation independently. Other outer
+                        // subrequests admit once and pass the internal actor to nested helpers.
+                        var operationActor = subRequest.Type == SubRequestType.Cell ? fileActor :
+                            await service.AuthorizeResourceActorAsync(actor, doc.TransitionId,
+                                CellBridgeAuthorization.RequiredAccess(subRequest), cancellationToken, fresh: true);
                         if (FssHttpDependencies.Error(subRequest, fileResponse.SubResponses) is { } dependencyError)
                         {
                             subResponse.ErrorCode = dependencyError;
@@ -123,24 +131,24 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         }
                         else if (subRequest.Type == SubRequestType.Cell)
                         {
-                            await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, actor, accepted, cancellationToken);
+                            await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, operationActor, accepted, cancellationToken);
                         }
                         else if (OuterDocumentOperations.Handles(subRequest.Type))
                             await OuterDocumentOperations.ExecuteAsync(service, doc.TransitionId, subRequest, subResponse,
-                                publicBase, actor, cancellationToken);
+                                publicBase, operationActor, cancellationToken);
                         else
                             await service.Provider.State.TransitionAsync(doc.TransitionId, (current, now) =>
                             {
-                                var access = service.Access(actor, current);
-                                if (!access.HasFlag(CellBridgeAuthorization.RequiredAccess(subRequest)) || !OwnsSession(current, subRequest, actor, now))
+                                var access = service.Access(operationActor, current);
+                                if (!access.HasFlag(CellBridgeAuthorization.RequiredAccess(subRequest)) || !OwnsSession(current, subRequest, operationActor, now))
                                 {
                                     subResponse.ErrorCode = "FileUnauthorizedAccess";
                                     subResponse.HResult = CellBridgeAuthorization.AccessDeniedHResult.ToString();
                                     return new StateTransition<bool>(null, false);
                                 }
                                 var document = StoredDocument.RestoreMetadata(current, now);
-                                var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, actor.Identity);
-                                ApplyMetadata(document, subRequest, subResponse, log, publicBase, actor);
+                                var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, operationActor.Identity);
+                                ApplyMetadata(document, subRequest, subResponse, log, publicBase, operationActor);
                                 if (subResponse.ErrorCode == "FileUnauthorizedAccess") return new StateTransition<bool>(null, false);
                                 // Invalid lock input cannot publish incidental editor expiry
                                 // from restoring, inspecting or logging the detached document.
@@ -173,7 +181,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 }
 
                 if (await service.Provider.State.FindByResourceIdAsync(doc.TransitionId, cancellationToken) is { } latest &&
-                    service.Access(actor, latest).HasFlag(DocumentAccess.Read))
+                    service.Access(fileActor, latest).HasFlag(DocumentAccess.Read))
                     fileResponse.Url = DocumentRequestResolver.CanonicalUrl(StoredDocument.RestoreMetadata(latest, DateTime.UtcNow), publicBase);
                 response.Responses.Add(fileResponse);
             }
@@ -346,7 +354,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             return execution;
         }
         var fsshttpbResponse = execution.Response;
-        if (service.Access(actor, execution.State).HasFlag(DocumentAccess.Read) &&
+        if (service.ExecutionAccess(actor, execution).HasFlag(DocumentAccess.Read) &&
             CellSubRequestDataValidation.TryGetBoolean(subRequest.SubRequestDataAttributes, "GetFileProps", out bool getFileProps) && getFileProps)
         {
             subResponse.SubResponseDataAttributes["Etag"] = execution.State.Etag;

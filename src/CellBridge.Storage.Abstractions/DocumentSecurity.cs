@@ -8,7 +8,12 @@ public sealed record SubjectIdentity(string Subject, string Login, string Displa
 public enum DocumentAccess { None = 0, Read = 1, Write = 2 }
 
 /// <summary>Export-safe reference to host-owned policy, never the policy data itself.</summary>
-public sealed record DocumentAuthorizationBinding(string PolicyDomain, int ContractVersion, long Revision);
+public sealed record DocumentAuthorizationBinding(string PolicyDomain, int ContractVersion, long Revision)
+{
+    /// <summary>Trusted scope for the ordinary async external-authority contract, version 2.</summary>
+    public string? TenantId { get; init; }
+    public string? WorkspaceId { get; init; }
+}
 
 public sealed record DocumentSecurity(string? Owner, ImmutableDictionary<string, DocumentAccess> Grants,
     SubjectIdentity? CreatedBy, SubjectIdentity? ModifiedBy)

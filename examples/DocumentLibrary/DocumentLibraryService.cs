@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
@@ -20,12 +19,12 @@ public sealed record LibraryDocument(
 public sealed class DocumentLibraryService(
     CellBridgeDocumentService documents,
     DocumentLibraryDestination destination,
-    DocumentLibraryPermissionPolicy permissions,
     ExternalRevisionPublisher publisher,
     ExternalRevisionPublicationWorker publicationWorker,
-    DocumentLibraryOptions options)
+    DocumentLibraryOptions options,
+    CachedDocumentAuthorizationProvider? authorizationCache = null)
 {
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _permissionGates = new();
+    private readonly SemaphoreSlim _permissionGate = new(1, 1);
 
     public const string OwnerSubject = "local:owner";
     public const string EditorSubject = "local:editor";
@@ -33,7 +32,6 @@ public sealed class DocumentLibraryService(
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        await permissions.LoadAsync(cancellationToken);
         foreach (var discovered in await destination.ListAsync(cancellationToken))
         {
             var manifest = discovered;
@@ -42,15 +40,20 @@ public sealed class DocumentLibraryService(
             {
                 if (manifest.CellBridgeBound)
                     throw new InvalidOperationException($"Destination {manifest.FileName} was bound, but its CellBridge state is missing. Restore the PostgreSQL database and destination from one coordinated recovery point.");
+                if (manifest.PendingCreation)
+                    throw new InvalidOperationException($"Upload {manifest.FileName} did not complete its Create authorization and CellBridge commit. Recover its state or remove this unaccepted staged upload before restarting; it cannot be imported automatically.");
                 if (!manifest.Receipts.IsEmpty)
                     throw new InvalidOperationException($"Unbound destination {manifest.FileName} unexpectedly has delivery receipts.");
                 var bytes = await destination.ReadCurrentBytesAsync(manifest.ResourceId, cancellationToken);
-                state = await documents.ImportAsync(manifest.ResourceId, manifest.CellBridgePath, bytes,
+                state = await documents.ImportExternalAsync(manifest.ResourceId, manifest.CellBridgePath, bytes,
+                    DocumentLibraryPermissionProvider.Scope,
                     new(OwnerSubject, "owner", "Local owner"),
                     new(new("system:document-library-recovery", "recovery", "Document library recovery"), true),
                     cancellationToken)
                     ?? throw new InvalidOperationException($"Could not recover CellBridge state for {manifest.FileName}.");
             }
+
+            RequireExternalAuthorization(state, manifest);
 
             if (state.Publication is null)
             {
@@ -71,18 +74,21 @@ public sealed class DocumentLibraryService(
 
             if (!manifest.CellBridgeBound)
                 await destination.MarkCellBridgeBoundAsync(manifest.ResourceId, cancellationToken);
-
-            var desired = permissions.Binding(manifest.DesiredPermissionRevision);
-            var current = state.Security.AuthorizationPolicy;
-            if (current != desired)
-            {
-                if (current is null || current.PolicyDomain != desired.PolicyDomain ||
-                    current.ContractVersion != desired.ContractVersion || current.Revision >= desired.Revision)
-                    throw new InvalidOperationException($"Permission binding for {manifest.FileName} cannot be reconciled automatically.");
-                if (!await documents.UpdateAuthorizationAsync(state.ResourceId, current, desired, cancellationToken))
-                    throw new InvalidOperationException($"Permission binding for {manifest.FileName} changed during startup reconciliation.");
-            }
         }
+    }
+
+    private static void RequireExternalAuthorization(DocumentState state, LibraryManifest manifest)
+    {
+        var binding = state.Security.AuthorizationPolicy;
+        var scope = DocumentLibraryPermissionProvider.Scope;
+        if (binding is { ContractVersion: 2, Revision: > 0 } &&
+            binding.PolicyDomain == DocumentLibraryPermissionProvider.Domain &&
+            binding.TenantId == scope.TenantId && binding.WorkspaceId == scope.WorkspaceId)
+            return;
+
+        if (binding is { ContractVersion: 1 } && binding.PolicyDomain == DocumentLibraryPermissionProvider.Domain)
+            throw new InvalidOperationException($"Document {manifest.FileName} uses legacy authorization. This example does not migrate existing state. Use a fresh example database and destination root; preserve existing storage separately if it is needed for recovery.");
+        throw new InvalidOperationException($"Permission binding for {manifest.FileName} does not match this host's authority. Use a fresh example database and destination root.");
     }
 
     public async Task<DocumentState> CreateBlankAsync(string? name, string? type, CellBridgeActor actor,
@@ -112,11 +118,32 @@ public sealed class DocumentLibraryService(
             .Add(ReaderSubject, DocumentAccess.Read)
             .SetItem(actor.Identity.Subject, DocumentAccess.Write);
         var manifest = await destination.CreateAsync(resourceId, bindingId, fileName, path,
-            new MemoryStream(bytes, writable: false), initialPermissions, cancellationToken);
-        permissions.Install(manifest);
-        var state = await documents.ImportAsync(resourceId, path, bytes, actor.Identity,
-            new(new("system:document-library-upload", "upload", "Document library upload"), true), cancellationToken)
-            ?? throw new InvalidOperationException("CellBridge rejected the document path or resource ID.");
+            new MemoryStream(bytes, writable: false), initialPermissions, cancellationToken, pendingCreation: true);
+        DocumentState? state;
+        try
+        {
+            state = await documents.CreateExternalAsync(resourceId, path, bytes,
+                DocumentLibraryPermissionProvider.Scope, actor, cancellationToken);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // This error means the engine rejected Create before committing state.
+            // Unknown commit outcomes retain their staged manifest for explicit recovery.
+            if (await documents.Provider.State.FindByResourceIdAsync(resourceId, CancellationToken.None) is null)
+            {
+                await destination.DiscardRejectedCreationAsync(resourceId, CancellationToken.None);
+                authorizationCache?.InvalidateResource(resourceId);
+            }
+            throw;
+        }
+        if (state is null)
+        {
+            // A returned rejection is definitive. Exceptions may hide a successful commit and
+            // must retain their staged upload for the recovery checks in InitializeAsync.
+            await destination.DiscardRejectedCreationAsync(resourceId, CancellationToken.None);
+            authorizationCache?.InvalidateResource(resourceId);
+            throw new InvalidOperationException("CellBridge rejected the document path or resource ID.");
+        }
         if (!await publisher.BindAsync(resourceId, state.LifecycleGeneration, state.StateVersion,
             bindingId, manifest.DestinationId, manifest.CurrentRevision, cancellationToken))
             throw new InvalidOperationException("CellBridge could not bind the imported document to its destination.");
@@ -152,7 +179,7 @@ public sealed class DocumentLibraryService(
         CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(resourceId, cancellationToken);
-        if (!documents.Access(actor, state).HasFlag(DocumentAccess.Read))
+        if (!(await documents.GetAccessAsync(actor, state, cancellationToken)).HasFlag(DocumentAccess.Read))
             throw new UnauthorizedAccessException("Document access denied.");
         return await destination.OpenCurrentReadAsync(resourceId, cancellationToken);
     }
@@ -166,26 +193,20 @@ public sealed class DocumentLibraryService(
     {
         if (subject == OwnerSubject && !access.HasFlag(DocumentAccess.Write))
             throw new InvalidOperationException("The local owner must retain write access.");
-        var gate = _permissionGates.GetOrAdd(resourceId, static _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
+        await _permissionGate.WaitAsync(cancellationToken);
         try
         {
             var currentManifest = await destination.GetAsync(resourceId, cancellationToken);
-            var currentPermissions = currentManifest
-                .PermissionSnapshots[currentManifest.DesiredPermissionRevision].Decisions;
+            var currentPermissions = currentManifest.Permissions;
             var nextPermissions = currentPermissions.SetItem(subject, Normalize(access));
-            var prepared = await destination.PreparePermissionsAsync(resourceId, nextPermissions, cancellationToken);
-            permissions.Install(prepared);
-            var state = await RequireStateAsync(resourceId, cancellationToken);
-            var expected = state.Security.AuthorizationPolicy;
-            var next = permissions.Binding(prepared.DesiredPermissionRevision);
-            if (!await documents.UpdateAuthorizationAsync(resourceId, expected, next, cancellationToken))
-                throw new InvalidOperationException("The permission binding changed before this update committed.");
-            return next.Revision;
+            var committed = await destination.SetPermissionsAsync(resourceId, nextPermissions, cancellationToken);
+            // Invalidation follows the durable host commit. Already admitted work may finish.
+            authorizationCache?.InvalidateResource(resourceId);
+            return committed.DesiredPermissionRevision;
         }
         finally
         {
-            gate.Release();
+            _permissionGate.Release();
         }
     }
 

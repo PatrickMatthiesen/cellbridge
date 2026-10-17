@@ -14,10 +14,16 @@ public sealed partial class PostgreSqlListEngine
         CancellationToken ct = default)
     {
         ValidateActor(actor);
-        return InRecordTransactionAsync(workspaceId, async (connection, transaction) =>
+        return QueryAuthorizedAsync();
+
+        async Task<RecordPage> QueryAuthorizedAsync()
         {
+            var authorization = await AuthorizeOperationAsync(actor, workspaceId,
+                [(listId, ListAuthorizationAction.Read)], ct);
+            return await InRecordTransactionAsync(workspaceId, authorization, async (connection, transaction) =>
+            {
             var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
-                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct);
+                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct, authorization);
             RequireWriteContext(context, ListAccess.Read);
             var definition = context.Definition!;
             ListValidation.ValidateQuery(definition, query, _limits);
@@ -108,7 +114,8 @@ public sealed partial class PostgreSqlListEngine
                 records.Add(ReadRecord(reader, workspaceId, listId));
             }
             return new RecordPage(records, hasMore ? records[^1].Id : null, definition.SchemaVersion);
-        }, ct);
+            }, ct);
+        }
     }
 
     private static string QueryParameter(NpgsqlCommand command, NpgsqlDbType type, object? value)

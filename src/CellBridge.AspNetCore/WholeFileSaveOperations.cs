@@ -31,6 +31,8 @@ public sealed partial class CellBridgeDocumentService
         if (hostLockToken is not null && (string.IsNullOrWhiteSpace(hostLockToken) || hostLockToken.Length > 1024))
             throw new ArgumentException("A host lock token must contain 1 to 1024 characters.", nameof(hostLockToken));
 
+        actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Write, cancellationToken);
+
         // Capture authority before consuming host bytes. Preparing a file never refreshes its lease.
         var before = await provider.State.TransitionAsync(resourceId, (current, now) =>
         {

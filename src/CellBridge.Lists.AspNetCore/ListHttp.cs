@@ -37,6 +37,17 @@ public static class CellBridgeListsExtensions
     {
         var group = endpoints.MapGroup(prefix);
         Map(group, "GET", "", async s => Results.Json(await s.Engine.GetListsAsync(s.Actor, s.Workspace, s.Ct), HttpState.Json));
+        Map(group, "GET", "/page", async s =>
+        {
+            s.CheckQuery("pageSize", "continuation");
+            var pageSize = s.SingleQuery("pageSize") is { } raw
+                ? int.TryParse(raw, out var parsed) ? parsed : throw HttpState.Invalid()
+                : 256;
+            if (s.Engine is not IPagedListEngine paged) throw new ListException(ListFailure.NotSupported,
+                "The list engine does not support definition paging.");
+            return Results.Json(await paged.GetListsPageAsync(s.Actor, s.Workspace,
+                s.SingleQuery("continuation"), pageSize, s.Ct), HttpState.Json);
+        });
         Map(group, "POST", "", async s => Results.Json(await s.Engine.CreateListAsync(s.Actor, s.Workspace, await s.Read<CreateListRequest>(), s.Ct), HttpState.Json, statusCode: 201));
         Map(group, "GET", "/{listId:guid}", async s => Results.Json(await s.Definition(), HttpState.Json));
         Map(group, "PUT", "/{listId:guid}/schema", async s => Results.Json(await s.Engine.PublishSchemaAsync(s.Actor, s.Workspace, s.List, await s.Read<PublishSchemaRequest>(), s.Ct), HttpState.Json));
@@ -120,7 +131,7 @@ public static class CellBridgeListsExtensions
                 catch (ListException e)
                 {
                     var code = e.Failure switch { ListFailure.Validation => 400, ListFailure.NotFound => 404, ListFailure.Forbidden => 404,
-                        ListFailure.Conflict => 409, ListFailure.Limit => 413, _ => 503 };
+                        ListFailure.Conflict => 409, ListFailure.Limit => 413, ListFailure.NotSupported => 501, _ => 503 };
                     var error = e.Failure is ListFailure.Forbidden or ListFailure.NotFound ? "NotFound" : e.Failure.ToString();
                     return Results.Json(new { error }, statusCode: code);
                 }

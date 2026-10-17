@@ -7,6 +7,8 @@ namespace CellBridge.AspNetCore;
 
 public sealed record CellBridgeActor(SubjectIdentity Identity, bool CanCreate = false)
 {
+    // Only the engine can attach an admission. Public permission ceilings cannot create one.
+    internal DocumentOperationAuthorization? Authorization { get; init; }
     /// <summary>Optional trusted-host ceiling for this request, restricted to one resource.</summary>
     public DocumentAccessLimit? AccessLimit { get; init; }
     public const string SubjectClaim = "cellbridge:subject";

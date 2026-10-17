@@ -33,11 +33,13 @@ public sealed class LibraryIntegrationTests
         await Task.WhenAll(revokeEditor, revokeReader);
 
         var manifest = await harness.Destination.GetAsync(state.ResourceId);
-        var decisions = manifest.PermissionSnapshots[manifest.DesiredPermissionRevision].Decisions;
+        var decisions = manifest.Permissions;
         Assert.Equal(DocumentAccess.None, decisions[DocumentLibraryService.EditorSubject]);
         Assert.Equal(DocumentAccess.None, decisions[DocumentLibraryService.ReaderSubject]);
         var committed = (await harness.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(manifest.DesiredPermissionRevision, committed.Security.AuthorizationPolicy!.Revision);
+        Assert.Equal(state.Security.AuthorizationPolicy, committed.Security.AuthorizationPolicy);
+        Assert.Equal(2, committed.Security.AuthorizationPolicy!.ContractVersion);
+        Assert.Single(manifest.PermissionSnapshots);
     }
 
     [Fact]
@@ -67,11 +69,13 @@ public sealed class LibraryIntegrationTests
             DocumentLibraryHarness.Owner)).Count);
     }
 
-    [Fact]
-    public async Task PermissionDenialRevocationAndPreparedWriteFencingUseCellBridgeAuthority()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PermissionRevocationDeniesLaterWritesAndRetainsExistingLease(bool cached)
     {
         using var files = new TemporaryDirectory();
-        await using var harness = new DocumentLibraryHarness(files.Path);
+        await using var harness = new DocumentLibraryHarness(files.Path, cached: cached);
         var state = await harness.UploadAsync(TestOfficeFile.Docx("baseline"));
         var request = DocumentLibraryHarness.SaveRequest(state, TestOfficeFile.Docx("denied"));
         var readerDenied = await harness.Documents.ExecuteAsync(state.ResourceId,
@@ -88,6 +92,14 @@ public sealed class LibraryIntegrationTests
 
         await harness.Library.SetPermissionAsync(state.ResourceId,
             DocumentLibraryService.EditorSubject, DocumentAccess.None);
+        var afterRevocation = (await harness.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.Equal(beforeRevocation.Security.AuthorizationPolicy, afterRevocation.Security.AuthorizationPolicy);
+        Assert.Equal(beforeRevocation.Coordination, afterRevocation.Coordination);
+        Assert.Equal(DocumentLibraryService.EditorSubject, afterRevocation.Coordination.HostLock!.OwnerSubject);
+        var blockedOwner = await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire,
+            "owner-lock", DocumentLibraryHarness.Owner);
+        Assert.False(blockedOwner.Success);
+        Assert.Equal("editor-lock", blockedOwner.CurrentLock);
         var committed = await locks.TryCommitAsync(acquired.WriteToken!, beforeRevocation.StateVersion,
             DocumentLibraryHarness.Editor, (current, _) => current, Guid.NewGuid());
         Assert.False(committed);

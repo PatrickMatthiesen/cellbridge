@@ -36,7 +36,7 @@ public static class PostgreSqlListSetup
             {
                 await using var version = new NpgsqlCommand("SELECT version FROM cellbridge_lists.schema_version", connection, transaction);
                 var value = await version.ExecuteScalarAsync(cancellationToken);
-                if (value is not int schemaVersion || schemaVersion is not (1 or 2))
+                if (value is not int schemaVersion || schemaVersion is not (1 or 2 or 3))
                     throw new InvalidOperationException("The list schema version is missing or unsupported.");
             }
 
@@ -94,12 +94,14 @@ public static class PostgreSqlListSetup
 
         await using var connection = await adminSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await AcquireWorkspaceAuthorizationLockAsync(connection, transaction, workspaceId, cancellationToken);
         await SetContextAsync(connection, transaction, workspaceId, cancellationToken);
-        await using (var workspace = new NpgsqlCommand("INSERT INTO cellbridge_lists.workspaces(workspace_id,name) VALUES ($1,$2) ON CONFLICT (workspace_id) DO UPDATE SET name=EXCLUDED.name", connection, transaction))
+        await using (var workspace = new NpgsqlCommand("INSERT INTO cellbridge_lists.workspaces(workspace_id,name) VALUES ($1,$2) ON CONFLICT (workspace_id) DO UPDATE SET name=EXCLUDED.name WHERE cellbridge_lists.workspaces.authorization_mode='builtin' RETURNING workspace_id", connection, transaction))
         {
             workspace.Parameters.AddWithValue(workspaceId);
             workspace.Parameters.AddWithValue(name);
-            await workspace.ExecuteNonQueryAsync(cancellationToken);
+            if (await workspace.ExecuteScalarAsync(cancellationToken) is null)
+                throw new ListException(ListFailure.Conflict, "A host-authorized workspace cannot be registered as built-in.");
         }
         await using (var member = new NpgsqlCommand("""
             WITH inserted AS (
@@ -123,6 +125,43 @@ public static class PostgreSqlListSetup
         await transaction.CommitAsync(cancellationToken);
     }
 
+    public static async Task RegisterHostWorkspaceAsync(NpgsqlDataSource adminSource, Guid workspaceId,
+        string name, string policyDomain, string authorizationScope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(adminSource);
+        if (workspaceId == Guid.Empty) throw new ArgumentException("A workspace ID is required.", nameof(workspaceId));
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 200 || !ListValidation.IsWellFormedText(name))
+            throw new ArgumentException("A valid workspace name is required.", nameof(name));
+        if (string.IsNullOrWhiteSpace(policyDomain) || policyDomain.Length > 200 ||
+            !ListValidation.IsWellFormedText(policyDomain) || policyDomain.Any(char.IsControl))
+            throw new ArgumentException("A valid policy domain is required.", nameof(policyDomain));
+        if (string.IsNullOrWhiteSpace(authorizationScope) || authorizationScope.Length > 1024 ||
+            !ListValidation.IsWellFormedText(authorizationScope) || authorizationScope.Any(char.IsControl))
+            throw new ArgumentException("A valid authorization scope is required.", nameof(authorizationScope));
+
+        await using var connection = await adminSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await AcquireWorkspaceAuthorizationLockAsync(connection, transaction, workspaceId, cancellationToken);
+        await SetContextAsync(connection, transaction, workspaceId, cancellationToken);
+        await using var workspace = new NpgsqlCommand("""
+            INSERT INTO cellbridge_lists.workspaces(
+              workspace_id,name,authorization_mode,authorization_domain,authorization_scope)
+            VALUES ($1,$2,'host',$3,$4)
+            ON CONFLICT (workspace_id) DO UPDATE SET name=EXCLUDED.name
+            WHERE cellbridge_lists.workspaces.authorization_mode='host'
+              AND cellbridge_lists.workspaces.authorization_domain=EXCLUDED.authorization_domain
+              AND cellbridge_lists.workspaces.authorization_scope=EXCLUDED.authorization_scope
+            RETURNING workspace_id
+            """, connection, transaction);
+        workspace.Parameters.AddWithValue(workspaceId);
+        workspace.Parameters.AddWithValue(name);
+        workspace.Parameters.AddWithValue(policyDomain);
+        workspace.Parameters.AddWithValue(authorizationScope);
+        if (await workspace.ExecuteScalarAsync(cancellationToken) is null)
+            throw new ListException(ListFailure.Conflict, "The workspace is already bound to a different authorization anchor.");
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public static async Task RegisterTemplateAsync(NpgsqlDataSource adminSource, ListTemplate template,
         CancellationToken cancellationToken = default)
     {
@@ -143,6 +182,15 @@ public static class PostgreSqlListSetup
         Guid workspaceId, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("SELECT set_config('cellbridge.workspace_id',$1,true)", connection, transaction);
+        command.Parameters.AddWithValue(workspaceId.ToString("D"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task AcquireWorkspaceAuthorizationLockAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, Guid workspaceId, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,391813))", connection, transaction);
         command.Parameters.AddWithValue(workspaceId.ToString("D"));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }

@@ -159,6 +159,7 @@ public sealed partial class CellBridgeDocumentService
         CellBridgeActor actor, IReadOnlyDictionary<string, string>? lockAttributes, CancellationToken cancellationToken)
     {
         if (provider.State is not IAtomicDocumentRenameStore store) throw new NotSupportedException("This provider does not support atomic rename.");
+        actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Write, cancellationToken);
         return await store.RenameAsync(resourceId, (current, now) =>
         {
             Demand(actor, current, DocumentAccess.Write);

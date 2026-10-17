@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS cellbridge_lists.schema_version (
     version integer NOT NULL
 );
 INSERT INTO cellbridge_lists.schema_version(singleton, version)
-VALUES (true, 2) ON CONFLICT (singleton) DO NOTHING;
+VALUES (true, 3) ON CONFLICT (singleton) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS cellbridge_lists.templates (
     template_id uuid NOT NULL,
@@ -18,10 +18,36 @@ CREATE TABLE IF NOT EXISTS cellbridge_lists.templates (
 CREATE TABLE IF NOT EXISTS cellbridge_lists.workspaces (
     workspace_id uuid PRIMARY KEY,
     name text NOT NULL,
+    authorization_mode text NOT NULL DEFAULT 'builtin',
+    authorization_domain text COLLATE "C" NULL,
+    authorization_scope text COLLATE "C" NULL,
     stored_bytes bigint NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
     audit_count bigint NOT NULL DEFAULT 0 CHECK (audit_count >= 0),
     security_audit_count integer NOT NULL DEFAULT 0 CHECK (security_audit_count >= 0)
 );
+ALTER TABLE cellbridge_lists.workspaces ADD COLUMN IF NOT EXISTS authorization_mode text NOT NULL DEFAULT 'builtin';
+ALTER TABLE cellbridge_lists.workspaces ADD COLUMN IF NOT EXISTS authorization_domain text COLLATE "C" NULL;
+ALTER TABLE cellbridge_lists.workspaces ADD COLUMN IF NOT EXISTS authorization_scope text COLLATE "C" NULL;
+ALTER TABLE cellbridge_lists.workspaces DROP CONSTRAINT IF EXISTS workspaces_authorization_anchor_check;
+ALTER TABLE cellbridge_lists.workspaces ADD CONSTRAINT workspaces_authorization_anchor_check CHECK (
+  (authorization_mode='builtin' AND authorization_domain IS NULL AND authorization_scope IS NULL) OR
+  (authorization_mode='host' AND authorization_domain IS NOT NULL AND authorization_scope IS NOT NULL AND
+   char_length(authorization_domain) BETWEEN 1 AND 200 AND btrim(authorization_domain)<>'' AND
+   char_length(authorization_scope) BETWEEN 1 AND 1024 AND btrim(authorization_scope)<>''));
+
+CREATE OR REPLACE FUNCTION cellbridge_lists.reject_authorization_anchor_rebinding()
+RETURNS trigger LANGUAGE plpgsql AS $binding$
+BEGIN
+  IF ROW(NEW.authorization_mode,NEW.authorization_domain,NEW.authorization_scope)
+     IS DISTINCT FROM ROW(OLD.authorization_mode,OLD.authorization_domain,OLD.authorization_scope) THEN
+    RAISE EXCEPTION 'A workspace authorization anchor is immutable' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $binding$;
+REVOKE ALL ON FUNCTION cellbridge_lists.reject_authorization_anchor_rebinding() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER immutable_workspace_authorization_anchor
+  BEFORE UPDATE OF authorization_mode,authorization_domain,authorization_scope ON cellbridge_lists.workspaces
+  FOR EACH ROW EXECUTE FUNCTION cellbridge_lists.reject_authorization_anchor_rebinding();
 ALTER TABLE cellbridge_lists.workspaces ALTER COLUMN audit_count TYPE bigint;
 CREATE TABLE IF NOT EXISTS cellbridge_lists.memberships (
     workspace_id uuid NOT NULL REFERENCES cellbridge_lists.workspaces(workspace_id) ON DELETE CASCADE,
@@ -227,6 +253,8 @@ BEGIN
   END IF;
 END $migration$;
 
+UPDATE cellbridge_lists.schema_version SET version=2 WHERE singleton AND version=1;
+
 DO $setup$
 DECLARE table_name text;
 BEGIN
@@ -241,4 +269,4 @@ BEGIN
   END LOOP;
 END $setup$;
 
-UPDATE cellbridge_lists.schema_version SET version=2 WHERE singleton;
+UPDATE cellbridge_lists.schema_version SET version=3 WHERE singleton;
