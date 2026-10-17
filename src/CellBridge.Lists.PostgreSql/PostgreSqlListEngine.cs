@@ -158,29 +158,30 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         return new(page.Select(x => x.Definition).ToArray(), next);
     }
 
-    private async Task<IReadOnlyList<Guid>> ReadCandidateIdsAsync(string subject, Guid workspaceId, Guid? after, int limit,
-        OperationAuthorization authorization, CancellationToken ct)
-    {
-        await using var connection = await _source.OpenConnectionAsync(ct);
-        await using var transaction = await connection.BeginTransactionAsync(ct);
-        await ConfigureAsync(connection, transaction, workspaceId, ct);
-        await RequireAnchorAsync(connection, transaction, workspaceId, authorization, true, ct);
-        await AuthorizeMemberAsync(connection, transaction, workspaceId, subject, ct, authorization);
-        await using var command = new NpgsqlCommand("""
-            SELECT list_id FROM cellbridge_lists.lists
-            WHERE workspace_id=$1 AND ($2::uuid IS NULL OR list_id>$2)
-            ORDER BY list_id LIMIT $3
-            """, connection, transaction);
-        command.Parameters.AddWithValue(workspaceId);
-        command.Parameters.AddWithValue(after.HasValue ? after.Value : DBNull.Value);
-        command.Parameters.AddWithValue(limit);
-        var result = new List<Guid>();
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct)) result.Add(reader.GetGuid(0));
-        await reader.DisposeAsync();
-        await transaction.CommitAsync(ct);
-        return result;
-    }
+    private Task<IReadOnlyList<Guid>> ReadCandidateIdsAsync(string subject, Guid workspaceId, Guid? after, int limit,
+        OperationAuthorization authorization, CancellationToken ct) =>
+        MapStoreFailuresAsync<IReadOnlyList<Guid>>(async () =>
+        {
+            await using var connection = await _source.OpenConnectionAsync(ct);
+            await using var transaction = await connection.BeginTransactionAsync(ct);
+            await ConfigureAsync(connection, transaction, workspaceId, ct);
+            await RequireAnchorAsync(connection, transaction, workspaceId, authorization, true, ct);
+            await AuthorizeMemberAsync(connection, transaction, workspaceId, subject, ct, authorization);
+            await using var command = new NpgsqlCommand("""
+                SELECT list_id FROM cellbridge_lists.lists
+                WHERE workspace_id=$1 AND ($2::uuid IS NULL OR list_id>$2)
+                ORDER BY list_id LIMIT $3
+                """, connection, transaction);
+            command.Parameters.AddWithValue(workspaceId);
+            command.Parameters.AddWithValue(after.HasValue ? after.Value : DBNull.Value);
+            command.Parameters.AddWithValue(limit);
+            var result = new List<Guid>();
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) result.Add(reader.GetGuid(0));
+            await reader.DisposeAsync();
+            await transaction.CommitAsync(ct);
+            return result;
+        });
 
     private Task<IReadOnlyList<ListDefinition>> ReadAuthorizedDefinitionsAsync(string subject, Guid workspaceId,
         IReadOnlySet<Guid> allowed, OperationAuthorization authorization, CancellationToken ct) =>
@@ -440,14 +441,13 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         }, ct);
     }
 
-    private async Task<T> InTransactionAsync<T>(Guid workspaceId, bool exclusiveAuthorization,
+    private Task<T> InTransactionAsync<T>(Guid workspaceId, bool exclusiveAuthorization,
         OperationAuthorization? authorization, Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> operation,
-        CancellationToken ct)
-    {
-        if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
-        await EnsureHealthyAsync(ct);
-        try
+        CancellationToken ct) =>
+        MapStoreFailuresAsync(async () =>
         {
+            if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
+            await EnsureHealthyAsync(ct);
             await using var connection = await _source.OpenConnectionAsync(ct);
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
             await ConfigureAsync(connection, transaction, workspaceId, ct);
@@ -456,9 +456,13 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
             var result = await operation(connection, transaction);
             await transaction.CommitAsync(CancellationToken.None);
             return result;
-        }
-        catch (ListException) { throw; }
-        catch (OperationCanceledException) { throw; }
+        });
+
+    // Keep native transactions and host preflights on the same typed store-failure contract.
+    // Cancellation, domain failures and programming errors propagate unchanged.
+    private static async Task<T> MapStoreFailuresAsync<T>(Func<Task<T>> operation)
+    {
+        try { return await operation(); }
         catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.QueryCanceled or PostgresErrorCodes.LockNotAvailable)
         { throw new ListException(ListFailure.Unavailable, "The list operation timed out."); }
         catch (NpgsqlException ex)

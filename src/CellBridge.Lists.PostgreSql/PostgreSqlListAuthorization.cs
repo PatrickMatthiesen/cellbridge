@@ -94,38 +94,39 @@ public sealed partial class PostgreSqlListEngine
         return decisions;
     }
 
-    private async Task<WorkspaceAnchor?> ReadAnchorAsync(Guid workspaceId, CancellationToken ct)
-    {
-        await EnsureHealthyAsync(ct);
-        await using var connection = await _source.OpenConnectionAsync(ct);
-        await using var transaction = await connection.BeginTransactionAsync(ct);
-        await using var batch = new NpgsqlBatch(connection, transaction);
-        var configure = new NpgsqlBatchCommand("""
-            SELECT set_config('cellbridge.workspace_id',@workspace::text,true),
-              set_config('statement_timeout',@timeout::text,true),
-              set_config('lock_timeout',@timeout::text,true)
-            """);
-        configure.Parameters.AddWithValue("workspace", workspaceId);
-        configure.Parameters.AddWithValue("timeout",
-            Math.Clamp((long)_limits.StatementTimeout.TotalMilliseconds, 1, int.MaxValue));
-        batch.BatchCommands.Add(configure);
-        var read = new NpgsqlBatchCommand("""
-            SELECT workspace_id,authorization_mode,authorization_domain,authorization_scope
-            FROM cellbridge_lists.workspaces WHERE workspace_id=@workspace
-            """);
-        read.Parameters.AddWithValue("workspace", workspaceId);
-        batch.BatchCommands.Add(read);
-        await using var reader = await batch.ExecuteReaderAsync(ct);
-        await reader.NextResultAsync(ct);
-        WorkspaceAnchor? result = await reader.ReadAsync(ct)
-            ? new WorkspaceAnchor(reader.GetGuid(0), reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3))
-            : null;
-        await reader.DisposeAsync();
-        await transaction.CommitAsync(ct);
-        return result;
-    }
+    private Task<WorkspaceAnchor?> ReadAnchorAsync(Guid workspaceId, CancellationToken ct) =>
+        MapStoreFailuresAsync<WorkspaceAnchor?>(async () =>
+        {
+            await EnsureHealthyAsync(ct);
+            await using var connection = await _source.OpenConnectionAsync(ct);
+            await using var transaction = await connection.BeginTransactionAsync(ct);
+            await using var batch = new NpgsqlBatch(connection, transaction);
+            var configure = new NpgsqlBatchCommand("""
+                SELECT set_config('cellbridge.workspace_id',@workspace::text,true),
+                  set_config('statement_timeout',@timeout::text,true),
+                  set_config('lock_timeout',@timeout::text,true)
+                """);
+            configure.Parameters.AddWithValue("workspace", workspaceId);
+            configure.Parameters.AddWithValue("timeout",
+                Math.Clamp((long)_limits.StatementTimeout.TotalMilliseconds, 1, int.MaxValue));
+            batch.BatchCommands.Add(configure);
+            var read = new NpgsqlBatchCommand("""
+                SELECT workspace_id,authorization_mode,authorization_domain,authorization_scope
+                FROM cellbridge_lists.workspaces WHERE workspace_id=@workspace
+                """);
+            read.Parameters.AddWithValue("workspace", workspaceId);
+            batch.BatchCommands.Add(read);
+            await using var reader = await batch.ExecuteReaderAsync(ct);
+            await reader.NextResultAsync(ct);
+            WorkspaceAnchor? result = await reader.ReadAsync(ct)
+                ? new WorkspaceAnchor(reader.GetGuid(0), reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3))
+                : null;
+            await reader.DisposeAsync();
+            await transaction.CommitAsync(ct);
+            return result;
+        });
 
     private static async Task RequireAnchorAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         Guid workspaceId, OperationAuthorization? authorization, bool hostExpected, CancellationToken ct)
