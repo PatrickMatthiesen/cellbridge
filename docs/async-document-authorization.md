@@ -71,11 +71,11 @@ cache.InvalidateResource(resourceId);
 cache.InvalidateWorkspace(workspaceId);
 ```
 
-Invalidation discards cached decisions and supersedes evaluations still pending admission. The cache checks its epoch and admits a result under the same short lock used by invalidation. An invalidated pending result is reevaluated, with a bounded retry count; continuous invalidation fails closed. Already admitted work may finish. Capacity eviction does not revoke an operation. Supporting pending-entry and invalidation metadata are bounded too.
+Invalidation discards matching cached decisions and supersedes matching evaluations still pending admission. The cache checks invalidation state and admits a result under the same short lock used by invalidation. An invalidated pending result is reevaluated, with a bounded retry count; continuous invalidation fails closed. Already admitted work may finish. Capacity eviction alone does not revoke an operation. Supporting pending-entry and invalidation metadata are bounded too.
 
 Legitimate denies are cached too. A newly granted permission can therefore wait for expiry or invalidation before a later operation sees it.
 
-The implementation uses a bounded LRU and one invalidation epoch because capacity eviction alone does not establish this admission boundary. It does not retain an object or tombstone for every resource/user ever seen. Invalidation scans only resident entries. It conservatively supersedes unrelated pending evaluations too. The decorator is process-local. A host may broadcast invalidation notifications to its instances or accept TTL expiry on other instances. There is no bundled distributed notification or strong revocation coordinator.
+The implementation uses a bounded LRU and marks only matching resident entries as invalidated. It does not retain an object or tombstone for every resource/user ever seen. When capacity evicts an entry whose provider evaluation is still running, a later invalidation conservatively supersedes that evaluation, even if unrelated. A single generation counter preserves this guarantee without retaining evicted identities. The decorator is process-local. A host may broadcast invalidation notifications to its instances or accept TTL expiry on other instances. There is no bundled distributed notification or strong revocation coordinator.
 
 Expiry is the earliest of evaluation-call start plus TTL, the provider's original `EvaluatedAtUtc` plus TTL, and its `FreshUntilUtc`. Omitted evaluation time asserts evaluation during this call and uses call start. Providers reusing their own cached data must preserve its original evaluation time and source freshness deadline. Errors and timeouts do not become cached allows. Expired allows are never served while refreshing.
 

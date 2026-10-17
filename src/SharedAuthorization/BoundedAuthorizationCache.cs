@@ -97,7 +97,7 @@ internal sealed class BoundedAuthorizationCache<T>
             cancellationToken.ThrowIfCancellationRequested();
             Entry? ownedEntry = null;
             Task<PendingResult>? pending = null;
-            long joinedEpoch = 0;
+            Entry? joinedEntry = null;
             T cachedValue = default!;
             var cacheHit = false;
 
@@ -108,7 +108,7 @@ internal sealed class BoundedAuthorizationCache<T>
                     if (existing.Pending is not null)
                     {
                         pending = existing.Pending.Task;
-                        joinedEpoch = _epoch;
+                        joinedEntry = existing;
                     }
                     else if (IsFresh(existing))
                     {
@@ -127,7 +127,7 @@ internal sealed class BoundedAuthorizationCache<T>
                     MakeRoom();
                     var completion = new TaskCompletionSource<PendingResult>(TaskCreationOptions.RunContinuationsAsynchronously);
                     var node = _leastRecentlyUsed.AddLast(key);
-                    ownedEntry = new Entry(key, node, _epoch, completion);
+                    ownedEntry = new Entry(key, node, completion);
                     _entries.Add(key, ownedEntry);
                 }
             }
@@ -141,7 +141,7 @@ internal sealed class BoundedAuthorizationCache<T>
                 // A normal coalesced completion or capacity eviction is not an
                 // invalidation retry. The waiter still acquires its own admission below.
                 lock (_gate)
-                    if (joinedEpoch == _epoch) attempt--;
+                    if (!IsInvalidated(joinedEntry!)) attempt--;
                 continue;
             }
 
@@ -202,7 +202,7 @@ internal sealed class BoundedAuthorizationCache<T>
         lock (_gate)
         {
             _entries.TryGetValue(key, out var current);
-            if (ownedEntry.Epoch != _epoch)
+            if (IsInvalidated(ownedEntry))
             {
                 if (ReferenceEquals(current, ownedEntry)) Remove(ownedEntry, PendingResult.Retry);
                 else ownedEntry.Pending!.TrySetResult(PendingResult.Retry);
@@ -305,7 +305,10 @@ internal sealed class BoundedAuthorizationCache<T>
         {
             _epoch++;
             foreach (var entry in _entries.Values.Where(entry => matches(entry.Key)).ToArray())
+            {
+                entry.Invalidated = true;
                 Remove(entry, PendingResult.Retry);
+            }
         }
     }
 
@@ -323,9 +326,17 @@ internal sealed class BoundedAuthorizationCache<T>
         while (_entries.Count >= _options.Capacity)
         {
             var key = _leastRecentlyUsed.First!.Value;
-            Remove(_entries[key], PendingResult.Retry);
+            var entry = _entries[key];
+            entry.EvictedEpoch = _epoch;
+            Remove(entry, PendingResult.Retry);
         }
     }
+
+    // Resident entries observe only matching invalidations. Once capacity eviction removes an
+    // in-flight entry, retain no identity metadata in the cache: a later invalidation conservatively
+    // supersedes that evaluation. This keeps eviction from admitting a subsequently revoked allow.
+    private bool IsInvalidated(Entry entry) => entry.Invalidated ||
+        entry.EvictedEpoch is { } epoch && epoch != _epoch;
 
     private void Touch(Entry entry)
     {
@@ -352,12 +363,12 @@ internal sealed class BoundedAuthorizationCache<T>
     private sealed class Entry(
         AuthorizationCacheKey key,
         LinkedListNode<AuthorizationCacheKey> node,
-        long epoch,
         TaskCompletionSource<PendingResult> pending)
     {
         internal AuthorizationCacheKey Key { get; } = key;
         internal LinkedListNode<AuthorizationCacheKey> Node { get; } = node;
-        internal long Epoch { get; } = epoch;
+        internal bool Invalidated { get; set; }
+        internal long? EvictedEpoch { get; set; }
         internal TaskCompletionSource<PendingResult>? Pending { get; set; } = pending;
         internal T Value { get; set; } = default!;
         internal long AdmittedTimestamp { get; set; }

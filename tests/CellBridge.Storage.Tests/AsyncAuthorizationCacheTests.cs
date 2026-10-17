@@ -241,6 +241,113 @@ public sealed class AsyncAuthorizationCacheTests
         Assert.Equal(2, provider.Calls);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CapacityEvictedEvaluationCannotAdmitAnAllowAfterLaterInvalidation(bool matching)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstId = Guid.NewGuid();
+        var provider = new DelegateProvider(async (call, request, _) =>
+        {
+            if (call == 1)
+            {
+                started.TrySetResult();
+                await release.Task;
+                return new(true);
+            }
+            return new(request.ResourceId != firstId);
+        });
+        var cache = Create(provider, new ManualTimeProvider(Start), capacity: 1);
+        var pending = cache.AuthorizeAsync(Request(firstId)).AsTask();
+        await started.Task;
+        Assert.True((await cache.AuthorizeAsync(Request(Guid.NewGuid()))).Allowed);
+        cache.InvalidateResource(matching ? firstId : Guid.NewGuid());
+        release.TrySetResult();
+
+        Assert.False((await pending).Allowed);
+        Assert.False((await cache.AuthorizeAsync(Request(firstId))).Allowed);
+        Assert.Equal(3, provider.Calls);
+    }
+
+    [Theory]
+    [InlineData("subject")]
+    [InlineData("resource")]
+    [InlineData("workspace")]
+    [InlineData("all")]
+    public async Task MatchingInvalidationRejectsResidentOwnerAndWaiterWithoutRepopulation(string dimension)
+    {
+        var cache = new BoundedAuthorizationCache<bool>(new(2, 1024, TimeSpan.FromMinutes(1), 0), () => false);
+        var key = new AuthorizationCacheKey("domain", "subject", "tenant", "workspace", "resource", "1", "read");
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async ValueTask<AuthorizationCacheDecision<bool>> Evaluate(CancellationToken _)
+        {
+            started.TrySetResult();
+            await release.Task;
+            return new(true, true);
+        }
+        var owner = cache.AuthorizeAsync(key, Evaluate).AsTask();
+        await started.Task;
+        var waiter = cache.AuthorizeAsync(key, Evaluate).AsTask();
+        switch (dimension)
+        {
+            case "subject": cache.InvalidateSubject(key.Subject); break;
+            case "resource": cache.InvalidateResource(key.ResourceId); break;
+            case "workspace": cache.InvalidateWorkspace(key.WorkspaceId!); break;
+            case "all": cache.InvalidateAll(); break;
+        }
+        release.TrySetResult();
+
+        Assert.All(await Task.WhenAll(owner, waiter), allowed => Assert.False(allowed));
+        Assert.Equal((0, 0), cache.Counts);
+    }
+
+    [Theory]
+    [InlineData("subject", false)]
+    [InlineData("subject", true)]
+    [InlineData("resource", false)]
+    [InlineData("resource", true)]
+    [InlineData("workspace", false)]
+    [InlineData("workspace", true)]
+    public async Task UnrelatedInvalidationDoesNotRejectPendingOwnerOrWaiter(string dimension, bool existingOtherEntry)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var request = Request(Guid.NewGuid());
+        var other = Request(Guid.NewGuid()) with { Subject = "other-subject", Scope = new("other-tenant", "other-workspace") };
+        var provider = new DelegateProvider(async (_, incoming, _) =>
+        {
+            if (incoming.ResourceId == request.ResourceId)
+            {
+                started.TrySetResult();
+                await release.Task;
+            }
+            return new(true);
+        });
+        var cache = Create(provider, new ManualTimeProvider(Start), maximumInvalidationRetries: 0);
+        if (existingOtherEntry) Assert.True((await cache.AuthorizeAsync(other)).Allowed);
+        var owner = cache.AuthorizeAsync(request).AsTask();
+        await started.Task;
+        var waiter = cache.AuthorizeAsync(request).AsTask();
+        switch (dimension)
+        {
+            case "subject": cache.InvalidateSubject(other.Subject); break;
+            case "resource": cache.InvalidateResource(other.ResourceId); break;
+            case "workspace": cache.InvalidateWorkspace(other.Scope.WorkspaceId!); break;
+        }
+        release.TrySetResult();
+
+        Assert.All(await Task.WhenAll(owner, waiter), decision => Assert.True(decision.Allowed));
+        Assert.Equal(existingOtherEntry ? 2 : 1, provider.Calls);
+        if (existingOtherEntry)
+        {
+            Assert.True((await cache.AuthorizeAsync(other)).Allowed);
+            Assert.Equal(3, provider.Calls);
+        }
+    }
+
     [Fact]
     public async Task CapacityAndLocalInvalidationBoundMetadataChurn()
     {
