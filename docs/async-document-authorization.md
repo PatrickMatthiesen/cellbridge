@@ -138,6 +138,14 @@ processes reached approximately 1.9 and 2.1 GiB observed RSS, sampled every 100 
 RSS alone does not distinguish live managed objects, reusable runtime buffers
 and other process memory. This is not evidence that the authorization cache leaks.
 
+A separate bounded in-memory probe released the service, stores and document
+objects, then forced full collections. Their weak references became dead. After
+20/40/repeated-40 saves, shared byte-pool buffers accounted for 4.21/15.74/27.28 MB
+of the remaining managed heap; the non-pool remainder stayed near 1 MB. These
+diagnostic-only counts inspected private .NET 10.0.12 runtime fields. They explain
+most residual managed memory in that probe, but do not establish bounded pool
+growth or explain the durable process's PostgreSQL/native memory.
+
 Large edit histories remain an unresolved storage scalability limit. A follow-up
 must address repeated graph descriptors and full-state loading while preserving
 history, protocol identities, receipts and recovery. Lowering retention limits or
