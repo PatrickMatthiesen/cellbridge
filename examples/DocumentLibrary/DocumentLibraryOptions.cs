@@ -6,7 +6,6 @@ public sealed class DocumentLibraryOptions
     public string StorageProvider { get; set; } = "PostgreSql";
     public TimeSpan PublicationInterval { get; set; } = TimeSpan.FromSeconds(1);
     public long MaxUploadBytes { get; set; } = 128L * 1024 * 1024;
-    public bool MigrateVersionedAuthorization { get; set; }
     public LibraryAuthorizationCacheOptions AuthorizationCache { get; set; } = new();
 }
 

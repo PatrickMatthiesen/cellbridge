@@ -47,8 +47,6 @@ var app = builder.AddCSharpApp("document-library", "../CellBridge.DocumentLibrar
     .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
     .WithEnvironment("DocumentLibrary__StorageProvider", "PostgreSql")
     .WithEnvironment("DocumentLibrary__DestinationRoot", destinationRoot)
-    .WithEnvironment("DocumentLibrary__MigrateVersionedAuthorization",
-        builder.Configuration["DocumentLibrary:MigrateVersionedAuthorization"] ?? "false")
     .WithEnvironment("DocumentLibrary__AuthorizationCache__Enabled",
         builder.Configuration["DocumentLibrary:AuthorizationCache:Enabled"] ?? "false")
     .WithEnvironment("DocumentLibrary__AuthorizationCache__Capacity",

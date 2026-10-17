@@ -53,7 +53,7 @@ public sealed class DocumentLibraryService(
                     ?? throw new InvalidOperationException($"Could not recover CellBridge state for {manifest.FileName}.");
             }
 
-            state = await EnsureExternalAuthorizationAsync(state, manifest, cancellationToken);
+            RequireExternalAuthorization(state, manifest);
 
             if (state.Publication is null)
             {
@@ -77,25 +77,18 @@ public sealed class DocumentLibraryService(
         }
     }
 
-    private async Task<DocumentState> EnsureExternalAuthorizationAsync(DocumentState state,
-        LibraryManifest manifest, CancellationToken cancellationToken)
+    private static void RequireExternalAuthorization(DocumentState state, LibraryManifest manifest)
     {
         var binding = state.Security.AuthorizationPolicy;
         var scope = DocumentLibraryPermissionProvider.Scope;
         if (binding is { ContractVersion: 2, Revision: > 0 } &&
             binding.PolicyDomain == DocumentLibraryPermissionProvider.Domain &&
             binding.TenantId == scope.TenantId && binding.WorkspaceId == scope.WorkspaceId)
-            return state;
+            return;
 
-        if (binding is not { ContractVersion: 1, Revision: > 0 } ||
-            binding.PolicyDomain != DocumentLibraryPermissionProvider.Domain ||
-            !manifest.PermissionSnapshots.ContainsKey(binding.Revision))
-            throw new InvalidOperationException($"Permission binding for {manifest.FileName} does not match this host's authority.");
-        if (!options.MigrateVersionedAuthorization)
-            throw new InvalidOperationException($"Document {manifest.FileName} uses versioned permissions. Stop old writers, back up coordinated state, then explicitly set DocumentLibrary:MigrateVersionedAuthorization=true to migrate and reconnect editing clients.");
-        if (!await documents.BindExternalAuthorizationAsync(state.ResourceId, state.StateVersion, binding, scope, cancellationToken))
-            throw new InvalidOperationException($"Permission binding for {manifest.FileName} changed during migration.");
-        return await RequireStateAsync(state.ResourceId, cancellationToken);
+        if (binding is { ContractVersion: 1 } && binding.PolicyDomain == DocumentLibraryPermissionProvider.Domain)
+            throw new InvalidOperationException($"Document {manifest.FileName} uses legacy authorization. This example does not migrate existing state. Use a fresh example database and destination root; preserve existing storage separately if it is needed for recovery.");
+        throw new InvalidOperationException($"Permission binding for {manifest.FileName} does not match this host's authority. Use a fresh example database and destination root.");
     }
 
     public async Task<DocumentState> CreateBlankAsync(string? name, string? type, CellBridgeActor actor,

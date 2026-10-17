@@ -92,13 +92,11 @@ editor until it expires or a trusted operator clears it. Permission TTL and leas
 expiry are separate limits. Provider failures deny access and never reuse expired
 allows.
 
-Existing version-1 documents require an explicit migration. Stop old writers and
-back up PostgreSQL together with the destination root. Start this version with
-`DocumentLibrary__MigrateVersionedAuthorization=true`, then reconnect Office
-clients and remove the setting. Migration checks the stored state version and
-binding, clears sessions and leases, and preserves content, history and delivery
-receipts. Startup otherwise refuses version-1 documents. It always rejects an
-unrelated authority domain or scope.
+Use a fresh example database and destination root. This example does not migrate
+legacy authorization state. Startup rejects legacy bindings, native documents,
+and unrelated authority domains or scopes without changing their authorization.
+Keep any existing database and destination together in a separate location if
+you need them for recovery. The example never resets or takes over that storage.
 
 A staged upload whose Create commit is uncertain remains marked pending. Startup
 can finish publication binding when the authorized CellBridge state exists. It

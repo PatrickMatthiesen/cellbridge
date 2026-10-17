@@ -3,13 +3,17 @@ using CellBridge.AspNetCore;
 using CellBridge.DocumentLibrary;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
+using Microsoft.Extensions.Configuration;
 
 namespace CellBridge.DocumentLibrary.Tests;
 
-public sealed class AuthorizationMigrationTests
+public sealed class AuthorizationRecoveryTests
 {
-    [Fact]
-    public async Task VersionedDocumentsRequireExplicitMigrationAndKeepHistoryAndDeliveryReceipts()
+    [Theory]
+    [InlineData("matching")]
+    [InlineData("content")]
+    [InlineData("publication")]
+    public async Task LegacyAuthorizationIsRejectedWithoutChangingRecoveryState(string recoveryState)
     {
         using var files = new TemporaryDirectory();
         await using var harness = new DocumentLibraryHarness(files.Path);
@@ -18,59 +22,49 @@ public sealed class AuthorizationMigrationTests
         var manifest = await harness.Destination.CreateAsync(Guid.NewGuid(), Guid.NewGuid(), "legacy.docx",
             "/shared/legacy.docx", new MemoryStream(baseline),
             ImmutableDictionary<string, DocumentAccess>.Empty.Add(DocumentLibraryService.OwnerSubject, DocumentAccess.Write));
-        var oldPolicy = new DocumentLibraryPermissionPolicy(harness.Destination);
-        oldPolicy.Install(manifest);
+        var oldPolicy = new LegacyPolicy();
         var oldService = new CellBridgeDocumentService(harness.Provider, authorizationPolicy: oldPolicy);
         var imported = (await oldService.ImportAsync(manifest.ResourceId, manifest.CellBridgePath, baseline,
             DocumentLibraryHarness.Owner.Identity, DocumentLibraryHarness.Owner))!;
-        Assert.True(await harness.Publisher.BindAsync(imported.ResourceId, imported.LifecycleGeneration, imported.StateVersion,
-            manifest.BindingId, manifest.DestinationId, manifest.CurrentRevision));
-        await harness.Destination.MarkCellBridgeBoundAsync(imported.ResourceId);
+        if (recoveryState != "content")
+        {
+            Assert.True(await harness.Publisher.BindAsync(imported.ResourceId, imported.LifecycleGeneration, imported.StateVersion,
+                manifest.BindingId, manifest.DestinationId, manifest.CurrentRevision));
+            await harness.Destination.MarkCellBridgeBoundAsync(imported.ResourceId);
+        }
         imported = (await harness.Provider.State.FindByResourceIdAsync(imported.ResourceId))!;
         var saved = await oldService.ExecuteAsync(imported.ResourceId, DocumentPartitionKind.FileContents,
             DocumentLibraryHarness.SaveRequest(imported, changed), new Dictionary<string, string>(), DocumentLibraryHarness.Owner);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
-        Assert.Equal(1, await harness.Worker.PublishPendingOnceAsync());
+        Assert.Equal(recoveryState == "content" ? 0 : 1, await harness.Worker.PublishPendingOnceAsync());
+        if (recoveryState == "publication")
+            await harness.Provider.State.TransitionAsync(imported.ResourceId, (current, _) =>
+                new StateTransition<bool>(current with
+                { Publication = current.Publication! with { BindingId = Guid.NewGuid() } }, true));
         var locks = new SharedDocumentLocks(oldService);
         Assert.True((await locks.ApplyAsync(imported.ResourceId, HostLockOperation.Acquire, "old-lock", DocumentLibraryHarness.Owner)).Success);
         var before = (await harness.Provider.State.FindByResourceIdAsync(imported.ResourceId))!;
-        var beforeManifest = await harness.Destination.GetAsync(imported.ResourceId);
+        var manifestPath = Assert.Single(Directory.GetFiles(files.Path, "manifest.json", SearchOption.AllDirectories));
+        var manifestBefore = await File.ReadAllBytesAsync(manifestPath);
+        var destinationBefore = await harness.Destination.ReadCurrentBytesAsync(imported.ResourceId);
         var revisions = await oldService.ListRevisionsAsync(imported.ResourceId, DocumentLibraryHarness.Owner);
+        Assert.True(revisions.Count > 1);
+        Assert.NotEmpty(before.Receipts);
+        Assert.NotNull(before.Coordination.HostLock);
+        // Stale local configuration cannot opt this example into mutating legacy state.
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["DocumentLibrary:MigrateVersionedAuthorization"] = "true"
+        }).Build().GetSection("DocumentLibrary").Bind(harness.Options);
 
         var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Library.InitializeAsync());
-        Assert.Contains("MigrateVersionedAuthorization=true", refused.Message);
-        Assert.Equal(before, await harness.Provider.State.FindByResourceIdAsync(imported.ResourceId));
-        harness.Options.MigrateVersionedAuthorization = true;
-        await harness.Library.InitializeAsync();
-        var after = (await harness.Provider.State.FindByResourceIdAsync(imported.ResourceId))!;
-        Assert.Equal(2, after.Security.AuthorizationPolicy!.ContractVersion);
-        Assert.Equal(DocumentLibraryPermissionProvider.Scope.TenantId, after.Security.AuthorizationPolicy.TenantId);
-        Assert.Equal(DocumentLibraryPermissionProvider.Scope.WorkspaceId, after.Security.AuthorizationPolicy.WorkspaceId);
-        Assert.Equal(before.Content, after.Content);
-        Assert.Equal(before.ContentVersion, after.ContentVersion);
-        Assert.Equal(before.LifecycleGeneration, after.LifecycleGeneration);
-        Assert.Null(after.Coordination.HostLock);
-        Assert.True(after.Coordination.Generation > before.Coordination.Generation);
-        Assert.Equal(revisions, await harness.Documents.ListRevisionsAsync(imported.ResourceId, DocumentLibraryHarness.Owner));
-        Assert.Equal(changed, await harness.Destination.ReadCurrentBytesAsync(imported.ResourceId));
-        var afterManifest = await harness.Destination.GetAsync(imported.ResourceId);
-        Assert.Equal(beforeManifest.CurrentRevision, afterManifest.CurrentRevision);
-        Assert.Equal(beforeManifest.Receipts, afterManifest.Receipts);
-        Assert.Equal(beforeManifest.PermissionSnapshots.Keys, afterManifest.PermissionSnapshots.Keys);
-        foreach (var snapshot in beforeManifest.PermissionSnapshots.Values)
-        {
-            var retained = afterManifest.PermissionSnapshots[snapshot.Revision];
-            Assert.Equal(snapshot.Revision, retained.Revision);
-            Assert.Equal(snapshot.Decisions.OrderBy(x => x.Key), retained.Decisions.OrderBy(x => x.Key));
-        }
 
-        // Subsequent ordinary permission changes neither publish v1 snapshots nor migrate again.
-        await harness.Library.SetPermissionAsync(imported.ResourceId, DocumentLibraryService.ReaderSubject, DocumentAccess.Read);
-        await harness.Library.SetPermissionAsync(imported.ResourceId, DocumentLibraryService.ReaderSubject, DocumentAccess.None);
-        await harness.Library.InitializeAsync();
-        var current = (await harness.Provider.State.FindByResourceIdAsync(imported.ResourceId))!;
-        Assert.Equal(after.Security.AuthorizationPolicy, current.Security.AuthorizationPolicy);
-        Assert.Single((await harness.Destination.GetAsync(imported.ResourceId)).PermissionSnapshots);
+        Assert.Equal(before, await harness.Provider.State.FindByResourceIdAsync(imported.ResourceId));
+        Assert.Equal(manifestBefore, await File.ReadAllBytesAsync(manifestPath));
+        Assert.Equal(destinationBefore, await harness.Destination.ReadCurrentBytesAsync(imported.ResourceId));
+        Assert.Equal(revisions, await oldService.ListRevisionsAsync(imported.ResourceId, DocumentLibraryHarness.Owner));
+        Assert.Contains("does not migrate existing state", refused.Message);
+        Assert.Contains("fresh example database and destination root", refused.Message);
     }
 
     [Fact]
@@ -111,11 +105,10 @@ public sealed class AuthorizationMigrationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task MigrationOptInCannotTakeOverNativeDocumentsOrAnotherScope(bool native)
+    public async Task StartupCannotTakeOverNativeDocumentsOrAnotherScope(bool native)
     {
         using var files = new TemporaryDirectory();
         await using var harness = new DocumentLibraryHarness(files.Path);
-        harness.Options.MigrateVersionedAuthorization = true;
         var bytes = TestOfficeFile.Docx("unrelated authority");
         var manifest = await harness.Destination.CreateAsync(Guid.NewGuid(), Guid.NewGuid(), "other.docx",
             "/shared/other.docx", new MemoryStream(bytes),
@@ -129,5 +122,20 @@ public sealed class AuthorizationMigrationTests
         var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Library.InitializeAsync());
         Assert.Contains("does not match this host's authority", refused.Message);
         Assert.Equal(state, await harness.Provider.State.FindByResourceIdAsync(manifest.ResourceId));
+    }
+
+    private sealed class LegacyPolicy : ICellBridgeAuthorizationPolicy
+    {
+        public string PolicyDomain => DocumentLibraryPermissionProvider.Domain;
+        public DocumentAuthorizationBinding BindNewDocument(Guid resourceId) => new(PolicyDomain, 1, 1);
+        public ICellBridgeAuthorizationSnapshot? Resolve(DocumentState state) =>
+            state.Security.AuthorizationPolicy == BindNewDocument(state.ResourceId)
+                ? new LegacySnapshot(state.ResourceId, state.Security.AuthorizationPolicy!) : null;
+        private sealed record LegacySnapshot(Guid ResourceId, DocumentAuthorizationBinding Binding)
+            : ICellBridgeAuthorizationSnapshot
+        {
+            public DocumentAccess Evaluate(string subject) => subject == DocumentLibraryService.OwnerSubject
+                ? DocumentAccess.Read | DocumentAccess.Write : DocumentAccess.None;
+        }
     }
 }

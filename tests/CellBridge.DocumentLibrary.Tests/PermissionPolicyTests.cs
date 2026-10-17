@@ -10,25 +10,6 @@ namespace CellBridge.DocumentLibrary.Tests;
 public sealed class PermissionPolicyTests
 {
     [Fact]
-    public async Task DeserializedPermissionSnapshotCanBeInstalledAgain()
-    {
-        using var files = new TemporaryDirectory();
-        await using var destination = new DocumentLibraryDestination(files.Path);
-        var resourceId = Guid.NewGuid();
-        await destination.CreateAsync(resourceId, Guid.NewGuid(), "example.docx", "/shared/example.docx",
-            new MemoryStream(TestOfficeFile.Docx("baseline")),
-            ImmutableDictionary<string, DocumentAccess>.Empty
-                .Add(DocumentLibraryService.OwnerSubject, DocumentAccess.Write)
-                .Add(DocumentLibraryService.ReaderSubject, DocumentAccess.Read));
-        var policy = new DocumentLibraryPermissionPolicy(destination);
-        await policy.LoadAsync();
-        await policy.LoadAsync();
-        var manifest = await destination.GetAsync(resourceId);
-        policy.Install(manifest);
-        Assert.NotNull(policy.BindNewDocument(resourceId));
-    }
-
-    [Fact]
     public async Task MissingStateForBoundManifestFailsClosed()
     {
         using var files = new TemporaryDirectory();
