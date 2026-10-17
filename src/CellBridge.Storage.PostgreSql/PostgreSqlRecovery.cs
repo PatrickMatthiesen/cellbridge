@@ -67,7 +67,7 @@ public sealed partial class PostgreSqlStateStore
                     var bytes = Encoding.UTF8.GetBytes(reader.GetString(2));
                     metadataBytes = checked(metadataBytes + bytes.LongLength);
                     StorageLimits.Check("recovery metadata bytes", metadataBytes, 128L * 1024 * 1024);
-                    var state = RecoveryJson.Read<DocumentState>(bytes);
+                    var state = DocumentStateJson.Deserialize(Encoding.UTF8.GetString(bytes), strict: true, limits: _limits);
                     if (state.ResourceId != reader.GetGuid(0) || state.StateVersion != reader.GetInt64(1))
                         throw new StorageCorruptionException("Recovery snapshot row identity disagrees with JSON.");
                     if (pointers.TryGetValue((state.ResourceId, state.StateVersion), out var pointer) &&

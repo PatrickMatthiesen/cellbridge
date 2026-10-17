@@ -18,8 +18,20 @@ await using (var command = database.CreateCommand("""
       resource_id uuid NOT NULL, subject text NOT NULL, workspace text NOT NULL,
       can_read boolean NOT NULL, can_write boolean NOT NULL, PRIMARY KEY(resource_id,subject));
     """)) await command.ExecuteNonQueryAsync();
-if (args.Any(argument => argument is not ("--cache" or "--durable")))
-    throw new ArgumentException("Supported switches: --cache, --durable.");
+var saveCount = 100;
+var payloadBytes = 0;
+foreach (var argument in args)
+{
+    if (argument.StartsWith("--saves=", StringComparison.Ordinal) &&
+        int.TryParse(argument[8..], out var saves) && saves is >= 1 and <= 100) saveCount = saves;
+    else if (argument.StartsWith("--payload-bytes=", StringComparison.Ordinal) &&
+        int.TryParse(argument[16..], out var payload) && payload is >= 0 and <= 4 * 1024 * 1024) payloadBytes = payload;
+    else if (argument is not ("--cache" or "--durable" or "--measure-gc"))
+        throw new ArgumentException("Supported switches: --cache, --durable, --saves=1..100, --payload-bytes=0..4194304, --measure-gc.");
+}
+var payloadRandom = new Random(42);
+var extraText = new string(Enumerable.Range(0, payloadBytes).Select(_ => (char)payloadRandom.Next('a', 'z' + 1)).ToArray());
+var allocationStart = GC.GetTotalAllocatedBytes(precise: true);
 const int cacheCapacity = 32;
 const int resourceCount = 64;
 const int concurrency = 8;
@@ -48,7 +60,8 @@ try
 {
     await SetPermissions(id, actor, read: true, write: true);
     await SetPermissions(id, reader, read: true, write: false);
-    var state = await service.CreateExternalAsync(id, $"/shared/{workspace}/example.docx", Package("original"),
+    var initialPackage = Package("original");
+    var state = await service.CreateExternalAsync(id, $"/shared/{workspace}/example.docx", initialPackage,
         new("example-tenant", workspace), actor) ?? throw new InvalidOperationException("Create failed.");
     var processor = new CellBridgeRequestProcessor(service);
     var request = new CellStorageRequest
@@ -77,7 +90,7 @@ try
         var result = await processor.ExecuteAsync(request, "https://example.test", actor);
         if (result.Response.Responses[0].SubResponses[0].ErrorCode != "Success") throw new InvalidOperationException("Metadata denied.");
     });
-    var packages = Enumerable.Range(0, 100).Select(index => Package("replacement " + index)).ToArray();
+    var packages = Enumerable.Range(0, saveCount).Select(index => Package("replacement " + index)).ToArray();
     await Measure("changed-whole-file-save-and-readback", packages.Length, async index =>
     {
         using var bytes = new MemoryStream(packages[index]);
@@ -89,7 +102,15 @@ try
     if (currentAfterSaves.ContentVersion != state.ContentVersion + packages.Length ||
         !(await storage.Content.ReadVerifiedAsync(currentAfterSaves.Content)).SequenceEqual(packages[^1]))
         throw new InvalidOperationException("Authoritative content did not advance through every save.");
-    checks.Add("100-changing-saves-with-verified-revision-and-current-bytes");
+    checks.Add(saveCount + "-changing-saves-with-verified-revision-and-current-bytes");
+    foreach (var index in new[] { -1, 0, packages.Length / 2, packages.Length - 1 }.Distinct())
+    {
+        var revision = await service.GetRevisionAsync(id, state.Revisions[0].RevisionNumber + (ulong)(index + 1), actor);
+        var expected = index < 0 ? initialPackage : packages[index];
+        if (!(await storage.Content.ReadVerifiedAsync(revision.Content)).SequenceEqual(expected))
+            throw new InvalidOperationException("Historical revision bytes changed after subsequent saves.");
+    }
+    checks.Add("original-first-middle-latest-historical-bytes");
 
     // Exceed cache capacity and interleave hot and cold resources with actual concurrent operations.
     var resources = new List<Guid> { id };
@@ -121,7 +142,7 @@ try
     await ExpectDenied("revoked-new-save", async () =>
         await service.SaveWholeFileAsync(id, new MemoryStream(Package("revoked")), "revoked-save", actor, "example-lock"));
     await ExpectDenied("revoked-receipt-replay", async () =>
-        await service.SaveWholeFileAsync(id, new MemoryStream(packages[^1]), "save-99", actor, "example-lock"));
+        await service.SaveWholeFileAsync(id, new MemoryStream(packages[^1]), "save-" + (saveCount - 1), actor, "example-lock"));
     await ExpectDenied("revoked-lock-refresh", async () =>
         await locks.ApplyAsync(id, HostLockOperation.Refresh, "example-lock", actor));
     var deniedProtocol = await processor.ExecuteAsync(request, "https://example.test", actor);
@@ -142,6 +163,44 @@ try
         throw new InvalidOperationException("Revocation unexpectedly removed the previous editor's lock.");
     checks.Add("new-grant-visible-but-revoked-editor-lease-retained");
 
+    long? persistedCurrentStateBytes = null;
+    long? retainedStateJsonBytes = null;
+    long? retainedStateVersions = null;
+    long? retainedDatabaseBytes = null;
+    if (durable)
+    {
+        await using var stateBytes = database.CreateCommand("""
+            SELECT octet_length(s.state_json)::bigint,
+                   (SELECT sum(octet_length(state_json))::bigint FROM cellbridge_states WHERE resource_id=@id),
+                   (SELECT count(*) FROM cellbridge_states WHERE resource_id=@id),
+                   (SELECT sum(pg_total_relation_size(quote_ident(schemaname)||'.'||quote_ident(tablename)))::bigint
+                    FROM pg_tables WHERE schemaname='public')
+            FROM cellbridge_documents d JOIN cellbridge_states s USING(resource_id,state_version)
+            WHERE d.resource_id=@id
+            """);
+        stateBytes.Parameters.AddWithValue("id", id);
+        await using var stateBytesReader = await stateBytes.ExecuteReaderAsync();
+        if (!await stateBytesReader.ReadAsync()) throw new InvalidOperationException("Current durable document disappeared.");
+        persistedCurrentStateBytes = stateBytesReader.GetInt64(0);
+        retainedStateJsonBytes = stateBytesReader.GetInt64(1);
+        retainedStateVersions = stateBytesReader.GetInt64(2);
+        retainedDatabaseBytes = stateBytesReader.GetInt64(3);
+    }
+    var totalAllocatedBytes = GC.GetTotalAllocatedBytes(precise: true) - allocationStart;
+    var managedHeapBeforeGcBytes = GC.GetTotalMemory(forceFullCollection: false);
+    long? postGcLiveManagedBytes = null;
+    if (args.Contains("--measure-gc"))
+    {
+        Console.Error.WriteLine("Measurement-only full GC after all workload operations");
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        postGcLiveManagedBytes = GC.GetTotalMemory(forceFullCollection: false);
+    }
+    // Keep this optional codec probe outside allocation and live-heap measurements so
+    // the same executable can also measure older CellBridge dependency builds.
+    var storageSizeMethod = typeof(DocumentState).Assembly
+        .GetType("CellBridge.Storage.Abstractions.DocumentStateJson")?.GetMethod("GetSerializedSize");
+    var encodedStateBytes = storageSizeMethod?.Invoke(null, [currentAfterSaves]) as long?
+        ?? persistedCurrentStateBytes ?? Encoding.UTF8.GetByteCount(beforeDenials);
     Console.WriteLine(JsonSerializer.Serialize(new
     {
         cached = authority is CachedDocumentAuthorizationProvider,
@@ -151,7 +210,18 @@ try
         cacheTtlSeconds = 10,
         resourceCount,
         mixedReadConcurrency = concurrency,
+        changedSaveCount = saveCount,
+        extraTextBytes = payloadBytes,
         packageBytes = packages[^1].Length,
+        totalAllocatedBytes,
+        managedHeapBeforeGcBytes,
+        postGcLiveManagedBytes,
+        postGcOwners = "The service, stores, current state, packages and expanded denial-check JSON remain owned by this workload.",
+        encodedStateBytes,
+        persistedCurrentStateBytes,
+        retainedStateJsonBytes,
+        retainedStateVersions,
+        retainedDatabaseBytes,
         revisionCount = currentAfterSaves.Revisions.Length,
         documentStateJsonBytes = Encoding.UTF8.GetByteCount(beforeDenials),
         metrics,
@@ -159,6 +229,9 @@ try
         totalProviderCalls = hostAuthority.Calls,
         caveat = "Synthetic consumer workload. No HTTP transport, external destination, fault recovery or Office interoperability qualification."
     }, new JsonSerializerOptions { WriteIndented = true }));
+    GC.KeepAlive(service);
+    GC.KeepAlive(storage);
+    GC.KeepAlive(currentAfterSaves);
 }
 finally
 {
@@ -179,6 +252,7 @@ async Task MeasureConcurrent(string operation, int count, Func<int, Task> execut
 {
     Console.Error.WriteLine("Running " + operation);
     var calls = hostAuthority.Calls;
+    var allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
     var elapsed = Stopwatch.StartNew();
     await Parallel.ForEachAsync(Enumerable.Range(0, count), new ParallelOptions { MaxDegreeOfParallelism = concurrency },
         async (index, _) => await execute(index));
@@ -189,6 +263,7 @@ async Task MeasureConcurrent(string operation, int count, Func<int, Task> execut
         count,
         concurrency,
         providerCalls = hostAuthority.Calls - calls,
+        allocatedBytes = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore,
         elapsedMs = elapsed.Elapsed.TotalMilliseconds
     });
 }
@@ -197,6 +272,7 @@ async Task Measure(string operation, int count, Func<int, Task> execute)
 {
     Console.Error.WriteLine("Running " + operation);
     var calls = hostAuthority.Calls;
+    var allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
     var elapsed = Stopwatch.StartNew();
     for (var index = 0; index < count; index++) await execute(index);
     elapsed.Stop();
@@ -205,6 +281,7 @@ async Task Measure(string operation, int count, Func<int, Task> execute)
         operation,
         count,
         providerCalls = hostAuthority.Calls - calls,
+        allocatedBytes = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore,
         elapsedMs = elapsed.Elapsed.TotalMilliseconds,
         millisecondsPerOperation = elapsed.Elapsed.TotalMilliseconds / count
     });
@@ -221,7 +298,7 @@ async Task SetPermissions(Guid resource, CellBridgeActor subject, bool read, boo
     command.Parameters.AddWithValue("write", write);
     await command.ExecuteNonQueryAsync();
 }
-static byte[] Package(string text)
+byte[] Package(string text)
 {
     using var bytes = new MemoryStream();
     using (var zip = new ZipArchive(bytes, ZipArchiveMode.Create, leaveOpen: true))
@@ -229,7 +306,7 @@ static byte[] Package(string text)
         void Add(string path, string xml) { using var writer = new StreamWriter(zip.CreateEntry(path).Open(), Encoding.UTF8); writer.Write(xml); }
         Add("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>");
         Add("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>");
-        Add("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>" + text + "</w:t></w:r></w:p></w:body></w:document>");
+        Add("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>" + text + extraText + "</w:t></w:r></w:p></w:body></w:document>");
     }
     return bytes.ToArray();
 }

@@ -279,12 +279,12 @@ public sealed partial class DocumentPartition
                     stream.Position = 0;
                     handle = await content.WriteAsync(stream, cancellationToken);
                 }
-                elements.Add(new GraphElementState(id, (uint)element.DataElementType,
-                    serial, handle)
-                {
-                    MappingSerials = mappingSerials.TryGetValue(element.DataElementExtendedGuid, out var serials)
-                        ? serials.Select(s => new SerialId(s.Guid, s.Value)).ToImmutableArray() : [],
-                });
+                var mappings = mappingSerials.TryGetValue(element.DataElementExtendedGuid, out var serials)
+                    ? serials.Select(s => new SerialId(s.Guid, s.Value)).ToImmutableArray() : [];
+                // Historical revisions share these immutable descriptors with the current graph.
+                elements.Add(old is not null && old.Type == (uint)element.DataElementType &&
+                    old.Serial == serial && old.Payload == handle && old.MappingSerials.AsSpan().SequenceEqual(mappings.AsSpan())
+                    ? old : new GraphElementState(id, (uint)element.DataElementType, serial, handle) { MappingSerials = mappings });
             });
         return elements.ToImmutable();
     }

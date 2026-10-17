@@ -91,62 +91,89 @@ The provider domain and scope are durable identifiers. Changing scope/domain is 
 
 An external authority in the same PostgreSQL database still uses separate transactions from CellBridge. That supports ordinary admitted-work semantics; it does not create atomic cross-module revocation. No multi-process instant-revocation guarantee is implied by the choice of database.
 
-## Consumer measurements and remaining storage limit
+## Consumer measurements and storage limits
 
 The initial hot-resource trial used one changed save followed by 99 no-op
 receipts. It demonstrated fewer authority queries with caching, but did not test
-repeated editing or durable storage growth. The current
-[document example](../examples/HostAuthorizedDocuments/README.md) performs 100
-changing saves with verified bytes, then mixes concurrent reads across 64 resources.
-It also checks creation, reader/writer separation, scope isolation, grants,
-revocation, receipt replay and retained locks.
+repeated editing. The [document example](../examples/HostAuthorizedDocuments/README.md)
+now performs changing saves, verifies saved and historical bytes, and mixes 512
+history reads across 64 resources with eight concurrent callers. It also checks
+creation, reader/writer separation, scope isolation, grants, revocation, receipt
+replay and retained locks.
 
-On 2026-10-17 all four Release modes completed against isolated PostgreSQL 18.3:
-in-memory and PostgreSQL document stores, each cached and uncached. Each mode
-passed the same ten scenario checks. The host permission store was PostgreSQL in
-every mode. The optional cache had capacity 32 and an absolute ten-second TTL.
+The first correction stopped newly published indexes from copying revision
+mappings from every retained index. Publication takes the selected index's
+mappings and fresh wrappers while retaining historical elements, identity checks
+and serial watermarks. That reduced 100-save state JSON from 37.3 MB to 16.4 MB.
+The remaining duplication was metadata: each revision repeated cumulative graph
+descriptors. Raw file and graph payloads already used content handles.
 
-| Workload | Uncached provider calls | Cached calls, in-memory documents | Cached calls, PostgreSQL documents |
-| --- | ---: | ---: | ---: |
-| 1,000 history reads | 1,000 | 1 | 1 |
-| 200 direct SOAP metadata requests | 400 | 0 | 0 |
-| 100 changing whole-file saves and readbacks | 100 | 0 | 3 |
-| 512 mixed history reads, concurrency eight | 512 | 252 | 257 |
+Storage encoding 1 now stores immutable descriptors once per state. Each current
+or historical partition retains its exact ordered membership through direct
+ranges into that table. Decoding shares descriptor objects across revisions;
+it does not remove required history. Capture also reuses unchanged descriptors.
+Quota checks count encoded UTF-8 bytes through a bounded buffer and weakly
+memoize that count for immutable states. The codec reuses serializer type
+metadata per worker thread and clears operation graph references in `finally`.
+PostgreSQL schema 5 requires an [explicit migration with older writers stopped](storage-providers.md#upgrading-a-durable-host).
+Logical document format 2 and native/version-1/version-2 authorization semantics
+are unchanged. Async authorization still revalidates current state after awaiting
+the host decision.
 
-The durable run crossed TTL boundaries and therefore refreshed decisions.
-Concurrent cache misses can also duplicate provider calls. These single trials
-ran alongside build/test work, so they do not establish comparative latency or
-production throughput. The interactive DocumentLibrary separately exercises
-cookie-authenticated HTTP and SOAP saves with both cache modes; neither example
-qualifies live Office interoperability.
+On 2026-10-17, equivalent Release workloads ran sequentially against isolated
+Aspire-owned PostgreSQL 18.3, without concurrent builds or other test work. Each
+10/20/40/100-save workload ran with in-memory and PostgreSQL document stores,
+each cached and uncached. All 16 before and 16 after trials passed the same 11
+behavior/history checks. Host permissions used PostgreSQL in every mode; the
+optional cache had capacity 32 and a ten-second TTL. Each trial used a fresh
+database. The package size was approximately 834 bytes.
 
-The changing-save workload exposed a storage defect. Each newly published index
-copied revision mappings from all retained indexes, causing cubic mapping growth
-across revision history. Publication now copies the selected index's mappings
-and new revision wrappers. It retains every old graph element, ancestor,
-immutable-identity check and serial watermark. Regression tests materialize old
-revisions, replay receipts, reject a stale protocol save and accept a subsequent
-fresh protocol save.
+The uncached durable trials measured:
 
-This fixes one source of amplification, not the remaining history-storage design.
-In the 100-save durable workload, serialized document state fell from 37.3 MB to
-16.4 MB. Historical revisions still repeat the cumulative graph descriptors,
-which grow quadratically for these changing whole-file saves. The PostgreSQL
-provider also retains up to 64 complete state versions by default. Reading and
-serializing these states causes substantial allocation: the completed durable
-processes reached approximately 1.9 and 2.1 GiB observed RSS, sampled every 100 ms.
-RSS alone does not distinguish live managed objects, reusable runtime buffers
-and other process memory. This is not evidence that the authorization cache leaks.
+| Changed saves | Current state JSON before | Encoded state after | Total managed allocation before | Allocation after |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | 259,277 B | 68,353 B | 1.094 GB | 0.540 GB |
+| 20 | 817,546 B | 127,522 B | 2.861 GB | 0.831 GB |
+| 40 | 2,864,084 B | 245,861 B | 9.613 GB | 1.590 GB |
+| 100 | 16,443,721 B | 600,890 B | 60.276 GB | 5.449 GB |
 
-A separate bounded in-memory probe released the service, stores and document
-objects, then forced full collections. Their weak references became dead. After
-20/40/repeated-40 saves, shared byte-pool buffers accounted for 4.21/15.74/27.28 MB
-of the remaining managed heap; the non-pool remainder stayed near 1 MB. These
-diagnostic-only counts inspected private .NET 10.0.12 runtime fields. They explain
-most residual managed memory in that probe, but do not establish bounded pool
-growth or explain the durable process's PostgreSQL/native memory.
+At 100 saves, all 101 revisions remained readable. The 64 retained state snapshots
+occupied 540.92 MB of logical JSON before and 26.53 MB after. Physical bytes for
+the fresh database's public tables and indexes fell from 197.58 MB to 8.99 MB;
+this includes other fixture documents, TOAST, indexes and free space, and excludes
+WAL and system catalogs. Total elapsed time fell from 88.37 to 26.33 seconds.
+These are single trials, not throughput guarantees.
 
-Large edit histories remain an unresolved storage scalability limit. A follow-up
-must address repeated graph descriptors and full-state loading while preserving
-history, protocol identities, receipts and recovery. Lowering retention limits or
-forcing garbage collection would not correct that representation problem.
+Observed peak process RSS fell from 2,167,748 KiB to 288,332 KiB in the uncached
+durable trial, and from 2,157,436 KiB to 325,012 KiB with caching. RSS was sampled
+every 50 ms and measures the whole process. An optional diagnostic full GC ran
+only after workload operations. With the service, stores, current state, packages
+and expanded denial-check JSON still owned, the uncached live managed heap fell
+from 1,417.25 MB to 89.22 MB. In-memory 100-save allocation fell from 2.866 GB to
+0.546 GB uncached and from 2.884 GB to 0.539 GB cached. Default public-record JSON
+still expands graph descriptors; the example reports that size separately from
+encoded storage bytes.
+
+Larger synthetic DOCX trials added one MiB of deterministic varied XML text,
+producing a 636,979-byte package. Both stores passed 20 changed saves and the
+same checks. Uncached durable allocation fell from 5.001 GB to 2.989 GB, while
+peak RSS fell from 540,716 KiB to 468,944 KiB. Content dominated physical database
+size, which changed from 116.88 MB to 114.86 MB. In three paired in-memory trials,
+allocation fell slightly, from about 2.624 GB to 2.596 GB, and post-GC live heap
+fell from 132.91 to 135.01 MB to 130.65 to 132.20 MB. Peak RSS did not improve: its mean
+rose from 428,599 KiB to 488,841 KiB, with overlapping ranges. These measurements
+do not identify the cause. Large-content buffer and process-memory behavior
+remains a limit requiring separate investigation.
+
+Raw JSON, process metrics, source/binary hashes, executable snapshots and runnable
+drivers remain in ignored `artifacts/durable-history-memory/`. The example's
+`--saves`, `--payload-bytes` and `--measure-gc` switches reproduce the bounded
+workloads. No collection occurs as part of the storage fix.
+
+The codec fixes descriptor duplication in stored state for these workloads. It
+still reads complete compact states and retains the configured full snapshots.
+Detached revisions still have arrays of shared descriptor references, and graph
+processing and payload buffers still allocate. Portable recovery manifests keep
+their existing expanded v1 representation and size limits. These results do not
+establish bounded runtime-pool growth, rule out every possible leak, or qualify
+live Office/OOS editing, external publishing or hardware-failure recovery.

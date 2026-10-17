@@ -26,11 +26,14 @@ to use the library. Removing the volume removes its persisted data.
 
 Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
 `ConnectionStrings__cellbridge` before starting the host. Initialization accepts
-a fresh database or storage schema version 4, and explicitly migrates version 3
-to 4 while preserving documents. Stop hosts using that database before migration;
-schema-3 writers fail closed afterward. Older schemas are rejected without
-modifying them. Initialization sets authoritative byte/document limits. Existing
-data stays intact when a limit is reduced. See [external host reliability](external-host-reliability.md#storage-compatibility-and-validation).
+a fresh database or storage schema version 5, and explicitly migrates versions 3
+and 4 to 5 while preserving documents and retained snapshots. Stop all hosts and
+workers using that database before migration. Older writers fail their schema
+guard afterward. Setup rewrites retained state JSON with shared graph metadata
+and recounts encoded metadata and content bytes in the usage ledger. The version,
+state and ledger changes commit together. Unsupported schemas, corruption and
+limits below existing usage fail without changing the database. Initialization
+sets authoritative byte/document limits. See [external host reliability](external-host-reliability.md#storage-compatibility-and-validation).
 
 ### Configuration
 
@@ -287,15 +290,15 @@ power-loss and shared-filesystem behavior need deployment-specific qualification
    Test restoration in a separate environment.
 3. Update all CellBridge package references together. Build the application and
    the repository's `CellBridge.Storage.Setup` tool from matching source.
-4. Run setup against the stopped database. It migrates storage schema 3 to 4,
-   preserves documents and initializes recovery schema 1. Older development
-   schemas need a separate migration or recreation; setup rejects them.
+4. Run setup against the stopped database. It migrates storage schema 3 or 4 to 5,
+   preserves documents and all retained snapshots, and initializes recovery schema 1.
+   Older development schemas need a separate migration or recreation; setup rejects them.
 5. Start one upgraded host. Check provider health, document identities,
    permissions, downloads and a save/reopen cycle before enabling other writers.
    Verify publication workers' destination bindings and durable receipt stores
    before restarting them.
 
-There is no schema-4-to-3 downgrade. For rollback, stop upgraded writers and
+There is no schema-5 downgrade. For rollback, stop upgraded writers and
 restore the previous database, matching content objects, binaries and
 configuration. This loses changes made after the backup unless you reconcile
 them separately. Do not run older writers against the migrated database.
@@ -307,6 +310,24 @@ Implement `IDocumentStateStore` and `IContentStore`, then compose a
 the complete deployed backend.
 
 ### State contract
+
+`DocumentStateJson` writes storage encoding 1. It stores each immutable graph
+descriptor once within a snapshot and represents each partition's exact ordered
+membership with ranges into that table. Historical revisions retain their graph
+identities, content handles and selected indexes. Decoding shares descriptor
+objects across revisions; it does not discard old graphs. The codec also reads
+legacy expanded JSON. Logical `DocumentState.FormatVersion` remains 2 and the
+public detached records are unchanged. Default `JsonSerializer` output remains
+expanded; use the storage codec when measuring persisted metadata.
+
+Quota accounting counts encoded UTF-8 bytes with a bounded stream buffer and
+memoizes the count for an immutable state using a weak key. Synchronous codec
+operations reuse serializer type metadata on each worker thread and clear their
+graph references after success or failure. The first size count still walks and
+serializes the descriptors. PostgreSQL retains the configured number of complete
+state snapshots, which include lease and metadata transitions.
+Portable recovery manifests retain their existing expanded v1 representation and
+limits; encoding compaction does not remove those archive size limits.
 
 `TransitionAsync` acquires exclusive coordination for the resource, loads one
 coherent snapshot and supplies authoritative time. Invoke the callback once.
