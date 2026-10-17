@@ -11,9 +11,12 @@ existing SOAP/MTOM requests and endpoint suffixes. Directory discovery does not
 list documents or disclose their permissions.
 
 Resource IDs remain independent of paths. Downloads and protocol operations
-evaluate the resolved document's current authorization policy. A request that
-enables resource-ID lookup never falls back to its URL when the ID is missing,
-malformed or unknown.
+evaluate the resolved document's current authorization policy. When
+`UseResourceID` is true and the request supplies a `ResourceID`, CellBridge
+looks up that ID only. An explicitly empty, malformed or unknown ID does not
+fall back to the URL. If the optional `ResourceID` attribute is omitted, the
+required URL identifies the initial request and a successful response returns
+the stable ID. A URL miss still does not create a document.
 
 ## Move an existing resource
 
@@ -67,11 +70,11 @@ document-relative cellstorage endpoint can still resolve the unchanged resource
 ID. It enforces the resource's current permissions and returns its current URL.
 Unknown IDs cannot use the stale URL to target another document.
 
-This does not guarantee that every already-open Office session survives a move.
+One tested Word session continued saving by resource ID after a move, as recorded
+below. This does not guarantee that every already-open Office session survives a move.
 Office may issue another request using only the old path. Such a client must
 reopen the document at its current URL. Resource-ID requests continuing after a
-move are automated protocol evidence; live Word reconnect behavior needs
-separate verification.
+move have both automated protocol coverage and the bounded live evidence below.
 
 Retired paths remain reserved against use by a different resource, including
 after soft deletion. A host cannot rename `a.docx` to `b.docx` and then give
@@ -107,15 +110,35 @@ Office login completion URLs retain their mounted completion-path contract.
 ## Validation evidence
 
 Endpoint tests cover routing, escaping, authorization and stale URL behavior.
-Storage tests cover atomic moves and PostgreSQL persistence. These tests do not
-establish the filename Word displays or its reconnect behavior on Windows.
-Nested-path desktop validation remains unverified.
+Storage tests cover atomic moves and PostgreSQL persistence, including provider
+recreation and permission revocation.
 
-To qualify it, open a nested URL with spaces and Unicode in desktop Word on
-Windows, inspect its title, edit and save, and reopen the saved document. Move
-the resource while Word is open, capture the requests, and test another save.
-Check both resource-ID and path-only requests, including after permission
-revocation. Repeat with an existing flat document migrated through
-MoveDocumentAsync. Record the Windows and Office versions and request evidence
-in local ignored artifacts. Follow the [desktop validation guide](demo-library.md)
-for capture setup and distinguish that evidence from automated tests.
+On October 17, 2026, desktop Word for Microsoft 365 x64, build
+`16.0.20430.20146`, ran against the standard localhost HTTPS host with PostgreSQL
+on Windows build 26200. The document API drove these native Word checks, with
+separate UI observations and independently downloaded server content:
+
+- Open `/shared/issue72/team space/東京/Project plan æ.docx` for editing. Word
+  displayed `Project plan æ.docx`, saved one edit and reported Saved.
+- Move that resource to another nested directory while Word remained open,
+  using its current owner's lock identity. Save a second edit through the open
+  session, then close and reopen at the new URL in a fresh Word process.
+  Both edits survived. Independently downloaded revisions advanced from 1 to 3.
+- Move an existing flat document to
+  `/shared/issue72/migrated team/東京/Migrated plan ø.docx`. Word displayed
+  `Migrated plan ø.docx`, saved an edit and reopened that edit in a fresh process.
+
+The initial native requests exposed an omitted-ID bootstrap bug. Word sends
+`UseResourceID="true"` before it knows the ID. The server now uses the URL when
+the optional ID attribute is absent, then returns the stable ID, following
+[MS-FSSHTTP section 2.2.3.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/91fb9fd5-ef2d-4484-b57c-f0aedf7d0f00).
+Explicit empty, malformed and unknown IDs still fail without URL fallback.
+
+Raw requests/responses, downloaded packages, native results and UI captures are
+retained locally under ignored `artifacts/issue72-desktop`. These checks used one
+authenticated user and explicit sign-in for each fresh process. Automated
+`Close(0)` discarded any unsaved changes, so it does not establish normal-close
+prompt behavior. Live permission revocation, other Office builds, mounted
+applications and ShareBridge's metadata integration were not tested in this run.
+Follow the [desktop validation guide](demo-library.md) when qualifying another
+host or client configuration.

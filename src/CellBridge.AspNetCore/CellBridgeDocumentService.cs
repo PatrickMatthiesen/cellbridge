@@ -47,7 +47,10 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
     internal ValueTask<DocumentState?> LookupAsync(FssHttpRequest request, CancellationToken cancellationToken = default,
         string applicationPathBase = "")
     {
-        if (request.UseResourceId)
+        // When ResourceID is absent, UseResourceID enables identity in the
+        // response but the required URL still identifies the initial request.
+        // Once supplied, the ID is authoritative and must never fall back.
+        if (request.UseResourceId && request.ResourceId is not null)
             return Guid.TryParse(request.ResourceId, out var id)
                 ? provider.State.FindByResourceIdAsync(id, cancellationToken)
                 : ValueTask.FromResult<DocumentState?>(null);

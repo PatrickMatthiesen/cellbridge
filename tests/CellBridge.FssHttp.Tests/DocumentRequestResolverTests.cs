@@ -32,6 +32,11 @@ public sealed class DocumentRequestResolverTests
 
         Assert.Null(resolved);
         Assert.Null(DocumentRequestResolver.Resolve(store, new FssHttpRequest()));
+        Assert.Null(DocumentRequestResolver.Resolve(store, new FssHttpRequest
+        {
+            Url = "/shared/missing.docx",
+            UseResourceId = true,
+        }));
         Assert.Empty(store.List());
     }
 
@@ -52,21 +57,30 @@ public sealed class DocumentRequestResolverTests
     }
 
     [Fact]
-    public void EnabledResourceIdLookupNeverFallsBackAndPathLookupRemainsAvailable()
+    public void ExplicitInvalidResourceIdNeverFallsBackAndPathLookupRemainsAvailable()
     {
         var store = new DocumentStore();
         var document = store.Put("/shared/existing.docx", [1]);
 
+        foreach (var resourceId in new[] { "not-a-guid", "", Guid.NewGuid().ToString("D") })
+        {
+            Assert.Null(DocumentRequestResolver.Resolve(store, new FssHttpRequest
+            {
+                Url = document.Url,
+                UseResourceId = true,
+                ResourceId = resourceId,
+            }));
+        }
+
         Assert.Null(DocumentRequestResolver.Resolve(store, new FssHttpRequest
         {
-            Url = document.Url,
             UseResourceId = true,
-            ResourceId = "not-a-guid",
         }));
-        Assert.Null(DocumentRequestResolver.Resolve(store, new FssHttpRequest
+        Assert.Same(document, DocumentRequestResolver.Resolve(store, new FssHttpRequest
         {
             Url = document.Url,
             UseResourceId = true,
+            ResourceId = null,
         }));
         Assert.Same(document, DocumentRequestResolver.Resolve(store, new FssHttpRequest
         {

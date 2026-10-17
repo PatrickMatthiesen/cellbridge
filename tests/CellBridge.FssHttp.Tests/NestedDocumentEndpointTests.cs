@@ -108,13 +108,31 @@ public sealed class NestedDocumentEndpointTests
     {
         await using var fixture = await Fixture.Start();
         await fixture.Create("/shared/deep/file.docx", [1]);
-        foreach (var id in new string?[] { Guid.NewGuid().ToString("D"), "not-a-guid", "", null })
+        foreach (var id in new string?[] { Guid.NewGuid().ToString("D"), "not-a-guid", "" })
         {
             using var result = await fixture.Soap("/shared/deep/file.docx/_vti_bin/cellstorage.svc",
                 "/shared/deep/file.docx", "GetDocMetaInfo", useResourceId: true, resourceId: id);
             Assert.Equal(HttpStatusCode.OK, result.StatusCode);
             Assert.Equal("FileNotExistsOrCannotBeCreated", FileError(XDocument.Parse(await result.Content.ReadAsStringAsync())));
         }
+    }
+
+    [Fact]
+    public async Task UseResourceIdWithoutResourceIdBootstrapsNestedUrlLookup()
+    {
+        await using var fixture = await Fixture.Start();
+        var state = await fixture.Create("/shared/team space/東京/Project plan æ.docx", [1]);
+        const string url = "/shared/team%20space/%E6%9D%B1%E4%BA%AC/Project%20plan%20%C3%A6.docx";
+
+        using var result = await fixture.Soap(url + "/_vti_bin/cellstorage.svc",
+            url, "GetDocMetaInfo", useResourceId: true);
+
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        var xml = XDocument.Parse(await result.Content.ReadAsStringAsync());
+        Assert.Equal("Success", Error(xml));
+        var response = xml.Descendants(Protocol + "Response").Single();
+        Assert.Equal("http://localhost" + url, (string?)response.Attribute("Url"));
+        Assert.Equal(state.ResourceId, Guid.Parse((string?)response.Attribute("ResourceID")!));
     }
 
     [Theory]

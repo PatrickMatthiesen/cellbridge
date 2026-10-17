@@ -310,7 +310,10 @@ privileged operations and record the supplied owner and importing actor.
 Protocols still use GUID resource identities. Hosts with arbitrary string IDs,
 such as opaque WOPI IDs, must retain a stable mapping or supply their own
 collision-safe GUID derivation. Host-selected GUIDs do not remove that obligation.
-Explicit unknown or invalid ResourceIDs are never replaced with URL lookup.
+When `UseResourceID` is true, an explicitly supplied empty, malformed or
+unknown `ResourceID` is never replaced with URL lookup. If the optional
+attribute is omitted, the required URL identifies the initial request and the
+response can establish the stable ID.
 
 ## Request permissions
 
