@@ -1,5 +1,11 @@
 # Host-owned authorization consumer
 
+This example exercises the version-1 immutable snapshot/CAS contract. For the
+ordinary async permission callback API, start with
+[HostAuthorizedDocuments](../HostAuthorizedDocuments/README.md) or the interactive
+[DocumentLibrary](../DocumentLibrary/README.md). Snapshot publication is not
+required by the async API.
+
 This source consumer runs validated JWT authentication and an application-owned
 permission service. It uses no sample Identity accounts and writes no CellBridge
 grants. The imported owner is attribution only. The host policy allows

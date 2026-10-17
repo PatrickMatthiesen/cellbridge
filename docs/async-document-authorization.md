@@ -91,16 +91,54 @@ The provider domain and scope are durable identifiers. Changing scope/domain is 
 
 An external authority in the same PostgreSQL database still uses separate transactions from CellBridge. That supports ordinary admitted-work semantics; it does not create atomic cross-module revocation. No multi-process instant-revocation guarantee is implied by the choice of database.
 
-## Local measurement
+## Consumer measurements and remaining storage limit
 
-On 2026-10-17 the Release example ran three uncached/cached pairs on Linux with four available CPUs and PostgreSQL 18.3 in the isolated Aspire test container. Each process used one subject, one 831-byte DOCX, concurrency one, an indexed host permission row and an in-memory document store. Connections were open before measurement. Each group includes its first execution; these are elapsed-time samples, not a steady-state throughput qualification.
+The initial hot-resource trial used one changed save followed by 99 no-op
+receipts. It demonstrated fewer authority queries with caching, but did not test
+repeated editing or durable storage growth. The current
+[document example](../examples/HostAuthorizedDocuments/README.md) performs 100
+changing saves with verified bytes, then mixes concurrent reads across 64 resources.
+It also checks creation, reader/writer separation, scope isolation, grants,
+revocation, receipt replay and retained locks.
 
-| Workload per run | Uncached provider calls | Cached provider calls | Uncached median elapsed | Cached median elapsed |
-| --- | ---: | ---: | ---: | ---: |
-| 1,000 history reads | 1,000 | 1 | 250.3 ms | 5.4 ms |
-| 200 direct SOAP metadata requests | 400 | 0 | 158.1 ms | 40.2 ms |
-| 100 whole-file saves with distinct receipt keys | 100 | 0 | 116.9 ms | 76.0 ms |
+On 2026-10-17 all four Release modes completed against isolated PostgreSQL 18.3:
+in-memory and PostgreSQL document stores, each cached and uncached. Each mode
+passed the same ten scenario checks. The host permission store was PostgreSQL in
+every mode. The optional cache had capacity 32 and an absolute ten-second TTL.
 
-The cache capacity was 512 and TTL was 10 seconds. Lock acquisition had already cached Write; the first history read cached Read. Total provider calls, including setup and the post-invalidation deny check, were 1,502 uncached and 3 cached in every run. Whole-file saves changed content once, then recorded 99 no-op receipts. Across the three runs, whole-file elapsed times ranged from 106.3 to 131.2 ms uncached and 73.6 to 79.1 ms cached.
+| Workload | Uncached provider calls | Cached calls, in-memory documents | Cached calls, PostgreSQL documents |
+| --- | ---: | ---: | ---: |
+| 1,000 history reads | 1,000 | 1 | 1 |
+| 200 direct SOAP metadata requests | 400 | 0 | 0 |
+| 100 changing whole-file saves and readbacks | 100 | 0 | 3 |
+| 512 mixed history reads, concurrency eight | 512 | 252 | 257 |
 
-This demonstrates call reduction for one hot resource. It does not establish durable write throughput, many-workspace scalability, cold-cache batch efficiency or Office interoperability. Caching costs and benefit depend on the host authority, resource distribution and accepted TTL. The example prints raw counts/timings so consumers can repeat it against their own authority.
+The durable run crossed TTL boundaries and therefore refreshed decisions.
+Concurrent cache misses can also duplicate provider calls. These single trials
+ran alongside build/test work, so they do not establish comparative latency or
+production throughput. The interactive DocumentLibrary separately exercises
+cookie-authenticated HTTP and SOAP saves with both cache modes; neither example
+qualifies live Office interoperability.
+
+The changing-save workload exposed a storage defect. Each newly published index
+copied revision mappings from all retained indexes, causing cubic mapping growth
+across revision history. Publication now copies the selected index's mappings
+and new revision wrappers. It retains every old graph element, ancestor,
+immutable-identity check and serial watermark. Regression tests materialize old
+revisions, replay receipts, reject a stale protocol save and accept a subsequent
+fresh protocol save.
+
+This fixes one source of amplification, not the remaining history-storage design.
+In the 100-save durable workload, serialized document state fell from 37.3 MB to
+16.4 MB. Historical revisions still repeat the cumulative graph descriptors,
+which grow quadratically for these changing whole-file saves. The PostgreSQL
+provider also retains up to 64 complete state versions by default. Reading and
+serializing these states causes substantial allocation: the completed durable
+processes reached approximately 1.9 and 2.1 GiB observed RSS, sampled every 100 ms.
+RSS alone does not distinguish live managed objects, reusable runtime buffers
+and other process memory. This is not evidence that the authorization cache leaks.
+
+Large edit histories remain an unresolved storage scalability limit. A follow-up
+must address repeated graph descriptors and full-state loading while preserving
+history, protocol identities, receipts and recovery. Lowering retention limits or
+forcing garbage collection would not correct that representation problem.

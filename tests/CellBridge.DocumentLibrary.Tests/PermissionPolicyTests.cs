@@ -40,13 +40,13 @@ public sealed class PermissionPolicyTests
                 .Add(DocumentLibraryService.OwnerSubject, DocumentAccess.Write));
         await destination.MarkCellBridgeBoundAsync(resourceId);
         var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
-        var policy = new DocumentLibraryPermissionPolicy(destination);
-        var documents = new CellBridgeDocumentService(provider, authorizationPolicy: policy);
+        var policy = new DocumentLibraryPermissionProvider(destination);
+        var documents = new CellBridgeDocumentService(provider, documentAuthorizationProvider: policy);
         var publisher = new ExternalRevisionPublisher(provider, destination);
         var options = new DocumentLibraryOptions();
         using var worker = new ExternalRevisionPublicationWorker(provider, publisher,
             new() { PollingInterval = options.PublicationInterval }, NullLogger<ExternalRevisionPublicationWorker>.Instance);
-        var library = new DocumentLibraryService(documents, destination, policy, publisher, worker, options);
+        var library = new DocumentLibraryService(documents, destination, publisher, worker, options);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => library.InitializeAsync());
         Assert.Contains("coordinated recovery point", error.Message, StringComparison.Ordinal);
@@ -63,13 +63,13 @@ public sealed class PermissionPolicyTests
             new MemoryStream(baseline), ImmutableDictionary<string, DocumentAccess>.Empty
                 .Add(DocumentLibraryService.OwnerSubject, DocumentAccess.Write));
         var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
-        var policy = new DocumentLibraryPermissionPolicy(destination);
-        var documents = new CellBridgeDocumentService(provider, authorizationPolicy: policy);
+        var policy = new DocumentLibraryPermissionProvider(destination);
+        var documents = new CellBridgeDocumentService(provider, documentAuthorizationProvider: policy);
         var publisher = new ExternalRevisionPublisher(provider, destination);
         var options = new DocumentLibraryOptions();
         using var worker = new ExternalRevisionPublicationWorker(provider, publisher,
             new() { PollingInterval = options.PublicationInterval }, NullLogger<ExternalRevisionPublicationWorker>.Instance);
-        var library = new DocumentLibraryService(documents, destination, policy, publisher, worker, options);
+        var library = new DocumentLibraryService(documents, destination, publisher, worker, options);
 
         await library.InitializeAsync();
         var recovered = await provider.State.FindByResourceIdAsync(resourceId);

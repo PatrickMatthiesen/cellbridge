@@ -343,7 +343,7 @@ public sealed class AsyncDocumentAuthorizationTests
     }
 
     [Fact]
-    public async Task RevocationFencesPreparedLockCommitButLeaseRemainsUntilExpiry()
+    public async Task RevocationFencesPreparedLockCommitButLeaseRemainsUntilBindingMigration()
     {
         var now = DateTimeOffset.UtcNow;
         var time = new MutableTimeProvider(now);

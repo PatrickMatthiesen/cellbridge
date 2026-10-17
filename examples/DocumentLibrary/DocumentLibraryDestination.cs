@@ -50,7 +50,7 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
 
     public async Task<LibraryManifest> CreateAsync(Guid resourceId, Guid bindingId, string fileName,
         string cellBridgePath, Stream content, ImmutableDictionary<string, DocumentAccess> permissions,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool pendingCreation = false)
     {
         if (resourceId == Guid.Empty) throw new ArgumentException("A resource ID is required.", nameof(resourceId));
         if (bindingId == Guid.Empty) throw new ArgumentException("A binding ID is required.", nameof(bindingId));
@@ -88,7 +88,7 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
                 DateTimeOffset.UtcNow,
                 1,
                 ImmutableDictionary<long, LibraryPermissionSnapshot>.Empty.Add(1, snapshot),
-                ImmutableDictionary<Guid, DeliveryReceipt>.Empty);
+                ImmutableDictionary<Guid, DeliveryReceipt>.Empty) { PendingCreation = pendingCreation };
             await WriteManifestAsync(manifest, overwrite: false, cancellationToken);
             return manifest;
         }
@@ -101,6 +101,21 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
     public Task<LibraryManifest> GetAsync(Guid resourceId, CancellationToken cancellationToken = default) =>
         ReadManifestFileAsync(ManifestPath(resourceId), cancellationToken);
 
+    // Only a definitively rejected, newly staged upload is eligible. Accepted files and
+    // historical manifests never have PendingCreation without corresponding CellBridge state.
+    internal async Task DiscardRejectedCreationAsync(Guid resourceId, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = await GetAsync(resourceId, cancellationToken);
+            if (!current.PendingCreation || current.CellBridgeBound || !current.Receipts.IsEmpty)
+                throw new InvalidOperationException("Only an unaccepted staged upload can be discarded.");
+            Directory.Delete(DocumentRoot(resourceId), recursive: true);
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<LibraryManifest> MarkCellBridgeBoundAsync(Guid resourceId,
         CancellationToken cancellationToken = default)
     {
@@ -109,7 +124,7 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
         {
             var current = await GetAsync(resourceId, cancellationToken);
             if (current.CellBridgeBound) return current;
-            var next = current with { CellBridgeBound = true };
+            var next = current with { CellBridgeBound = true, PendingCreation = false };
             await WriteManifestAsync(next, overwrite: true, cancellationToken);
             return next;
         }
@@ -119,7 +134,7 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
         }
     }
 
-    public async Task<LibraryManifest> PreparePermissionsAsync(Guid resourceId,
+    public async Task<LibraryManifest> SetPermissionsAsync(Guid resourceId,
         ImmutableDictionary<string, DocumentAccess> permissions, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(permissions);
@@ -128,12 +143,11 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
         {
             await _faults.BeforePermissionPreparationAsync(resourceId, cancellationToken);
             var current = await GetAsync(resourceId, cancellationToken);
-            var revision = checked(current.PermissionSnapshots.Keys.DefaultIfEmpty(0).Max() + 1);
-            var snapshot = new LibraryPermissionSnapshot(revision, permissions);
+            var revision = checked(current.DesiredPermissionRevision + 1);
             var next = current with
             {
                 DesiredPermissionRevision = revision,
-                PermissionSnapshots = current.PermissionSnapshots.Add(revision, snapshot),
+                CurrentPermissions = permissions,
             };
             await WriteManifestAsync(next, overwrite: true, cancellationToken);
             return next;
@@ -293,8 +307,10 @@ public sealed class DocumentLibraryDestination : IExternalRevisionDestination, I
         var manifest = await JsonSerializer.DeserializeAsync<LibraryManifest>(stream, JsonOptions, cancellationToken)
             ?? throw new InvalidDataException("The destination manifest is empty.");
         if (manifest.FormatVersion != LibraryManifest.CurrentFormat || manifest.ResourceId == Guid.Empty ||
-            manifest.BindingId == Guid.Empty || manifest.DesiredPermissionRevision <= 0 ||
-            !manifest.PermissionSnapshots.ContainsKey(manifest.DesiredPermissionRevision))
+            manifest.ResourceId != resourceId || manifest.BindingId == Guid.Empty ||
+            manifest.DesiredPermissionRevision <= 0 ||
+            manifest.CurrentPermissions is null &&
+                !manifest.PermissionSnapshots.ContainsKey(manifest.DesiredPermissionRevision))
             throw new InvalidDataException("The destination manifest is invalid or unsupported.");
         _ = CurrentPath(manifest);
         return manifest;

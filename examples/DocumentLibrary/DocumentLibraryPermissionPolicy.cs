@@ -5,6 +5,8 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.DocumentLibrary;
 
+// Legacy v1 authority retained for compatibility and explicit migration tests.
+// The interactive host selects DocumentLibraryPermissionProvider instead.
 public sealed class DocumentLibraryPermissionPolicy(DocumentLibraryDestination destination)
     : ICellBridgeAuthorizationPolicy
 {

@@ -277,7 +277,8 @@ public sealed class OfficeAuthenticationTests
     private static string IdentityLoginState(string html) => WebUtility.HtmlDecode(Regex.Match(html,
         "name=\"_cellbridgeState\" value=\"([^\"]+)\"").Groups[1].Value);
 
-    internal sealed class LibraryFactory(string destination, Action<IServiceCollection>? configureServices = null)
+    internal sealed class LibraryFactory(string destination, Action<IServiceCollection>? configureServices = null,
+        bool cached = false)
         : WebApplicationFactory<global::Program>
     {
         private DocumentLibraryDestination? _ownedDestination;
@@ -288,6 +289,9 @@ public sealed class OfficeAuthenticationTests
             builder.UseEnvironment("Testing");
             builder.UseSetting("DocumentLibrary:StorageProvider", "InMemory");
             builder.UseSetting("DocumentLibrary:DestinationRoot", destination);
+            builder.UseSetting("DocumentLibrary:AuthorizationCache:Enabled", cached ? "true" : "false");
+            builder.UseSetting("DocumentLibrary:AuthorizationCache:Capacity", "64");
+            builder.UseSetting("DocumentLibrary:AuthorizationCache:DecisionTtl", "00:01:00");
             builder.ConfigureTestServices(services =>
             {
                 // RunAsync and WebApplicationFactory can dispose the provider concurrently.

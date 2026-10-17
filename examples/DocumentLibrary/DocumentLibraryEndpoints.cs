@@ -45,6 +45,7 @@ public static class DocumentLibraryEndpoints
             }
             catch (ArgumentException error) { return CreationError(error.Message, 400); }
             catch (DocumentNameConflictException error) { return CreationError(error.Message, 409); }
+            catch (UnauthorizedAccessException) { return CreationError("You do not have permission to create documents.", 403); }
         }).RequireAuthorization();
 
         app.MapPost("/library/upload", async (HttpContext context, DocumentLibraryService library,
@@ -57,7 +58,8 @@ public static class DocumentLibraryEndpoints
             var file = form.Files.GetFile("file");
             if (file is null || file.Length == 0) return Results.BadRequest("Choose a non-empty Office file.");
             await using var stream = file.OpenReadStream();
-            await library.UploadAsync(file.FileName, stream, actor, context.RequestAborted);
+            try { await library.UploadAsync(file.FileName, stream, actor, context.RequestAborted); }
+            catch (UnauthorizedAccessException) { return CreationError("You do not have permission to create documents.", 403); }
             return Results.Redirect("/");
         }).RequireAuthorization();
 

@@ -7,6 +7,11 @@ a specific `AllowedHosts` list; loopback is available for local testing.
 
 This example hosts CellBridge from NuGet packages. It keeps CellBridge state and content in PostgreSQL. A separate destination directory stores immutable Office files. Each document has one atomically replaced manifest that selects the current file revision and retains delivery receipts.
 
+This revision uses unreleased async authorization APIs from PR93. Published
+`0.1.0-beta.4` packages do not provide these APIs. Build the local packages and
+select the local feed with an isolated package cache as described below before
+running or testing this version of the example.
+
 This is separate from the repository's Razor Pages demo at `/library`. Both
 support creating blank Word, Excel and PowerPoint files. This example also
 uploads existing documents and delivers saves to a separate destination.
@@ -28,12 +33,14 @@ page or challenge headers are implemented in this example.
 `Program.cs` uses public methods from `CellBridge.AspNetCore`:
 
 ```csharp
-builder.Services.AddCellBridge<DocumentLibraryPermissionPolicy>(provider);
+builder.Services.AddCellBridgeWithExternalAuthorization<DocumentLibraryPermissionProvider>(provider);
 builder.Services.AddCellBridgeExternalPublishing<DocumentLibraryDestination>();
 builder.Services.AddCellBridgeCookieLogin<LocalLoginAuthenticator>("Cookies");
 ```
 
-`AddCellBridge<TPolicy>` registers a shared singleton permission policy.
+`AddCellBridgeWithExternalAuthorization<TProvider>` registers a singleton async
+provider. This host reads current permissions from its durable destination
+manifest for each read or write operation.
 `AddCellBridgeExternalPublishing<TDestination>` registers the host's destination,
 publisher and background queue worker. `AddCellBridgeCookieLogin<TAuthenticator>`
 creates a cookie scheme and enables the standard login pages. These methods are
@@ -41,7 +48,7 @@ available to any package consumer.
 
 `DocumentLibraryStorage.cs` selects this application's PostgreSQL connection and
 destination directory. The example supplies its file catalogue, manifest-based
-permission policy and private test accounts. It explicitly selects `Cookies` as
+permission provider and private test accounts. It explicitly selects `Cookies` as
 its default scheme and customizes the cookie name for this test application.
 
 Ordinary hosts receive stored owner/grant authorization through `AddCellBridge(provider)`.
@@ -49,8 +56,55 @@ They need no custom policy. Applications with existing Identity accounts can use
 `AddCellBridgeIdentityLogin<TUser>` with their account store; see
 [package integration](../../docs/package-integration.md).
 
-Startup checks storage health and loads document permissions before serving
-requests or starting the publication worker.
+Startup checks storage health and reconciles publication bindings before serving
+requests or starting the publication worker. New resources receive version-2
+authorization bindings with the server-selected `document-library` tenant and
+`local` workspace. These fixed identifiers describe this single-host example;
+paths and form input never select authority scope.
+
+## Document permissions and optional caching
+
+The host grants Create to its local owner. Interactive creation and upload pass
+the real authenticated actor to `CreateExternalAsync`, which also requires the
+actor's `CanCreate` capability. The permission-admin form commits host permissions
+without publishing a new CellBridge policy revision. Legacy permission snapshots,
+document history and delivery receipts remain intact; permission edits keep one
+current permission map instead of appending snapshots.
+
+Caching is off by default. To enable the package's bounded, process-local
+`CachedDocumentAuthorizationProvider`, set:
+
+```text
+DocumentLibrary__AuthorizationCache__Enabled=true
+DocumentLibrary__AuthorizationCache__Capacity=1024
+DocumentLibrary__AuthorizationCache__DecisionTtl=00:00:10
+```
+
+The same singleton decorator serves every document operation. After a permission
+manifest commits, the host calls `InvalidateResource` on that instance, so both
+cached allows and cached denies refresh. External manifest changes need explicit
+invalidation or TTL expiry. This example permits only one process per destination
+root and does not broadcast invalidations across processes.
+
+Work already admitted before revocation may finish. Later operations check again.
+Revocation does not remove an editor's old lease; that lease may block another
+editor until it expires or a trusted operator clears it. Permission TTL and lease
+expiry are separate limits. Provider failures deny access and never reuse expired
+allows.
+
+Existing version-1 documents require an explicit migration. Stop old writers and
+back up PostgreSQL together with the destination root. Start this version with
+`DocumentLibrary__MigrateVersionedAuthorization=true`, then reconnect Office
+clients and remove the setting. Migration checks the stored state version and
+binding, clears sessions and leases, and preserves content, history and delivery
+receipts. Startup otherwise refuses version-1 documents. It always rejects an
+unrelated authority domain or scope.
+
+A staged upload whose Create commit is uncertain remains marked pending. Startup
+can finish publication binding when the authorized CellBridge state exists. It
+refuses to import a pending upload with missing state, because trusted recovery
+must not bypass a failed user Create check. A definitive Create denial discards
+only its newly staged, unaccepted upload.
 
 ## Run the example
 
@@ -69,18 +123,14 @@ closing. It expires after eight hours without sliding renewal. Word, Excel and
 PowerPoint may reuse the same login cookie. Browser sign-ins request session cookies.
 
 Run the package-only app and its PostgreSQL database through the standalone AppHost.
-Until the optional list packages are published, first run `python3 tools/verify_packages.py`
-and select its local feed using the configuration below. A launch without that
-configuration uses the NuGet sources already configured on the machine:
+First run `python3 tools/verify_packages.py` at this source revision, then select
+its local feed and isolated cache using the configuration below. The generated
+`artifacts/packages/manifest.json` records the source commit and package hashes.
+A launch without this configuration uses the machine's configured NuGet sources
+and can restore older packages with the same beta version.
 
-```powershell
-aspire start --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire wait document-library --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire describe --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-```
-
-To smoke-test packages built locally by the package verifier, select its feed configuration and isolated package cache explicitly. Run these commands from the repository root after the verifier has populated `artifacts/packages`:
+Run these commands from the repository root after the verifier has populated
+`artifacts/packages`:
 
 ```powershell
 $env:DocumentLibrary__RestoreConfigFile = (Resolve-Path artifacts/packages/NuGet.Config).Path
@@ -93,13 +143,20 @@ aspire describe --apphost examples/DocumentLibrary/aspire/apphost.cs --non-inter
 aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 ```
 
-The AppHost does not auto-detect local package directories. Leave both settings unset for a published-package restore. Use the double-underscore environment names shown above because .NET configuration maps them to `DocumentLibrary:RestoreConfigFile` and `DocumentLibrary:RestorePackagesPath`.
+The AppHost does not auto-detect local package directories. This revision requires
+both settings. Use the double-underscore environment names shown above because
+.NET configuration maps them to `DocumentLibrary:RestoreConfigFile` and
+`DocumentLibrary:RestorePackagesPath`.
 
 The AppHost creates PostgreSQL, runs the package-only setup project, and starts the web app only after schema initialization succeeds. Its normal mode keeps a named PostgreSQL volume and stores destination files under the ignored `artifacts/document-library` directory. Set `Testing__Enabled=true` in the environment for disposable PostgreSQL and a unique temporary destination. This disposable mode also exposes a local HTTP endpoint for browser checks that cannot trust the developer certificate. Only one app process may use a destination root. The app holds an exclusive lock file for its full lifetime.
 
 ## Customer lists
 
 The standalone AppHost also enables `/lists`, using the optional list packages.
+This UI deliberately retains the native workspace membership and list-grant
+demonstration. It does not exercise PR93's external list authorization provider
+or list authorization cache. The separate
+[HostAuthorizedLists example](../HostAuthorizedLists/README.md) covers that mode.
 The setup process owns database provisioning; the web process receives a dedicated
 non-owner runtime login with document DML and workspace-isolated list access.
 It receives no setup credentials. Outside the AppHost, lists are opt-in through
