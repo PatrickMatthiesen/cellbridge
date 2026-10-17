@@ -8,7 +8,7 @@ public sealed record ListActor(string Subject);
 public enum ListAccess { None = 0, Read = 1, Write = 2, Design = 4 }
 public enum ListFieldType { Text, Boolean, Integer, Decimal, Date, Timestamp, Choice, Reference }
 public enum FilterOperator { Equal, NotEqual, GreaterThan, GreaterOrEqual, LessThan, LessOrEqual }
-public enum ListFailure { Validation, NotFound, Forbidden, Conflict, Limit, Unavailable }
+public enum ListFailure { Validation, NotFound, Forbidden, Conflict, Limit, Unavailable, NotSupported }
 
 public sealed class ListException(ListFailure failure, string message) : Exception(message)
 {

@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS cellbridge_lists.schema_version (
     version integer NOT NULL
 );
 INSERT INTO cellbridge_lists.schema_version(singleton, version)
-VALUES (true, 2) ON CONFLICT (singleton) DO NOTHING;
+VALUES (true, 3) ON CONFLICT (singleton) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS cellbridge_lists.templates (
     template_id uuid NOT NULL,
@@ -18,11 +18,38 @@ CREATE TABLE IF NOT EXISTS cellbridge_lists.templates (
 CREATE TABLE IF NOT EXISTS cellbridge_lists.workspaces (
     workspace_id uuid PRIMARY KEY,
     name text NOT NULL,
+    authorization_domain text COLLATE "C" NULL CHECK (
+      authorization_domain IS NULL OR (
+        char_length(authorization_domain) <= 200 AND
+        btrim(authorization_domain) <> ''
+      )
+    ),
     stored_bytes bigint NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
     audit_count bigint NOT NULL DEFAULT 0 CHECK (audit_count >= 0),
     security_audit_count integer NOT NULL DEFAULT 0 CHECK (security_audit_count >= 0)
 );
+ALTER TABLE cellbridge_lists.workspaces ADD COLUMN IF NOT EXISTS authorization_domain text COLLATE "C" NULL
+  CHECK (
+    authorization_domain IS NULL OR (
+      char_length(authorization_domain) <= 200 AND
+      btrim(authorization_domain) <> ''
+    )
+  );
 ALTER TABLE cellbridge_lists.workspaces ALTER COLUMN audit_count TYPE bigint;
+
+CREATE OR REPLACE FUNCTION cellbridge_lists.reject_authority_rebinding()
+RETURNS trigger LANGUAGE plpgsql AS $binding$
+BEGIN
+  IF NEW.authorization_domain IS DISTINCT FROM OLD.authorization_domain THEN
+    RAISE EXCEPTION 'A workspace authorization binding is immutable' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $binding$;
+REVOKE ALL ON FUNCTION cellbridge_lists.reject_authority_rebinding() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER immutable_workspace_authority
+  BEFORE UPDATE OF authorization_domain ON cellbridge_lists.workspaces
+  FOR EACH ROW EXECUTE FUNCTION cellbridge_lists.reject_authority_rebinding();
+
 CREATE TABLE IF NOT EXISTS cellbridge_lists.memberships (
     workspace_id uuid NOT NULL REFERENCES cellbridge_lists.workspaces(workspace_id) ON DELETE CASCADE,
     subject text NOT NULL,
@@ -227,6 +254,8 @@ BEGIN
   END IF;
 END $migration$;
 
+UPDATE cellbridge_lists.schema_version SET version=2 WHERE singleton AND version=1;
+
 DO $setup$
 DECLARE table_name text;
 BEGIN
@@ -241,4 +270,4 @@ BEGIN
   END LOOP;
 END $setup$;
 
-UPDATE cellbridge_lists.schema_version SET version=2 WHERE singleton;
+UPDATE cellbridge_lists.schema_version SET version=3 WHERE singleton;

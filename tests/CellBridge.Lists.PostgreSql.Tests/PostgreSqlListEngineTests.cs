@@ -555,6 +555,7 @@ public sealed class PostgreSqlFactAttribute : FactAttribute
 public sealed class ListDatabaseFixture : IAsyncLifetime
 {
     private string? _runtimeRole;
+    private string? _runtimeConnectionString;
     public bool Available { get; private set; }
     public NpgsqlDataSource? AdminSource { get; private set; }
     public NpgsqlDataSource? RuntimeSource { get; private set; }
@@ -584,7 +585,8 @@ public sealed class ListDatabaseFixture : IAsyncLifetime
             Password = password,
             ApplicationName = "CellBridge.Lists.PostgreSql.Tests"
         };
-        RuntimeSource = NpgsqlDataSource.Create(runtimeConnection.ConnectionString);
+        _runtimeConnectionString = runtimeConnection.ConnectionString;
+        RuntimeSource = NpgsqlDataSource.Create(_runtimeConnectionString);
         Engine = new PostgreSqlListEngine(RuntimeSource);
         await Engine.CheckHealthAsync();
         Available = true;
@@ -595,6 +597,16 @@ public sealed class ListDatabaseFixture : IAsyncLifetime
         var id = Guid.NewGuid();
         await PostgreSqlListSetup.RegisterWorkspaceAsync(AdminSource!, id, name, AdminActor.Subject);
         return id;
+    }
+
+    public NpgsqlDataSource NewRuntimeSource(string applicationName)
+    {
+        var connection = new NpgsqlConnectionStringBuilder(_runtimeConnectionString ??
+            throw new InvalidOperationException("The PostgreSQL list fixture is not initialized."))
+        {
+            ApplicationName = applicationName
+        };
+        return NpgsqlDataSource.Create(connection.ConnectionString);
     }
 
     public async Task SetWorkspaceContextAsync(Guid workspaceId,

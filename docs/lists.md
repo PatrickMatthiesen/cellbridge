@@ -293,18 +293,25 @@ have forced RLS with matching read/write checks. The provider sets verified
 workspace context transaction-locally and checks schema version/runtime privileges
 before use. Runtime credentials cannot register operator templates.
 
-The current provider requires list schema version 2. Before upgrading a version 1
-installation, stop every old list host and integration worker, back up the list
-schema, and run `InitializeAsync` with operator credentials. Setup creates
-per-list counters and normalized reference links, then recalculates each
-workspace's logical byte usage from its retained version 1 rows. This one-time
-recalculation charges memberships and creator grants that early version 1 code
-did not charge, without charging rows again if a later version 1 build already
-corrected them. Setup records version 2 in the same transaction. Repeated setup
-on version 2 does not scan retained rows again. A workspace whose recalculated
-usage exceeds its configured quota cannot add storage until its usage falls
-below the limit. Start only version 2 providers afterward. Running old providers
-during this migration can leave the new counters or links incomplete.
+The current provider requires list schema version 3. Before upgrading a version 1
+or 2 installation, stop every old list host and integration worker, back up the
+list schema, and run `InitializeAsync` with operator credentials. Version 3 adds a
+nullable authorization domain to workspace storage anchors. Existing workspaces
+retain the built-in authority.
+
+Upgrading version 1 also creates per-list counters and normalized reference links,
+then recalculates workspace logical usage from retained rows. That one-time
+recalculation charges memberships and creator grants omitted by early version 1
+code, without charging rows again when a later version 1 build corrected them.
+Repeated setup on version 3 does not repeat the version 1 recalculation. A workspace
+whose recalculated usage exceeds its configured quota cannot add storage until its
+usage falls below that limit. Start only version 3 providers afterward. Old beta.4
+hosts must not overlap this upgrade or serve host-authorized workspaces.
+
+For host-owned permissions without local membership or grant replicas, see
+[host-owned list authorization](host-list-authorization.md). The bundled provider
+requires one process and coordinated host permission writes. Documents retain
+independent authorization contracts.
 
 Record mutations use shared schema locks, record row locks and foreign keys.
 Creates atomically allocate the next per-list number and lifetime identity count.
