@@ -29,14 +29,17 @@ endpoint is optional and enables the two-host storage/lock test:
 ```powershell
 $env:OFFICECOLLABSERVER_INTEROP_ENDPOINT = 'https://localhost:7292/_vti_bin/cellstorage.svc'
 $env:OFFICECOLLABSERVER_INTEROP_PEER = 'http://localhost:5182/_vti_bin/cellstorage.svc'
+$env:CELLBRIDGE_INTEROP_PUBLIC_ORIGIN = 'https://localhost:7292'
 dotnet test tests/CellBridge.Interop.Tests/CellBridge.Interop.Tests.csproj
 ```
 
 Live checks include QueryAccess, QueryChanges, captured Word open exchanges,
 Word and Excel PutChanges, identity routing, session visibility, shared exclusive
 locks and forwarded HTTPS origins. Unconfigured HTTP checks report skipped.
-The proxy-origin test assumes a trusted loopback connection to the local host.
-It should run locally rather than targeting a remote proxy from another machine.
+`CELLBRIDGE_INTEROP_PUBLIC_ORIGIN` is the fixed origin advertised in protocol
+responses. If omitted, the tests use the SOAP endpoint origin. The proxy-origin
+test assumes a trusted loopback connection to the local host. It should run
+locally rather than targeting a remote proxy from another machine.
 
 Live HTTP tests require `CELLBRIDGE_INTEROP_COOKIE` and `CELLBRIDGE_INTEROP_CSRF`
 from an ordinary signed-in creator account. Cookies must include the paired

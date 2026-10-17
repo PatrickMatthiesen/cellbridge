@@ -6,14 +6,14 @@ namespace CellBridge.Interop.Tests;
 public sealed class ProxyOriginTests
 {
     [LiveInteropFact]
-    public async Task LoopbackHttpsProxyPreservesOfficeResponseOrigin()
+    public async Task FixedPublicOriginOverridesForwardedHost()
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
         using var http = LiveInteropHttp.Create();
         var name = "proxy-origin-" + Guid.NewGuid().ToString("N") + ".docx";
         var created = await http.PostAsJsonAsync(new Uri(endpoint, "/api/documents"), new { name, type = "docx" });
         created.EnsureSuccessStatusCode();
-        const string publicOrigin = "https://office-test.example.ts.net";
+        var publicOrigin = LiveInteropHttp.PublicOrigin(endpoint).GetLeftPart(UriPartial.Authority);
         var fileUrl = publicOrigin + "/shared/" + name;
         var soap = $"""
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
@@ -30,7 +30,7 @@ public sealed class ProxyOriginTests
             Content = new StringContent(soap, System.Text.Encoding.UTF8, "text/xml"),
         };
         message.Headers.Add("X-Forwarded-Proto", "https");
-        message.Headers.Add("X-Forwarded-Host", "office-test.example.ts.net");
+        message.Headers.Add("X-Forwarded-Host", "forwarded-origin.invalid");
         using var response = await http.SendAsync(message);
         response.EnsureSuccessStatusCode();
         var xml = XDocument.Parse(await response.Content.ReadAsStringAsync());

@@ -64,6 +64,15 @@ var web = builder.AddCSharpApp("web", "../src/CellBridge.Web/CellBridge.Web.cspr
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
 
+if (testRun)
+{
+    // The live test suite intentionally overlaps requests from one disposable account.
+    // Keep production admission defaults while giving the bounded test workload enough slots.
+    web.WithEnvironment("Protocol__MaxConcurrentRequests", "32")
+        .WithEnvironment("Protocol__MaxConcurrentRequestsPerSubject", "32");
+    var listsDatabase = postgres.AddDatabase("lists");
+    web.WithReference(listsDatabase).WaitFor(listsDatabase);
+}
 if (testAccount is not null) web.WaitForCompletion(testAccount);
 
 var wireCapture = Parameter("WireCaptureDirectory", "")
@@ -85,6 +94,9 @@ if (testRun || builder.Configuration.GetValue("AppHost:PeerEnabled", false))
         .WithHttpHealthCheck("/health")
         .WithExternalHttpEndpoints()
         .WithExplicitStart();
+    if (testRun)
+        peer.WithEnvironment("Protocol__MaxConcurrentRequests", "32")
+            .WithEnvironment("Protocol__MaxConcurrentRequestsPerSubject", "32");
     if (testAccount is not null) peer.WaitForCompletion(testAccount);
 }
 
