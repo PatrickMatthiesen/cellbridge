@@ -2,8 +2,9 @@
 
 Use `python tools/testing/run.py --packages` to check protocols, providers and packages together.
 It packs and tests the external application before starting Aspire, then runs
-its PostgreSQL commit/delivery reply-loss test against the disposable database.
-The ordinary package verifier skips that test when no database is configured.
+its PostgreSQL commit/delivery reply-loss and list seed recovery tests against
+the disposable databases.
+The ordinary package verifier skips these database tests when no database is configured.
 
 The [recovery environment matrix](supported-environments.md) ties process-crash
 and portable recovery checks to their measured configurations. For repeated
@@ -30,14 +31,19 @@ environment's Python. Stop this workspace's Aspire app before building.
 Finish any active capture using the [capture guide](capture-kit.md).
 The runner refuses to interrupt an existing app.
 
-The runner builds Release binaries, starts disposable PostgreSQL and two hosts
-through Aspire, provisions an integration account and creates test documents.
+The runner builds Release binaries, starts disposable PostgreSQL with separate
+protocol and list databases, and starts two hosts through Aspire. It provisions
+an integration account and creates test documents. The test profile uses a
+fixed reserved public origin and bounded higher protocol concurrency for its
+single account; production defaults remain unchanged.
 It runs:
 
 - Binary, SOAP and independent Office Inspectors parser tests.
 - Operator import/re-import checks and provider save, retry, concurrency,
   process-termination and lease-timing checks against PostgreSQL.
 - Captured Word/Excel HTTP replay, shared locks and loopback HTTPS forwarding.
+- Native list unit, ASP.NET Core and PostgreSQL tests, plus the list example's
+  JavaScript regression check.
 - Demo, capture tooling and Office evidence-verifier tests.
 
 Results are TRX files, `summary.json` and wire captures under

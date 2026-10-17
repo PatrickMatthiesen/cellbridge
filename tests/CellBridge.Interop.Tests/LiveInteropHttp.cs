@@ -4,6 +4,14 @@ namespace CellBridge.Interop.Tests;
 
 internal static class LiveInteropHttp
 {
+    public static Uri PublicOrigin(Uri endpoint)
+    {
+        var configured = Environment.GetEnvironmentVariable("CELLBRIDGE_INTEROP_PUBLIC_ORIGIN");
+        return string.IsNullOrWhiteSpace(configured)
+            ? new Uri(endpoint.GetLeftPart(UriPartial.Authority))
+            : new Uri(configured, UriKind.Absolute);
+    }
+
     public static HttpClient Create(Uri baseAddress = null)
     {
         var handler = new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false };

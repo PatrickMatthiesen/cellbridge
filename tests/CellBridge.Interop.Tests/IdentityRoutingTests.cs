@@ -15,9 +15,11 @@ public sealed class IdentityRoutingTests
         var name = "Excel encoding check " + Guid.NewGuid().ToString("N")[..8];
         using var created = await http.PostAsJsonAsync("/api/documents", new { name, type = "xlsx" });
         created.EnsureSuccessStatusCode();
-        var url = new Uri(endpoint, "/shared/" + Uri.EscapeDataString(name + ".xlsx")).AbsoluteUri;
-        var original = await http.GetByteArrayAsync(url);
-        using var firstHead = await http.SendAsync(new HttpRequestMessage(HttpMethod.Head, url));
+        var path = "/shared/" + Uri.EscapeDataString(name + ".xlsx");
+        var url = new Uri(LiveInteropHttp.PublicOrigin(endpoint), path).AbsoluteUri;
+        var transportUrl = new Uri(endpoint, path).AbsoluteUri;
+        var original = await http.GetByteArrayAsync(transportUrl);
+        using var firstHead = await http.SendAsync(new HttpRequestMessage(HttpMethod.Head, transportUrl));
         var etag = firstHead.Headers.ETag;
         XNamespace ns = CellStorageClient.ProtocolNamespace;
         var firstLock = Guid.NewGuid().ToString("B");
@@ -62,10 +64,10 @@ public sealed class IdentityRoutingTests
         Assert.Equal("FileNotExistsOrCannotBeCreated", (string?)unknown.Attribute("ErrorCode"));
         var unknownId = await Send(url, "GetLock", firstLock, Guid.NewGuid().ToString("N"));
         Assert.Equal("FileNotExistsOrCannotBeCreated", (string?)unknownId.Attribute("ErrorCode"));
-        Assert.Equal(original, await http.GetByteArrayAsync(url));
-        using var lastHead = await http.SendAsync(new HttpRequestMessage(HttpMethod.Head, url));
+        Assert.Equal(original, await http.GetByteArrayAsync(transportUrl));
+        using var lastHead = await http.SendAsync(new HttpRequestMessage(HttpMethod.Head, transportUrl));
         Assert.Equal(etag, lastHead.Headers.ETag);
-        using var missing = await http.GetAsync(url.Replace("%20", "%2520"));
+        using var missing = await http.GetAsync(transportUrl.Replace("%20", "%2520"));
         Assert.Equal(System.Net.HttpStatusCode.NotFound, missing.StatusCode);
     }
 }

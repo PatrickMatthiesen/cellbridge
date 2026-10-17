@@ -81,8 +81,8 @@ def main():
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if not shutil.which("aspire") or not shutil.which("dotnet"):
-        parser.error("Install Aspire CLI and .NET 10 first.")
+    if not shutil.which("aspire") or not shutil.which("dotnet") or not shutil.which("node"):
+        parser.error("Install Aspire CLI, .NET 10 and Node.js first.")
     hosts = cli_json(["aspire", "ps", "--format", "Json", "--non-interactive"])
     if any(Path(host["appHostPath"]).resolve() == APPHOST.resolve() for host in hosts):
         parser.error("Stop this workspace's Aspire app before building. Stop and validate any active capture first.")
@@ -100,6 +100,7 @@ def main():
         env.pop(key, None)
     password = secrets.token_urlsafe(24) + "Aa1!"
     env.update(Testing__Enabled="true", Parameters__TestPassword=password,
+               Parameters__PublicOrigin="https://cellbridge.test",
                Parameters__WireCaptureDirectory=str(output / "wire"),
                CELLBRIDGE_QUALIFICATION_DIRECTORY=str(output / "recovery"))
     summary = {"startedUtc": stamp, "platform": platform.platform(), "processors": os.cpu_count(),
@@ -144,6 +145,12 @@ def main():
         peer_origin = next(u["url"] for u in peer["urls"] if u.get("name") == "https" and u.get("isInternal"))
         env["OFFICECOLLABSERVER_INTEROP_ENDPOINT"] = web_origin.rstrip("/") + "/_vti_bin/cellstorage.svc"
         env["OFFICECOLLABSERVER_INTEROP_PEER"] = peer_origin.rstrip("/") + "/_vti_bin/cellstorage.svc"
+        public_origin = web["environment"]["Authentication__PublicOrigin"].rstrip("/")
+        if peer["environment"]["Authentication__PublicOrigin"].rstrip("/") != public_origin:
+            raise RuntimeError("The disposable web hosts advertise different public origins.")
+        env["CELLBRIDGE_INTEROP_PUBLIC_ORIGIN"] = public_origin
+        env["CELLBRIDGE_LISTS_TEST_CONNECTION_STRING"] = web["environment"]["ConnectionStrings__lists"]
+        env["CELLBRIDGE_LISTS_REQUIRE_DATABASE"] = "true"
         env["CELLBRIDGE_INTEROP_COOKIE"], env["CELLBRIDGE_INTEROP_CSRF"] = login(
             web_origin, "integration-writer", password)
         create_test_documents(web_origin, env["CELLBRIDGE_INTEROP_COOKIE"], env["CELLBRIDGE_INTEROP_CSRF"])
@@ -167,19 +174,21 @@ def main():
                 if response.read() != original:
                     raise RuntimeError("Repeated import replaced the stored document.")
         projects = ["CellBridge.FssHttpB.Tests", "CellBridge.FssHttp.Tests", "CellBridge.Storage.Tests",
-                    "CellBridge.Interop.Tests", "OfficeInspectors.Adapter"]
+                    "CellBridge.Interop.Tests", "CellBridge.Lists.Tests", "CellBridge.Lists.AspNetCore.Tests",
+                    "CellBridge.Lists.PostgreSql.Tests", "OfficeInspectors.Adapter"]
         for project in projects:
             run(project, ["dotnet", "test", f"tests/{project}", "-c", "Release", "--no-build",
                 "--nologo", "-v", "minimal", "--logger", "trx", "--results-directory", str(output / "tests" / project)])
         run("demo", ["dotnet", "test", "demo/CellBridge.Demo.slnx", "-c", "Release", "--no-build",
             "--nologo", "-v", "minimal", "--logger", "trx", "--results-directory", str(output / "tests")])
+        run("list-example-ui", ["node", "tools/testing/test-list-example-ui.cjs"])
         venv = ROOT / "tools/capture/.venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         run("capture", [str(venv) if venv.exists() else sys.executable, "-m", "pytest", "tools/capture", "-q"])
         run("office-evidence-gates", [str(venv) if venv.exists() else sys.executable, "-m", "pytest", "tools/testing", "-q"])
         if args.packages:
             run("durable-package-consumer", ["dotnet", "test", "tests/CellBridge.DocumentLibrary.Tests",
                 "-c", "Release", "--no-build", "--no-restore", "--nologo", "-v", "minimal",
-                "--filter", "FullyQualifiedName~PostgreSqlTests", "--logger", "trx",
+                "--filter", "FullyQualifiedName~PostgreSqlTests|FullyQualifiedName~ListSeedRecoveryTests", "--logger", "trx",
                 "--results-directory", str(output / "tests" / "package-consumer")])
         if args.performance:
             dll = ROOT / "tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll"
