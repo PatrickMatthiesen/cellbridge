@@ -36,6 +36,11 @@ public static class HistoricalGraphRestorer
         foreach (var element in elements.Values)
             if (element.SerialNumber.Guid == serialNamespace) knowledge = Math.Max(knowledge, element.SerialNumber.Value);
 
+        // Retain every old index for immutable history and serial validation, but publish
+        // only the selected index's revisions and the fresh wrappers in the new index.
+        var selectedRevisions = selectedMappings
+            .Where(mapping => mapping.Type == StreamObjectTypeHeaderStart.StorageIndexRevisionMapping)
+            .ToDictionary(mapping => mapping.Revision!, mapping => mapping);
         SerialNumber NextSerial() => new(serialNamespace, checked(++knowledge));
         ExGuid NextId() => new(1, Guid.NewGuid());
         var mappings = new List<StorageIndexMapping>();
@@ -57,14 +62,17 @@ public static class HistoricalGraphRestorer
                 Write(body, StreamObjectTypeHeaderStart.RevisionManifestRootDeclare, record);
             }
             elements.Add(revisionElement, new(DataElementType.RevisionManifestDataElementData, revisionElement, serial) { Data = body.ToArray() });
-            revisions.Add(revision, new(StreamObjectTypeHeaderStart.StorageIndexRevisionMapping, revision, null, revisionElement, NextSerial()));
+            var mapping = new StorageIndexMapping(StreamObjectTypeHeaderStart.StorageIndexRevisionMapping,
+                revision, null, revisionElement, NextSerial());
+            revisions.Add(revision, mapping);
+            selectedRevisions.Add(revision, mapping);
             var cellManifest = StorageManifestBuilder.BuildCellManifestDataElement(NextId(), NextSerial(), revision);
             elements.Add(cellManifest.DataElementExtendedGuid, cellManifest);
             mappings.Add(new(StreamObjectTypeHeaderStart.StorageIndexCellMapping, null, cell, cellManifest.DataElementExtendedGuid, NextSerial()));
         }
         // An empty index selects no graph. Retained elements remain immutable,
         // but selecting old revision mappings would fabricate a nonempty graph.
-        if (selectsManifest) mappings.AddRange(revisions.Values);
+        if (selectsManifest) mappings.AddRange(selectedRevisions.Values);
         var payload = new BinaryWriterEx();
         foreach (var mapping in mappings)
         {
