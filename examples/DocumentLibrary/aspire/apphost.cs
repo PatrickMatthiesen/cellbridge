@@ -3,18 +3,27 @@
 #:property AspireUseCliBundle=true
 
 using Microsoft.Extensions.Configuration;
+using Aspire.Hosting.ApplicationModel;
 
 var builder = DistributedApplication.CreateBuilder(args);
 var disposable = builder.Configuration.GetValue("Testing:Enabled", false);
 var postgres = builder.AddPostgres("document-library-postgres");
 if (!disposable) postgres.WithDataVolume("cellbridge-document-library-postgres");
 var database = postgres.AddDatabase("cellbridge");
+var runtimeRole = "cellbridge_library_runtime";
+var generatedRuntimePassword = Guid.NewGuid().ToString("N");
+var runtimePassword = builder.AddParameter("LibraryRuntimePassword", () => generatedRuntimePassword, secret: true);
+var tcp = postgres.GetEndpoint("tcp");
+var runtimeConnection = ReferenceExpression.Create($"Host={tcp.Property(EndpointProperty.Host)};Port={tcp.Property(EndpointProperty.Port)};Database=cellbridge;Username={runtimeRole}");
 var restoreConfigFile = builder.Configuration["DocumentLibrary:RestoreConfigFile"];
 var restorePackagesPath = builder.Configuration["DocumentLibrary:RestorePackagesPath"];
 
 #pragma warning disable ASPIRECSHARPAPPS001
 var setup = builder.AddCSharpApp("document-library-setup", "../Setup/CellBridge.DocumentLibrary.Setup.csproj")
     .WithReference(database)
+    .WithEnvironment("Lists__Enabled", "true")
+    .WithEnvironment("Lists__RuntimeRole", runtimeRole)
+    .WithEnvironment("Lists__RuntimePassword", runtimePassword)
     .WaitFor(database);
 if (!string.IsNullOrWhiteSpace(restoreConfigFile))
 {
@@ -30,7 +39,11 @@ var destinationRoot = disposable
     : Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../../../artifacts/document-library/destination"));
 
 var app = builder.AddCSharpApp("document-library", "../CellBridge.DocumentLibrary.csproj")
-    .WithReference(database)
+    .WithEnvironment("ConnectionStrings__cellbridge", runtimeConnection)
+    .WithEnvironment("ConnectionStrings__lists", runtimeConnection)
+    .WithEnvironment("DocumentLibrary__RuntimePassword", runtimePassword)
+    .WithEnvironment("Lists__RuntimePassword", runtimePassword)
+    .WithEnvironment("Lists__Enabled", "true")
     .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
     .WithEnvironment("DocumentLibrary__StorageProvider", "PostgreSql")
     .WithEnvironment("DocumentLibrary__DestinationRoot", destinationRoot)
@@ -38,6 +51,9 @@ var app = builder.AddCSharpApp("document-library", "../CellBridge.DocumentLibrar
     .WithHttpsEndpoint()
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
+// The collaborative browser does not trust this machine's developer certificate.
+// Disposable local UI checks can use HTTP; the normal example keeps HTTPS only.
+if (disposable) app.WithHttpEndpoint();
 if (!string.IsNullOrWhiteSpace(restoreConfigFile))
 {
     app.WithEnvironment("RestoreConfigFile", restoreConfigFile);

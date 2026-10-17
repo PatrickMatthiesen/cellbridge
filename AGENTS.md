@@ -11,6 +11,9 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
   `/_vti_bin/cellstorage.svc`; MS-FSSHTTPB carries the binary Cell payloads.
   See [the protocol decision](docs/protocol-version-decision.md).
 - Do not implement unrelated SharePoint APIs such as lists or search.
+- The optional `CellBridge.Lists*` packages provide native customer-workspace
+  lists requested separately from the Office protocol implementation. Maintain
+  them independently; they do not implement SharePoint list API compatibility.
 - Keep binary serialization in its standalone library with protocol unit tests.
 - Compare decoded requests and responses with SharePoint reference traffic and
   the OfficeDev Interop-TestSuites. Log enough detail to diagnose wire failures.

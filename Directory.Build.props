@@ -13,6 +13,7 @@
     <Description>Experimental Office document synchronization through MS-FSSHTTP and MS-FSSHTTPB.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <None Include="$(MSBuildThisFileDirectory)docs/package-readme.md" Pack="true" PackagePath="README.md" />
+    <None Include="$(MSBuildThisFileDirectory)docs/package-readme.md" Pack="true" PackagePath="README.md"
+          Condition="'$(MSBuildProjectName)' != 'CellBridge.Lists' and '$(MSBuildProjectName)' != 'CellBridge.Lists.PostgreSql' and '$(MSBuildProjectName)' != 'CellBridge.Lists.AspNetCore'" />
   </ItemGroup>
 </Project>

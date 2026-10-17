@@ -10,6 +10,8 @@
     <PackageReference Include="CellBridge.AspNetCore" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="CellBridge.Storage.InMemory" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="CellBridge.Storage.PostgreSql" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Lists.AspNetCore" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Lists.PostgreSql" Version="$(CellBridgePackageVersion)" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Setup/**;aspire/**" />

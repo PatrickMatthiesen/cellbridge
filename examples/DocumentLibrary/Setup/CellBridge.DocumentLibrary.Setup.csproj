@@ -9,6 +9,11 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="CellBridge.Storage.PostgreSql" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Lists.PostgreSql" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../DocumentLibraryListIds.cs" Link="DocumentLibraryListIds.cs" />
+    <Compile Include="../DocumentLibraryListSeed.cs" Link="DocumentLibraryListSeed.cs" />
   </ItemGroup>
 </Project>

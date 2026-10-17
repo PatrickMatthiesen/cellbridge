@@ -40,7 +40,7 @@ def change_archive(path, transform):
 
 def test_exact_release_artifacts_pass(tmp_path):
     artifacts(tmp_path)
-    assert len(validate_release(tmp_path, VERSION, COMMIT)["packages"]) == 9
+    assert len(validate_release(tmp_path, VERSION, COMMIT)["packages"]) == len(PROJECTS)
 
 
 @pytest.mark.parametrize("field,value", [("sourceDirty", True), ("sourceCommit", "b" * 40), ("version", "0.1.0-beta.2")])
@@ -99,11 +99,11 @@ def test_uploads_primaries_before_symbols_and_discovers_symbol_endpoint():
     calls = []
     push_packages("packages", VERSION, "temporary-fixture-key",
         lambda command: (calls.append(command), SimpleNamespace(returncode=0))[1])
-    assert len(calls) == 18
-    assert [Path(c[3]).name for c in calls[:9]] == [f"CellBridge.{n}.{VERSION}.nupkg" for n in PROJECTS]
-    assert [Path(c[3]).name for c in calls[9:]] == [f"CellBridge.{n}.{VERSION}.snupkg" for n in PROJECTS]
-    assert all("--no-symbols" in c for c in calls[:9])
-    assert all("--no-symbols" not in c for c in calls[9:])
+    assert len(calls) == 2 * len(PROJECTS)
+    assert [Path(c[3]).name for c in calls[:len(PROJECTS)]] == [f"CellBridge.{n}.{VERSION}.nupkg" for n in PROJECTS]
+    assert [Path(c[3]).name for c in calls[len(PROJECTS):]] == [f"CellBridge.{n}.{VERSION}.snupkg" for n in PROJECTS]
+    assert all("--no-symbols" in c for c in calls[:len(PROJECTS)])
+    assert all("--no-symbols" not in c for c in calls[len(PROJECTS):])
     assert all("--skip-duplicate" not in c for c in calls)
 
 

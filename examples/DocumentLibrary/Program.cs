@@ -2,6 +2,10 @@ using CellBridge.AspNetCore;
 using CellBridge.DocumentLibrary;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using CellBridge.Lists;
+using CellBridge.Lists.AspNetCore;
+using CellBridge.Lists.PostgreSql;
+using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -9,6 +13,19 @@ var provider = DocumentLibraryStorage.Create(builder);
 builder.Services.AddSingleton(sp => new DocumentLibraryDestination(
     sp.GetRequiredService<DocumentLibraryOptions>().DestinationRoot!));
 builder.Services.AddSingleton<DocumentLibraryService>();
+var listsEnabled = builder.Configuration.GetValue("Lists:Enabled", false);
+if (listsEnabled)
+{
+    var connectionString = builder.Configuration.GetConnectionString("lists")
+        ?? throw new InvalidOperationException("ConnectionStrings:lists is required when Lists:Enabled=true.");
+    if (builder.Configuration["Lists:RuntimePassword"] is { } password)
+        connectionString = new NpgsqlConnectionStringBuilder(connectionString) { Password = password }.ConnectionString;
+    builder.Services.AddKeyedSingleton("lists", (_, _) => NpgsqlDataSource.Create(connectionString));
+    builder.Services.AddSingleton<IListEngine>(services =>
+        new PostgreSqlListEngine(services.GetRequiredKeyedService<NpgsqlDataSource>("lists")));
+    builder.Services.AddCellBridgeLists(options => options.ActorResolver = context =>
+        CellBridgeActor.FromPrincipal(context.User) is { } actor ? new ListActor(actor.Identity.Subject) : null);
+}
 builder.Services.AddAuthorization(options => options.AddPolicy("permission-admin",
     policy => policy.RequireClaim("document-library:permission-admin", "true")));
 
@@ -50,10 +67,17 @@ app.UseAntiforgery();
 
 app.MapDocumentLibrary();
 app.MapCellBridge();
+if (listsEnabled)
+{
+    app.MapCellBridgeLists();
+    app.MapDocumentLibraryLists();
+}
 app.MapHealthChecks("/health").AllowAnonymous();
 
 await app.Services.GetRequiredService<StorageProvider>().CheckHealthAsync();
 await app.Services.GetRequiredService<DocumentLibraryService>().InitializeAsync();
+if (listsEnabled && app.Services.GetRequiredService<IListEngine>() is PostgreSqlListEngine lists)
+    await lists.CheckHealthAsync();
 await app.RunAsync();
 
 public partial class Program;

@@ -68,12 +68,15 @@ The package defaults to `PersistOfficeSession = true`, so Office can retain this
 closing. It expires after eight hours without sliding renewal. Word, Excel and
 PowerPoint may reuse the same login cookie. Browser sign-ins request session cookies.
 
-Run the package-only app and its PostgreSQL database through the standalone AppHost. A normal launch restores the published packages from the NuGet sources already configured on the machine:
+Run the package-only app and its PostgreSQL database through the standalone AppHost.
+Until the optional list packages are published, first run `python3 tools/verify_packages.py`
+and select its local feed using the configuration below. A launch without that
+configuration uses the NuGet sources already configured on the machine:
 
 ```powershell
 aspire start --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 aspire wait document-library --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire ps --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
+aspire describe --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 ```
 
@@ -85,14 +88,51 @@ $env:DocumentLibrary__RestorePackagesPath = (Resolve-Path artifacts/packages/con
 
 aspire start --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 aspire wait document-library --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire ps --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-# Open the document-library HTTPS endpoint reported by aspire ps.
+aspire describe --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
+# Open the document-library HTTPS endpoint reported by aspire describe.
 aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
 ```
 
 The AppHost does not auto-detect local package directories. Leave both settings unset for a published-package restore. Use the double-underscore environment names shown above because .NET configuration maps them to `DocumentLibrary:RestoreConfigFile` and `DocumentLibrary:RestorePackagesPath`.
 
-The AppHost creates PostgreSQL, runs the package-only setup project, and starts the web app only after schema initialization succeeds. Its normal mode keeps a named PostgreSQL volume and stores destination files under the ignored `artifacts/document-library` directory. Set `Testing__Enabled=true` in the environment for disposable PostgreSQL and a unique temporary destination. Only one app process may use a destination root. The app holds an exclusive lock file for its full lifetime.
+The AppHost creates PostgreSQL, runs the package-only setup project, and starts the web app only after schema initialization succeeds. Its normal mode keeps a named PostgreSQL volume and stores destination files under the ignored `artifacts/document-library` directory. Set `Testing__Enabled=true` in the environment for disposable PostgreSQL and a unique temporary destination. This disposable mode also exposes a local HTTP endpoint for browser checks that cannot trust the developer certificate. Only one app process may use a destination root. The app holds an exclusive lock file for its full lifetime.
+
+## Customer lists
+
+The standalone AppHost also enables `/lists`, using the optional list packages.
+The setup process owns database provisioning; the web process receives a dedicated
+non-owner runtime login with document DML and workspace-isolated list access.
+It receives no setup credentials. Outside the AppHost, lists are opt-in through
+`Lists:Enabled=true` and `ConnectionStrings:lists`.
+
+The local owner sees Acme and Contoso. Editor and reader see only Acme. Each
+customer starts with Work packages, Tasks and Deliverables from pinned company
+templates. Task records link to a work package, receive a `TASK-` number and have
+an External ID hidden from ordinary forms. Owner can add optional text fields and
+create list J. Editor can edit records; reader can browse and download extracts.
+These local account hints affect the UI only; the engine checks current grants.
+An uncertain field addition retains its field ID, name and target list. Retry
+checks the current schema for that ID before sending another update, so a lost
+response cannot turn the same addition into a second field.
+
+Open the same task in two tabs to try merging. Save a change in one tab, then
+save another in the other tab. The second tab retains its draft, shows original,
+current and proposed values, and offers choices for conflicting fields. A further
+concurrent edit repeats the comparison without an unconditional overwrite.
+
+CSV and XLSX links download one bounded page, with explicit extraction-limit
+headers. The reporting feed provides typed metadata and a restricted OData subset.
+Live Excel/Power BI imports and hosted refresh remain unverified. The small form
+does not edit numeric fields; applications can supply their own precision-aware
+controls through the same API. See the [list guide](../../docs/lists.md) for host
+responsibilities, permissions and limits.
+
+Setup resumes an interrupted initial seed and records completion in an
+operator-owned table. Completed workspaces preserve edited records, deleted seed
+records and revoked access on subsequent runs. Previously completed seeds without
+a marker are recognized through their lists and durable record identities.
+The seed is an initial local demonstration. Keep provisioning separate from
+customer management; normal record changes remain transactional in the list engine.
 
 The Status column shows whether the downloadable file has caught up with the
 saved content in CellBridge. A committed save may remain pending if the

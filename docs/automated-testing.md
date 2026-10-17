@@ -53,7 +53,7 @@ python3 tools/verify_packages.py
 This packs the libraries, builds the [consumer example](../examples/NuGetConsumer/README.md)
 and runs [package tests](../tests/CellBridge.Packages.Tests/README.md) using an
 isolated local feed/cache. Verification clears its own package output, checks
-all nine packages and symbol packages, validates embedded readmes, license,
+all twelve packages and symbol packages, validates embedded readmes, license,
 repository metadata and internal versions, and writes `artifacts/packages/manifest.json`.
 `python3 tools/check_release.py --version <version> --commit <sha>` checks the
 same archive metadata and hashes before release authentication. Artifact tests
@@ -79,7 +79,7 @@ python3 tools/testing/run.py --packages
 python3 tools/check_release.py --version <version> --commit <sha>
 ```
 
-Check `artifacts/packages/manifest.json` for nine matching package versions,
+Check `artifacts/packages/manifest.json` for twelve matching package versions,
 repository commits, archive hashes and `sourceDirty: false`. Require the durable
 consumer check to pass without a database skip. Use a new version for changed
 source; NuGet versions are immutable.
@@ -134,6 +134,10 @@ These switches choose the resource model; they are not Aspire parameters.
 Normal development includes the explicitly started [SharePoint proxy](capture-kit.md).
 
 ## Performance measurements
+
+For customer-workspace list writes, database-filtered pages and the 4,000-writes/minute
+baseline, see [measuring list performance](list-performance.md). That runner uses
+public provider calls and authenticated HTTP against disposable PostgreSQL.
 
 For isolated inbound parsing, eager restore and nested builder allocations, see
 [measuring request allocations](allocation-measurements.md). The stage benchmark

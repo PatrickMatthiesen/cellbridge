@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>true</IsPackable></PropertyGroup>
+  <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /><ProjectReference Include="../CellBridge.Lists/CellBridge.Lists.csproj" /></ItemGroup>
+  <PropertyGroup><Description>Experimental typed customer workspace lists with validation, authorized persistence and optional HTTP adapters.</Description></PropertyGroup>
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../docs/lists-package-readme.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+</Project>
