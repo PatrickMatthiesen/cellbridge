@@ -232,6 +232,56 @@ public sealed partial class HttpTests
         Assert.Equal(HttpStatusCode.MethodNotAllowed, (await host.Post("/odata/Records", "{}")).StatusCode);
     }
 
+    [Theory]
+    [InlineData("", "OData", "rEcOrDs")]
+    [InlineData("/Tenant/OData/App", "oDaTa", "ReCoRdS")]
+    public async Task Mixed_case_odata_links_preserve_the_service_root_and_path_base(string pathBase, string serviceSegment, string recordsSegment)
+    {
+        await using var host = await Host.Create(configure: o => o.Limits = new ListLimits { MaxPageSize = 1 }, pathBase: pathBase);
+        var serviceRoot = host.Path + "/" + serviceSegment;
+        var service = JsonNode.Parse(await host.Client.GetStringAsync(serviceRoot))!;
+        var metadataLink = service["@odata.context"]!.GetValue<string>();
+        Assert.Equal(serviceRoot + "/$metadata", metadataLink);
+        var metadata = XDocument.Parse(await host.Client.GetStringAsync(metadataLink));
+        Assert.Contains(metadata.Descendants(), element => element.Name.LocalName == "EntitySet" && element.Attribute("Name")?.Value == "Records");
+        var recordsLink = new Uri(new Uri(host.Client.BaseAddress!, serviceRoot + "/"), service["value"]![0]!["url"]!.GetValue<string>());
+        Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(recordsLink)).StatusCode);
+
+        var first = JsonNode.Parse(await host.Client.GetStringAsync(serviceRoot + "/" + recordsSegment))!;
+        var context = first["@odata.context"]!.GetValue<string>();
+        Assert.Equal(metadataLink + "#Records", context);
+        Assert.Equal(HttpStatusCode.OK, (await host.Client.GetAsync(context.Split('#')[0])).StatusCode);
+        var next = first["@odata.nextLink"]!.GetValue<string>();
+        Assert.StartsWith(serviceRoot + "/Records?", next);
+        var second = JsonNode.Parse(await host.Client.GetStringAsync(next))!;
+        Assert.Single(second["value"]!.AsArray());
+        Assert.Null(second["@odata.nextLink"]);
+        Assert.Equal(host.Engine.Record.Id, host.Engine.LastQuery!.AfterRecordId);
+    }
+
+    [Fact]
+    public async Task Odata_metadata_escapes_xml_invalid_label_characters_without_changing_native_names()
+    {
+        await using var host = await Host.Create();
+        const string name = "Label \ud83d\ude80 \ufffe \uffff literal_xFFFE_ &_<>\"";
+        const string encoded = "Label \ud83d\ude80 _xFFFE_ _xFFFF_ literal_x005F_xFFFE_ &_<>\"";
+        host.Engine.Definition = host.Engine.Definition with
+        {
+            Fields = host.Engine.Definition.Fields.Select(field => field.Id == host.Engine.Text ? field with { Name = name } : field).ToArray()
+        };
+        ListValidation.ValidateDefinition(host.Engine.Definition, new ListLimits());
+        var response = await host.Client.GetAsync(host.Path + "/odata/$metadata");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var document = XDocument.Parse(await response.Content.ReadAsStringAsync());
+        var property = document.Descendants().Single(element => element.Name.LocalName == "Property" && element.Attribute("Name")?.Value == "f_" + host.Engine.Text.ToString("N"));
+        var description = property.Elements().Single(element => element.Attribute("Term")?.Value == "Org.OData.Core.V1.Description");
+        Assert.Equal(encoded, description.Attribute("String")!.Value);
+        var native = JsonNode.Parse(await host.Client.GetStringAsync(host.Path))!;
+        var field = native["fields"]!.AsArray().Single(field => field!["id"]!.GetValue<Guid>() == host.Engine.Text)!;
+        Assert.Equal(name, field["name"]!.GetValue<string>());
+        Assert.Equal(name, host.Engine.Definition.Fields.Single(field => field.Id == host.Engine.Text).Name);
+    }
+
     [Fact]
     public async Task Explicit_odata_top_limits_total_results_and_zero_returns_none()
     {
@@ -313,14 +363,14 @@ public sealed partial class HttpTests
         Assert.Equal(0, host.Engine.Queries);
     }
 
-    private sealed class Host(WebApplication app, HttpClient client, FakeEngine engine) : IAsyncDisposable
+    private sealed class Host(WebApplication app, HttpClient client, FakeEngine engine, string pathBase) : IAsyncDisposable
     {
         public HttpClient Client { get; } = client;
         public FakeEngine Engine { get; } = engine;
-        public string Path => $"/api/workspaces/{Engine.Workspace}/lists/{Engine.Definition.Id}";
+        public string Path => pathBase + $"/api/workspaces/{Engine.Workspace}/lists/{Engine.Definition.Id}";
         public Task<HttpResponseMessage> Post(string path, string body) => Client.PostAsync(Path + path, new StringContent(body, Encoding.UTF8, "application/json"));
         public static async Task<Host> Create(Action<CellBridgeListsOptions>? configure = null, Action<HttpContext>? requestSetup = null,
-            Action<IServiceCollection>? configureServices = null)
+            Action<IServiceCollection>? configureServices = null, string pathBase = "")
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
@@ -337,6 +387,11 @@ public sealed partial class HttpTests
             });
             configureServices?.Invoke(builder.Services);
             var app = builder.Build();
+            if (pathBase.Length > 0)
+            {
+                app.UsePathBase(pathBase);
+                app.UseRouting();
+            }
             app.Use(async (context, next) =>
             {
                 requestSetup?.Invoke(context);
@@ -350,7 +405,7 @@ public sealed partial class HttpTests
             var client = app.GetTestClient();
             client.DefaultRequestHeaders.Add("X-Test-Actor", "issuer:reader");
             client.DefaultRequestHeaders.Authorization = new("Bearer", "valid");
-            return new Host(app, client, engine);
+            return new Host(app, client, engine, pathBase);
         }
         public async ValueTask DisposeAsync() { Client.Dispose(); await app.DisposeAsync(); }
     }

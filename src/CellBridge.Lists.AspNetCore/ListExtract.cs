@@ -110,7 +110,7 @@ internal static class ListExtract
             // exceed the limit on readers which count surrogate pairs separately.
             if (text.Length > 32767)
                 throw new ListException(ListFailure.Limit, "XLSX cell text exceeds 32767 UTF-16 units.");
-            return new XElement(ns + "c", new XAttribute("t", "inlineStr"), new XElement(ns + "is", new XElement(ns + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), SafeXml(text))));
+            return new XElement(ns + "c", new XAttribute("t", "inlineStr"), new XElement(ns + "is", new XElement(ns + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), XmlDisplayText.Encode(text))));
         }
         XElement Numeric(string text) => new(ns + "c", new XElement(ns + "v", text));
     }
@@ -124,20 +124,4 @@ internal static class ListExtract
         return digits.Length > 15;
     }
 
-    // SpreadsheetML's escaped character form preserves controls that XML cannot
-    // carry. Escape literal escape sequences first so Excel does not alter text.
-    private static string SafeXml(string text)
-    {
-        var output = new StringBuilder();
-        for (var i = 0; i < text.Length; i++)
-        {
-            var c = text[i];
-            if (c == '_' && i + 6 < text.Length && text[i + 1] == 'x' && text[i + 6] == '_' &&
-                text.AsSpan(i + 2, 4).ToString().All(Uri.IsHexDigit)) output.Append("_x005F_");
-            else if (c is '\t' or '\n' or '\r' || c >= 0x20 && c is not '\ufffe' and not '\uffff' && !char.IsSurrogate(c)) output.Append(c);
-            else if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) { output.Append(c); output.Append(text[++i]); }
-            else output.Append("_x").Append(((int)c).ToString("X4", CultureInfo.InvariantCulture)).Append('_');
-        }
-        return output.ToString();
-    }
 }

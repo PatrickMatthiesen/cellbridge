@@ -73,6 +73,10 @@
   function lockNavigation(locked) {
     locked ||= busy || Boolean(state.draft) || Boolean(state.pendingList);
     const ready = Boolean(state.context && state.definition);
+    // run() locks before taking a save snapshot. The fieldset preserves each
+    // control's own read-only/unconfirmed-create state when it unlocks.
+    $('record-fields').disabled = busy || Boolean(state.preview);
+    for (const select of $('merge-fields').querySelectorAll('select')) select.disabled = busy;
     $('cancel-record').disabled = busy;
     $('back-to-draft').disabled = busy;
     $('workspace').disabled = locked || !$('workspace').options.length;

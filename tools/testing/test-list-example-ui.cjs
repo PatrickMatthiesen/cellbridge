@@ -107,6 +107,7 @@ responses=[{status:200,body:definition},{status:409},{status:200,body:definition
   responses=[blocked,{status:200,body:{}},{status:200,body:{records:[],nextCursor:null}}];
   const offset=calls.length;
   const saving=test.run(test.saveRecord,get('save-record'));
+  assert.equal(get('record-fields').disabled,true,'The draft must freeze before the schema request completes.');
   assert.equal(get('workspace').disabled,true);assert.equal(get('list').disabled,true);
   assert.equal(get('cancel-record').disabled,true);assert.equal(get('back-to-draft').disabled,true);
   get('cancel-record').dispatch('click');get('back-to-draft').dispatch('click');
@@ -120,6 +121,20 @@ responses=[{status:200,body:definition},{status:409},{status:200,body:definition
   assert.equal(calls[offset+1].path,originalContext.listRoot+'/records/record');
   assert.equal(calls[offset+2].path,originalContext.listRoot+'/records/query');
   assert.equal(get('cancel-record').disabled,false);
+  assert.equal(get('record-fields').disabled,false);
+  // A failed schema read retains the draft and restores editing, including a retry with new values.
+  control.value='retry draft';test.state.draft=originalDraft;
+  let rejectSchema;const failedSchema=new Promise(resolve=>{rejectSchema=resolve});
+  responses=[failedSchema];const failedOffset=calls.length;
+  const failedSave=test.run(test.saveRecord,get('save-record'));
+  assert.equal(get('record-fields').disabled,true);
+  rejectSchema(new Error('schema unavailable'));await failedSave;
+  assert.equal(calls.length,failedOffset+1);assert.equal(test.state.draft,originalDraft);
+  assert.equal(control.value,'retry draft');assert.equal(get('record-fields').disabled,false);
+  control.value='edited after failure';
+  responses=[{status:200,body:definition},{status:200,body:{}},{status:200,body:{records:[],nextCursor:null}}];
+  const retrySaveOffset=calls.length;await test.run(test.saveRecord,get('save-record'));
+  assert.equal(JSON.parse(calls[retrySaveOffset+1].body).changes[0].value,'edited after failure');
   // closeDraft within loadList keeps navigation locked through the pending read.
   test.state.draft=null;get('workspace').value='workspace';get('list').value='list';
   let unblockLoad;const blockedLoad=new Promise(resolve=>{unblockLoad=resolve});
@@ -134,10 +149,28 @@ responses=[{status:200,body:definition},{status:409},{status:200,body:definition
   let unblockCreate;const blockedCreate=new Promise(resolve=>{unblockCreate=resolve});
   responses=[blockedCreate,new Error('response lost')];const createOffset=calls.length;
   const creating=test.run(test.saveRecord);
+  assert.equal(get('record-fields').disabled,true,'New-record fields must freeze during schema loading.');
   get('cancel-record').dispatch('click');get('workspace').value='other-workspace';get('list').value='other-list';
   unblockCreate({status:200,body:definition});await creating;
   assert.equal(calls[createOffset+1].path,originalContext.listRoot+'/records');
   assert.equal(test.state.draft,createDraft);
+  assert.equal(get('record-fields').disabled,false);
+  assert.equal(createDraft.controls.get(fieldId).control.disabled,true,'Uncertain creates retain their immutable payload.');
+  // A create whose schema lookup failed can be edited before retrying.
+  const failedCreate={...createDraft,createId:'schema-retry',pendingCreate:null,
+   controls:new Map([[fieldId,{field:definition.fields[0],control:new Element('input'),initial:''}]])};
+  failedCreate.controls.get(fieldId).control.value='first create draft';test.state.draft=failedCreate;
+  let failCreateSchema;const createSchemaFailure=new Promise(resolve=>{failCreateSchema=resolve});
+  responses=[createSchemaFailure];const failedCreating=test.run(test.saveRecord);
+  assert.equal(get('record-fields').disabled,true);
+  failCreateSchema(new Error('schema unavailable'));await failedCreating;
+  assert.equal(test.state.draft,failedCreate);assert.equal(failedCreate.pendingCreate,null);
+  assert.equal(get('record-fields').disabled,false);
+  assert.equal(failedCreate.controls.get(fieldId).control.disabled,false);
+  failedCreate.controls.get(fieldId).control.value='corrected create draft';
+  responses=[{status:200,body:definition},{status:200,body:{number:3}},{status:200,body:{records:[],nextCursor:null}}];
+  const createRetryOffset=calls.length;await test.run(test.saveRecord);
+  assert.equal(JSON.parse(calls[createRetryOffset+1].body).values[fieldId],'corrected create draft');
   // Schema publication snapshots both the route and the field name before its GET.
   test.state.draft=null;test.state.context=originalContext;
   const form={elements:{name:{value:'Notes'}},reset(){}};
@@ -157,10 +190,13 @@ responses=[{status:200,body:definition},{status:409},{status:200,body:definition
   assert.equal(calls[referenceOffset+1].path,originalContext.workspaceRoot+'/target-list/records/query');
   // Merge resolution retains the same draft route across its schema GET.
   test.state.draft=originalDraft;test.state.preview={currentRevision:2,schemaVersion:3,suggestedChanges:[{fieldId,value:'mine'}],fields:[]};
-  get('merge-fields').replaceChildren();
+  const mergeChoice=new Element('select');mergeChoice.value='current';
+  get('merge-fields').replaceChildren(mergeChoice);
   let unblockMerge;const blockedMerge=new Promise(resolve=>{unblockMerge=resolve});
   responses=[blockedMerge,{status:200,body:{}},{status:200,body:{records:[],nextCursor:null}}];const mergeOffset=calls.length;
   const merging=test.run(test.saveMerge);
+  assert.equal(get('record-fields').disabled,true);
+  assert.equal(mergeChoice.disabled,true,'Conflict choices freeze before saving their snapshot.');
   get('back-to-draft').dispatch('click');assert.ok(test.state.preview);
   get('workspace').value='different-customer';get('list').value='different-list';
   unblockMerge({status:200,body:definition});await merging;
@@ -209,5 +245,5 @@ responses=[{status:200,body:definition},{status:409},{status:200,body:definition
   await assertNavigationUnavailable(()=>test.loadWorkspace(),[{status:503}]);
   await assertNavigationUnavailable(()=>test.loadWorkspace(),[{status:200,body:[]}]);
   await assertNavigationUnavailable(()=>test.loadList(),[{status:404}]);
-  console.log('List UI checks passed: exact numeric snapshots, draft/retry retention, immutable async targets, and failed/empty navigation guards.');
+  console.log('List UI checks passed: exact numeric snapshots, save-time field locks, draft/retry retention, immutable async targets, and failed/empty navigation guards.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

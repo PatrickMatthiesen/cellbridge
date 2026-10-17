@@ -255,6 +255,11 @@ protected `$skiptoken`. Filters use the native comparison subset joined by `and`
 ordering permits one field. Unsupported options, functions, expansion, counts and
 writes fail. Hidden fields are omitted from default rows but remain in metadata
 and explicit projections. This is a reporting adapter, not a full OData service.
+Metadata display labels escape XML-invalid UTF-16 units as `_xHHHH_`. A literal
+escape sequence's leading underscore becomes `_x005F_` to distinguish it from an
+encoded character. Unicode characters allowed by XML remain intact. These are
+literal label representations in OData metadata; native JSON schema names stay
+unchanged.
 Explicit `$top` limits the total response and does not create a next link; omit it
 to use bounded server paging. `$select` controls returned properties. Request
 `IEEE754Compatible=true` in the JSON Accept header to transport Int64 and decimal

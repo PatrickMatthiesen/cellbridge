@@ -45,7 +45,7 @@ internal static class ODataFeed
                 property.Add(new XElement(edm + "Annotation", new XAttribute("Term", "CellBridge.Lists.MaximumDecimalScale"), new XAttribute("Int", ListValidation.DecimalScale)));
             }
             if (field.Type == ListFieldType.Timestamp) property.Add(new XAttribute("Precision", "7"));
-            property.Add(new XElement(edm + "Annotation", new XAttribute("Term", "Org.OData.Core.V1.Description"), new XAttribute("String", field.Name)));
+            property.Add(new XElement(edm + "Annotation", new XAttribute("Term", "Org.OData.Core.V1.Description"), new XAttribute("String", XmlDisplayText.Encode(field.Name))));
             entity.Add(property);
         }
         var document = new XDocument(new XElement(edmx + "Edmx", new XAttribute("Version", "4.0"), new XElement(edmx + "DataServices",
@@ -167,7 +167,7 @@ internal static class ODataFeed
     private static string Base(HttpState s)
     {
         var path = s.Context.Request.Path.Value!;
-        var marker = path.LastIndexOf("/odata", StringComparison.Ordinal);
+        var marker = path.LastIndexOf("/odata", StringComparison.OrdinalIgnoreCase);
         // Relative links avoid trusting a request-controlled Host header.
         return s.Context.Request.PathBase + path[..(marker + 6)];
     }
