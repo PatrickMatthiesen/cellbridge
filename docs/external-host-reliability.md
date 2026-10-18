@@ -231,9 +231,11 @@ service reads provider snapshots and has no process-wide document cache to evict
 
 ## Storage compatibility and validation
 
-Detached document records remain logical format 2. PostgreSQL schema 5 stores
-shared immutable graph metadata using storage encoding 1. Explicit
-`InitializeAsync` migrates schema 3 or 4 to 5 in a transaction while retaining
+Detached document records remain logical format 2. PostgreSQL schema 6 stores
+shared immutable graph metadata using storage encoding 1 and indexes small current
+metadata and revision summaries. Schema 5 upgrades build these indexes from current
+heads while preserving every snapshot JSON byte. Explicit
+`InitializeAsync` migrates schema 3, 4 or 5 to 6 in a transaction while retaining
 all snapshots, documents, content and ownership. Stop all hosts and workers
 against that store before migration. Older writers fail their schema guard
 afterward; mixed writer versions are unsupported. Unsupported schemas are

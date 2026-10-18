@@ -26,14 +26,34 @@ to use the library. Removing the volume removes its persisted data.
 
 Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
 `ConnectionStrings__cellbridge` before starting the host. Initialization accepts
-a fresh database or storage schema version 5, and explicitly migrates versions 3
-and 4 to 5 while preserving documents and retained snapshots. Stop all hosts and
+a fresh database or storage schema version 6, and explicitly migrates versions 3, 4
+and 5 to 6 while preserving documents and retained snapshots. Stop all hosts and
 workers using that database before migration. Older writers fail their schema
-guard afterward. Setup rewrites retained state JSON with shared graph metadata
-and recounts encoded metadata and content bytes in the usage ledger. The version,
-state and ledger changes commit together. Unsupported schemas, corruption and
+guard afterward. For schemas 3 and 4, setup rewrites retained state JSON with shared
+graph metadata. For schema 5, it preserves all snapshot JSON bytes. Setup builds
+current metadata and revision-summary indexes from each current head, then
+recounts authoritative metadata and content bytes in the usage ledger. These
+changes commit together. Unsupported schemas, corruption and
 limits below existing usage fail without changing the database. Initialization
 sets authoritative byte/document limits. See [external host reliability](external-host-reliability.md#storage-compatibility-and-validation).
+
+Selective reads use the optional `IDocumentReadStore` capability. PostgreSQL keeps
+small current-metadata and revision-summary tables alongside authoritative snapshots.
+Each publication updates them in the same transaction. Summary pages contain at
+most 256 rows, newest first. Offsets describe live history, so a concurrent save
+can move rows between pages; callers requiring a stable export should retain the
+revision numbers they selected. Downloads authorize again before using a handle.
+Missing or inconsistent indexes fail closed. Explicit setup rebuilds indexes when
+upgrading schemas 3, 4 or 5. Re-running setup on schema 6 validates its existing
+schema and usage; it does not silently repair corrupted projections.
+
+The usage ledger charges authoritative state, content and recovery receipts.
+Derived read records and their SQL indexes add physical database bytes but do not
+charge a second logical copy of the same history. Backups still include them, and
+portable recovery rebuilds them from the imported current heads. In-memory stores
+project the same immutable records under their state lock. Providers without the
+capability, and arbitrary full-state policy callbacks, use complete state reads.
+Full protocol graph operations, saves and restores continue to load complete states.
 
 ### Configuration
 
@@ -290,15 +310,16 @@ power-loss and shared-filesystem behavior need deployment-specific qualification
    Test restoration in a separate environment.
 3. Update all CellBridge package references together. Build the application and
    the repository's `CellBridge.Storage.Setup` tool from matching source.
-4. Run setup against the stopped database. It migrates storage schema 3 or 4 to 5,
-   preserves documents and all retained snapshots, and initializes recovery schema 1.
+4. Run setup against the stopped database. It migrates storage schema 3, 4 or 5 to 6,
+   preserves documents and all retained snapshots, builds the selective read indexes,
+   and initializes recovery schema 1.
    Older development schemas need a separate migration or recreation; setup rejects them.
 5. Start one upgraded host. Check provider health, document identities,
    permissions, downloads and a save/reopen cycle before enabling other writers.
    Verify publication workers' destination bindings and durable receipt stores
    before restarting them.
 
-There is no schema-5 downgrade. For rollback, stop upgraded writers and
+There is no schema-6 downgrade. For rollback, stop upgraded writers and
 restore the previous database, matching content objects, binaries and
 configuration. This loses changes made after the backup unless you reconcile
 them separately. Do not run older writers against the migrated database.

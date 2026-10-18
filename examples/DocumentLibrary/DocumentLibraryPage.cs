@@ -88,15 +88,18 @@ internal static class DocumentLibraryPage
         return Page("Documents", body, context, token, true);
     }
 
-    public static string History(HttpContext context, Guid resourceId, IReadOnlyList<DocumentRevision> revisions, string token)
+    public static string History(HttpContext context, Guid resourceId, RevisionSummaryPage page, string token)
     {
+        var revisions = page.Revisions;
+        var nextPage = page.NextOffset is { } next
+            ? $"<a class=\"button quiet\" href=\"/library/files/{resourceId:D}/history?offset={next}\">Older revisions</a>" : "";
         var rows = string.Join("", revisions.Select(r => $$"""
             <tr><td><span class="revision-number">{{r.RevisionNumber}}</span></td><td>{{r.ContentVersion}}</td><td>{{E(r.Author.DisplayName)}}</td><td><time datetime="{{r.CreatedUtc:O}}">{{r.CreatedUtc.ToString("dd MMM yyyy, HH:mm", CultureInfo.InvariantCulture)}} UTC</time></td><td><a class="button quiet" href="/_cellbridge/history/{{resourceId:D}}/{{r.LifecycleGeneration}}/{{r.RevisionNumber}}">{{Icon("download")}}Download</a></td></tr>
             """));
         return Page("Version history", $$"""
             <a class="back-link" href="/">{{Icon("back")}}Back to documents</a>
             <section class="workspace-heading"><div class="workspace-icon">{{Icon("history")}}</div><h1>Version history</h1></section>
-            <section class="library history-library"><div class="list-heading"><h2>Saved versions</h2><span>{{revisions.Count}} {{(revisions.Count == 1 ? "revision" : "revisions")}}</span></div><div class="history-scroll"><table class="file-table"><caption class="sr-only">Saved document revisions</caption><thead><tr><th scope="col">Revision</th><th scope="col">Version</th><th scope="col">Saved by</th><th scope="col">Saved on</th><th scope="col">File</th></tr></thead><tbody>{{rows}}</tbody></table></div></section>
+            <section class="library history-library"><div class="list-heading"><h2>Saved versions</h2><span>{{revisions.Count}} {{(revisions.Count == 1 ? "revision on this page" : "revisions on this page")}}</span></div><div class="history-scroll"><table class="file-table"><caption class="sr-only">Saved document revisions</caption><thead><tr><th scope="col">Revision</th><th scope="col">Version</th><th scope="col">Saved by</th><th scope="col">Saved on</th><th scope="col">File</th></tr></thead><tbody>{{rows}}</tbody></table></div>{{nextPage}}</section>
             """, context, token, false);
     }
 

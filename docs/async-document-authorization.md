@@ -115,10 +115,32 @@ it does not remove required history. Capture also reuses unchanged descriptors.
 Quota checks count encoded UTF-8 bytes through a bounded buffer and weakly
 memoize that count for immutable states. The codec reuses serializer type
 metadata per worker thread and clears operation graph references in `finally`.
-PostgreSQL schema 5 requires an [explicit migration with older writers stopped](storage-providers.md#upgrading-a-durable-host).
+PostgreSQL schema 6 requires an [explicit migration with older writers stopped](storage-providers.md#upgrading-a-durable-host).
 Logical document format 2 and native/version-1/version-2 authorization semantics
 are unchanged. Async authorization still revalidates current state after awaiting
 the host decision.
+
+Current metadata, catalog rows and HTTP downloads now use the optional
+`IDocumentReadStore` capability with the built-in native or ordinary async authority.
+`ListRevisionSummariesAsync` returns live newest-first pages of at most 256 headers;
+`GetRevisionSummaryAsync` returns one selected publication's content handle. Neither
+returns partition graphs. The database returns the requested summaries with the
+current authorization/lifecycle fence in one statement after the host decision.
+A content handle is an identifier; later download requests authorize again.
+
+PostgreSQL schema 6 adds transactional current-metadata and revision-summary tables.
+Upgrading schema 5 builds these indexes from current heads without rewriting snapshot
+JSON. It preserves current history membership even when older retained snapshots
+contain additional revisions. In-memory stores project the same records under their
+state lock. Existing providers and arbitrary full-state policy callbacks keep their
+complete-state fallback. The original graph-returning history APIs remain available;
+when an external authorization check confirms the same immutable state version,
+they reuse the decoded state instead of reading its JSON a second time. A changed
+version triggers a complete current-state read. Saves, restores and protocol graph
+operations retain their complete state and identity requirements.
+
+The following codec measurements compare the expanded schema-4 snapshots with
+compact schema-5 snapshots, before selective reads.
 
 On 2026-10-17, equivalent Release workloads ran sequentially against isolated
 Aspire-owned PostgreSQL 18.3, without concurrent builds or other test work. Each
@@ -170,10 +192,89 @@ drivers remain in ignored `artifacts/durable-history-memory/`. The example's
 `--saves`, `--payload-bytes` and `--measure-gc` switches reproduce the bounded
 workloads. No collection occurs as part of the storage fix.
 
-The codec fixes descriptor duplication in stored state for these workloads. It
-still reads complete compact states and retains the configured full snapshots.
+The codec fixes descriptor duplication in stored state for these workloads. Full graph operations
+still read complete compact states and retain the configured full snapshots. The
+selective metadata paths described below avoid that work for catalog pages,
+revision summaries and HTTP downloads.
 Detached revisions still have arrays of shared descriptor references, and graph
 processing and payload buffers still allocate. Portable recovery manifests keep
 their existing expanded v1 representation and size limits. These results do not
 establish bounded runtime-pool growth, rule out every possible leak, or qualify
 live Office/OOS editing, external publishing or hardware-failure recovery.
+
+### Selective read measurements
+
+On 2026-10-18, matched workloads compared compact schema-5 snapshots with the
+schema-6 selective reads. The optional `--read-metrics` workload adds 200 authorized
+catalog pages of 16 rows, 512 mixed revision-summary pages of eight headers, and
+512 selected historical download-metadata reads. The two history groups run at
+concurrency eight. A reflection measurement adapter projects the older full-history
+APIs to the same fields; its allocations remain included. Each trial checks page
+identities, ordering, continuation offsets, selected historical bytes and revocation.
+
+All 18 matched pairs passed the same 17 checks: 10/20/40/100 changed saves with
+both stores and both cache modes, plus 20-save larger-content trials for both stores.
+Each trial used a fresh database on the same owned PostgreSQL 18.3 instance, with
+no concurrent builds or tests. The uncached PostgreSQL scaling results were:
+
+| Changed saves | Whole-workload allocation before | After | Selected-metadata allocation before | After |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | 2.855 GB | 0.898 GB | 400.90 MB | 20.70 MB |
+| 20 | 4.038 GB | 1.072 GB | 826.00 MB | 20.70 MB |
+| 40 | 7.069 GB | 1.554 GB | 1,898.46 MB | 20.71 MB |
+| 100 | 21.084 GB | 4.200 GB | 6,688.91 MB | 20.73 MB |
+
+Selected metadata remains approximately constant in this bounded workload while
+all 101 revisions remain available. The 100-save uncached elapsed time fell from
+46.00 to 33.86 seconds. Peak RSS changed from 319,388 to 313,984 KiB; post-GC live
+heap changed from 122.18 to 122.77 MB. Lower allocation did not produce a matching
+reduction in retained heap or RSS in this trial.
+
+The 100-save cached PostgreSQL pair measured:
+
+| Operation | Managed allocation before | After | Elapsed before | After |
+| --- | ---: | ---: | ---: | ---: |
+| 200 authorized catalog pages | 5,334.82 MB | 448.10 MB | 12,745.88 ms | 7,622.25 ms |
+| 512 mixed revision-summary pages | 3,422.94 MB | 29.58 MB | 2,187.71 ms | 178.36 ms |
+| 512 selected historical metadata reads | 6,690.40 MB | 19.02 MB | 4,092.19 ms | 148.54 ms |
+| 100 changing saves and readbacks | 1,445.91 MB | 1,450.39 MB | 19,104.88 ms | 19,090.34 ms |
+
+Authority-provider calls matched in these phases: 7,300 for catalog pages, 248 for
+mixed summary pages, zero for the cached selected-metadata group, and two for saves.
+Whole-workload allocation fell from 21.09 GB to 4.17 GB and elapsed time from 45.29
+to 32.90 seconds. Peak sampled RSS fell from 320,360 to 274,560 KiB. Post-GC live
+managed heap with the reported owners retained fell from 124.82 to 90.87 MB.
+
+Current state JSON stayed approximately 600.9 KB and all 64 retained snapshots
+approximately 26.53 MB. Across the full 65-resource fixture, the read tables held
+65 current heads and 165 revision summaries: 145,674 logical JSON bytes and 311,296
+physical relation/index bytes. Total public relation bytes rose from 9,003,008 to
+9,314,304. Full-workload WAL rose from 9,642,608 to 10,273,768 bytes. The WAL delta
+covers the whole owned server during schema setup, document and host fixtures,
+permission changes and background activity; it is not a save-only or device-write
+measurement.
+
+Selective reads retain validation work over revision keys to check count, lifecycle
+and latest number. That work still scales with history length. Saves and protocol
+graph operations continue to allocate complete graph state. In-memory stores
+already own decoded state, so projecting fresh metadata and the measurement adapter
+can add allocation there. At ten saves, uncached in-memory total allocation rose
+from 135.15 to 141.01 MB. In the larger 20-save DOCX pair, durable allocation fell
+from 6.203 to 3.240 GB, but RSS rose from 387,444 to 412,392 KiB. Larger in-memory
+allocation changed from 2.642 to 2.649 GB and RSS from 395,836 to 410,128 KiB.
+These are single trials; the process-memory causes remain unresolved.
+
+Explicit schema-5-to-6 initialization on a clone of the 100-save fixture took
+370.41 ms and allocated 22.25 MB. The whole process took 0.452 seconds and peaked
+at 83,384 KiB RSS. It preserved all 128 retained snapshot rows across 65 resources,
+27,113,298 JSON bytes and the logical usage ledger exactly, checked with a SHA-256
+for every row. It built 65 heads and 165 summaries from current heads. Whole-server
+WAL during this migration was 16,888,056 bytes, with the same background-activity
+scope limitation as the workload WAL measure.
+
+Raw data, source/binary hashes, excluded stale-output setup diagnostics, the
+comparison script and migration probe remain in ignored `artifacts/selective-reads/`.
+`--read-metrics` reproduces the extra read phases. The automated regressions make
+full state reads fail while exercising metadata, catalog, paging and downloads;
+they also cover unsigned revision numbers, stale/corrupt projections, current-head
+membership after migration/import, authorization races and custom-policy fallback.

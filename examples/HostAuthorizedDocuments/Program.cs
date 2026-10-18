@@ -1,4 +1,6 @@
+using System.Collections;
 using System.Diagnostics;
+using System.Reflection;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
@@ -26,8 +28,8 @@ foreach (var argument in args)
         int.TryParse(argument[8..], out var saves) && saves is >= 1 and <= 100) saveCount = saves;
     else if (argument.StartsWith("--payload-bytes=", StringComparison.Ordinal) &&
         int.TryParse(argument[16..], out var payload) && payload is >= 0 and <= 4 * 1024 * 1024) payloadBytes = payload;
-    else if (argument is not ("--cache" or "--durable" or "--measure-gc"))
-        throw new ArgumentException("Supported switches: --cache, --durable, --saves=1..100, --payload-bytes=0..4194304, --measure-gc.");
+    else if (argument is not ("--cache" or "--durable" or "--measure-gc" or "--read-metrics"))
+        throw new ArgumentException("Supported switches: --cache, --durable, --saves=1..100, --payload-bytes=0..4194304, --measure-gc, --read-metrics.");
 }
 var payloadRandom = new Random(42);
 var extraText = new string(Enumerable.Range(0, payloadBytes).Select(_ => (char)payloadRandom.Next('a', 'z' + 1)).ToArray());
@@ -54,6 +56,7 @@ if (durable)
 }
 else storage = new(new InMemoryStateStore(), new InMemoryContentStore());
 var service = new CellBridgeDocumentService(storage, documentAuthorizationProvider: authority);
+var readMetrics = args.Contains("--read-metrics") ? new ReadBenchmarkAdapter(service) : null;
 var metrics = new List<object>();
 var checks = new List<string>();
 try
@@ -125,6 +128,60 @@ try
     await MeasureConcurrent("mixed-hot-cold-history", 512, async index =>
         await service.ListRevisionsAsync(index % 2 == 0 ? id : resources[(index / 2) % resources.Count], actor));
 
+    if (readMetrics is not null)
+    {
+        const int pageSize = 8;
+        var expectedHistory = new Dictionary<Guid, BenchmarkRevision[]>();
+        foreach (var resource in resources)
+            expectedHistory.Add(resource, (await service.ListRevisionsAsync(resource, actor))
+                .Select(BenchmarkRevision.Capture).ToArray());
+        var expectedCatalog = await AuthorizedDocumentCatalog.ReadAsync(service, actor, 0, resourceCount);
+        if (expectedCatalog.NextOffset is not null || expectedCatalog.Documents.Count != resourceCount ||
+            !expectedCatalog.Documents.Select(document => document.ResourceId).ToHashSet().SetEquals(resources))
+            throw new InvalidOperationException("The catalog fixture did not contain every authorized resource.");
+        await Measure("authorized-catalog-pages", 200, async index =>
+        {
+            var offset = index % (resourceCount / 16) * 16;
+            var page = await AuthorizedDocumentCatalog.ReadAsync(service, actor, offset, 16);
+            var expected = expectedCatalog.Documents.Skip(offset).Take(16).ToArray();
+            if (page.NextOffset != (offset + 16 < resourceCount ? offset + 16 : null) ||
+                !page.Documents.Select(document => (document.ResourceId, document.Path, document.Length,
+                    document.ContentVersion, document.ModifiedUtc, document.ActiveEditors))
+                    .SequenceEqual(expected.Select(document => (document.ResourceId, document.Path, document.Length,
+                        document.ContentVersion, document.ModifiedUtc, document.ActiveEditors))))
+                throw new InvalidOperationException("A catalog page changed authorized identities or metadata.");
+        });
+        await MeasureConcurrent("mixed-paged-revision-summaries", 512, async index =>
+        {
+            var resource = index % 2 == 0 ? id : resources[(index / 2) % resources.Count];
+            var revisions = expectedHistory[resource];
+            var offset = resource == id ? (index / 2) % ((revisions.Length + pageSize - 1) / pageSize) * pageSize : 0;
+            var page = await readMetrics.ListAsync(resource, offset, pageSize, actor);
+            if (page.NextOffset != (offset + pageSize < revisions.Length ? offset + pageSize : null) ||
+                !page.Revisions.SequenceEqual(revisions.Skip(offset).Take(pageSize)))
+                throw new InvalidOperationException("A revision-summary page changed historical metadata.");
+        });
+        var historical = new[] { -1, 0, packages.Length / 2, packages.Length - 1 }.Distinct()
+            .Select(index => (Revision: state.Revisions[0].RevisionNumber + (ulong)(index + 1),
+                Bytes: index < 0 ? initialPackage : packages[index])).ToArray();
+        await MeasureConcurrent("selected-historical-download-metadata", 512, async index =>
+        {
+            var selected = historical[index % historical.Length];
+            var summary = await readMetrics.GetAsync(id, selected.Revision, actor);
+            if (summary != expectedHistory[id].Single(revision => revision.RevisionNumber == selected.Revision))
+                throw new InvalidOperationException("Selected historical download metadata changed.");
+        });
+        foreach (var selected in historical)
+        {
+            var summary = await readMetrics.GetAsync(id, selected.Revision, actor);
+            if (!(await storage.Content.ReadVerifiedAsync(summary.Content)).SequenceEqual(selected.Bytes))
+                throw new InvalidOperationException("Selected metadata did not resolve to the historical file bytes.");
+        }
+        checks.Add("authorized-catalog-page-identities-and-metadata");
+        checks.Add("paged-revision-summary-order-content-and-continuations");
+        checks.Add("selected-historical-download-handles-with-verified-bytes");
+    }
+
     var scopedId = Guid.NewGuid();
     await SetPermissions(scopedId, actor, read: true, write: true);
     await service.ImportExternalAsync(scopedId, $"/shared/{workspace}/other-workspace.docx", Package("private"),
@@ -139,6 +196,16 @@ try
     if (authority is CachedDocumentAuthorizationProvider cache) cache.InvalidateSubject(actor.Identity.Subject);
     var beforeDenials = JsonSerializer.Serialize(await storage.State.FindByResourceIdAsync(id));
     await ExpectDenied("revoked-history-read", async () => await service.ListRevisionsAsync(id, actor));
+    if (readMetrics is not null)
+    {
+        await ExpectDenied("revoked-revision-summary-page", async () => await readMetrics.ListAsync(id, 0, 8, actor));
+        await ExpectDenied("revoked-selected-historical-metadata", async () =>
+            await readMetrics.GetAsync(id, state.Revisions[0].RevisionNumber, actor));
+        if ((await AuthorizedDocumentCatalog.ReadAsync(service, actor, 0, resourceCount))
+            .Documents.Any(document => document.ResourceId == id))
+            throw new InvalidOperationException("The catalog exposed a revoked document.");
+        checks.Add("revoked-document-absent-from-authorized-catalog");
+    }
     await ExpectDenied("revoked-new-save", async () =>
         await service.SaveWholeFileAsync(id, new MemoryStream(Package("revoked")), "revoked-save", actor, "example-lock"));
     await ExpectDenied("revoked-receipt-replay", async () =>
@@ -210,6 +277,7 @@ try
         cacheTtlSeconds = 10,
         resourceCount,
         mixedReadConcurrency = concurrency,
+        selectiveReadBenchmark = readMetrics?.Implementation,
         changedSaveCount = saveCount,
         extraTextBytes = payloadBytes,
         packageBytes = packages[^1].Length,
@@ -331,5 +399,58 @@ sealed class PostgreSqlHostAuthority(NpgsqlDataSource database) : IDocumentAutho
         command.Parameters.AddWithValue("id", request.ResourceId); command.Parameters.AddWithValue("subject", request.Subject);
         command.Parameters.AddWithValue("workspace", request.Scope.WorkspaceId!);
         return new(await command.ExecuteScalarAsync(cancellationToken) is true, evaluatedAt);
+    }
+}
+
+
+// The optional adapter keeps one measurement executable usable with older dependency
+// builds. Baseline reads project the existing full-history APIs to the same fields.
+sealed record BenchmarkRevision(Guid ResourceId, long LifecycleGeneration, ulong RevisionNumber,
+    uint ContentVersion, DateTime CreatedUtc, SubjectIdentity Author, ContentHandle Content)
+{
+    public static BenchmarkRevision Capture(DocumentRevision value) => new(value.ResourceId,
+        value.LifecycleGeneration, value.RevisionNumber, value.ContentVersion, value.CreatedUtc, value.Author, value.Content);
+    public static BenchmarkRevision Capture(object value) => new(Read<Guid>(value, "ResourceId"),
+        Read<long>(value, "LifecycleGeneration"), Read<ulong>(value, "RevisionNumber"),
+        Read<uint>(value, "ContentVersion"), Read<DateTime>(value, "CreatedUtc"),
+        Read<SubjectIdentity>(value, "Author"), Read<ContentHandle>(value, "Content"));
+    public static T Read<T>(object value, string name) => (T)value.GetType().GetProperty(name)!.GetValue(value)!;
+}
+sealed record BenchmarkRevisionPage(IReadOnlyList<BenchmarkRevision> Revisions, int? NextOffset);
+sealed class ReadBenchmarkAdapter(CellBridgeDocumentService service)
+{
+    private readonly MethodInfo? _list = typeof(CellBridgeDocumentService).GetMethod("ListRevisionSummariesAsync",
+        [typeof(Guid), typeof(int), typeof(int), typeof(CellBridgeActor), typeof(CancellationToken)]);
+    private readonly MethodInfo? _get = typeof(CellBridgeDocumentService).GetMethod("GetRevisionSummaryAsync",
+        [typeof(Guid), typeof(ulong), typeof(CellBridgeActor), typeof(CancellationToken)]);
+    public string Implementation => _list is not null && _get is not null
+        ? "Selective metadata APIs with a reflection measurement adapter"
+        : "Compatibility projection of full-history APIs";
+    public async ValueTask<BenchmarkRevisionPage> ListAsync(Guid resource, int offset, int limit, CellBridgeActor actor)
+    {
+        if (_list is null)
+        {
+            var revisions = await service.ListRevisionsAsync(resource, actor);
+            return new(revisions.Skip(offset).Take(limit).Select(BenchmarkRevision.Capture).ToArray(),
+                offset + limit < revisions.Count ? offset + limit : null);
+        }
+        var page = await Invoke(_list, [resource, offset, limit, actor, CancellationToken.None]);
+        return new(BenchmarkRevision.Read<IEnumerable>(page, "Revisions").Cast<object>()
+            .Select(BenchmarkRevision.Capture).ToArray(), BenchmarkRevision.Read<int?>(page, "NextOffset"));
+    }
+    public async ValueTask<BenchmarkRevision> GetAsync(Guid resource, ulong revision, CellBridgeActor actor)
+    {
+        if (_get is null) return BenchmarkRevision.Capture(await service.GetRevisionAsync(resource, revision, actor));
+        return BenchmarkRevision.Capture(await Invoke(_get, [resource, revision, actor, CancellationToken.None]));
+    }
+    private async ValueTask<object> Invoke(MethodInfo method, object[] arguments)
+    {
+        object pending;
+        try { pending = method.Invoke(service, arguments)!; }
+        catch (TargetInvocationException error) when (error.InnerException is not null)
+        { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+        var task = (Task)pending.GetType().GetMethod("AsTask")!.Invoke(pending, null)!;
+        await task;
+        return task.GetType().GetProperty("Result")!.GetValue(task)!;
     }
 }

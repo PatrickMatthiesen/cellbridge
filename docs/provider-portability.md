@@ -18,7 +18,7 @@ dotnet build CellBridge.slnx -c Release
 ```
 
 Initialize the destination with `CellBridge.Storage.Setup` and its own connection
-string. Recovery uses storage schema 5 plus recovery schema 1. Explicit setup adds
+string. Recovery uses storage schema 6 plus recovery schema 1. Explicit setup adds
 the recovery tables to an existing supported database and preserves existing state.
 Export/import never initialize a database implicitly. Missing, future or multiple
 recovery schema versions fail before import writes content.

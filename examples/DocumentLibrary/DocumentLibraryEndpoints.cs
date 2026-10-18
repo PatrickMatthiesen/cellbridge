@@ -85,7 +85,11 @@ public static class DocumentLibraryEndpoints
         {
             try
             {
-                var revisions = await library.HistoryAsync(resourceId, RequireActor(context), context.RequestAborted);
+                var offset = 0;
+                if (context.Request.Query.TryGetValue("offset", out var rawOffset) &&
+                    (!int.TryParse(rawOffset, System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out offset) || offset < 0)) return Results.BadRequest();
+                var revisions = await library.HistoryPageAsync(resourceId, offset, RequireActor(context), context.RequestAborted);
                 var token = antiforgery.GetAndStoreTokens(context).RequestToken!;
                 return Html(DocumentLibraryPage.History(context, resourceId, revisions, token));
             }

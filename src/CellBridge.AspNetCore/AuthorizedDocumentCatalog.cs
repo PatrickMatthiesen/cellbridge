@@ -20,14 +20,14 @@ public static class AuthorizedDocumentCatalog
             if (candidates.Count == 0) break;
             foreach (var candidate in candidates)
             {
-                var state = await service.Provider.State.FindByResourceIdAsync(candidate.ResourceId, cancellationToken);
-                if (state is null || !state.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase)) continue;
-                var admitted = await service.AuthorizeActorAsync(actor, state, DocumentAccess.Read, cancellationToken, fresh: true);
-                state = await service.RevalidateReadStateAsync(state, cancellationToken);
-                if (state is null || !service.Access(admitted, state).HasFlag(DocumentAccess.Read)) continue;
+                if (!candidate.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase)) continue;
+                DocumentReadMetadata state;
+                try { state = await service.GetDocumentMetadataAsync(candidate.ResourceId, actor, cancellationToken); }
+                catch (UnauthorizedAccessException) { continue; }
+                catch (KeyNotFoundException) { continue; }
+                if (!state.Path.StartsWith("/shared/", StringComparison.OrdinalIgnoreCase)) continue;
                 if (skipped++ < offset) continue;
-                visible.Add(new(state.ResourceId, state.Path, state.Content.Length, state.ContentVersion,
-                    state.ModifiedUtc, state.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow)) { Security = state.Security });
+                visible.Add(state.ToSummary(DateTime.UtcNow));
                 if (visible.Count > limit) break;
             }
             physicalOffset += candidates.Count;
