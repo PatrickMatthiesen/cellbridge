@@ -11,7 +11,7 @@ namespace CellBridge.Storage.Abstractions;
 /// membership is an ordered sequence of table ranges; no graph identity is removed.
 /// The detached public records and legacy expanded JSON remain unchanged.
 /// </summary>
-public static class DocumentStateJson
+public static partial class DocumentStateJson
 {
     private static readonly ConditionalWeakTable<DocumentState, Size> Sizes = new();
     private sealed record Size(long Bytes);
@@ -71,11 +71,7 @@ public static class DocumentStateJson
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object) throw new JsonException("Expected a document state.");
-            if (root.TryGetProperty("Revisions", out var revisions))
-            {
-                if (revisions.ValueKind != JsonValueKind.Array) throw new JsonException("Expected revision history.");
-                StorageLimits.Check("history revisions", revisions.GetArrayLength(), limits.MaxHistoryRevisions);
-            }
+            PreflightGraphMemberships(root, limits);
             if (strict) CheckDuplicates(document.RootElement);
             var options = strict ? StrictOptions : JsonSerializerOptions.Default;
             ElementRanges? ranges = null;
@@ -84,8 +80,6 @@ public static class DocumentStateJson
                 var table = metadata.Deserialize<GraphMetadata>(options) ?? throw new JsonException("Missing graph table.");
                 if (table.Version != 1 || table.Elements is null || table.Elements.Any(e => e is null || e.MappingSerials.IsDefault))
                     throw new JsonException("Unsupported or incomplete graph metadata.");
-                StorageLimits.Check("shared graph descriptors", table.Elements.LongLength,
-                    checked((long)limits.MaxGraphElements * (limits.MaxHistoryRevisions + 1L)));
                 context = AcquireContext();
                 ranges = context.Ranges;
                 ranges.Initialize(table.Elements, maxElements: limits.MaxGraphElements);
@@ -243,28 +237,34 @@ public static class DocumentStateJson
     private static void ValidatePartitionIdentities(DocumentState state)
     {
         foreach (var partitions in state.Partitions.Concat(state.Revisions.SelectMany(r => r.Partitions)).GroupBy(p => p.Kind))
-            ValidateIdentities(partitions.SelectMany(p => p.Elements));
-    }
-
-    private static void ValidateIdentities(IEnumerable<GraphElementState> elements)
-    {
-        var identities = new Dictionary<ExtendedId, GraphElementState>();
-        foreach (var element in elements)
         {
-            if (element.Id is null || element.Serial is null || element.Payload is null || element.MappingSerials.IsDefault)
-                throw new StorageCorruptionException("Incomplete immutable graph descriptor.");
-            if (identities.TryGetValue(element.Id, out var previous))
+            var identities = new Dictionary<ExtendedId, (GraphElementState Element, int Partition)>();
+            var partitionNumber = 0;
+            foreach (var partition in partitions)
             {
-                // Protocol null serials may acquire a watermark. Two populated serials
-                // for one immutable element must agree, as must its payload and mappings.
-                if (previous.Type != element.Type || previous.Payload.Length != element.Payload.Length ||
-                    previous.Payload.Sha256 != element.Payload.Sha256 ||
-                    previous.Serial.Guid != Guid.Empty && element.Serial.Guid != Guid.Empty && previous.Serial != element.Serial ||
-                    !previous.MappingSerials.AsSpan().SequenceEqual(element.MappingSerials.AsSpan()))
-                    throw new StorageCorruptionException("Conflicting immutable graph descriptor identity.");
-                if (previous.Serial.Guid != Guid.Empty) continue;
+                foreach (var element in partition.Elements)
+                {
+                    if (element is null || element.Id is null || element.Serial is null || element.Payload is null || element.MappingSerials.IsDefault)
+                        throw new StorageCorruptionException("Incomplete immutable graph descriptor.");
+                    var canonical = element;
+                    if (identities.TryGetValue(element.Id, out var previous))
+                    {
+                        if (previous.Partition == partitionNumber)
+                            throw new StorageCorruptionException("Duplicate graph member identity.");
+                        var prior = previous.Element;
+                        // Protocol null serials may acquire a watermark. Preserve
+                        // the populated watermark while checking later partitions.
+                        if (prior.Type != element.Type || prior.Payload.Length != element.Payload.Length ||
+                            prior.Payload.Sha256 != element.Payload.Sha256 ||
+                            prior.Serial.Guid != Guid.Empty && element.Serial.Guid != Guid.Empty && prior.Serial != element.Serial ||
+                            !prior.MappingSerials.AsSpan().SequenceEqual(element.MappingSerials.AsSpan()))
+                            throw new StorageCorruptionException("Conflicting immutable graph descriptor identity.");
+                        if (prior.Serial.Guid != Guid.Empty) canonical = prior;
+                    }
+                    identities[element.Id] = (canonical, partitionNumber);
+                }
+                partitionNumber = checked(partitionNumber + 1);
             }
-            identities[element.Id] = element;
         }
     }
 

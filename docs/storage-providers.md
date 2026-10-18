@@ -55,6 +55,17 @@ project the same immutable records under their state lock. Providers without the
 capability, and arbitrary full-state policy callbacks, use complete state reads.
 Full protocol graph operations, saves and restores continue to load complete states.
 
+Decoded graph membership has its own admission budget. The codec counts every
+current and historical element reference, multiplied by the runtime pointer size,
+before allocating descriptor objects or membership arrays. Writers apply the same
+`StorageLimits.MaxDecodedGraphMembershipBytes` limit, default 128 MiB. Array headers,
+descriptors, parser buffers and other process memory are outside this counter.
+Hosts can raise it explicitly for their available memory and concurrency. An
+existing state or migration over the configured budget fails without pruning any
+revision; migration rolls back its schema, state and ledger changes. Recovery also
+limits combined decoded membership across captured/imported snapshots to 128 MiB,
+independent of its existing encoded metadata limit.
+
 ### Configuration
 
 | Setting | Meaning |
@@ -63,6 +74,7 @@ Full protocol graph operations, saves and restores continue to load complete sta
 | `ConnectionStrings:cellbridge` | Required PostgreSQL connection string, supplied by Aspire in local development. |
 | `Storage:ContentProvider` | `PostgreSql`, the default for PostgreSQL state, or `FileSystem`. |
 | `Storage:ContentRoot` | Absolute filesystem content directory, required for FileSystem. |
+| `Storage:MaxDecodedGraphMembershipBytes` | Reference-slot bytes across current and historical graph arrays per state, default 128 MiB. Checked before compact or legacy graph decoding and on writes. This is separate from stored bytes and total process memory. |
 | `Storage:MaxObjectBytes` | Maximum bytes per binary object, default 512 MiB. This is a quota, not a tested document-size promise. |
 | `Storage:MultipleInstances` | Require shared state and content; reject incompatible provider combinations. |
 | `Storage:SharedContent` | Operator declaration that the filesystem root is shared with verified flush/rename semantics. Default false. |

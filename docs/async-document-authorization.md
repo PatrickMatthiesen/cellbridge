@@ -278,3 +278,25 @@ comparison script and migration probe remain in ignored `artifacts/selective-rea
 full state reads fail while exercising metadata, catalog, paging and downloads;
 they also cover unsigned revision numbers, stale/corrupt projections, current-head
 membership after migration/import, authorization races and custom-policy fallback.
+
+
+Code review identified that small range sequences could expand into many reference
+arrays even with shared descriptors. The codec now preflights compact and legacy
+membership counts before descriptor or membership deserialization. The configurable
+per-state `MaxDecodedGraphMembershipBytes` budget defaults to 128 MiB of reference
+slots. It also applies on writes and migration; recovery bounds the combined
+reference slots across snapshots. This counter excludes descriptor objects, array
+headers and other process memory. It changes admission, not retention: over-budget
+operations fail, and migration rolls back without dropping history. Writers also
+reject duplicate identities within one partition so they cannot publish compact
+JSON that their reader rejects. Identity reuse across revisions and allowed
+null-serial watermark upgrades remain supported.
+
+A bounded follow-up compared the reviewed selective-read build with these
+admission guards on identical fresh-database workloads. The uncached durable
+100-save run changed from 33.40 to 34.21 seconds and 4.163 to 4.202 GB allocated.
+The cached pair changed from 33.26 to 33.60 seconds and 4.165 to 4.170 GB. The
+larger 20-save pair changed from 17.59 to 17.84 seconds with allocation about
+3.236 GB in both builds. All six trials passed 17 checks. RSS and live heap
+remained variable; the guards bound admitted reference arrays, not total process
+memory. Raw evidence and hashes remain in `artifacts/review-memory-budget/`.

@@ -79,6 +79,12 @@ public static class ProviderRecovery
         if (snapshot.Heads.Select(h => h.ResourceId).Distinct().Count() != snapshot.Heads.Length ||
             snapshot.Snapshots.Select(s => (s.ResourceId, s.StateVersion)).Distinct().Count() != snapshot.Snapshots.Length)
             throw new StorageCorruptionException("Duplicate recovery identity.");
+        long decodedGraphMembershipBytes = 0;
+        foreach (var state in snapshot.Snapshots)
+        {
+            decodedGraphMembershipBytes = checked(decodedGraphMembershipBytes + StorageLimits.GetDecodedGraphMembershipBytes(state));
+            StorageLimits.Check("recovery decoded graph membership bytes", decodedGraphMembershipBytes, 128L * 1024 * 1024);
+        }
         var heads = snapshot.Heads.ToDictionary(h => h.ResourceId);
         var groups = snapshot.Snapshots.GroupBy(s => s.ResourceId).ToDictionary(g => g.Key, g => g.ToArray());
         if (heads.Count != groups.Count) throw new StorageCorruptionException("Recovery heads and snapshots disagree.");
