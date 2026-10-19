@@ -32,7 +32,7 @@ are rejected. Shared base-lock authority, recoverable external publication and
 conditional document lifecycle APIs are available for hosts to adopt. Their
 presence does not qualify every external backend or desktop client.
 
-PostgreSQL setup explicitly migrates schema 3 to 4 with hosts stopped. Back up
+PostgreSQL setup explicitly migrates schema 3, 4 or 5 to 6 with hosts stopped. Back up
 state and content before upgrading. See the upgrade and tested recovery limits
 in the repository guides before changing a durable installation.
 

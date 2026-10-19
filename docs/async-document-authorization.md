@@ -29,7 +29,7 @@ For a host owning its routes, construct `CellBridgeDocumentService` with the nam
 
 Use `CreateExternalAsync` with a host-selected resource GUID and `DocumentAuthorizationScope` for ordinary creation. It requires both the actor's explicit `CanCreate` host capability and the provider's `Create` decision. `ImportExternalAsync` is a trusted import operation requiring `CanCreate`, not a user-level bypass for upload routes. The host supplies scope through trusted resource registration. Document paths do not determine tenant membership. Moving a path keeps the existing scope; changing authority scope requires explicit binding migration.
 
-The runnable [HostAuthorizedDocuments example](../examples/HostAuthorizedDocuments/README.md) uses a real async PostgreSQL permission query, direct protocol processing, shared host locks, and whole-file saves. It has no dependency on ShareBridge or WopiHost.
+The [document library web example](../examples/DocumentLibrary/README.md) shows an async permission provider in an authenticated host, with optional caching, document saves and version history.
 
 ## Operation boundaries
 
@@ -91,62 +91,26 @@ The provider domain and scope are durable identifiers. Changing scope/domain is 
 
 An external authority in the same PostgreSQL database still uses separate transactions from CellBridge. That supports ordinary admitted-work semantics; it does not create atomic cross-module revocation. No multi-process instant-revocation guarantee is implied by the choice of database.
 
-## Consumer measurements and remaining storage limit
+## Read document metadata and history
 
-The initial hot-resource trial used one changed save followed by 99 no-op
-receipts. It demonstrated fewer authority queries with caching, but did not test
-repeated editing or durable storage growth. The current
-[document example](../examples/HostAuthorizedDocuments/README.md) performs 100
-changing saves with verified bytes, then mixes concurrent reads across 64 resources.
-It also checks creation, reader/writer separation, scope isolation, grants,
-revocation, receipt replay and retained locks.
+Use `GetDocumentMetadataAsync` for current file metadata and
+`ListRevisionSummariesAsync` for a history page. These APIs return metadata
+without partition graphs or file bytes:
 
-On 2026-10-17 all four Release modes completed against isolated PostgreSQL 18.3:
-in-memory and PostgreSQL document stores, each cached and uncached. Each mode
-passed the same ten scenario checks. The host permission store was PostgreSQL in
-every mode. The optional cache had capacity 32 and an absolute ten-second TTL.
+```csharp
+var page = await documents.ListRevisionSummariesAsync(resourceId, offset: 0,
+    limit: 20, actor, cancellationToken);
+foreach (var revision in page.Revisions)
+    Console.WriteLine($"{revision.RevisionNumber}: {revision.CreatedUtc:u}");
+```
 
-| Workload | Uncached provider calls | Cached calls, in-memory documents | Cached calls, PostgreSQL documents |
-| --- | ---: | ---: | ---: |
-| 1,000 history reads | 1,000 | 1 | 1 |
-| 200 direct SOAP metadata requests | 400 | 0 | 0 |
-| 100 changing whole-file saves and readbacks | 100 | 0 | 3 |
-| 512 mixed history reads, concurrency eight | 512 | 252 | 257 |
+History pages are newest first, with a maximum page size of 256. Pass
+`NextOffset` to read the next page. Concurrent saves can move entries between
+pages. Use `GetRevisionSummaryAsync` with a revision number to select one version.
+Each call checks the caller's current access, including reads of older versions.
+The HTTP download endpoints also authorize each request.
 
-The durable run crossed TTL boundaries and therefore refreshed decisions.
-Concurrent cache misses can also duplicate provider calls. These single trials
-ran alongside build/test work, so they do not establish comparative latency or
-production throughput. The interactive DocumentLibrary separately exercises
-cookie-authenticated HTTP and SOAP saves with both cache modes; neither example
-qualifies live Office interoperability.
-
-The changing-save workload exposed a storage defect. Each newly published index
-copied revision mappings from all retained indexes, causing cubic mapping growth
-across revision history. Publication now copies the selected index's mappings
-and new revision wrappers. It retains every old graph element, ancestor,
-immutable-identity check and serial watermark. Regression tests materialize old
-revisions, replay receipts, reject a stale protocol save and accept a subsequent
-fresh protocol save.
-
-This fixes one source of amplification, not the remaining history-storage design.
-In the 100-save durable workload, serialized document state fell from 37.3 MB to
-16.4 MB. Historical revisions still repeat the cumulative graph descriptors,
-which grow quadratically for these changing whole-file saves. The PostgreSQL
-provider also retains up to 64 complete state versions by default. Reading and
-serializing these states causes substantial allocation: the completed durable
-processes reached approximately 1.9 and 2.1 GiB observed RSS, sampled every 100 ms.
-RSS alone does not distinguish live managed objects, reusable runtime buffers
-and other process memory. This is not evidence that the authorization cache leaks.
-
-A separate bounded in-memory probe released the service, stores and document
-objects, then forced full collections. Their weak references became dead. After
-20/40/repeated-40 saves, shared byte-pool buffers accounted for 4.21/15.74/27.28 MB
-of the remaining managed heap; the non-pool remainder stayed near 1 MB. These
-diagnostic-only counts inspected private .NET 10.0.12 runtime fields. They explain
-most residual managed memory in that probe, but do not establish bounded pool
-growth or explain the durable process's PostgreSQL/native memory.
-
-Large edit histories remain an unresolved storage scalability limit. A follow-up
-must address repeated graph descriptors and full-state loading while preserving
-history, protocol identities, receipts and recovery. Lowering retention limits or
-forcing garbage collection would not correct that representation problem.
+The built-in stores support these selective reads. Custom stores and policies
+that require a complete document state use a full-state fallback. Keep
+`ListRevisionsAsync` and `GetRevisionAsync` for operations that need complete
+revision graphs.

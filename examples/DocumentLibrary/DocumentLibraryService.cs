@@ -159,18 +159,16 @@ public sealed class DocumentLibraryService(
         var result = new List<LibraryDocument>(page.Documents.Count);
         foreach (var summary in page.Documents)
         {
-            var state = await RequireStateAsync(summary.ResourceId, cancellationToken);
             var manifest = await destination.GetAsync(summary.ResourceId, cancellationToken);
-            var publication = state.Publication;
-            var pending = publication?.Pending.Length ?? 0;
-            var status = publication?.BlockedReason is { } reason
+            var pending = summary.PendingDeliveryCount;
+            var status = summary.DeliveryBlock is { } reason
                 ? "Committed in CellBridge; destination blocked: " + reason
                 : pending > 0
                     ? $"Committed in CellBridge; {pending} destination delivery item(s) pending"
                     : "Delivered to destination";
             result.Add(new(summary.ResourceId, manifest.FileName, manifest.CellBridgePath,
                 summary.Length, summary.ContentVersion, summary.ModifiedUtc, status, pending,
-                publication?.BlockedReason, manifest.CurrentRevision));
+                summary.DeliveryBlock, manifest.CurrentRevision));
         }
         return result;
     }
@@ -178,15 +176,17 @@ public sealed class DocumentLibraryService(
     public async Task<Stream> OpenDeliveredAsync(Guid resourceId, CellBridgeActor actor,
         CancellationToken cancellationToken = default)
     {
-        var state = await RequireStateAsync(resourceId, cancellationToken);
-        if (!(await documents.GetAccessAsync(actor, state, cancellationToken)).HasFlag(DocumentAccess.Read))
-            throw new UnauthorizedAccessException("Document access denied.");
+        _ = await documents.GetDocumentMetadataAsync(resourceId, actor, cancellationToken);
         return await destination.OpenCurrentReadAsync(resourceId, cancellationToken);
     }
 
     public async Task<IReadOnlyList<DocumentRevision>> HistoryAsync(Guid resourceId, CellBridgeActor actor,
         CancellationToken cancellationToken = default) =>
         await documents.ListRevisionsAsync(resourceId, actor, cancellationToken);
+
+    public async Task<RevisionSummaryPage> HistoryPageAsync(Guid resourceId, int offset, CellBridgeActor actor,
+        CancellationToken cancellationToken = default) =>
+        await documents.ListRevisionSummariesAsync(resourceId, offset, 100, actor, cancellationToken);
 
     public async Task<long> SetPermissionAsync(Guid resourceId, string subject, DocumentAccess access,
         CancellationToken cancellationToken = default)

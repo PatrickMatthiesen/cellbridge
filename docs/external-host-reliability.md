@@ -231,13 +231,11 @@ service reads provider snapshots and has no process-wide document cache to evict
 
 ## Storage compatibility and validation
 
-Document JSON remains format 2 with additive defaulted properties. Public beta
-constructors and `IDocumentStateStore` remain compatible. PostgreSQL schema 4 adds
-the tombstone flag and live-path uniqueness. Explicit `InitializeAsync` migrates
-schema 3 to 4 in a transaction while retaining documents/content/ownership. Stop
-all hosts against that store before migration. Schema-3 writers fail closed after
-the upgrade; mixed schema-3/schema-4 hosting is unsupported. Older schemas remain
-unsupported. This migration is not run against a shared host by this work.
+Document records remain logical format 2. PostgreSQL schema 6 requires explicit
+setup to upgrade schemas 3, 4 or 5. Stop all hosts and workers first. Upgrades
+preserve documents, history, content and ownership. Mixed writer versions are
+unsupported. See the [upgrade procedure](storage-providers.md#upgrading-a-durable-host)
+for backups and rollback.
 
 `ExternalPublicationTests`, `SharedHostLockTests` and `HostLifecycleTests` cover
 lost acknowledgements, competing publishers/protocols, delayed failure reports,

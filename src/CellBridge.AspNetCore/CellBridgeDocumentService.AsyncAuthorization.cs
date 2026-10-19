@@ -45,7 +45,13 @@ public sealed partial class CellBridgeDocumentService
             await AuthorizeActorAsync(actor, await CurrentAsync(resourceId, cancellationToken), required, cancellationToken, fresh);
     }
 
-    internal async ValueTask<CellBridgeActor> AuthorizeActorAsync(CellBridgeActor actor, DocumentState state,
+    internal ValueTask<CellBridgeActor> AuthorizeActorAsync(CellBridgeActor actor, DocumentState state,
+        DocumentAccess required, CancellationToken cancellationToken, bool fresh = false) =>
+        AuthorizeReadIdentityAsync(actor, state.ResourceId, state.LifecycleGeneration, state.IsDeleted,
+            state.Security.AuthorizationPolicy, required, cancellationToken, fresh);
+
+    private async ValueTask<CellBridgeActor> AuthorizeReadIdentityAsync(CellBridgeActor actor, Guid resourceId,
+        long lifecycleGeneration, bool isDeleted, DocumentAuthorizationBinding? observedBinding,
         DocumentAccess required, CancellationToken cancellationToken, bool fresh = false)
     {
         if (_externalAuthorization is null) return actor;
@@ -54,11 +60,11 @@ public sealed partial class CellBridgeDocumentService
         if (!fresh && actor.Authorization is not null)
             return actor;
         actor = actor with { Authorization = null };
-        if (state.IsDeleted || !IsExternalBinding(state.Security.AuthorizationPolicy) ||
+        if (isDeleted || !IsExternalBinding(observedBinding) ||
             string.IsNullOrWhiteSpace(actor.Identity.Subject) || actor.Identity.Subject.Length > 1024)
-            return actor with { Authorization = new(actor.Identity.Subject, state.ResourceId, state.LifecycleGeneration,
-                state.Security.AuthorizationPolicy, DocumentAccess.None) };
-        var binding = state.Security.AuthorizationPolicy!;
+            return actor with { Authorization = new(actor.Identity.Subject, resourceId, lifecycleGeneration,
+                observedBinding, DocumentAccess.None) };
+        var binding = observedBinding!;
         var access = DocumentAccess.None;
         // QueryAccess needs both capabilities. Ordinary write admissions imply read, as native grants do.
         if (required == DocumentAccess.None)
@@ -68,7 +74,7 @@ public sealed partial class CellBridgeDocumentService
         }
         else if (await Check(required.HasFlag(DocumentAccess.Write) ? DocumentAction.Write : DocumentAction.Read))
             access = required.HasFlag(DocumentAccess.Write) ? DocumentAccess.Read | DocumentAccess.Write : DocumentAccess.Read;
-        return actor with { Authorization = new(actor.Identity.Subject, state.ResourceId, state.LifecycleGeneration, binding, access) };
+        return actor with { Authorization = new(actor.Identity.Subject, resourceId, lifecycleGeneration, binding, access) };
 
         async ValueTask<bool> Check(DocumentAction action)
         {
@@ -76,7 +82,7 @@ public sealed partial class CellBridgeDocumentService
             try
             {
                 var result = await _externalAuthorization.AuthorizeAsync(new(actor.Identity.Subject,
-                    new(binding.TenantId, binding.WorkspaceId), state.ResourceId, state.LifecycleGeneration, binding, action), cancellationToken);
+                    new(binding.TenantId, binding.WorkspaceId), resourceId, lifecycleGeneration, binding, action), cancellationToken);
                 return result is { Allowed: true } && AuthorizationDecisionFreshness.IsValid(result.EvaluatedAtUtc,
                     result.FreshUntilUtc, start, _authorizationTime.GetUtcNow());
             }
@@ -85,9 +91,21 @@ public sealed partial class CellBridgeDocumentService
         }
     }
 
-    internal ValueTask<DocumentState?> RevalidateReadStateAsync(DocumentState observed, CancellationToken cancellationToken) =>
-        _externalAuthorization is null ? ValueTask.FromResult<DocumentState?>(observed) :
-        provider.State.FindByResourceIdAsync(observed.ResourceId, cancellationToken);
+    internal async ValueTask<DocumentState?> RevalidateReadStateAsync(DocumentState observed, CancellationToken cancellationToken)
+    {
+        if (_externalAuthorization is null) return observed;
+        if (SelectiveReads is { } reads)
+        {
+            var current = await reads.FindReadMetadataByResourceIdAsync(observed.ResourceId, cancellationToken);
+            if (current is null) return null;
+            // State versions identify immutable snapshots. An unchanged pointer lets
+            // graph-returning APIs retain their already decoded complete state.
+            if (current.StateVersion == observed.StateVersion && current.LifecycleGeneration == observed.LifecycleGeneration &&
+                current.Security.AuthorizationPolicy == observed.Security.AuthorizationPolicy)
+                return observed;
+        }
+        return await provider.State.FindByResourceIdAsync(observed.ResourceId, cancellationToken);
+    }
 
     /// <summary>Evaluates a fresh operation-time decision. Synchronous Access remains fail-closed for external actors.</summary>
     public async ValueTask<DocumentAccess> GetAccessAsync(CellBridgeActor actor, DocumentState state,

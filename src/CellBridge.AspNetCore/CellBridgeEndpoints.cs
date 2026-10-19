@@ -92,8 +92,8 @@ public static class CellBridgeEndpoints
                     System.Globalization.CultureInfo.InvariantCulture, out var number)) return Results.NotFound();
                 var actor = CellBridgeActor.FromPrincipal(context.User);
                 if (actor is null) return Results.Unauthorized();
-                DocumentRevision revision;
-                try { revision = await service.GetRevisionAsync(resourceId, number, actor, context.RequestAborted); }
+                DocumentRevisionSummary revision;
+                try { revision = await service.GetRevisionSummaryAsync(resourceId, number, actor, context.RequestAborted); }
                 catch (UnauthorizedAccessException) { return Results.NotFound(); }
                 catch (KeyNotFoundException) { return Results.NotFound(); }
                 if (revision.LifecycleGeneration != generation) return Results.NotFound();
@@ -137,14 +137,12 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
         return Results.NotFound();
     if (HttpMethods.IsOptions(context.Request.Method)) return Discovery(context);
     if (HttpMethods.IsPost(context.Request.Method)) return Results.NotFound();
-    var state = await service.Provider.State.FindByPathKeyAsync(StorageIds.PathKey(path), context.RequestAborted);
     var actor = CellBridgeActor.FromPrincipal(context.User);
     if (actor is null) return Results.Unauthorized();
+    DocumentReadMetadata? state;
+    try { state = await service.FindDocumentMetadataByPathKeyAsync(StorageIds.PathKey(path), actor, context.RequestAborted); }
+    catch (UnauthorizedAccessException) { return Results.NotFound(); }
     if (state is null) return Results.NotFound();
-    actor = await service.AuthorizeActorAsync(actor, state, DocumentAccess.Read, context.RequestAborted);
-    state = await service.RevalidateReadStateAsync(state, context.RequestAborted);
-    if (state is null) return Results.NotFound();
-    if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) return Results.NotFound();
     context.Response.Headers.CacheControl = "private, no-store";
     context.Response.ContentLength = state.Content.Length;
     context.Response.Headers.ETag = state.Etag;

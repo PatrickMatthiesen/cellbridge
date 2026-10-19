@@ -143,9 +143,24 @@ public class BudgetAndQueryTests
         var index = partition.Elements.Single(e => e.Type == (uint)DataElementType.StorageIndexDataElementData);
         Assert.NotEmpty(index.MappingSerials);
         var alias = index.MappingSerials.First();
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Partitions = current.Partitions.Select(p => p.Kind != 0 ? p : p with
-            { Elements = p.Elements.Select(e => e with { Serial = e.Type == (uint)DataElementType.StorageManifestDataElementData ? alias : e.Serial }).ToImmutableArray() }).ToImmutableArray() }, true));
+        static PartitionState ApplyAlias(PartitionState value, SerialId serial) => value.Kind != 0 ? value : value with
+        {
+            Elements = value.Elements.Select(element => element.Type == (uint)DataElementType.StorageManifestDataElementData
+                ? element with { Serial = serial } : element).ToImmutableArray(),
+        };
+        await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+        {
+            // Keep retained copies consistent while aliasing an element serial with a mapping serial.
+            var next = current with
+            {
+                Partitions = current.Partitions.Select(partition => ApplyAlias(partition, alias)).ToImmutableArray(),
+                Revisions = current.Revisions.Select(revision => revision with
+                {
+                    Partitions = revision.Partitions.Select(partition => ApplyAlias(partition, alias)).ToImmutableArray(),
+                }).ToImmutableArray(),
+            };
+            return new StateTransition<bool>(next, true);
+        });
         var full = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(), new Dictionary<string, string>(), TestActor.Value);
         var known = ClientKnowledge.FromElements(full.Response.DataElementPackage!.DataElements);
         var delta = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, Query(known), new Dictionary<string, string>(), TestActor.Value);

@@ -1,11 +1,10 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
-using System.Text.Json;
 using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.InMemory;
 
-public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore, IProviderRecoveryStore
+public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentReadStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore, IProviderRecoveryStore
 {
     public StorageBudget Budget { get; private set; }
     public InMemoryStateStore(StorageBudget? budget = null) => Budget = budget ?? new StorageBudget();
@@ -40,7 +39,8 @@ public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentL
             IReadOnlyList<DocumentSummary> result = _documents.Values.Where(x => !x.IsDeleted).OrderBy(x => x.PathKey, StringComparer.Ordinal)
                 .Skip(offset).Take(limit).Select(x => new DocumentSummary(x.ResourceId, x.Path, x.Content.Length,
                     x.ContentVersion, x.ModifiedUtc, x.Editors.Count(e => e.ExpiresUtc > DateTime.UtcNow))
-                    { Security = x.Security }).ToArray();
+                    { Security = x.Security, PendingDeliveryCount = x.Publication?.Pending.Length ?? 0,
+                        DeliveryBlock = x.Publication?.BlockedReason }).ToArray();
             return ValueTask.FromResult(result);
         }
     }
@@ -56,7 +56,7 @@ public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentL
                     _documents.Values.Any(s => s.RetiredPathKeys.Contains(state.PathKey))) return ValueTask.FromResult(false);
                 var next = state with { StateVersion = 0 };
                 Budget.Limits.CheckDocument(next);
-                Budget.Adjust(JsonSerializer.SerializeToUtf8Bytes(next).LongLength, 1);
+                Budget.Adjust(DocumentStateJson.GetSerializedSize(next), 1);
                 _documents[state.ResourceId] = next;
                 _paths.Add(state.PathKey, state.ResourceId);
                 return ValueTask.FromResult(true);

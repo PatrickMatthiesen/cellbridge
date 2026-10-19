@@ -88,6 +88,8 @@ public sealed record DocumentSummary(Guid ResourceId, string Path, long Length,
     uint ContentVersion, DateTime ModifiedUtc, int ActiveEditors)
 {
     public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
+    public int PendingDeliveryCount { get; init; }
+    public string? DeliveryBlock { get; init; }
 }
 
 /// <summary>Content writes must complete durably before their handles can be published.</summary>

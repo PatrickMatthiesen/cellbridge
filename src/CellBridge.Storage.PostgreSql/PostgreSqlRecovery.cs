@@ -60,6 +60,7 @@ public sealed partial class PostgreSqlStateStore
                 }
             var states = ImmutableArray.CreateBuilder<DocumentState>();
             long metadataBytes = 0;
+            long decodedGraphMembershipBytes = 0;
             await using (var command = new NpgsqlCommand("SELECT resource_id,state_version,state_json FROM cellbridge_states ORDER BY resource_id,state_version", connection, transaction))
             await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 while (await reader.ReadAsync(cancellationToken))
@@ -67,7 +68,17 @@ public sealed partial class PostgreSqlStateStore
                     var bytes = Encoding.UTF8.GetBytes(reader.GetString(2));
                     metadataBytes = checked(metadataBytes + bytes.LongLength);
                     StorageLimits.Check("recovery metadata bytes", metadataBytes, 128L * 1024 * 1024);
-                    var state = RecoveryJson.Read<DocumentState>(bytes);
+                    // Compact snapshots can reuse a small graph table in many
+                    // membership arrays. Bound their aggregate before decoding
+                    // another snapshot, while the earlier states remain owned here.
+                    var remainingGraphMembershipBytes = 128L * 1024 * 1024 - decodedGraphMembershipBytes;
+                    var decodeLimits = _limits with
+                    {
+                        MaxDecodedGraphMembershipBytes = Math.Min(_limits.MaxDecodedGraphMembershipBytes, remainingGraphMembershipBytes),
+                    };
+                    var state = DocumentStateJson.Deserialize(Encoding.UTF8.GetString(bytes), strict: true, limits: decodeLimits);
+                    decodedGraphMembershipBytes = checked(decodedGraphMembershipBytes + StorageLimits.GetDecodedGraphMembershipBytes(state));
+                    StorageLimits.Check("recovery decoded graph membership bytes", decodedGraphMembershipBytes, 128L * 1024 * 1024);
                     if (state.ResourceId != reader.GetGuid(0) || state.StateVersion != reader.GetInt64(1))
                         throw new StorageCorruptionException("Recovery snapshot row identity disagrees with JSON.");
                     if (pointers.TryGetValue((state.ResourceId, state.StateVersion), out var pointer) &&
