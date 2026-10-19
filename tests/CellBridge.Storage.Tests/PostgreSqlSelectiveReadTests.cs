@@ -36,7 +36,7 @@ public sealed class PostgreSqlSelectiveReadTests
             await Assert.ThrowsAsync<StorageCorruptionException>(() => store.FindByResourceIdAsync(state.ResourceId).AsTask());
 
             var metadata = (await store.FindReadMetadataByResourceIdAsync(state.ResourceId))!;
-            Assert.Equal(JsonSerializer.Serialize(DocumentReadModels.Metadata(current)), JsonSerializer.Serialize(metadata));
+            AssertMetadata(current, metadata);
             Assert.Equal(JsonSerializer.Serialize(metadata), JsonSerializer.Serialize(await store.FindReadMetadataByPathKeyAsync(current.PathKey)));
             var page = (await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 1))!;
             Assert.Equal(ulong.MaxValue, Assert.Single(page.Revisions).RevisionNumber);
@@ -98,8 +98,7 @@ public sealed class PostgreSqlSelectiveReadTests
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
             await store.InitializeAsync();
             Assert.Equal(before, await SnapshotJson(source));
-            Assert.Equal(JsonSerializer.Serialize(DocumentReadModels.Metadata(state)),
-                JsonSerializer.Serialize(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)));
+            AssertMetadata(state, await store.FindReadMetadataByResourceIdAsync(state.ResourceId));
             var page = (await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!;
             Assert.Equal(state.Revisions.Select(revision => revision.RevisionNumber).Reverse(),
                 page.Revisions.Select(revision => revision.RevisionNumber));
@@ -150,34 +149,6 @@ public sealed class PostgreSqlSelectiveReadTests
         });
 
     [PostgreSqlFact]
-    public Task RecoveryImportRebuildsCurrentProjectionsWithSnapshotsInReverseOrder() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
-        {
-            var store = new PostgreSqlStateStore(source);
-            var content = new PostgreSqlContentStore(source);
-            var service = new CellBridgeDocumentService(new(store, content));
-            var state = (await service.CreateAsync("/projection-recovery.docx", MinimalDocx.Create(), TestActor.Value))!;
-            for (var index = 0; index < 2; index++) state = await RevisionHistoryTests.Save(service, state, "revision " + index);
-            var snapshot = await store.CaptureRecoveryAsync();
-            await BudgetAndQueryTests.WithDatabase(new(), async destination =>
-            {
-                var target = new PostgreSqlStateStore(destination);
-                var targetContent = new PostgreSqlContentStore(destination);
-                foreach (var handle in ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(StorageReferences.Handles)))
-                {
-                    await using var bytes = await content.OpenReadAsync(handle);
-                    Assert.Equal(handle, await targetContent.WriteAsync(bytes));
-                }
-                var reversed = snapshot with { Snapshots = snapshot.Snapshots.Reverse().ToImmutableArray() };
-                await target.ImportRecoveryAsync(reversed, new(Guid.NewGuid(), new string('a', 64), snapshot.Heads.Length, snapshot.Snapshots.Length));
-                Assert.Equal(JsonSerializer.Serialize(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)),
-                    JsonSerializer.Serialize(await target.FindReadMetadataByResourceIdAsync(state.ResourceId)));
-                Assert.Equal(JsonSerializer.Serialize((await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions),
-                    JsonSerializer.Serialize((await target.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions));
-            });
-        });
-
-    [PostgreSqlFact]
     public Task RemovedCurrentRevisionDoesNotReturnFromRetainedSnapshotsMigrationOrReverseImport() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
@@ -223,6 +194,10 @@ public sealed class PostgreSqlSelectiveReadTests
                 var reversed = snapshot with { Snapshots = snapshot.Snapshots.Reverse().ToImmutableArray() };
                 await target.ImportRecoveryAsync(reversed, new(Guid.NewGuid(), new string('b', 64), snapshot.Heads.Length, snapshot.Snapshots.Length));
                 await AssertCurrentMembership(target);
+                Assert.Equal(JsonSerializer.Serialize(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)),
+                    JsonSerializer.Serialize(await target.FindReadMetadataByResourceIdAsync(state.ResourceId)));
+                Assert.Equal(JsonSerializer.Serialize((await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions),
+                    JsonSerializer.Serialize((await target.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions));
                 var restored = await target.CaptureRecoveryAsync();
                 Assert.Contains(restored.Snapshots, old => old.StateVersion < restored.Heads.Single().StateVersion &&
                     old.Revisions.Any(revision => revision.RevisionNumber == removed.RevisionNumber));
@@ -267,6 +242,27 @@ public sealed class PostgreSqlSelectiveReadTests
             await using (var check = source.CreateCommand("SELECT state_json FROM cellbridge_states"))
                 Assert.Equal("not JSON", await check.ExecuteScalarAsync());
         });
+
+    private static void AssertMetadata(DocumentState expected, DocumentReadMetadata? actual)
+    {
+        Assert.NotNull(actual);
+        Assert.Equal(expected.ResourceId, actual.ResourceId);
+        Assert.Equal(expected.Path, actual.Path);
+        Assert.Equal(expected.PathKey, actual.PathKey);
+        Assert.Equal(expected.CreatedUtc, actual.CreatedUtc);
+        Assert.Equal(expected.ModifiedUtc, actual.ModifiedUtc);
+        Assert.Equal(expected.ContentVersion, actual.ContentVersion);
+        Assert.Equal(expected.StateVersion, actual.StateVersion);
+        Assert.Equal(expected.LifecycleGeneration, actual.LifecycleGeneration);
+        Assert.Equal(expected.IsDeleted, actual.IsDeleted);
+        Assert.Equal(expected.Content, actual.Content);
+        Assert.Equal(JsonSerializer.Serialize(expected.Security), JsonSerializer.Serialize(actual.Security));
+        Assert.Equal(expected.Revisions[^1].RevisionNumber, actual.LatestRevisionNumber);
+        Assert.Equal(expected.Revisions.Length, actual.RevisionCount);
+        Assert.Equal(expected.Editors.Select(editor => editor.ExpiresUtc), actual.EditorExpiries);
+        Assert.Equal(expected.Publication?.Pending.Length ?? 0, actual.PendingDeliveryCount);
+        Assert.Equal(expected.Publication?.BlockedReason, actual.DeliveryBlock);
+    }
 
     private static async Task<string[]> SnapshotJson(NpgsqlDataSource source)
     {

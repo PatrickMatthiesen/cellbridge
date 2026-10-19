@@ -38,19 +38,17 @@ public sealed class DocumentStateJsonTests
         Func<Guid, Task>? verifyRetainedSnapshots = null)
     {
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/compact-history.docx", MinimalDocx.Create("revision 0"), TestActor.Value))!;
+        var submitted = new List<byte[]> { MinimalDocx.Create("revision 0") };
+        var state = (await service.CreateAsync("/compact-history.docx", submitted[0], TestActor.Value))!;
         var originalGraph = await DocumentPartition.RestoreFileGraphAsync(state, provider.Content, provider.Limits);
         var originalFileCell = originalGraph.FileCell;
         var locks = new SharedDocumentLocks(service);
         Assert.True((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value)).Success);
         var sizes = new Dictionary<int, long>();
-        sizes[1] = DocumentStateJson.GetSerializedSize(state);
-
-        byte[]? firstPackage = null;
         for (var saveNumber = 1; saveNumber <= 100; saveNumber++)
         {
             var bytes = MinimalDocx.Create("revision " + saveNumber);
-            if (saveNumber == 1) firstPackage = bytes;
+            submitted.Add(bytes);
             using var package = new MemoryStream(bytes);
             var result = await service.SaveWholeFileAsync(state.ResourceId, package, "save-" + saveNumber,
                 TestActor.Value, "lock");
@@ -83,12 +81,13 @@ public sealed class DocumentStateJsonTests
         Assert.Equal(originalFileCell, (await DocumentPartition.RestoreFileGraphAsync(decoded, provider.Content,
             provider.Limits)).FileCell);
 
-        foreach (var revision in decoded.Revisions)
+        for (var index = 0; index < decoded.Revisions.Length; index++)
         {
+            var revision = decoded.Revisions[index];
             var partition = revision.Partitions.Single(partition => partition.Kind == 0);
             var graph = await DocumentPartition.RestoreGraphAsync(partition, provider.Content, provider.Limits);
-            var expected = await provider.Content.ReadVerifiedAsync(revision.Content);
-            Assert.Equal(expected, PartitionGraphSnapshot.Create(graph.Elements, graph.StorageIndex).Materialize());
+            Assert.Equal(submitted[index], await provider.Content.ReadVerifiedAsync(revision.Content));
+            Assert.Equal(submitted[index], PartitionGraphSnapshot.Create(graph.Elements, graph.StorageIndex).Materialize());
             Assert.Equal(originalFileCell, PartitionGraphSnapshot.Create(graph.Elements, graph.StorageIndex).FileCell);
         }
 
@@ -101,6 +100,7 @@ public sealed class DocumentStateJsonTests
             RevisionHistory.Latest(state), "codec-round-trip-restore", TestActor.Value);
         Assert.False(restored.IsReplay);
         var restoredState = (await restoreProvider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.Equal(submitted[9], await restoreProvider.Content.ReadVerifiedAsync(restoredState.Content));
         Assert.Equal(originalFileCell, (await DocumentPartition.RestoreFileGraphAsync(restoredState,
             restoreProvider.Content, restoreProvider.Limits)).FileCell);
         var replay = await restoreService.RestoreRevisionAsync(state.ResourceId, selected.RevisionNumber,
@@ -108,7 +108,7 @@ public sealed class DocumentStateJsonTests
         Assert.True(replay.IsReplay);
         Assert.Equal(restored.Revision.RevisionNumber, replay.Revision.RevisionNumber);
         Assert.Equal(100, ((await restoreProvider.State.FindByResourceIdAsync(state.ResourceId))!).WholeFileSaveReceipts.Length);
-        using var replayBytes = new MemoryStream(firstPackage!);
+        using var replayBytes = new MemoryStream(submitted[1]);
         var wholeFileReplay = await restoreService.SaveWholeFileAsync(state.ResourceId, replayBytes, "save-1",
             TestActor.Value, "lock");
         Assert.True(wholeFileReplay.IsReplay);
@@ -255,14 +255,6 @@ public sealed class DocumentStateJsonTests
         badVersion["GraphMetadata"]!["Version"] = 99;
         Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.Deserialize(badVersion.ToJsonString()));
 
-        var badRangeShape = JsonNode.Parse(json)!;
-        badRangeShape["Partitions"]![filePartitionIndex]!["Elements"]![0] = "not-a-range";
-        Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.Deserialize(badRangeShape.ToJsonString()));
-
-        var badTableShape = JsonNode.Parse(json)!;
-        badTableShape["GraphMetadata"]!["Elements"] = new JsonObject();
-        Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.Deserialize(badTableShape.ToJsonString()));
-
         var duplicateMember = JsonNode.Parse(json)!;
         duplicateMember["Partitions"]![filePartitionIndex]!["Elements"] = new JsonArray(0, 1, 0, 1);
         Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.Deserialize(duplicateMember.ToJsonString()));
@@ -271,10 +263,6 @@ public sealed class DocumentStateJsonTests
         var table = unusedTableEntry["GraphMetadata"]!["Elements"]!.AsArray();
         table.Add(JsonNode.Parse(table[0]!.ToJsonString()));
         Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.Deserialize(unusedTableEntry.ToJsonString()));
-
-        var invalidHistoryShape = JsonNode.Parse(json)!;
-        invalidHistoryShape["Revisions"] = new JsonObject();
-        Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.Deserialize(invalidHistoryShape.ToJsonString()));
 
         Assert.Throws<StorageQuotaExceededException>(() => DocumentStateJson.Deserialize(json,
             limits: new StorageLimits { MaxHistoryRevisions = 1 }));

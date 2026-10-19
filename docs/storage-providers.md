@@ -25,46 +25,18 @@ before serving requests. [Provision an account](authentication.md#first-setup)
 to use the library. Removing the volume removes its persisted data.
 
 Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
-`ConnectionStrings__cellbridge` before starting the host. Initialization accepts
-a fresh database or storage schema version 6, and explicitly migrates versions 3, 4
-and 5 to 6 while preserving documents and retained snapshots. Stop all hosts and
-workers using that database before migration. Older writers fail their schema
-guard afterward. For schemas 3 and 4, setup rewrites retained state JSON with shared
-graph metadata. For schema 5, it preserves all snapshot JSON bytes. Setup builds
-current metadata and revision-summary indexes from each current head, then
-recounts authoritative metadata and content bytes in the usage ledger. These
-changes commit together. Unsupported schemas, corruption and
-limits below existing usage fail without changing the database. Initialization
-sets authoritative byte/document limits. See [external host reliability](external-host-reliability.md#storage-compatibility-and-validation).
+`ConnectionStrings__cellbridge` before starting the host. Setup accepts fresh
+or schema-6 databases and upgrades schemas 3, 4 and 5 while preserving documents
+and retained snapshots. Stop all hosts and workers using the database first.
+Unsupported schemas, corruption or exceeded limits abort the upgrade without
+changing persisted data. Follow the [upgrade procedure](#upgrading-a-durable-host)
+for backups and rollback.
 
-Selective reads use the optional `IDocumentReadStore` capability. PostgreSQL keeps
-small current-metadata and revision-summary tables alongside authoritative snapshots.
-Each publication updates them in the same transaction. Summary pages contain at
-most 256 rows, newest first. Offsets describe live history, so a concurrent save
-can move rows between pages; callers requiring a stable export should retain the
-revision numbers they selected. Downloads authorize again before using a handle.
-Missing or inconsistent indexes fail closed. Explicit setup rebuilds indexes when
-upgrading schemas 3, 4 or 5. Re-running setup on schema 6 validates its existing
-schema and usage; it does not silently repair corrupted projections.
-
-The usage ledger charges authoritative state, content and recovery receipts.
-Derived read records and their SQL indexes add physical database bytes but do not
-charge a second logical copy of the same history. Backups still include them, and
-portable recovery rebuilds them from the imported current heads. In-memory stores
-project the same immutable records under their state lock. Providers without the
-capability, and arbitrary full-state policy callbacks, use complete state reads.
-Full protocol graph operations, saves and restores continue to load complete states.
-
-Decoded graph membership has its own admission budget. The codec counts every
-current and historical element reference, multiplied by the runtime pointer size,
-before allocating descriptor objects or membership arrays. Writers apply the same
-`StorageLimits.MaxDecodedGraphMembershipBytes` limit, default 128 MiB. Array headers,
-descriptors, parser buffers and other process memory are outside this counter.
-Hosts can raise it explicitly for their available memory and concurrency. An
-existing state or migration over the configured budget fails without pruning any
-revision; migration rolls back its schema, state and ledger changes. Recovery also
-limits combined decoded membership across captured/imported snapshots to 128 MiB,
-independent of its existing encoded metadata limit.
+Current metadata and paged revision summaries avoid loading complete document
+history with the built-in stores. See [reading document metadata and history](async-document-authorization.md#read-document-metadata-and-history).
+Graph operations, saves and restores still load complete states. Derived read
+indexes take physical disk space in addition to the authoritative state and
+content counted by storage quotas.
 
 ### Configuration
 
@@ -74,7 +46,7 @@ independent of its existing encoded metadata limit.
 | `ConnectionStrings:cellbridge` | Required PostgreSQL connection string, supplied by Aspire in local development. |
 | `Storage:ContentProvider` | `PostgreSql`, the default for PostgreSQL state, or `FileSystem`. |
 | `Storage:ContentRoot` | Absolute filesystem content directory, required for FileSystem. |
-| `Storage:MaxDecodedGraphMembershipBytes` | Reference-slot bytes across current and historical graph arrays per state, default 128 MiB. Checked before compact or legacy graph decoding and on writes. This is separate from stored bytes and total process memory. |
+| `Storage:MaxDecodedGraphMembershipBytes` | Maximum graph-reference bytes per document state, default 128 MiB. Applies to reads, writes and upgrades. This is separate from disk quotas and does not limit total process memory. |
 | `Storage:MaxObjectBytes` | Maximum bytes per binary object, default 512 MiB. This is a quota, not a tested document-size promise. |
 | `Storage:MultipleInstances` | Require shared state and content; reject incompatible provider combinations. |
 | `Storage:SharedContent` | Operator declaration that the filesystem root is shared with verified flush/rename semantics. Default false. |
@@ -89,6 +61,12 @@ independent of its existing encoded metadata limit.
 | `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
 | `Protocol:CaptureDirectory` | Opt-in directory for correlated raw requests/responses. Default disabled. Restrict access and manage retention. |
 
+
+The graph-reference limit covers current and historical graph arrays. Exceeding
+it rejects the operation without removing history. Raise it only with enough
+memory for concurrent operations; graph objects and file buffers consume memory
+in addition to this limit. Recovery also has a fixed 128 MiB aggregate limit on
+graph-reference bytes across retained snapshots.
 
 Environment variables use double underscores, such as
 `Storage__ContentProvider=FileSystem`. Set `AppHost__PeerEnabled=true` to add a
@@ -344,23 +322,16 @@ the complete deployed backend.
 
 ### State contract
 
-`DocumentStateJson` writes storage encoding 1. It stores each immutable graph
-descriptor once within a snapshot and represents each partition's exact ordered
-membership with ranges into that table. Historical revisions retain their graph
-identities, content handles and selected indexes. Decoding shares descriptor
-objects across revisions; it does not discard old graphs. The codec also reads
-legacy expanded JSON. Logical `DocumentState.FormatVersion` remains 2 and the
-public detached records are unchanged. Default `JsonSerializer` output remains
-expanded; use the storage codec when measuring persisted metadata.
+Use `DocumentStateJson` to read and write persisted state and calculate its
+encoded size. It supports compact storage encoding 1 and legacy expanded JSON.
+The public `DocumentState` records remain logical format 2. Preserve all revision
+graph identities and content handles when implementing a provider.
 
-Quota accounting counts encoded UTF-8 bytes with a bounded stream buffer and
-memoizes the count for an immutable state using a weak key. Synchronous codec
-operations reuse serializer type metadata on each worker thread and clear their
-graph references after success or failure. The first size count still walks and
-serializes the descriptors. PostgreSQL retains the configured number of complete
-state snapshots, which include lease and metadata transitions.
-Portable recovery manifests retain their existing expanded v1 representation and
-limits; encoding compaction does not remove those archive size limits.
+Providers can implement `IDocumentReadStore` for current metadata and paged
+revision summaries. Return each selection with the current authorization and
+lifecycle metadata from one coherent view. Update any derived read records
+atomically with state changes, including recovery import. Without this optional
+capability, the service reads complete states.
 
 `TransitionAsync` acquires exclusive coordination for the resource, loads one
 coherent snapshot and supplies authoritative time. Invoke the callback once.

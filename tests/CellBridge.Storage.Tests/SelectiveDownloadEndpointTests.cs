@@ -99,38 +99,4 @@ public sealed class SelectiveDownloadEndpointTests
             return inner.OpenReadAsync(handle, cancellationToken);
         }
     }
-
-    private sealed class SelectiveOnlyStateStore(IDocumentStateStore inner) : IDocumentStateStore, IDocumentReadStore
-    {
-        private int _fullReadCount;
-        public int FullReadCount => Volatile.Read(ref _fullReadCount);
-        public bool Durable => inner.Durable;
-        public bool Shared => inner.Shared;
-        public ValueTask<DocumentState?> FindByResourceIdAsync(Guid resourceId, CancellationToken cancellationToken = default)
-        {
-            Interlocked.Increment(ref _fullReadCount);
-            throw new InvalidOperationException("Download route materialized full state.");
-        }
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string pathKey, CancellationToken cancellationToken = default)
-        {
-            Interlocked.Increment(ref _fullReadCount);
-            throw new InvalidOperationException("Download route materialized full state.");
-        }
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken cancellationToken = default) =>
-            inner.ListAsync(offset, limit, cancellationToken);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default) => inner.TryCreateAsync(state, cancellationToken);
-        public ValueTask<T> TransitionAsync<T>(Guid resourceId, Func<DocumentState, DateTime, StateTransition<T>> transition,
-            CancellationToken cancellationToken = default) => inner.TransitionAsync(resourceId, transition, cancellationToken);
-        public ValueTask CheckHealthAsync(CancellationToken cancellationToken = default) => inner.CheckHealthAsync(cancellationToken);
-        public ValueTask<DocumentReadMetadata?> FindReadMetadataByResourceIdAsync(Guid resourceId, CancellationToken cancellationToken = default) =>
-            ((IDocumentReadStore)inner).FindReadMetadataByResourceIdAsync(resourceId, cancellationToken);
-        public ValueTask<DocumentReadMetadata?> FindReadMetadataByPathKeyAsync(string pathKey, CancellationToken cancellationToken = default) =>
-            ((IDocumentReadStore)inner).FindReadMetadataByPathKeyAsync(pathKey, cancellationToken);
-        public ValueTask<DocumentRevisionReadPage?> ReadRevisionSummariesAsync(Guid resourceId, int offset, int limit,
-            CancellationToken cancellationToken = default) =>
-            ((IDocumentReadStore)inner).ReadRevisionSummariesAsync(resourceId, offset, limit, cancellationToken);
-        public ValueTask<DocumentRevisionRead?> ReadRevisionSummaryAsync(Guid resourceId, ulong revisionNumber,
-            CancellationToken cancellationToken = default) =>
-            ((IDocumentReadStore)inner).ReadRevisionSummaryAsync(resourceId, revisionNumber, cancellationToken);
-    }
 }

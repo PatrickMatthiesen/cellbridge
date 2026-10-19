@@ -231,16 +231,11 @@ service reads provider snapshots and has no process-wide document cache to evict
 
 ## Storage compatibility and validation
 
-Detached document records remain logical format 2. PostgreSQL schema 6 stores
-shared immutable graph metadata using storage encoding 1 and indexes small current
-metadata and revision summaries. Schema 5 upgrades build these indexes from current
-heads while preserving every snapshot JSON byte. Explicit
-`InitializeAsync` migrates schema 3, 4 or 5 to 6 in a transaction while retaining
-all snapshots, documents, content and ownership. Stop all hosts and workers
-against that store before migration. Older writers fail their schema guard
-afterward; mixed writer versions are unsupported. Unsupported schemas are
-rejected without resetting data. See [the upgrade procedure](storage-providers.md#upgrading-a-durable-host)
-for backups, quota checks and rollback.
+Document records remain logical format 2. PostgreSQL schema 6 requires explicit
+setup to upgrade schemas 3, 4 or 5. Stop all hosts and workers first. Upgrades
+preserve documents, history, content and ownership. Mixed writer versions are
+unsupported. See the [upgrade procedure](storage-providers.md#upgrading-a-durable-host)
+for backups and rollback.
 
 `ExternalPublicationTests`, `SharedHostLockTests` and `HostLifecycleTests` cover
 lost acknowledgements, competing publishers/protocols, delayed failure reports,
