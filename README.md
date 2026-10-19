@@ -104,7 +104,7 @@ and the Office challenge/completion flow; see [login integration](docs/package-i
 
 For applications with their own document permissions, start with
 [async host authorization](docs/async-document-authorization.md) and the
-[PostgreSQL-backed consumer example](examples/HostAuthorizedDocuments/README.md).
+[document library web example](examples/DocumentLibrary/README.md).
 The existing [versioned policy example](examples/HostAuthorization/README.md)
 retains coordinated binding updates and lease reconciliation.
 The [integration guide](docs/package-integration.md) covers parsed SOAP requests,

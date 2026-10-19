@@ -1,6 +1,5 @@
 <Solution>
   <Folder Name="/examples/">
-    <Project Path="examples/HostAuthorizedDocuments/HostAuthorizedDocuments.csproj" />
     <Project Path="examples/HostAuthorizedLists/HostAuthorizedLists.csproj" />
   </Folder>
   <Folder Name="/src/">
