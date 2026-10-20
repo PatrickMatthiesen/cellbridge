@@ -5,15 +5,9 @@ using System.Xml.Linq;
 
 namespace CellBridge.Interop.Tests;
 
-public sealed class MultiInstanceFactAttribute : FactAttribute
-{
-    public MultiInstanceFactAttribute()
-    {
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_PEER")))
-            Skip = "Set OFFICECOLLABSERVER_INTEROP_ENDPOINT and OFFICECOLLABSERVER_INTEROP_PEER to two hosts using shared storage.";
-    }
-}
+public sealed class MultiInstanceFactAttribute : FactAttribute;
 
+[Collection("WebDemo integration")]
 public class MultiInstanceTests
 {
     [MultiInstanceFact]

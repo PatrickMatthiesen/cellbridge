@@ -2,6 +2,7 @@ using Microsoft.Protocols.TestSuites.SharedAdapter;
 
 namespace CellBridge.Interop.Tests;
 
+[Collection("WebDemo integration")]
 public sealed class QueryChangesTests
 {
     [Fact]
@@ -30,6 +31,7 @@ public sealed class QueryChangesTests
     }
 }
 
+[Collection("WebDemo integration")]
 public sealed class LiveQueryChangesTests
 {
     [LiveInteropFact]

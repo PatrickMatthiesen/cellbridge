@@ -2,9 +2,22 @@
 import argparse
 import json
 import subprocess
+from pathlib import Path
 import urllib.parse
 
-from run import APPHOST, ROOT, cli_json
+ROOT = Path(__file__).resolve().parents[2]
+APPHOST = ROOT / "aspire/CellBridge.AppHost.csproj"
+
+
+def cli_json(command):
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=True, timeout=180)
+    for index, character in enumerate(result.stdout):
+        if character in "[{":
+            try:
+                return json.loads(result.stdout[index:])
+            except json.JSONDecodeError:
+                pass
+    raise RuntimeError("Command returned no JSON.")
 
 
 def main():
@@ -19,13 +32,11 @@ def main():
     host = status["Self"]["DNSName"].rstrip(".")
     authority = host if args.https_port == 443 else f"{host}:{args.https_port}"
     origin = "https://" + authority
-    subprocess.run(["aspire", "wait", "web", "--apphost", str(APPHOST),
+    subprocess.run(["aspire", "wait", "webdemo", "--apphost", str(APPHOST),
         "--non-interactive"], cwd=ROOT, check=True, timeout=180)
-    subprocess.run(["aspire", "wait", "demo", "--apphost", str(APPHOST),
-        "--non-interactive"], cwd=ROOT, check=True, timeout=180)
-    description = cli_json(["aspire", "describe", "web", "--apphost", str(APPHOST),
+    description = cli_json(["aspire", "describe", "webdemo", "--apphost", str(APPHOST),
         "--format", "Json", "--non-interactive"])
-    web = next(r for r in description["resources"] if r["displayName"] == "web")
+    web = next(r for r in description["resources"] if r["displayName"] == "webdemo")
     if web["environment"].get("Authentication__PublicOrigin", "").rstrip("/") != origin:
         parser.error(f"Start this AppHost with Parameters__PublicOrigin={origin} first.")
     endpoint = next(u["url"] for u in web["urls"] if u["name"] == "http" and u.get("isInternal"))

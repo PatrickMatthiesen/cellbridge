@@ -9,11 +9,12 @@ using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.Tests;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class HostAuthorizationTests
 {
     private static readonly CellBridgeActor Writer = new(new("external:writer", "writer", "Writer"));

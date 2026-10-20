@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
+    <ProjectReference Include="../CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
+    <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
+    <ProjectReference Include="../../benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj" />
+    <Compile Include="../../benchmark/CellBridge.Storage.Benchmark/SyntheticWorkload.cs" Link="Workloads/SyntheticWorkload.cs" />
+    <Compile Include="../../benchmark/CellBridge.Lists.Benchmark/BenchmarkDatabase.cs" Link="Workloads/BenchmarkDatabase.cs" />
+    <Compile Include="../../benchmark/CellBridge.Lists.Benchmark/BenchmarkHttpHost.cs" Link="Workloads/BenchmarkHttpHost.cs" />
+    <Compile Include="../../benchmark/CellBridge.Lists.Benchmark/SqlMeasurements.cs" Link="Workloads/SqlMeasurements.cs" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

@@ -8,14 +8,14 @@ grants. The imported owner is attribution only. The host policy allows
 Run the complete check from the repository root:
 
 ```sh
-python3 examples/HostAuthorization/verify.py
+dotnet test tests/CellBridge.HostAuthorization.Tests
 ```
 
-The script generates a disposable JWT signing key, starts this example's own
-Aspire AppHost with `--isolated`, waits for health, checks download/catalog access,
-commits a permission revision as a separate permission operator, checks revocation,
-and stops only its AppHost. Tokens and keys remain in memory. .NET 10, Python 3
-and the repository's Aspire CLI/SDK are required. Docker is not needed.
+The xUnit fixture generates a disposable JWT signing key and starts this example's
+project-based AppHost through Aspire Hosting.Testing. It checks download/catalog
+access, commits a permission revision as a separate permission operator, checks
+revocation, and disposes its own AppHost. Tokens and keys remain in memory.
+.NET 10 and the repository's Aspire CLI/SDK are required. Docker is not needed.
 
 For interactive use, supply `Parameters__SigningKey` privately, then run:
 

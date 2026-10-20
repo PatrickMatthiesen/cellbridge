@@ -6,7 +6,7 @@ using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Hosting;

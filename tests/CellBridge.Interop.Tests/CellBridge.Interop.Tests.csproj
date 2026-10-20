@@ -49,4 +49,9 @@
     <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="WebDemoFixture.cs" />
+    <PackageReference Include="Aspire.Hosting.Testing" Version="17.0.0-preview.1.26479.11" />
+    <ProjectReference Include="../CellBridge.WebDemo.AppHost/CellBridge.WebDemo.AppHost.csproj" />
+  </ItemGroup>
 </Project>

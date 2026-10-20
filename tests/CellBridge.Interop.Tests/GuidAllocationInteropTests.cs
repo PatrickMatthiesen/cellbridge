@@ -3,7 +3,7 @@ using Reference = Microsoft.Protocols.TestSuites.SharedAdapter;
 
 namespace CellBridge.Interop.Tests;
 
-[Collection("Allocation concurrency")]
+[Collection("WebDemo integration")]
 public sealed class GuidAllocationInteropTests
 {
     [MultiInstanceFact]

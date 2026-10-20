@@ -6,7 +6,7 @@ using System.Xml.Linq;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,6 +14,7 @@ using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class NestedPathPostgreSqlTests
 {
     private static readonly XNamespace Protocol = "http://schemas.microsoft.com/sharepoint/soap/";

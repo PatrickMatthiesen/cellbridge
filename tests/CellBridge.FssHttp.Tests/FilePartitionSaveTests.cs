@@ -4,7 +4,7 @@ using System.Text.Json;
 using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 
 namespace CellBridge.FssHttp.Tests;
 
@@ -14,7 +14,7 @@ public sealed class FilePartitionSaveTests
     public void RecordedExcelSaveIgnoresReservedBitsAndReopensWorkbookGraph()
     {
         var store = new DocumentStore();
-        Assert.True(DocumentCreation.TryCreate(store, "Excel test", "xlsx").Created);
+        store.Put("/shared/Excel%20test.xlsx", MinimalXlsx.Create());
         var document = store.Get("/shared/Excel%20test.xlsx")!;
         var request = FsshttpbCellRequest.Deserialize(new BinaryReaderEx(File.ReadAllBytes(
             Path.Combine(AppContext.BaseDirectory, "Fixtures", "excel-save-20260928.bin"))));
@@ -51,7 +51,7 @@ public sealed class FilePartitionSaveTests
     public void WrongOfficePackageTypeDoesNotReplaceDocument()
     {
         var store = new DocumentStore();
-        DocumentCreation.TryCreate(store, "book", "xlsx");
+        store.Put("/shared/book.xlsx", MinimalXlsx.Create());
         var document = store.Get("/shared/book.xlsx")!;
         var before = document.Content;
         var result = CellBinaryRequestExecutor.Execute(document, document.FilePartition,

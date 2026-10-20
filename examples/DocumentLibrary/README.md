@@ -70,32 +70,43 @@ PowerPoint may reuse the same login cookie. Browser sign-ins request session coo
 
 Run the package-only app and its PostgreSQL database through the standalone AppHost.
 Until the optional list packages are published, first run `python3 tools/verify_packages.py`
-and select its local feed using the configuration below. A launch without that
+and select its local feed using the restore commands below. A launch without that
 configuration uses the NuGet sources already configured on the machine:
 
 ```powershell
-aspire start --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire wait document-library --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire describe --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
+aspire start --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
+aspire wait document-library --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
+aspire describe --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
+aspire stop --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
 ```
 
 To smoke-test packages built locally by the package verifier, select its feed configuration and isolated package cache explicitly. Run these commands from the repository root after the verifier has populated `artifacts/packages`:
 
 ```powershell
-$env:DocumentLibrary__RestoreConfigFile = (Resolve-Path artifacts/packages/NuGet.Config).Path
-$env:DocumentLibrary__RestorePackagesPath = (Resolve-Path artifacts/packages/consumer-cache).Path
+dotnet restore examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj `
+  --configfile artifacts/packages/NuGet.Config `
+  --packages artifacts/packages/consumer-cache
+$env:NUGET_PACKAGES = (Resolve-Path artifacts/packages/consumer-cache).Path
+$env:RestoreConfigFile = (Resolve-Path artifacts/packages/NuGet.Config).Path
 
-aspire start --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire wait document-library --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire describe --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
+aspire start --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
+aspire wait document-library --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
+aspire describe --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
 # Open the document-library HTTPS endpoint reported by aspire describe.
-aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
+aspire stop --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
 ```
 
-The AppHost does not auto-detect local package directories. Leave both settings unset for a published-package restore. Use the double-underscore environment names shown above because .NET configuration maps them to `DocumentLibrary:RestoreConfigFile` and `DocumentLibrary:RestorePackagesPath`.
+The AppHost does not auto-detect local package directories. Leave `NUGET_PACKAGES`
+and `RestoreConfigFile` unset to use your ordinary NuGet configuration. These are
+standard restore inputs inherited by the project build, rather than AppHost
+resource settings.
 
-The AppHost creates PostgreSQL, runs the package-only setup project, and starts the web app only after schema initialization succeeds. Its normal mode keeps a named PostgreSQL volume and stores destination files under the ignored `artifacts/document-library` directory. Set `Testing__Enabled=true` in the environment for disposable PostgreSQL and a unique temporary destination. This disposable mode also exposes a local HTTP endpoint for browser checks that cannot trust the developer certificate. Only one app process may use a destination root. The app holds an exclusive lock file for its full lifetime.
+The AppHost creates PostgreSQL, runs the package-only setup project, and starts
+the web app only after schema initialization succeeds. It always keeps the named
+PostgreSQL volume and stores destination files under the ignored
+`artifacts/document-library` directory. Aspire allocates the HTTPS port. Tests own
+separate fixtures and temporary destinations. Only one app process may use a
+destination root. The app holds an exclusive lock file for its full lifetime.
 
 ## Customer lists
 

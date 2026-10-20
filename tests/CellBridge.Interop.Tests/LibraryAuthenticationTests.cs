@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 
 namespace CellBridge.Interop.Tests;
 
+[Collection("WebDemo integration")]
 public sealed class LibraryAuthenticationTests
 {
     [LiveInteropFact]
@@ -20,8 +21,7 @@ public sealed class LibraryAuthenticationTests
         Assert.NotEmpty(token);
         http.DefaultRequestHeaders.Remove("X-CellBridge-CSRF");
         var name = "library-" + Guid.NewGuid().ToString("N");
-        // The Razor token is issued by demo; web validates it against the same
-        // identity/key ring when the per-request catalog client forwards it.
+        // The library and document endpoints use the same authenticated application.
         using var created = await http.PostAsync("/library?handler=Create", new FormUrlEncodedContent(new Dictionary<string, string>
         { ["NewName"] = name, ["NewType"] = "docx", ["__RequestVerificationToken"] = token }));
         Assert.Equal(HttpStatusCode.Redirect, created.StatusCode);

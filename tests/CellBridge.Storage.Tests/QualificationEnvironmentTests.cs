@@ -6,6 +6,7 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class QualificationEnvironmentTests
 {
     [PostgreSqlFact]
@@ -66,7 +67,5 @@ public sealed class PostgreSqlLinuxFactAttribute : FactAttribute
     public PostgreSqlLinuxFactAttribute()
     {
         if (!OperatingSystem.IsLinux()) Skip = "Durable filesystem reclamation is qualified on Linux only.";
-        else if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")))
-            Skip = "Set the migrated disposable PostgreSQL test database.";
     }
 }
