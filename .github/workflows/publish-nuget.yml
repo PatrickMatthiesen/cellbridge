@@ -63,8 +63,7 @@ jobs:
           PY
       - run: dotnet build tools/CellBridge.Storage.Setup -c Release --nologo
       - run: dotnet tools/CellBridge.Storage.Setup/bin/Release/net10.0/CellBridge.Storage.Setup.dll
-      - run: dotnet test CellBridge.slnx -c Release --nologo --verbosity minimal
-      - run: dotnet test demo/CellBridge.Demo.slnx -c Release --nologo --verbosity minimal
+      - run: dotnet test CellBridge.slnx -m:1 -c Release --nologo --verbosity minimal
       - run: node tools/testing/test-list-example-ui.cjs
       - run: python -m pip install --require-hashes -r tools/capture/requirements-dev.txt
       - run: python -m pytest tools/capture tools/testing -q

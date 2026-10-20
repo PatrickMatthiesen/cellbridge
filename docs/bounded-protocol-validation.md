@@ -70,15 +70,15 @@ dotnet test tests/CellBridge.Interop.Tests -c Release --filter FullyQualifiedNam
 dotnet test tests/CellBridge.Storage.Tests -c Release --filter FullyQualifiedName~BoundedTransactionPropertyTests
 ```
 
-The standalone storage command skips PostgreSQL unless its test connection is
-provided. Use the inspected isolated runner for complete live/provider validation:
+Storage and HTTP replay suites own disposable PostgreSQL environments through
+Hosting.Testing. Run the complete Linux suite with:
 
 ```sh
-python3 tools/testing/run.py --output artifacts/testing/audit-fuzz
+dotnet test CellBridge.slnx --logger trx --results-directory artifacts/testing/audit-fuzz
 ```
 
-See [test prerequisites and isolation](automated-testing.md). The runner creates
-and stops its own disposable Aspire stack; use only your bound worktree.
+See [test prerequisites and isolation](automated-testing.md). The fixtures create
+and stop their own disposable Aspire stacks; use only your bound worktree.
 Diagnostics record seed, sample, mutation, byte count or budget. Keep TRX files,
 raw mutation output and run summaries under ignored `artifacts/`. To investigate
 a failure, reproduce the reported seed/sample, reduce the input while preserving

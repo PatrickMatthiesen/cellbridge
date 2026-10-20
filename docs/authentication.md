@@ -30,7 +30,7 @@ Passwords need at least 12 characters with uppercase, lowercase, a digit and a
 nonalphanumeric character. Five failed attempts lock the account for 15 minutes.
 Accounts are provisioned by the operator; there is no public registration.
 
-Open `https://localhost:7292/library`, sign in and create a document. To import
+Open WebDemo's allocated HTTPS endpoint followed by `/library`, sign in and create a document. To import
 existing files with a chosen owner:
 
 ```sh

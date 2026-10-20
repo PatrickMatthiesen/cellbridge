@@ -1,204 +1,122 @@
 # Automated testing
 
-Use `python tools/testing/run.py --packages` to check protocols, providers and packages together.
-It packs and tests the external application before starting Aspire, then runs
-its PostgreSQL commit/delivery reply-loss and list seed recovery tests against
-the disposable databases.
-The ordinary package verifier skips these database tests when no database is configured.
+## Routine Linux checks
 
-The [recovery environment matrix](supported-environments.md) ties process-crash
-and portable recovery checks to their measured configurations. For repeated
-single-save Word and Excel qualification, use the [desktop procedure](desktop-save-qualification.md).
+Install .NET 10, Docker and an Aspire CLI compatible with the pinned AppHost SDK.
+Build and run the main solution from the repository root:
 
-CellBridge has protocol/unit tests, live HTTP checks, provider tests and an
-interactive Windows Word check. Use the commands below for the part you are
-changing. [Client coverage](interoperability.md#client-coverage) records desktop
-results.
+```sh
+dotnet build CellBridge.slnx
+dotnet test CellBridge.slnx -m:1 --logger trx --results-directory artifacts/testing
+```
 
-## Repeatable local checks
+Protocol, replay, provider and API tests run without a Windows desktop.
+PostgreSQL suites use project-based Aspire AppHosts through Hosting.Testing.
+Fixtures start their own disposable PostgreSQL resources, apply the existing
+initialization, wait for health/completion, and dispose their own application.
+They do not use the development database or volume. Storage tests always own their database. Lists accepts an explicitly supplied
+`CELLBRIDGE_LISTS_TEST_CONNECTION_STRING` for an externally managed test database.
 
-Install .NET 10, the compatible Aspire CLI, Docker and capture test dependencies.
-From the repository root:
+Run a focused suite with `dotnet test tests/CellBridge.Storage.Tests`,
+`dotnet test tests/CellBridge.Lists.PostgreSql.Tests`,
+`dotnet test tests/CellBridge.Interop.Tests` or
+`dotnet test tests/CellBridge.WebDemo.Tests`. WebDemo checks cover authenticated
+pages, API authorization and antiforgery. The interop fixture hosts WebDemo peers
+against PostgreSQL and replays reviewed Office requests. Real desktop Office and
+remote SharePoint checks remain separate opt-in workflows.
+
+Fixture generators live in the non-shipping `tests/CellBridge.TestFixtures`
+project. Tests that need only document bytes do not reference an application.
+`tests/CellBridge.TestInfrastructure` owns reusable Aspire environments.
+Record TRX results and qualification reports under ignored `artifacts/`.
+See [recovery environments](supported-environments.md) and
+[bounded protocol validation](bounded-protocol-validation.md).
+
+Capture and desktop evidence tooling retains its Python dependencies:
 
 ```sh
 python3 -m venv tools/capture/.venv
-tools/capture/.venv/bin/python -m pip install -r tools/capture/requirements-dev.txt
-python3 tools/testing/run.py
+tools/capture/.venv/bin/python -m pip install --require-hashes -r tools/capture/requirements-dev.txt
+tools/capture/.venv/bin/python -m pytest tools/capture tools/testing -q
+node tools/testing/test-list-example-ui.cjs
 ```
 
-On Windows, use `tools/capture/.venv/Scripts/python.exe` for the virtual
-environment's Python. Stop this workspace's Aspire app before building.
-Finish any active capture using the [capture guide](capture-kit.md).
-The runner refuses to interrupt an existing app.
-
-The runner builds Release binaries, starts disposable PostgreSQL with separate
-protocol and list databases, and starts two hosts through Aspire. It provisions
-an integration account and creates test documents. The test profile uses a
-fixed reserved public origin and bounded higher protocol concurrency for its
-single account; production defaults remain unchanged.
-It runs:
-
-- Binary, SOAP and independent Office Inspectors parser tests.
-- Operator import/re-import checks and provider save, retry, concurrency,
-  process-termination and lease-timing checks against PostgreSQL.
-- Captured Word/Excel HTTP replay, shared locks and loopback HTTPS forwarding.
-- Native list unit, ASP.NET Core and PostgreSQL tests, plus the list example's
-  JavaScript regression check.
-- Demo, capture tooling and Office evidence-verifier tests.
-
-Results are TRX files, `summary.json` and wire captures under
-`artifacts/testing/<timestamp>`. The runner stops its AppHost on completion
-and uses no persistent development volume.
-
-For packed-library consumption, with Aspire stopped:
+## Package checks
 
 ```sh
 python3 tools/verify_packages.py
-```
-
-This packs the libraries, builds the [consumer example](../examples/NuGetConsumer/README.md)
-and runs [package tests](../tests/CellBridge.Packages.Tests/README.md) using an
-isolated local feed/cache. Verification clears its own package output, checks
-all twelve packages and symbol packages, validates embedded readmes, license,
-repository metadata and internal versions, and writes `artifacts/packages/manifest.json`.
-`python3 tools/check_release.py --version <version> --commit <sha>` checks the
-same archive metadata and hashes before release authentication. Artifact tests
-under `tools/testing` exercise tampering, missing packages/symbols and incorrect
-identity/version/commit/clean-source flags.
-It also builds the package-only [document library](../examples/DocumentLibrary/README.md)
-and its setup/probe projects, rejects source-project references to CellBridge,
-and runs destination crash/retry and consumer save/permission/lock tests.
-The PostgreSQL consumer tests require a disposable migrated database through
-`ConnectionStrings__cellbridge`; they report skips when it is absent. The Linux
-storage and publishing jobs supply that database. A package run with skipped
-database tests does not establish restart recovery for the durable consumer.
-The package tests compare the reusable processor's response with the HTTP endpoint
-and exercise host-selected identities and read-only request limits.
-
-## Publishing packages
-
-Set the version in `Directory.Build.props` and commit the reviewed changes.
-From that clean commit, with this workspace's Aspire stopped, run:
-
-```sh
-python3 tools/testing/run.py --packages
 python3 tools/check_release.py --version <version> --commit <sha>
 ```
 
-Check `artifacts/packages/manifest.json` for twelve matching package versions,
-repository commits, archive hashes and `sourceDirty: false`. Require the durable
-consumer check to pass without a database skip. Use a new version for changed
-source; NuGet versions are immutable.
+The verifier packs the libraries, builds package-only examples and runs
+[consumer checks](../tests/CellBridge.Packages.Tests/README.md) against an isolated
+local feed/cache. It validates all twelve packages and symbols, readmes, license,
+repository metadata and internal versions, then writes
+`artifacts/packages/manifest.json`. Database consumer checks need an explicitly
+supplied disposable migrated database; skipped database checks do not establish
+durable consumer recovery. A release requires reviewed committed source and
+`sourceDirty: false`. The [publish workflow](../.github/workflows/publish-nuget.yml)
+validates from `main`; use a new version for changed source.
 
-The [publish workflow](../.github/workflows/publish-nuget.yml) runs only from
-`main`. Dispatch it with the committed version and `publish: false` to validate
-packing, artifact checks and NuGet login. After checking that run, dispatch
-`publish: true` against the same source. The workflow checks the artifacts before
-authentication, then uploads dependencies, the hosting package and symbols.
+## Development AppHost
 
-NuGet Trusted Publishing needs a policy for `PatrickMatthiesen/cellbridge`,
-workflow `publish-nuget.yml`, environment `nuget`, owner `CellBridge` and package
-pattern `CellBridge.*`. Set the GitHub repository variable `NUGET_USER` to the
-policy creator's NuGet profile name. The publishing job exchanges GitHub OIDC
-credentials for temporary NuGet credentials.
+```sh
+aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire describe --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire stop --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+```
 
-Publication across packages is not atomic. After a partial failure, retain the
-run artifact and verify which versions NuGet accepted before uploading only the
-remaining artifacts. The workflow does not skip duplicates. After publication,
-verify restoration from NuGet.org with a fresh cache, check symbol availability,
-and create the source tag and release notes on GitHub.
+The fixed development graph contains durable PostgreSQL, schema/authentication
+initialization, WebDemo and an explicitly started SharePoint capture resource.
+It starts no tests or benchmarks. Aspire allocates ports and passes connection
+and endpoint references. `Parameters__PublicOrigin` supplies an external HTTPS
+origin when desktop Office connects through another hostname. Its local default
+is WebDemo's allocated HTTPS endpoint.
 
-## Bounded protocol properties and differential checks
-
-[Bounded validation](bounded-protocol-validation.md) records fixed seeds, input
-limits, semantic assertions, parser provenance and reproduction commands for
-framing, graph budgets, persisted rejection and receipt retries.
-
-## AppHost configuration
-
-Inputs use standard configuration. Aspire parameters can be overridden with
-environment variables such as `Parameters__PublicOrigin`. Keep non-secret local
-values in ignored `aspire/apphost.settings.json`; environment values override
-the file. Use Aspire's secret configuration for secrets.
-
-| Parameter | Default | Purpose |
-| --- | --- | --- |
-| `StorageVolume` | `cellbridge-storage-data` | Persistent development volume |
-| `PublicOrigin` | `https://localhost:7292` | Origin reached by Office and browsers |
-| `WireCaptureDirectory` | Empty | Absolute server capture directory |
-| `TestPassword` | Required in test mode | Secret for the test-account seed job |
-
-`Testing__Enabled=true` selects disposable mode, omitting the persistent volume
-and SharePoint proxy. The runner clears inherited AppHost/test settings, the
-database connection string and live-test endpoints. It ignores local AppHost
-settings and supplies its own temporary account secret. Inherited `Storage__*`
-settings remain in effect.
-
-`AppHost__PeerEnabled=true` adds an explicitly started peer in development.
-`Testing__RunStorageTests=true` adds an explicitly started storage test command.
-These switches choose the resource model; they are not Aspire parameters.
-Normal development includes the explicitly started [SharePoint proxy](capture-kit.md).
+Other external inputs are `Parameters__ApplicationName`,
+`Parameters__WireCaptureDirectory`, `Parameters__CaptureUpstream`,
+`Parameters__CaptureOutput` and `Parameters__CaptureUpstreamCa`.
+Non-secret local values can live in ignored `aspire/apphost.settings.json`;
+environment variables override the file. These inputs do not select resources.
+Never stop another worktree's AppHost. Finish an active capture with
+`tools/capture/stop.py` before stopping its AppHost.
 
 ## Performance measurements
 
-For customer-workspace list writes, database-filtered pages and the 4,000-writes/minute
-baseline, see [measuring list performance](list-performance.md). That runner uses
-public provider calls and authenticated HTTP against disposable PostgreSQL.
-
-For isolated inbound parsing, eager restore and nested builder allocations, see
-[measuring request allocations](allocation-measurements.md). The stage benchmark
-uses synthetic inputs and reviewed fixture bytes without a running app.
+Performance projects live under `benchmark/`. Correctness assertions live under
+`tests/`, while each benchmark still rejects failed operations and invalid results.
+See [list measurements](list-performance.md) and
+[isolated allocation measurements](allocation-measurements.md).
 
 ```sh
-python3 tools/testing/run.py --performance --sizes 1,10 --clients 1,8 --iterations 5
+dotnet build benchmark/CellBridge.Benchmark.AppHost -c Release
+aspire start --isolated --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
+aspire wait benchmark-postgres --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
+aspire resource storage-benchmark start --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
+aspire logs storage-benchmark --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
+aspire stop --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
 ```
 
-The runner measures PostgreSQL and filesystem content, both with PostgreSQL
-state. Each benchmark creates/drops a separate database and uses a temporary
-filesystem directory. The database role needs `CREATE DATABASE`.
-Each client edits its own document.
+Both `storage-benchmark` and `lists-benchmark` require explicit start. Configure
+workload arguments with `StorageBenchmark__Arguments` or
+`ListsBenchmark__Arguments` as JSON arrays before starting this focused AppHost.
+Each run retains workload, setup, warm-up and measured-interval metadata.
+Steady-state timings exclude startup/schema setup and warm-up; process peak
+memory remains cumulative. Preserve raw reports with runtime, hardware, source
+and backend details when comparing runs. This harness does not establish a final
+SQL baseline.
 
-Reports include save/download p50/p95/p99, throughput, allocations, retained graph
-counts and process peak memory. The default workload repeats package bytes with
-fresh complete DOCX graphs. It measures the document service and includes
-deduplication, setup and initial creation; HTTP, network latency and Office
-rendering are excluded. Peak memory and usage totals accumulate within an
-invocation. Use enough samples for percentile comparisons.
-
-### Workloads and options
-
-These options apply to the benchmark executable shown below. The Python runner
-exposes sizes, clients and iterations; use the executable for custom workloads.
-
-| Option | Behavior |
-| --- | --- |
-| `--workload full` | Complete graph for each save; default |
-| `--workload changed-full` | Changes package bytes for each complete save |
-| `--workload delta` | Reuses existing file objects |
-| `--workload delta-chain` | Also links each earlier revision through the current index |
-| `--workload captured` | Replays two reviewed saves; requires `--iterations 2` |
-| `--sizes 0` | Small deterministic DOCX |
-| `--seed` | Controls synthetic bytes and save identities |
-| `--retry` | Checks identical accepted-save retries |
-| `--query-every` | Samples empty/prior/current client knowledge |
-| `--allow-quota` | Permits quota rejection and verifies unchanged content/versions |
-
-After a Release build, run a service-level growth check:
+For a small repeated-save/state-growth check without PostgreSQL:
 
 ```sh
-dotnet tools/CellBridge.Storage.Benchmark/bin/Release/net10.0/CellBridge.Storage.Benchmark.dll --content memory --sizes 0 --clients 1 --iterations 1000 --workload delta-chain --retry --output artifacts/delta-chain.json
+dotnet run -c Release --project benchmark/CellBridge.Storage.Benchmark -- --content memory --sizes 0 --clients 1 --iterations 64 --workload delta-chain --retry --output artifacts/delta-chain.json
 ```
 
-Budget overrides use `Storage__...`. Ordinary runs fail on rejection.
-Reports distinguish retained history from the graph closure needed to
-reconstruct a file and list blockers to retention analysis. Allocation totals
-include setup, queries and retention diagnostics; forced collections affect
-throughput. A constant-size file can still accumulate required history.
-See [storage limits](storage-providers.md#limits-and-qualification).
-
-The `Storage performance report` GitHub workflow runs manually or weekly and
-uploads JSON from a fresh database per provider. Compare repeat runs on the same
-machine; it does not enforce a fixed latency threshold.
+Use current supported workload limits and do not interpret quota rejection as a
+successful save. Larger retained graphs and multiple clients need separate
+qualification. The [storage guide](storage-providers.md#limits-and-qualification)
+describes supported limits.
 
 ## Connect the Windows laptop through Tailscale
 
@@ -215,22 +133,20 @@ tailscale serve status
 ```
 
 Use the machine's full `*.ts.net` name and a free HTTPS port. Start Aspire with
-that origin, a distinct persistent volume and server capture enabled:
+that origin and server capture enabled:
 
 ```sh
 export Parameters__PublicOrigin='https://dev-machine.example.ts.net:8444'
-export Parameters__StorageVolume=cellbridge-ofba-storage-data
 export Parameters__WireCaptureDirectory="$PWD/artifacts/office-wire"
-aspire start --isolated --apphost aspire/apphost.cs --non-interactive
+aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
 python3 tools/testing/tailscale.py --https-port 8444
 tailscale serve status
 ```
 
-Use a different named volume for each concurrent trial. Aspire `--isolated`
-randomizes ports but does not isolate explicit Docker volume names.
-Use ordinary development mode, not `Testing__Enabled=true`, for laptop sessions.
+The development AppHost uses an application-scoped durable volume. Integration
+fixtures own separate disposable databases.
 
-The helper waits for web/demo, discovers the current HTTP port and verifies the
+The helper waits for WebDemo, discovers the current HTTP port and verifies the
 configured public origin. It refuses unrelated listeners and tries noninteractive
 sudo if the daemon denies access. Rerun it after restarting isolated Aspire,
 whose ports change. The library, sign-in, documents and SOAP share
@@ -250,7 +166,7 @@ restarts, add an absolute directory to ignored `aspire/apphost.settings.json`:
 ```
 
 Restart Aspire and verify a SOAP request creates request/response/summary files.
-Environment overrides take precedence; disposable runs ignore the file. Remove
+Environment overrides take precedence; test fixtures do not load this file. Remove
 the setting when finished.
 
 Keep routes at their original roots. The host accepts forwarded HTTPS/Host
@@ -327,7 +243,7 @@ Finish the laptop session, remove only its Serve listener and stop Aspire:
 
 ```sh
 tailscale serve --https=8444 off
-aspire stop --apphost aspire/apphost.cs --non-interactive
+aspire stop --apphost aspire/CellBridge.AppHost.csproj --non-interactive
 ```
 
 The named PostgreSQL volume retains documents and accounts.
@@ -351,7 +267,7 @@ extraction and validation.
 
 ## Further coverage
 
-The runner and replay tests execute without Office. PowerShell stand-ins check
+The native fixtures and replay tests execute without Office. PowerShell stand-ins check
 wrapper logic; real COM tests need an interactive desktop. A scheduled Windows
 test should use "Run only when user is logged on".
 

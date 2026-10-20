@@ -14,12 +14,11 @@ With Aspire stopped, build and start from the repository root:
 
 ```sh
 dotnet build CellBridge.slnx
-aspire start --apphost aspire/apphost.cs --non-interactive
-aspire wait web --non-interactive
-aspire wait demo --non-interactive
+aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
 ```
 
-Aspire uses the `cellbridge-storage-data` PostgreSQL volume. The `storage-init`
+Aspire uses an application-scoped durable PostgreSQL volume. The `storage-init`
 resource initializes fresh/current storage, and the host checks both stores
 before serving requests. [Provision an account](authentication.md#first-setup)
 to use the library. Removing the volume removes its persisted data.
@@ -56,15 +55,8 @@ data stays intact when a limit is reduced. See [external host reliability](exter
 
 
 Environment variables use double underscores, such as
-`Storage__ContentProvider=FileSystem`. Set `AppHost__PeerEnabled=true` to add a
-second host, then start it with:
-
-```sh
-aspire resource web-peer start --apphost aspire/apphost.cs --non-interactive
-aspire describe --non-interactive
-```
-
-Both hosts use the same database. Discover assigned ports from Aspire.
+`Storage__ContentProvider=FileSystem`. Multi-host integration tests use a separate
+project-based AppHost with disposable storage; they do not alter the development graph.
 
 ### Deployment constraints
 

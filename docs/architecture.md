@@ -1,7 +1,7 @@
 # Architecture
 
 CellBridge implements the Office file synchronization protocols in reusable
-.NET libraries. The sample host and demo provide a development environment;
+.NET libraries. WebDemo provides a development environment;
 [interoperability coverage](interoperability.md) describes the tested client
 behavior and unsupported operations.
 
@@ -48,12 +48,11 @@ See [authentication and permissions](authentication.md).
 | `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
 | `CellBridge.Lists.PostgreSql` | Independent list schema, JSONB records, workspace isolation and list grants |
 | `CellBridge.Lists.AspNetCore` | Opt-in list APIs, protected paging, CSV/XLSX and read-only OData subset |
-| `CellBridge.Web` | Sample host, package generation and catalog APIs |
+| `CellBridge.WebDemo` | Non-packable development host, Razor Pages, package generation and catalog APIs |
 | `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |
 | `tools/CellBridge.Admin` | Operator account provisioning, explicit file imports and document permission updates |
 | `tools/CellBridge.Storage.Setup` | Current-schema initialization and quiescent object maintenance |
-| `demo/CellBridge.Demo` | Razor Pages client of the sample HTTP catalog |
-| `aspire/apphost.cs` | PostgreSQL, schema initialization, sample host, demo and optional capture proxy |
+| `aspire/CellBridge.AppHost.csproj` | PostgreSQL, schema initialization, WebDemo and optional capture proxy |
 
 The binary library is independent of ASP.NET Core and storage. Provider contracts
 are independent of the protocols. The sample owns file creation and Aspire setup.

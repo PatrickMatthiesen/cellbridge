@@ -6,6 +6,11 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 
 ## Protocol scope
 
+- During beta, make needed breaking changes directly and update repository
+  callers, tests, examples and current docs. Do not add compatibility shims,
+  deprecation periods or consumer migration guides for superseded designs.
+  Preserve real database migrations and existing developer data.
+
 - Use MS-OCPROTO, MS-FSSHTTP and MS-FSSHTTPB as protocol authorities.
 - Implement both layers. MS-FSSHTTP is the outer SOAP/MTOM protocol at
   `/_vti_bin/cellstorage.svc`; MS-FSSHTTPB carries the binary Cell payloads.
@@ -20,14 +25,14 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 
 ## Repository map
 
-- `src/CellBridge.Web`: sample HTTP host, imports and document catalog.
+- `src/CellBridge.WebDemo`: non-packable development host, Razor Pages library and document catalog.
 - `src/CellBridge.AspNetCore`: reusable discovery, download and cellstorage endpoints.
 - `src/CellBridge.FssHttp`: SOAP and MTOM handling.
 - `src/CellBridge.FssHttpB`: binary serialization and object graphs.
 - `src/CellBridge.Storage`: protocol document state and persistence codecs.
 - `src/CellBridge.Storage.*`: provider contracts, backends and conformance checks.
-- `demo/`: separate Razor Pages solution, Aspire resource `demo`.
-- `aspire/apphost.cs`: file-based AppHost for `web`, `demo` and `sharepoint`.
+- `aspire/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, durable PostgreSQL, initialization and optional capture.
+- `benchmark/`: isolated measurements and focused benchmark AppHost.
 - `tests/`: protocol, storage and interoperability tests.
 - `tools/capture/`: SharePoint capture tooling.
 
@@ -36,20 +41,21 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 Use the Aspire CLI to run the app, rather than raw `dotnet run`:
 
 ```sh
-aspire start --non-interactive
-aspire wait web --non-interactive
-aspire wait demo --non-interactive
-aspire ps --non-interactive
-aspire describe --non-interactive
-aspire stop --non-interactive
+aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire ps --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire describe --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire stop --apphost aspire/CellBridge.AppHost.csproj --non-interactive
 ```
 
 - Stop Aspire before building outputs that its processes have locked.
 - Run checks relevant to the change. Main solution: `CellBridge.slnx`.
-  Demo solution: `demo/CellBridge.Demo.slnx`. Live tests are opt-in; see
+  Linux PostgreSQL and replay fixtures own their disposable Aspire environments.
+  Live remote Office tests are opt-in; see
   [interop instructions](tests/CellBridge.Interop.Tests/README.md).
 - For desktop Office failures, inspect request logs first. Use a hostname Windows
-  can resolve; the local demo Office origin defaults to `https://localhost:7292`.
+  can resolve; Aspire allocates the local HTTPS origin. Use `Parameters__PublicOrigin`
+  for an external browser/Office origin.
 - During an active capture, stop it with `tools/capture/stop.py` before stopping
   Aspire, then validate the capture. See [the capture guide](docs/capture-kit.md).
 
