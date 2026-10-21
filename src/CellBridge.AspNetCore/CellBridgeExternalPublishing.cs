@@ -5,7 +5,7 @@ using Microsoft.Extensions.Hosting;
 
 namespace CellBridge.AspNetCore;
 
-/// <summary>Settings for polling the durable queue of accepted file revisions.</summary>
+/// <summary>Settings for checking the queue of accepted file revisions awaiting delivery.</summary>
 public sealed class CellBridgeExternalPublicationOptions
 {
     public TimeSpan PollingInterval { get; set; } = TimeSpan.FromSeconds(1);
@@ -23,7 +23,8 @@ public static class CellBridgeExternalPublishing
     /// <summary>Registers one shared destination, publisher and hosted queue worker.</summary>
     /// <remarks>Requires AddCellBridge. Existing singleton registrations of TDestination are reused.
     /// Documents must be explicitly bound through ExternalRevisionPublisher.BindAsync.
-    /// The destination must implement durable idempotent receipts, including across host instances.
+    /// The destination must store delivery receipts that survive restarts and prevent
+    /// duplicate writes, including when several host instances deliver the same revision.
     /// Do not register another hosted worker, including through an opaque host factory.</remarks>
     public static IServiceCollection AddCellBridgeExternalPublishing<TDestination>(this IServiceCollection services,
         Action<CellBridgeExternalPublicationOptions>? configure = null)

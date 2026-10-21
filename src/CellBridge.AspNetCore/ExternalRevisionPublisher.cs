@@ -5,13 +5,16 @@ namespace CellBridge.AspNetCore;
 
 public enum PublicationAttempt { NoWork, Delivered, Superseded, Blocked, Conflict, ContentUnavailable, TransientFailure }
 
-/// <summary>Trusted host integration. Durable recovery polls the state store, not request completion callbacks.</summary>
+/// <summary>
+/// Delivers accepted file revisions. Recovery checks the state store without
+/// depending on request completion callbacks.
+/// </summary>
 public sealed class ExternalRevisionPublisher(StorageProvider provider, IExternalRevisionDestination destination)
 {
     public ValueTask<bool> BindAsync(Guid resourceId, long generation, long stateVersion, Guid bindingId,
         string destinationId, string externalRevision, CancellationToken cancellationToken = default)
     {
-        if (bindingId == Guid.Empty) throw new ArgumentException("A durable binding identity is required.", nameof(bindingId));
+        if (bindingId == Guid.Empty) throw new ArgumentException("A non-empty destination binding ID is required.", nameof(bindingId));
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationId);
         ArgumentException.ThrowIfNullOrWhiteSpace(externalRevision);
         return provider.State.TransitionAsync(resourceId, (current, _) =>

@@ -4,19 +4,16 @@ on:
     paths:
       - 'tools/capture/**'
       - 'tools/testing/**'
-      - 'aspire/apphost.cs'
       - 'src/**'
       - 'tests/**'
-      - 'demo/**'
+      - 'benchmark/**'
       - 'testdata/**'
       - 'Directory.*'
       - 'nuget.config'
-      - 'aspire/nuget.config'
       - 'global.json'
       - 'tools/CellBridge.Admin/**'
       - 'tools/CellBridge.Storage.*/**'
       - 'tools/CellBridge.Lists.Setup/**'
-      - 'tools/CellBridge.Lists.Benchmark/**'
       - 'tools/verify_packages.py'
       - 'tools/package_manifest.py'
       - 'tools/check_release.py'
@@ -33,19 +30,16 @@ on:
     paths:
       - 'tools/capture/**'
       - 'tools/testing/**'
-      - 'aspire/apphost.cs'
       - 'src/**'
       - 'tests/**'
-      - 'demo/**'
+      - 'benchmark/**'
       - 'testdata/**'
       - 'Directory.*'
       - 'nuget.config'
-      - 'aspire/nuget.config'
       - 'global.json'
       - 'tools/CellBridge.Admin/**'
       - 'tools/CellBridge.Storage.*/**'
       - 'tools/CellBridge.Lists.Setup/**'
-      - 'tools/CellBridge.Lists.Benchmark/**'
       - 'tools/verify_packages.py'
       - 'tools/package_manifest.py'
       - 'tools/check_release.py'
@@ -67,8 +61,10 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet test CellBridge.slnx --nologo --verbosity minimal
-      - run: dotnet test demo/CellBridge.Demo.slnx --nologo --verbosity minimal
+      - run: dotnet test tests/CellBridge.FssHttp.Tests --nologo --verbosity minimal
+      - run: dotnet test tests/CellBridge.FssHttpB.Tests --nologo --verbosity minimal
+      - run: dotnet test tests/OfficeInspectors.Adapter --nologo --verbosity minimal
+      - run: dotnet test tests/CellBridge.WebDemo.Tests --nologo --verbosity minimal
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
@@ -109,8 +105,7 @@ jobs:
           dotnet-version: '10.0.x'
       - run: dotnet build tools/CellBridge.Storage.Setup --nologo
       - run: dotnet tools/CellBridge.Storage.Setup/bin/Debug/net10.0/CellBridge.Storage.Setup.dll
-      - run: dotnet test CellBridge.slnx --nologo --verbosity minimal
-      - run: dotnet test demo/CellBridge.Demo.slnx --nologo --verbosity minimal
+      - run: dotnet test CellBridge.slnx -m:1 --nologo --verbosity minimal
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'

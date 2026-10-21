@@ -7,13 +7,13 @@ using CellBridge.OfficeInspectors;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
 [CollectionDefinition("Disposable database recovery", DisableParallelization = true)]
-public sealed class DatabaseRecoveryCollection;
+public sealed class DatabaseRecoveryCollection : ICollectionFixture<DatabaseRecoveryFixture>;
 
 [Collection("Disposable database recovery")]
 public sealed class DatabaseRecoveryTests
@@ -449,7 +449,7 @@ public sealed class DatabaseRecoveryTests
             await Command("docker", "start", id);
             // Aspire resource start recreates the container after an external
             // kill. This fault test must retain the exact PGDATA instead. Initial
-            // startup uses aspire wait; here SQL proves recovery of the same server.
+            // startup uses Hosting.Testing health checks; here SQL proves recovery of the same server.
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             while (true)
             {
@@ -497,8 +497,6 @@ public sealed class DatabaseRecoveryTests
         private static async Task<string> Command(string executable, params string[] args)
         {
             var start = new ProcessStartInfo(executable) { RedirectStandardOutput = true, RedirectStandardError = true };
-            if (executable == "aspire") start.WorkingDirectory = Path.GetDirectoryName(
-                Environment.GetEnvironmentVariable("CELLBRIDGE_RECOVERY_APPHOST"))!;
             // docker exec --env PGPASSWORD reads this CLI environment value. The
             // generated credential never appears in process arguments or reports.
             start.Environment["PGPASSWORD"] = new NpgsqlConnectionStringBuilder(
@@ -520,8 +518,7 @@ public sealed class DatabaseRecoveryTheoryAttribute : TheoryAttribute
 {
     public DatabaseRecoveryTheoryAttribute()
     {
-        if (!OperatingSystem.IsLinux() || string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CELLBRIDGE_RECOVERY_RUN")) ||
-            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CELLBRIDGE_RECOVERY_CONTAINER")))
-            Skip = "Run tools/testing/recovery.py against its owned disposable PostgreSQL container.";
+        if (!OperatingSystem.IsLinux())
+            Skip = "Controlled PostgreSQL interruption and filesystem restore checks require Linux.";
     }
 }

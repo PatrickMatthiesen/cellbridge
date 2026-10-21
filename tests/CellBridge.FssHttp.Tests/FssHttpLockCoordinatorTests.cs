@@ -4,7 +4,7 @@ using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 
 namespace CellBridge.FssHttp.Tests;
 

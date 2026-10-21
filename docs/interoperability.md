@@ -126,17 +126,17 @@ a single-desktop test, with no coauthoring transition qualification.
 
 ## Automated checks
 
-The [test runner](../tools/testing/run.py) starts disposable PostgreSQL and two
-hosts through Aspire. It covers protocol replay, provider consistency, quota
+The [integration fixtures](automated-testing.md) reuse `CellBridge.AppHost` with
+disposable PostgreSQL and two WebDemo instances. They cover protocol replay, provider consistency, quota
 races, retry/failure behavior, metadata retention and quiescent cleanup.
 Query tests reconstruct saved files from prior client knowledge and returned
 parts. CI also uses the independent [Office Inspectors parser](office-inspectors.md).
 
 Buffered and streaming reconstruction use the same reviewed save captures.
 HTTP tests check multipart preambles/headers, content length and capture/output
-byte equality. Durable-save tests compare streamed graph, response, versions and
+byte equality. Save tests compare streamed graph, response, versions and
 metadata with the buffered path, including ingestion failure, cancellation and
-expanded ZIP limits before publication.
+expanded ZIP limits before saving changes.
 
 See [automated testing](automated-testing.md) for commands and desktop test
 procedures. Hardware power loss, asynchronous database failover and Office

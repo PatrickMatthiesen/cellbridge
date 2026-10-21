@@ -15,6 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class AuthenticationTests
 {
     [PostgreSqlFact]
@@ -22,7 +23,7 @@ public sealed class AuthenticationTests
     {
         var clock = new TestClock();
         await using var first = await Start(clock);
-        await using var peer = await Start(clock, renew: false);
+        await using var peer = await Start(clock);
         var username = "auth-" + Guid.NewGuid().ToString("N");
         const string password = "Test-password-7292!";
         string subject;
@@ -109,14 +110,14 @@ public sealed class AuthenticationTests
         Assert.Null(CellBridgeActor.FromPrincipal(new(new ClaimsIdentity([new(ClaimTypes.NameIdentifier, "attacker")], "external"))));
     }
 
-    private static async Task<WebApplication> Start(TestClock clock, bool renew = true)
+    private static async Task<WebApplication> Start(TestClock clock)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         { ["ConnectionStrings:cellbridge"] = Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge"),
           ["Authentication:PublicOrigin"] = "https://localhost" });
-        builder.Services.AddCellBridgeAuthentication(builder.Configuration, renew, serveOffice: renew);
+        builder.Services.AddCellBridgeAuthentication(builder.Configuration);
         builder.Services.Configure<CookieAuthenticationOptions>(IdentityConstants.ApplicationScheme, o => o.TimeProvider = clock);
         builder.Services.Configure<SecurityStampValidatorOptions>(o => o.TimeProvider = clock);
         builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);

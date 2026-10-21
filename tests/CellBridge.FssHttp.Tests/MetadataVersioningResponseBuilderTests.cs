@@ -2,7 +2,7 @@ using CellBridge.AspNetCore;
 using System.Xml.Linq;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 
 public sealed class MetadataVersioningResponseBuilderTests
 {

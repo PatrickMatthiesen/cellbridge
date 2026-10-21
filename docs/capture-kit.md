@@ -53,11 +53,11 @@ configuration file, use an absolute directory:
 ```
 
 The equivalent host environment variable is `Protocol__CaptureDirectory`.
-Aspire wires its `WireCaptureDirectory` parameter into that variable for `web`:
+Aspire wires its `WireCaptureDirectory` parameter into that variable for `webdemo`:
 
 ```sh
 export Parameters__WireCaptureDirectory="$PWD/artifacts/office-wire"
-aspire start --isolated --apphost aspire/apphost.cs --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 The Aspire parameter defaults to empty. For an existing app, finish outstanding
@@ -127,25 +127,25 @@ The default upstream is a placeholder. Aspire declares the proxy but starts it
 only on request:
 
 ```sh
-aspire start --apphost aspire/apphost.cs --non-interactive
-aspire resource sharepoint start --apphost aspire/apphost.cs --non-interactive
-aspire wait sharepoint --apphost aspire/apphost.cs --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire resource sharepoint start --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait sharepoint --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 | Aspire parameter | Default | Purpose |
 | --- | --- | --- |
 | `CaptureUpstream` | `http://sharepoint.example.test:42292` | Fixed upstream origin |
-| `CapturePort` | `8443` | Local HTTPS listener port |
-| `CaptureUpstreamCa` | Local preflight PEM if present, otherwise empty | Upstream certificate trust inside the proxy |
+| `CaptureUpstreamCa` | Empty | Upstream certificate trust inside the proxy |
 | `CaptureOutput` | Absolute `tools/capture/captures` path | Raw evidence directory |
 
 Configure these through the AppHost `Parameters` section, user secrets or
-environment variables. Disposable automated runs omit the proxy.
+environment variables. Aspire allocates the direct TLS listener port; inspect
+`aspire describe` for the current `sharepoint` endpoint. Test fixtures omit the proxy.
 For HTTPS upstreams with a private CA, set `CaptureUpstreamCa` to a verified
 certificate/CA PEM on the Aspire machine. HTTP upstreams ignore that setting.
 
-Open `https://sharepoint.dev.localhost:8443/Shared%20Documents/Document.docx`
-in Word. The listener binds IPv4 loopback and uses Aspire's existing development
+Open the allocated `sharepoint` HTTPS endpoint followed by
+`/Shared%20Documents/Document.docx` in Word. The listener binds IPv4 loopback and uses Aspire's existing development
 certificate without an extra Aspire proxy hop. The client must resolve the
 hostname and trust a certificate covering it. Using `localhost` instead changes
 the Host header and requires matching SharePoint mappings.
@@ -159,7 +159,9 @@ client header.
 ### Configure SharePoint alternate access mappings
 
 SharePoint must recognize the proxy origin and upstream origin in the same zone.
-For a web application extended into an HTTP zone on port 42292:
+For a web application extended into an HTTP zone on port 42292, the following
+example uses capture port 8443. Substitute the allocated `sharepoint` port in
+both proxy URLs for your run.
 
 | Internal URL | Zone | Public URL for zone |
 | --- | --- | --- |

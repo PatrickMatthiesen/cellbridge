@@ -13,8 +13,8 @@ Create or import a file, open it in Word, Excel or PowerPoint, and save changes
 back to CellBridge. Use the sample to try desktop editing, or add the endpoints
 to your own ASP.NET Core application.
 
-CellBridge is experimental. The APIs may change, and production-scale operation
-has not been qualified.
+CellBridge is experimental. The APIs may change, and CellBridge has not been
+tested at production scale.
 
 Optional [customer workspace list libraries](docs/lists.md) provide typed schemas,
 company templates, custom fields, record merge previews, references and authorized
@@ -26,7 +26,7 @@ provide their own customer lifecycle and user interface.
 | Feature | Current support |
 | --- | --- |
 | Word editing | Open, edit, save and reopen tested while signed in. |
-| Excel editing | Open, edit, save and reopen tested while signed in on the durable host. |
+| Excel editing | Open, edit, save and reopen tested while signed in on the PostgreSQL-backed host. |
 | PowerPoint editing | Save and reopen presentations, including complex Copilot-generated slides. |
 | Document library | Create blank Office files, import existing documents and download saved files. |
 | Accounts and permissions | Local sign-in, document ownership, read-only/editing access and revocation. |
@@ -42,31 +42,31 @@ unimplemented or disabled. See [revision history](docs/revision-history.md),
 
 ## Try the demo
 
-The repository contains two separate applications. The Razor Pages demo served
-at `/library` creates blank documents and uses the sample Identity accounts.
+The development application `src/CellBridge.WebDemo` hosts the protocol endpoints
+and a Razor Pages library at `/library`. It creates blank documents and uses
+the sample Identity accounts.
 The [package-only document library](examples/DocumentLibrary/README.md) also creates
 blank documents and adds uploads, Office links, downloads, history, permissions
 and save-delivery status.
 It stores actual destination files separately from CellBridge state and tests
 recovery after lost save replies. Its built-in identities are for local testing.
 
-Install the .NET 10 SDK, an Aspire CLI compatible with the preview SDK pinned
-in `aspire/apphost.cs`, Docker and Python 3.12 or newer.
+Install the .NET 10 SDK, an Aspire CLI compatible with the preview packages pinned
+in `src/CellBridge.AppHost/CellBridge.AppHost.csproj`, Docker and Python 3.12 or newer.
 Desktop editing requires Office on Windows.
 
 From the repository root:
 
 ```sh
-aspire start --apphost aspire/apphost.cs --non-interactive
-aspire wait web --non-interactive
-aspire wait demo --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 aspire ps --non-interactive
 ```
 
-Aspire starts PostgreSQL, initializes the schema and starts the host and library.
+Aspire starts durable PostgreSQL, initializes the schema and then starts WebDemo.
 [Provision an account](docs/authentication.md#first-setup), then open
-`https://localhost:7292/library`. Sign in, create a document and use its Office
-open link to edit and save it.
+the HTTPS endpoint shown for `webdemo`, followed by `/library`. Sign in, create
+a document and use its Office open link to edit and save it.
 
 For another computer, set `Parameters__PublicOrigin` to an HTTPS origin that
 Office can reach and trust. The [demo guide](docs/demo-library.md) covers imports
@@ -77,7 +77,7 @@ with `tools/capture/stop.py` first, then run `aspire stop --non-interactive`.
 
 ## Use in ASP.NET Core
 
-After configuring authentication and a durable `StorageProvider`, register the
+After configuring authentication and a `StorageProvider`, register the
 services and endpoints in `Program.cs`:
 
 ```csharp
@@ -115,14 +115,14 @@ share locks with WOPI, follow [external host reliability](docs/external-host-rel
 
 ```sh
 dotnet build CellBridge.slnx
-dotnet test CellBridge.slnx
-dotnet test demo/CellBridge.Demo.slnx
+dotnet test CellBridge.slnx -m:1
 ```
 
-CI runs protocol, storage, demo, parser and capture checks on Linux and Windows.
-See [automated testing](docs/automated-testing.md) for the disposable two-host
-runner and desktop tests. [Live interoperability tests](tests/CellBridge.Interop.Tests/README.md)
-are opt-in.
+CI runs protocol, PostgreSQL, WebDemo and parser checks on Linux, and capture
+checks on Linux and Windows.
+See [automated testing](docs/automated-testing.md) for disposable PostgreSQL
+and replay fixtures and desktop tests. [HTTP interoperability tests](tests/CellBridge.Interop.Tests/README.md)
+own disposable hosts by default. Remote and desktop checks remain opt-in.
 
 ## Documentation
 

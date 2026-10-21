@@ -1,59 +1,71 @@
 # Measuring request allocations
 
-`tools/CellBridge.Allocations.Benchmark` measures preloaded inbound parsing,
-eager document and file-graph restoration, and nested binary builders. Use it
-when choosing allocation changes. It does not measure HTTP ingestion, network
+`benchmark/CellBridge.Allocations.Benchmark` measures preloaded inbound parsing,
+eager document and file-graph restoration, and nested binary builders.
+BenchmarkDotNet owns process isolation, warm-up, measurement and allocation
+reporting for synthetic inputs. It does not measure HTTP ingestion, network
 latency, Office rendering or end-to-end save throughput.
 
-Build in Release, then run separate before/after batches on the same machine:
+Build in Release and select the methods to measure:
 
 ```sh
-dotnet build tools/CellBridge.Allocations.Benchmark -c Release
-python3 tools/CellBridge.Allocations.Benchmark/run.py --label before --repeats 3 --iterations 30
-# Apply the candidate change, then rebuild.
-dotnet build tools/CellBridge.Allocations.Benchmark -c Release
-python3 tools/CellBridge.Allocations.Benchmark/run.py --label after --repeats 3 --iterations 30
-python3 tools/CellBridge.Allocations.Benchmark/compare.py artifacts/allocations/before artifacts/allocations/after
+dotnet build benchmark/CellBridge.Allocations.Benchmark -c Release
+dotnet benchmark/CellBridge.Allocations.Benchmark/bin/Release/net10.0/CellBridge.Allocations.Benchmark.dll --filter '*' --artifacts artifacts/allocations/bdn --exporters json
 ```
 
-Labels must be new. Reports and immutable executable snapshots stay in ignored
-`artifacts/allocations/<label>/`. Each batch records HEAD, the production diff
-against HEAD, SDK, benchmark source hashes, assembly hashes and runtime settings.
-The runner disables tiered compilation for repeatable stage comparisons. It
-starts a separate process per stage, workload, backend and repetition, and runs
-those processes sequentially. Other work on the machine can still affect latency.
+The default cases use deterministic seed-42 payloads of 1 KiB, 1 MiB and 8 MiB
+with memory and fresh filesystem content providers. `GlobalSetup` constructs the
+request, graph and persisted state outside measured invocations. Filesystem paths
+belong to the run and are removed by `GlobalCleanup`. No development database,
+Aspire application or shared volume is used. BenchmarkDotNet records its job,
+runtime and timing settings in its output. Additional JSON files under
+`artifacts/allocations/metadata` record workload hashes, source commit, tracked
+diff hash, working-tree status and loaded assembly hashes. Set
+`CELLBRIDGE_BENCHMARK_METADATA` to keep these beside a particular run's report.
+Use a fresh output directory for each comparison and retain the exact source and
+build outputs. Other work on the machine can affect timing.
 
-The runner covers seed-42 payloads of 1 KiB, 1 MiB and 8 MiB plus the reviewed
-`save-first` and `save-second` fixtures. Each synthetic request contains one
-complete file graph. The second reviewed save merges the first save's graph
-before restoration. Fixture hashes are checked during setup.
+## Reviewed captures and provider diagnostics
 
-| Stage | Measured operation |
-| --- | --- |
-| `inbound` | MTOM views, SOAP XML parsing and complete binary request decoding from a preloaded buffer |
-| `binary` | Binary request decoding alone |
-| `restore` | `StoredDocument.RestoreAsync`, including verified content reads, document/partition content copies and eager file-graph construction |
-| `nested` | `StorageManifestBuilder.BuildObjectGroupDataElement`, including its final owning payload array |
-| `file-build` | `FileContentPartitionBuilder.BuildQueryChangesResponse`, including its nested builders |
+The `--diagnostics` mode retains reviewed SharePoint requests, logical provider
+read counts and stage reports for comparisons that need those details:
 
-Restore preserves the reviewed retained graph. The nested and file-build stages
-build new graphs using its materialized file bytes. They do not reserialize the
-original captured graph. The input bytes, parsed graph, persisted state and
-provider writes are prepared outside measured intervals. Five warmups precede
-30 measured operations. Allocation totals include runtime overhead within that
-interval. Comparisons use the median of three batch means and check workload
-hashes, generated wire hashes and logical read counts.
+```sh
+dotnet benchmark/CellBridge.Allocations.Benchmark/bin/Release/net10.0/CellBridge.Allocations.Benchmark.dll --diagnostics --workload save-second --stage restore --content filesystem --iterations 30 --output artifacts/allocations/capture/restore.json
+```
 
-Restore runs against the in-memory provider and a fresh filesystem content root
-that is removed on exit. Filesystem reads are warmed and include the provider's
-integrity verification. Handle lengths count logical content reads, not physical
-disk I/O. No development database, Aspire app or shared volume is used.
+Use `--workload synthetic --bytes 1048576` for synthetic diagnostic input, or
+`save-first` and `save-second` for the reviewed fixtures. The second save merges
+the first save's graph before restoration. Setup verifies the fixture hashes.
+For repetition, invoke the executable again with a new output path. The native
+benchmark process owns its content directory and cleanup. There is no Python
+lifecycle runner.
 
-Reports also include process CPU time, per-operation wall time, p50/p95 latency,
-logical reads, retained managed bytes and process peak working set. Retained
-managed bytes include the live setup and final result. Process peak includes
-setup, JIT and warmup. Neither isolates transient operation peak memory. Use an
-allocation profiler or a separate ingestion/load run for that question.
+| Diagnostic stage | BenchmarkDotNet method | Measured operation |
+| --- | --- | --- |
+| `inbound` | `InboundMtomSoapBinary` | MTOM views, SOAP parsing and complete binary request decoding from a preloaded buffer |
+| `binary` | `BinaryParse` | Complete binary request decoding |
+| `restore` | `Restore` | Verified content reads, document/partition copies and eager file-graph restoration |
+| `nested` | `NestedObjectGroupBuild` | Object-group construction, including its final owning payload array |
+| `file-build` | `FileResponseBuild` | File response construction, including nested builders |
+
+In diagnostic mode, input preparation, persistence, five warm-ups, output
+serialization and probes are outside the timed operation loop. The operation
+count is `--iterations`. Retained managed bytes include setup and the final
+result. Process peak includes setup, JIT and warm-up. Neither isolates transient
+operation peak memory. Logical read bytes include integrity verification and do
+not measure physical disk I/O. The nested and file-build stages use materialized
+file bytes rather than reserializing the original captured graph.
+
+`compare.py` compares diagnostic reports with exactly one stage each. It checks
+workload, wire hashes and logical reads before comparing repeat medians:
+
+```sh
+python3 benchmark/CellBridge.Allocations.Benchmark/compare.py artifacts/allocations/before artifacts/allocations/after
+```
+
+The results below describe earlier allocation changes. They are not the SQL
+baseline for a later storage-provider comparison.
 
 ## Measured nested copy reduction
 

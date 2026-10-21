@@ -5,7 +5,10 @@ Office challenges, protocol responses and library open links use it rather than
 an incoming Host header. Without a fixed origin, remote protocol requests need
 a specific `AllowedHosts` list; loopback is available for local testing.
 
-This example hosts CellBridge from NuGet packages. It keeps CellBridge state and content in PostgreSQL. A separate destination directory stores immutable Office files. Each document has one atomically replaced manifest that selects the current file revision and retains delivery receipts.
+This example hosts CellBridge from NuGet packages. It keeps CellBridge state and
+content in PostgreSQL. A separate destination directory stores immutable Office
+files. Each document has a manifest that selects the current file revision and
+stores delivery receipts. Updates replace the whole manifest atomically.
 
 This revision uses unreleased async authorization APIs from PR93. Published
 `0.1.0-beta.4` packages do not provide these APIs. Build the local packages and
@@ -131,22 +134,30 @@ Run these commands from the repository root after the verifier has populated
 `artifacts/packages`:
 
 ```powershell
-$env:DocumentLibrary__RestoreConfigFile = (Resolve-Path artifacts/packages/NuGet.Config).Path
-$env:DocumentLibrary__RestorePackagesPath = (Resolve-Path artifacts/packages/consumer-cache).Path
+dotnet restore examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj `
+  --configfile artifacts/packages/NuGet.Config `
+  --packages artifacts/packages/consumer-cache
+$env:NUGET_PACKAGES = (Resolve-Path artifacts/packages/consumer-cache).Path
+$env:RestoreConfigFile = (Resolve-Path artifacts/packages/NuGet.Config).Path
 
-aspire start --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire wait document-library --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
-aspire describe --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
+aspire start --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
+aspire wait document-library --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
+aspire describe --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
 # Open the document-library HTTPS endpoint reported by aspire describe.
-aspire stop --apphost examples/DocumentLibrary/aspire/apphost.cs --non-interactive
+aspire stop --apphost examples/DocumentLibrary/aspire/CellBridge.DocumentLibrary.AppHost.csproj --non-interactive
 ```
 
 The AppHost does not auto-detect local package directories. This revision requires
-both settings. Use the double-underscore environment names shown above because
-.NET configuration maps them to `DocumentLibrary:RestoreConfigFile` and
-`DocumentLibrary:RestorePackagesPath`.
+`NUGET_PACKAGES` and `RestoreConfigFile` to select the packages built from this
+source. These standard restore inputs apply to the project build.
 
-The AppHost creates PostgreSQL, runs the package-only setup project, and starts the web app only after schema initialization succeeds. Its normal mode keeps a named PostgreSQL volume and stores destination files under the ignored `artifacts/document-library` directory. Set `Testing__Enabled=true` in the environment for disposable PostgreSQL and a unique temporary destination. This disposable mode also exposes a local HTTP endpoint for browser checks that cannot trust the developer certificate. Only one app process may use a destination root. The app holds an exclusive lock file for its full lifetime.
+
+The AppHost creates PostgreSQL, runs the package-only setup project, and starts
+the web app only after schema initialization succeeds. It always keeps the named
+PostgreSQL volume and stores destination files under the ignored
+`artifacts/document-library` directory. Aspire allocates the HTTPS port. Tests own
+separate fixtures and temporary destinations. Only one app process may use a
+destination root. The app holds an exclusive lock file for its full lifetime.
 
 ## Customer lists
 

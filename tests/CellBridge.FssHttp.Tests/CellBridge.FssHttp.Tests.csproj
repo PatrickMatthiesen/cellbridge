@@ -27,11 +27,16 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
     <ProjectReference Include="..\..\src\CellBridge.Storage\CellBridge.Storage.csproj" />
-    <ProjectReference Include="..\..\src\CellBridge.Web\CellBridge.Web.csproj" />
+    <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
     <ProjectReference Include="../../tools/CellBridge.Admin/CellBridge.Admin.csproj" />
   </ItemGroup>
 
   <ItemGroup><Compile Include="../CellBridge.TestIdentity.cs" Link="TestIdentity.cs" /></ItemGroup>
   <ItemGroup><Compile Include="../CellBridge.Packages.Tests/HostingRegistrationTests.cs" Link="HostingRegistrationTests.cs" /></ItemGroup>
   <ItemGroup><PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.12" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/CellBridge.Authentication/CellBridge.Authentication.csproj" />
+    <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
+  </ItemGroup>
 </Project>

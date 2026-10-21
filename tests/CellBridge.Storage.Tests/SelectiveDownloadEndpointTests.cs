@@ -4,7 +4,7 @@ using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using CellBridge.Tests;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
 

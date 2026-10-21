@@ -3,7 +3,7 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage;
 
-/// <summary>Pure publication helpers; call only after constructing the final committed partition state.</summary>
+/// <summary>Builds history records without I/O. Call only after constructing the final partition state to save.</summary>
 public static class RevisionHistory
 {
     public static DocumentState Initialize(DocumentState state) => state.Revisions.IsEmpty

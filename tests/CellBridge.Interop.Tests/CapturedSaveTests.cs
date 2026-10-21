@@ -7,6 +7,7 @@ using CellBridge.FssHttpB;
 
 namespace CellBridge.Interop.Tests;
 
+[Collection("WebDemo integration")]
 public sealed class CapturedSaveTests
 {
     [LiveInteropFact]

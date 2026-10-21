@@ -8,11 +8,12 @@ using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.Storage.FileSystem;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public class StorageTests
 {
     [Fact]
@@ -191,15 +192,9 @@ public class StorageTests
     }
 }
 
-public sealed class PostgreSqlFactAttribute : FactAttribute
-{
-    public PostgreSqlFactAttribute()
-    {
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")))
-            Skip = "Set ConnectionStrings__cellbridge to a migrated PostgreSQL test database.";
-    }
-}
+public sealed class PostgreSqlFactAttribute : FactAttribute;
 
+[Collection("PostgreSQL")]
 public sealed class PostgreSqlTests
 {
     [PostgreSqlFact]

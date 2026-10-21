@@ -121,7 +121,7 @@ public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, St
             await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, 0, 1, cancellationToken);
             if (await IsPathReservedAsync(connection, transaction, state.PathKey, state.ResourceId, cancellationToken)) return false;
             await InsertStateAsync(connection, transaction, next, cancellationToken);
-            // Publication has begun. Cancellation cannot be interpreted as rollback.
+            // The database write has begun. Cancellation does not prove that it rolled back.
             await transaction.CommitAsync(CancellationToken.None);
             return true;
         }
@@ -188,7 +188,7 @@ public sealed partial class PostgreSqlStateStore(NpgsqlDataSource dataSource, St
         }
         catch (PostgresException ex) when (rename && ex.SqlState == PostgresErrorCodes.UniqueViolation)
         { throw new InvalidOperationException("The destination filename already exists.", ex); }
-        catch (NpgsqlException ex) { throw new StorageUnavailableException("Document publication failed or its commit outcome is unknown.", ex); }
+        catch (NpgsqlException ex) { throw new StorageUnavailableException("Saving the document failed or the transaction result is unknown.", ex); }
     }
     public ValueTask<DocumentState?> FindLifecycleAsync(Guid id, CancellationToken cancellationToken = default) =>
         FindAsync("d.resource_id = $1", id, cancellationToken);

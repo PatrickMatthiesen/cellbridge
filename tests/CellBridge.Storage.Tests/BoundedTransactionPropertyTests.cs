@@ -5,12 +5,13 @@ using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Npgsql;
 using Xunit.Abstractions;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class BoundedTransactionPropertyTests(ITestOutputHelper output)
 {
     private const int Seed = 0x18_34;

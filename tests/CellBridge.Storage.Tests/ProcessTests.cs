@@ -6,11 +6,12 @@ using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.Conformance;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public class ProcessTests
 {
     [Fact]
@@ -155,8 +156,7 @@ public sealed class QualificationFactAttribute : FactAttribute
 {
     public QualificationFactAttribute()
     {
-        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")) ||
-            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CELLBRIDGE_QUALIFICATION_DIRECTORY")))
-            Skip = "Set the disposable database and CELLBRIDGE_QUALIFICATION_DIRECTORY for deployment-root qualification.";
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CELLBRIDGE_QUALIFICATION_DIRECTORY")))
+            Skip = "Set CELLBRIDGE_QUALIFICATION_DIRECTORY for deployment-root qualification.";
     }
 }

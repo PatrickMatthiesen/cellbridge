@@ -156,7 +156,7 @@ public sealed class StorageProvider(IDocumentStateStore state, IContentStore con
         if (limits is not null && !Capabilities.AtomicBudgets)
             throw new InvalidOperationException("Explicit storage limits require state and content stores with shared atomic accounting.");
         if (durable && !Capabilities.Durable)
-            throw new InvalidOperationException("This storage configuration does not provide durable saves.");
+            throw new InvalidOperationException("This storage configuration does not preserve saved changes after a restart.");
         if (multipleInstances && (!Capabilities.SharedState || !Capabilities.SharedContent))
             throw new InvalidOperationException("Multiple service instances require shared state and shared content.");
     }

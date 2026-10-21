@@ -11,20 +11,23 @@ Microsoft parser. Captured Word and Excel save regressions validate graph-aware
 materialization. These tests exercise protocol exchanges, not a running Office
 desktop.
 
-Run the offline checks with:
+Run the parser/replay and HTTP checks from the repository root:
 
-```powershell
-dotnet test tests/CellBridge.Interop.Tests/CellBridge.Interop.Tests.csproj
+```sh
+dotnet test tests/CellBridge.Interop.Tests
 ```
 
-For a disposable Aspire database and two web hosts, use
-`python3 tools/testing/run.py` from the repository root. This enables all HTTP
-tests and runs provider and protocol checks too. See
-[automated testing](../../docs/automated-testing.md) for the Windows Word script,
-Tailscale setup and performance runs.
+The HTTP collection reuses `src/CellBridge.AppHost` through Hosting.Testing.
+Its fixture removes the persistent PostgreSQL mount and capture resources, runs
+the current schema initialization, seeds a temporary Identity account, and starts
+two WebDemo instances against that
+same database. The fixture uses real login and antiforgery flows and creates its
+documents through the authenticated API. It disposes only its own resources.
+.NET 10, the repository's Aspire packages and a Docker-compatible container runtime
+are required. No Windows desktop or continuously running development app is needed.
+See [automated testing](../../docs/automated-testing.md) for other checks.
 
-To test an already running Aspire app, set the full SOAP endpoint. The peer
-endpoint is optional and enables the two-host storage/lock test:
+To test an already running Aspire app, set the full SOAP endpoint. Supply both hosts when running the complete suite:
 
 ```powershell
 $env:OFFICECOLLABSERVER_INTEROP_ENDPOINT = 'https://localhost:7292/_vti_bin/cellstorage.svc'
@@ -35,7 +38,7 @@ dotnet test tests/CellBridge.Interop.Tests/CellBridge.Interop.Tests.csproj
 
 Live checks include QueryAccess, QueryChanges, captured Word open exchanges,
 Word and Excel PutChanges, identity routing, session visibility, shared exclusive
-locks and forwarded HTTPS origins. Unconfigured HTTP checks report skipped.
+locks and forwarded HTTPS origins. The default run supplies both hosts.
 `CELLBRIDGE_INTEROP_PUBLIC_ORIGIN` is the fixed origin advertised in protocol
 responses. If omitted, the tests use the SOAP endpoint origin. The proxy-origin
 test assumes a trusted loopback connection to the local host. It should run
@@ -44,7 +47,6 @@ locally rather than targeting a remote proxy from another machine.
 Live HTTP tests require `CELLBRIDGE_INTEROP_COOKIE` and `CELLBRIDGE_INTEROP_CSRF`
 from an ordinary signed-in creator account. Cookies must include the paired
 antiforgery cookie; the token must be issued after sign-in. Keep these values
-out of logs and captures. `python3 tools/testing/run.py` provisions a temporary
-Identity account, performs the login form flow and supplies both privately for
-a disposable local run. A shared account across hosts tests cookie and storage
+out of logs and captures. The default Hosting.Testing fixture supplies both
+privately after signing into its temporary account. A shared account across hosts tests cookie and storage
 sharing, not distinct authenticated desktop coauthoring.

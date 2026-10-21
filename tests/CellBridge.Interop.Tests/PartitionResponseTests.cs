@@ -180,6 +180,7 @@ public sealed class PartitionResponseTests
     }
 }
 
+[Collection("WebDemo integration")]
 public sealed class LivePartitionTests
 {
     private static readonly Guid MetadataPartitionId =

@@ -5,7 +5,7 @@ using CellBridge.FssHttp;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 
 namespace CellBridge.Storage.Tests;
 

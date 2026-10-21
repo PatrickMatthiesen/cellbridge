@@ -4,6 +4,15 @@ CellBridge is an experimental ASP.NET Core implementation of MS-FSSHTTP and
 MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 [README.md](README.md) for current capabilities and limitations.
 
+## Beta compatibility policy
+
+- During beta, make needed breaking changes directly and update repository
+  callers, tests, examples and current docs. Do not add compatibility shims,
+  deprecation periods or consumer migration guides for superseded designs.
+  Preserve real database migrations and existing developer data.
+- Release all shipping CellBridge NuGet packages together with the same version
+  throughout beta. Keep document and Lists dependencies independent.
+
 ## Protocol scope
 
 - Use MS-OCPROTO, MS-FSSHTTP and MS-FSSHTTPB as protocol authorities.
@@ -20,14 +29,14 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 
 ## Repository map
 
-- `src/CellBridge.Web`: sample HTTP host, imports and document catalog.
+- `src/CellBridge.WebDemo`: non-packable development host, Razor Pages library and document catalog.
 - `src/CellBridge.AspNetCore`: reusable discovery, download and cellstorage endpoints.
 - `src/CellBridge.FssHttp`: SOAP and MTOM handling.
 - `src/CellBridge.FssHttpB`: binary serialization and object graphs.
 - `src/CellBridge.Storage`: protocol document state and persistence codecs.
 - `src/CellBridge.Storage.*`: provider contracts, backends and conformance checks.
-- `demo/`: separate Razor Pages solution, Aspire resource `demo`.
-- `aspire/apphost.cs`: file-based AppHost for `web`, `demo` and `sharepoint`.
+- `src/CellBridge.AppHost/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, PostgreSQL, initialization and optional capture.
+- `benchmark/`: isolated measurements using the shared disposable environment.
 - `tests/`: protocol, storage and interoperability tests.
 - `tools/capture/`: SharePoint capture tooling.
 
@@ -36,28 +45,29 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 Use the Aspire CLI to run the app, rather than raw `dotnet run`:
 
 ```sh
-aspire start --non-interactive
-aspire wait web --non-interactive
-aspire wait demo --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 aspire ps --non-interactive
-aspire describe --non-interactive
-aspire stop --non-interactive
+aspire describe --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 - Stop Aspire before building outputs that its processes have locked.
 - Run checks relevant to the change. Main solution: `CellBridge.slnx`.
-  Demo solution: `demo/CellBridge.Demo.slnx`. Live tests are opt-in; see
+  Linux PostgreSQL and replay fixtures reuse the main AppHost with disposable storage.
+  Live remote Office tests are opt-in; see
   [interop instructions](tests/CellBridge.Interop.Tests/README.md).
 - For desktop Office failures, inspect request logs first. Use a hostname Windows
-  can resolve; the local demo Office origin defaults to `https://localhost:7292`.
+  can resolve; Aspire allocates the local HTTPS origin. Use `Parameters__PublicOrigin`
+  for an external browser/Office origin.
 - During an active capture, stop it with `tools/capture/stop.py` before stopping
   Aspire, then validate the capture. See [the capture guide](docs/capture-kit.md).
 
 ## Implementation constraints
 
-- Aspire defaults to durable PostgreSQL state and content storage. The optional
-  in-memory provider is volatile. Imports create only missing documents; saves
-  do not write back to the import directory. See
+- Aspire uses PostgreSQL for state and content by default. The in-memory provider
+  loses its contents when the process stops. Imports create only missing documents.
+  Saves do not write back to the import directory. See
   [storage setup and provider contracts](docs/storage-providers.md).
 - Resolve supplied resource IDs correctly. Do not create documents on SOAP lookup
   misses or hide unknown IDs with a URL fallback. See

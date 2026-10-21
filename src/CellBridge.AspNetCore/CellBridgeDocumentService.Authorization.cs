@@ -69,7 +69,8 @@ public sealed partial class CellBridgeDocumentService
 
     /// <summary>
     /// Trusted host operation, not a document-writer privilege. Prepare the next immutable snapshot first.
-    /// Successful CAS is the permission-change boundary; it reconciles recorded subjects and fences prepared writes.
+    /// A successful conditional update applies the new permissions, updates recorded subjects
+    /// and prevents writes prepared under the previous permissions from committing.
     /// Cannot remove or migrate a binding to another policy domain.
     /// </summary>
     public async ValueTask<bool> UpdateAuthorizationAsync(Guid resourceId, DocumentAuthorizationBinding? expected,

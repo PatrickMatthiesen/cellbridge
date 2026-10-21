@@ -11,7 +11,7 @@ Phase descriptions retain the design gates; they are not an inventory of missing
 
 The existing SOAP/MTOM transport, binary framing, durable providers, authorization,
 knowledge handling and graph-aware file saves remain the foundation. The earlier
-streamed durable saves, streamed MTOM responses, bounded content verification and
+streamed file saves, streamed MTOM responses, bounded content verification and
 binary materialization improvements are already implemented. See the
 [current capabilities](../README.md#features),
 [protocol profiles](protocol-version-decision.md) and

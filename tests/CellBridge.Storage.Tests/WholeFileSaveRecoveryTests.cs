@@ -8,11 +8,12 @@ using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.Tests;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class WholeFileSaveRecoveryTests
 {
     private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());

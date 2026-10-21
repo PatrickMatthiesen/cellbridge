@@ -5,6 +5,7 @@ using System.Xml.Linq;
 
 namespace CellBridge.Interop.Tests;
 
+[Collection("WebDemo integration")]
 public sealed class IdentityRoutingTests
 {
     [LiveInteropFact]

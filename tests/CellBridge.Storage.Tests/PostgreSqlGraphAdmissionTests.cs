@@ -3,11 +3,12 @@ using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class PostgreSqlGraphAdmissionTests
 {
     [PostgreSqlFact]

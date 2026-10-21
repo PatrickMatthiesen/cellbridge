@@ -14,12 +14,11 @@ With Aspire stopped, build and start from the repository root:
 
 ```sh
 dotnet build CellBridge.slnx
-aspire start --apphost aspire/apphost.cs --non-interactive
-aspire wait web --non-interactive
-aspire wait demo --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
-Aspire uses the `cellbridge-storage-data` PostgreSQL volume. The `storage-init`
+Aspire uses an application-scoped durable PostgreSQL volume. The `storage-init`
 resource initializes fresh/current storage, and the host checks both stores
 before serving requests. [Provision an account](authentication.md#first-setup)
 to use the library. Removing the volume removes its persisted data.
@@ -69,15 +68,8 @@ in addition to this limit. Recovery also has a fixed 128 MiB aggregate limit on
 graph-reference bytes across retained snapshots.
 
 Environment variables use double underscores, such as
-`Storage__ContentProvider=FileSystem`. Set `AppHost__PeerEnabled=true` to add a
-second host, then start it with:
-
-```sh
-aspire resource web-peer start --apphost aspire/apphost.cs --non-interactive
-aspire describe --non-interactive
-```
-
-Both hosts use the same database. Discover assigned ports from Aspire.
+`Storage__ContentProvider=FileSystem`. Multi-host integration tests customize the
+main AppHost before starting it, with a fresh database and a second WebDemo process.
 
 ### Deployment constraints
 
@@ -181,13 +173,15 @@ size only; its PostgreSQL wrapper adds shared accounting.
 
 ## Commit and retry behavior
 
-A durable save verifies and combines the retained graph without loading the previous
-complete package. It reconstructs into an exclusively created temporary file,
-validates every ZIP member under the expanded-byte budget and rewinds for content
-storage. Graph payloads still load eagerly. The staging file is deleted on every
-exit path. The save then locks the document row, reads
-the current state and database time, rechecks permission, coherency and leases,
-and publishes a snapshot with a save receipt. File I/O happens outside the lock;
+The document service verifies and combines the retained graph without loading
+the previous complete package. It reconstructs the file into an exclusively
+created temporary file, checks every ZIP member against the limit on expanded
+bytes and rewinds the stream for storage. Graph payloads still load eagerly.
+The staging file is deleted on success, failure or cancellation.
+
+The service then locks the document row, reads the current state and database
+time, rechecks permission, coherency and leases, and saves a snapshot with a
+save receipt. File I/O happens outside the lock;
 different documents have independent locks.
 
 Receipts bind the proposed storage index to the operation digest, accepted

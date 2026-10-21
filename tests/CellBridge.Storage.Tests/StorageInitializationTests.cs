@@ -3,10 +3,11 @@ using System.Text.Json.Nodes;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class StorageInitializationTests
 {
     [PostgreSqlFact]

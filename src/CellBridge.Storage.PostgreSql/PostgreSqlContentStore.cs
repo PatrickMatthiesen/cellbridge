@@ -59,8 +59,8 @@ public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long max
         }
         else
         {
-            // Reuse is publication too: a deduplicated handle must refer to
-            // complete, verified bytes rather than just an existing key.
+            // Verify existing content before returning a reused handle.
+            // An existing key alone does not prove that its content is complete.
             await using (var metadata = new NpgsqlCommand(
                 "SELECT length,sha256 FROM cellbridge_objects WHERE object_key=$1", connection, transaction))
             {

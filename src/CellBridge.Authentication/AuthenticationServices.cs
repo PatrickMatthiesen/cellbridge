@@ -23,7 +23,7 @@ public static class AuthenticationServices
     public const string LoginRateLimitPolicy = "CellBridge.Authentication.Login";
 
     public static IServiceCollection AddCellBridgeAuthentication(this IServiceCollection services,
-        IConfiguration configuration, bool renewCookies = true, bool serveOffice = true)
+        IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("cellbridge")
             ?? throw new InvalidOperationException("Authentication requires an initialized PostgreSQL identity database.");
@@ -61,7 +61,7 @@ public static class AuthenticationServices
             o.Cookie.SecurePolicy = CookieSecurePolicy.Always;
             o.Cookie.SameSite = SameSiteMode.Lax;
             o.ExpireTimeSpan = TimeSpan.FromHours(8);
-            o.SlidingExpiration = renewCookies;
+            o.SlidingExpiration = true;
             o.LoginPath = "/auth/login";
             o.Events.OnRedirectToLogin = context =>
             {
@@ -74,21 +74,9 @@ public static class AuthenticationServices
             };
             o.Events.OnRedirectToAccessDenied = context =>
             { context.Response.StatusCode = StatusCodes.Status403Forbidden; return Task.CompletedTask; };
-            if (!renewCookies)
-            {
-                var validate = o.Events.OnValidatePrincipal;
-                o.Events.OnValidatePrincipal = async context =>
-                {
-                    await validate(context);
-                    // The public web host renews; internal catalog replies never
-                    // silently renew a cookie that the browser does not receive.
-                    context.ShouldRenew = false;
-                };
-            }
         });
-        if (serveOffice)
-            services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
-                o => o.PublicOrigin = origin.GetLeftPart(UriPartial.Authority));
+        services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
+            o => o.PublicOrigin = origin.GetLeftPart(UriPartial.Authority));
         services.AddAuthorization();
         services.AddAntiforgery(o =>
         {

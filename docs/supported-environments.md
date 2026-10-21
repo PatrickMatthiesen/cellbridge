@@ -6,9 +6,10 @@ Provider support alone does not establish recovery on every deployment.
 
 ## Record a qualification run
 
-Run `python tools/testing/run.py` with the workspace AppHost stopped. The runner
-uses disposable PostgreSQL and writes `recovery/environment.json`, TRX results
-and `summary.json` under its ignored output directory. The report records the
+Run `dotnet test tests/CellBridge.Storage.Tests --logger trx --results-directory artifacts/testing`.
+The native Aspire fixtures own disposable PostgreSQL. Set
+`CELLBRIDGE_QUALIFICATION_DIRECTORY` to an ignored output directory to retain
+`environment.json` and qualify that output filesystem. The report records the
 exact PostgreSQL version, `fsync`, `synchronous_commit`, `full_page_writes`, host
 OS/runtime and drive-root filesystem types for the temporary and output paths. It contains
 no connection strings or account credentials.
@@ -27,10 +28,10 @@ and the source commit when qualifying a deployment.
 | PostgreSQL state and local filesystem content | `ProcessTests.FileSystemProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` | The same process boundary with immutable files under the reported temporary root. |
 | PostgreSQL state and filesystem content under the run output root | `ProcessTests.ConfiguredFileSystemProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` | The same process boundary on the reported output filesystem. Missing qualification inputs cause a skip. |
 | Portable recovery across PostgreSQL/filesystem content | `PortabilityProviderTests.PostgreSqlToFileSystemToPostgreSqlRetainsEverySnapshotRootAndRestores` and portability failure tests | Export/import preserves current and retained graph/content roots, history, receipts and pending delivery. A reopened provider can restore a retained revision. |
-| Disposable local Linux PostgreSQL, with PostgreSQL or local filesystem content | `DatabaseRecoveryTests`, run through `tools/testing/recovery.py` | Database process termination before publication SQL, clean database stop/start after acknowledged saves, and quiescent custom-format `pg_dump`/`pg_restore`, each with state and content verification. |
+| Disposable local Linux PostgreSQL, with PostgreSQL or local filesystem content | `DatabaseRecoveryTests`, with the native recovery fixture | Database process termination before publication SQL, clean database stop/start after acknowledged saves, and quiescent custom-format `pg_dump`/`pg_restore`, each with state and content verification. |
 | In-memory state and content | Volatile provider conformance | API behavior during a process lifetime, with no restart recovery guarantee. |
 
-Current CI also exercises PostgreSQL 18 in a Linux container and protocol/package
+Current CI exercises PostgreSQL 18 in Linux containers and protocol/package
 checks on Windows. A runner label does not identify its backing filesystem or
 qualify physical power loss. Record a successful run's environment before adding
 a concrete configuration to a deployment's supported matrix.
@@ -47,7 +48,7 @@ operation and preserves the stored objects and accounting.
 The repository selects stable .NET 10 SDKs through `global.json`; it permits
 newer .NET 10 feature bands and excludes prerelease SDKs. See Microsoft's
 [SDK selection rules](https://learn.microsoft.com/en-us/dotnet/core/tools/global-json).
-The final runner records the selected SDK in `summary.json`.
+Retain `dotnet --info` and the source commit with each qualification report.
 
 ## Limits and recovery
 
@@ -82,28 +83,19 @@ replica backups still need their own qualification. See [provider recovery](prov
 On Linux with Docker, the pinned Aspire SDK and .NET 10 available, run:
 
 ```sh
-python3 tools/testing/recovery.py
+dotnet test tests/CellBridge.Storage.Tests --filter FullyQualifiedName~DatabaseRecoveryTests --logger trx --results-directory artifacts/recovery
 ```
 
-The runner builds the storage tests and starts its own minimal AppHost with
-`--isolated`. It refuses an active AppHost in this worktree and removes inherited
-connection strings and storage configuration. It creates a PostgreSQL 18.3
-container with a unique ownership marker, dynamic ports and PGDATA in the
-container's writable layer. The image's unused default data mount is tmpfs.
-There are no database bind mounts or persistent volumes. Removing the container
-discards its database. Filesystem objects and copied backup roots are under the
-run's ignored `artifacts/recovery` directory. The runner retains the exact
-container during faults and removes it after stopping its AppHost.
+The native recovery fixture owns its isolated PostgreSQL environment and fault
+lifecycle. It keeps the same owned container during interruption/restart checks
+and disposes only its own resources. Database interruption checks require Linux
+and Docker. Filesystem objects and backup reports belong under ignored
+`artifacts/recovery` output. No development database is used or deleted.
 
-All six recovery cases must execute and pass. Missing opt-in inputs skip the
-tests in ordinary test runs; skips do not qualify a database recovery run. The
-runner also executes existing process, provider-portability and environment
-checks, then stops only its own AppHost and removes its verified container.
-Keep its summary, TRX results, environment reports and backup artifacts together.
-Reports identify the source commit and dirty state, host and container OS,
-SDK/runtime, Npgsql, Aspire CLI, Docker, image digest, PostgreSQL and backup-client
-versions, durability settings and filesystem mounts. They omit connection strings
-and passwords.
+All six recovery cases must execute and pass. Skipped cases do not qualify a
+database recovery run. Retain TRX results, environment reports and backup evidence
+with source/runtime information. These checks preserve the existing provider
+schema and publication semantics.
 
 The Debian qualification on 2026-10-09 covers both PostgreSQL content and
 local filesystem content. All six controlled database recovery cases and the

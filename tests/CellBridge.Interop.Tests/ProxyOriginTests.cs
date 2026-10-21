@@ -3,6 +3,7 @@ using System.Xml.Linq;
 
 namespace CellBridge.Interop.Tests;
 
+[Collection("WebDemo integration")]
 public sealed class ProxyOriginTests
 {
     [LiveInteropFact]

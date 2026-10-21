@@ -10,7 +10,7 @@ using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.Tests;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 
 namespace CellBridge.Storage.Tests;
 

@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
-using CellBridge.Web;
+using CellBridge.TestFixtures;
 
 namespace CellBridge.Storage.Tests;
 

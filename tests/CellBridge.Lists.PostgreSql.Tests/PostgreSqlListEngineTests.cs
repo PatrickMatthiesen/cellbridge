@@ -541,20 +541,12 @@ public sealed class PostgreSqlListEngineTests(ListDatabaseFixture database)
     private static JsonObject Values(ListField field, string value) => new() { [field.Id.ToString("D")] = value };
 }
 
-public sealed class PostgreSqlFactAttribute : FactAttribute
-{
-    public PostgreSqlFactAttribute()
-    {
-        var configured = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CELLBRIDGE_LISTS_TEST_CONNECTION_STRING")) ||
-            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ConnectionStrings__lists"));
-        var required = string.Equals(Environment.GetEnvironmentVariable("CELLBRIDGE_LISTS_REQUIRE_DATABASE"), "true", StringComparison.OrdinalIgnoreCase);
-        if (!configured && !required) Skip = "A PostgreSQL list test connection is not configured.";
-    }
-}
+public sealed class PostgreSqlFactAttribute : FactAttribute;
 
 public sealed class ListDatabaseFixture : IAsyncLifetime
 {
     private string? _runtimeRole;
+    private CellBridge.TestInfrastructure.PostgreSqlEnvironment? environment;
     public bool Available { get; private set; }
     public NpgsqlDataSource? AdminSource { get; private set; }
     public NpgsqlDataSource? RuntimeSource { get; private set; }
@@ -567,9 +559,9 @@ public sealed class ListDatabaseFixture : IAsyncLifetime
             ?? Environment.GetEnvironmentVariable("ConnectionStrings__lists");
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            if (string.Equals(Environment.GetEnvironmentVariable("CELLBRIDGE_LISTS_REQUIRE_DATABASE"), "true", StringComparison.OrdinalIgnoreCase))
-                Assert.Fail("CELLBRIDGE_LISTS_TEST_CONNECTION_STRING or ConnectionStrings__lists is required.");
-            return;
+            environment = await CellBridge.TestInfrastructure.PostgreSqlEnvironment.StartAsync();
+            connectionString = environment.ListsConnectionString;
+            Environment.SetEnvironmentVariable("ConnectionStrings__lists", connectionString);
         }
         AdminSource = NpgsqlDataSource.Create(connectionString);
         _runtimeRole = "cellbridge_lists_test_" + Guid.NewGuid().ToString("N");
@@ -651,6 +643,11 @@ public sealed class ListDatabaseFixture : IAsyncLifetime
             await using var cleanup = new NpgsqlCommand($"DROP OWNED BY \"{_runtimeRole}\"; DROP ROLE \"{_runtimeRole}\"", connection);
             await cleanup.ExecuteNonQueryAsync();
             await AdminSource.DisposeAsync();
+        }
+        if (environment is not null)
+        {
+            Environment.SetEnvironmentVariable("ConnectionStrings__lists", null);
+            await environment.DisposeAsync();
         }
     }
 }
