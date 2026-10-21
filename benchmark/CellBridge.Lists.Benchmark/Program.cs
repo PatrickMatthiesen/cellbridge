@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using CellBridge.Lists;
 using CellBridge.Lists.AspNetCore;
 using CellBridge.Lists.PostgreSql;
+using CellBridge.TestInfrastructure;
 using Npgsql;
 
 return await Benchmark.RunAsync(BenchmarkMetadata.Arguments(args, "ListsBenchmark__Arguments"));
@@ -35,8 +36,6 @@ internal static class Benchmark
             for (var i = 0; i < text.Length; i++) text[i] = alphabet[random.Next(alphabet.Length)];
         });
         var connection = Environment.GetEnvironmentVariable("ConnectionStrings__lists");
-        if (string.IsNullOrWhiteSpace(connection))
-        { Console.Error.WriteLine("ConnectionStrings__lists must supply an administrative disposable PostgreSQL connection."); return 2; }
         var cases = new List<object>();
         object? preparation = null;
         object? metadata = null;
@@ -46,6 +45,9 @@ internal static class Benchmark
         using var listener = SqlMeasurements.Listen();
         try
         {
+            await using var environment = string.IsNullOrWhiteSpace(connection)
+                ? await PostgreSqlEnvironment.StartAsync() : null;
+            connection = environment?.ListsConnectionString ?? connection!;
             await using var database = await BenchmarkDatabase.OpenAsync(connection);
             var engine = new PostgreSqlListEngine(database.Runtime);
             await engine.CheckHealthAsync();

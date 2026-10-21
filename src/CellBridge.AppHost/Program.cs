@@ -9,11 +9,12 @@ builder.Configuration.AddUserSecrets<Program>()
 // disposable PostgreSQL resources and never select the development volume.
 var postgres = builder.AddPostgres("storage").WithDataVolume();
 var database = postgres.AddDatabase("cellbridge");
-var initialization = builder.AddProject<Projects.CellBridge_Storage_Setup>("storage-init")
+var initialization = builder.AddDotnetProject("storage-init", "../../tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj")
     .WithReference(database)
     .WaitFor(database);
 
-var webdemo = builder.AddProject<Projects.CellBridge_WebDemo>("webdemo", launchProfileName: null)
+var webdemo = builder.AddDotnetProject("webdemo", "../CellBridge.WebDemo/CellBridge.WebDemo.csproj",
+        options => options.ExcludeLaunchProfile = true)
     .WithHttpEndpoint()
     .WithHttpsEndpoint()
     .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
@@ -30,23 +31,23 @@ webdemo.WithEnvironment(context =>
         builder.Configuration["Parameters:PublicOrigin"] is { Length: > 0 } origin
             ? origin : webdemo.GetEndpoint("https"));
 webdemo.WithEnvironment("Authentication__ApplicationName", builder.AddParameter("ApplicationName", "CellBridge"));
-webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.AddParameter("WireCaptureDirectory", ""));
+webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.Configuration["Parameters:WireCaptureDirectory"] ?? "");
 
 // Capture is available on demand and keeps mitmproxy's direct TLS listener.
 // Python is required by mitmproxy, rather than used to own .NET app lifecycles.
-var captureDirectory = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../tools/capture"));
+var captureDirectory = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../../tools/capture"));
 var captureUpstream = builder.AddParameter("CaptureUpstream", "http://sharepoint.example.test:42292");
 var captureOutput = builder.AddParameter("CaptureOutput", Path.Combine(captureDirectory, "captures"));
-var captureUpstreamCa = builder.AddParameter("CaptureUpstreamCa", "");
+var captureUpstreamCa = builder.Configuration["Parameters:CaptureUpstreamCa"];
 #pragma warning disable ASPIRECERTIFICATES001
 builder.AddPythonApp("sharepoint", captureDirectory, "run.py")
     .WithPip()
     .WithExplicitStart()
     .WithEnvironment("CAPTURE_REVERSE_UPSTREAM", captureUpstream)
     .WithEnvironment("CAPTURE_OUTPUT_ROOT", captureOutput)
-    .WithEnvironment(async context =>
+    .WithEnvironment(context =>
     {
-        if (!string.IsNullOrWhiteSpace(await captureUpstreamCa.Resource.GetValueAsync(context.CancellationToken)))
+        if (!string.IsNullOrWhiteSpace(captureUpstreamCa))
             context.EnvironmentVariables["CAPTURE_UPSTREAM_CA"] = captureUpstreamCa;
     })
     .WithHttpsEndpoint(name: "https", env: "CAPTURE_PORT", isProxied: false)

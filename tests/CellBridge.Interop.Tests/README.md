@@ -17,12 +17,13 @@ Run the parser/replay and HTTP checks from the repository root:
 dotnet test tests/CellBridge.Interop.Tests
 ```
 
-The HTTP collection owns a project-based Aspire fixture through Hosting.Testing.
-It creates disposable PostgreSQL, runs the current schema initialization, seeds
-a temporary Identity account, and starts two WebDemo instances against that
+The HTTP collection reuses `src/CellBridge.AppHost` through Hosting.Testing.
+Its fixture removes the persistent PostgreSQL mount and capture resources, runs
+the current schema initialization, seeds a temporary Identity account, and starts
+two WebDemo instances against that
 same database. The fixture uses real login and antiforgery flows and creates its
 documents through the authenticated API. It disposes only its own resources.
-.NET 10, the repository's Aspire CLI/SDK and a Docker-compatible container runtime
+.NET 10, the repository's Aspire packages and a Docker-compatible container runtime
 are required. No Windows desktop or continuously running development app is needed.
 See [automated testing](../../docs/automated-testing.md) for other checks.
 

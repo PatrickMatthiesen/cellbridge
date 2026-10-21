@@ -52,7 +52,7 @@ See [authentication and permissions](authentication.md).
 | `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |
 | `tools/CellBridge.Admin` | Operator account provisioning, explicit file imports and document permission updates |
 | `tools/CellBridge.Storage.Setup` | Current-schema initialization and quiescent object maintenance |
-| `aspire/CellBridge.AppHost.csproj` | PostgreSQL, schema initialization, WebDemo and optional capture proxy |
+| `src/CellBridge.AppHost/CellBridge.AppHost.csproj` | PostgreSQL, schema initialization, WebDemo and optional capture proxy |
 
 The binary library is independent of ASP.NET Core and storage. Provider contracts
 are independent of the protocols. The sample owns file creation and Aspire setup.

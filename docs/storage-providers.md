@@ -14,8 +14,8 @@ With Aspire stopped, build and start from the repository root:
 
 ```sh
 dotnet build CellBridge.slnx
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 Aspire uses an application-scoped durable PostgreSQL volume. The `storage-init`

@@ -1,12 +1,15 @@
 using System.Diagnostics;
 using Aspire.Hosting;
+using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
+using CellBridge.TestInfrastructure;
 
 namespace CellBridge.Storage.Tests;
 
 public sealed class DatabaseRecoveryFixture : IAsyncLifetime
 {
     private DistributedApplication? application;
+    private IDistributedApplicationTestingBuilder? testingBuilder;
     private readonly string marker = Guid.NewGuid().ToString("N");
     private readonly Dictionary<string, string?> previous = new();
     private string? containerId;
@@ -15,13 +18,26 @@ public sealed class DatabaseRecoveryFixture : IAsyncLifetime
     {
         if (!OperatingSystem.IsLinux()) return;
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-        var builder = await DistributedApplicationTestingBuilder.CreateAsync<Projects.CellBridge_Recovery_AppHost>(
-            ["--environment", "Testing", "--RecoveryRun", marker], timeout.Token);
+        var builder = testingBuilder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
+        builder.Resources.Remove(builder.Resources.Single(resource => resource.Name == "webdemo"));
+        // The fault tests restart this exact container. PGDATA uses its writable
+        // layer, and the ownership checks below limit cleanup to this run.
+        builder.CreateResourceBuilder<PostgresServerResource>("storage")
+            .WithContainerName($"cellbridge-recovery-{marker}")
+            .WithLifetime(ContainerLifetime.Persistent)
+            .WithEnvironment("PGDATA", $"/cellbridge-recovery-data/{marker}")
+            .WithEnvironment("CELLBRIDGE_RECOVERY_RUN", marker)
+            .WithContainerRuntimeArgs("--label", $"cellbridge.recovery={marker}",
+                "--tmpfs", "/var/lib/postgresql:rw");
         application = await builder.BuildAsync(timeout.Token);
         try
         {
             await application.StartAsync(timeout.Token);
             await application.ResourceNotifications.WaitForResourceHealthyAsync("cellbridge", timeout.Token);
+            await application.ResourceNotifications.WaitForResourceAsync("storage-init", KnownResourceStates.Finished, timeout.Token);
+            if (application.ResourceNotifications.TryGetCurrentState("storage-init", out var initialized) &&
+                initialized.Snapshot.ExitCode is { } exitCode && exitCode != 0)
+                throw new InvalidOperationException($"PostgreSQL recovery schema setup failed with exit code {exitCode}.");
             containerId = (await Docker("inspect", "--format", "{{.Id}}", "cellbridge-recovery-" + marker)).Trim();
             var directory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../artifacts/recovery", marker));
             Directory.CreateDirectory(directory);
@@ -46,6 +62,8 @@ public sealed class DatabaseRecoveryFixture : IAsyncLifetime
     public async Task DisposeAsync()
     {
         if (!OperatingSystem.IsLinux()) return;
+        await using var ownedBuilder = testingBuilder;
+        testingBuilder = null;
         foreach (var (name, value) in previous) Environment.SetEnvironmentVariable(name, value);
         try
         {

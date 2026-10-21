@@ -15,33 +15,27 @@ strings and credentials are excluded from the report.
 
 ## Run a local measurement
 
-The focused project AppHost owns an ephemeral PostgreSQL container. Workloads
-require an explicit start and never run during ordinary WebDemo development:
+Run the Release executable directly:
 
 ```sh
-aspire start --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --isolated --non-interactive
-aspire wait benchmark-postgres --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
-aspire resource lists-benchmark start --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
-aspire logs lists-benchmark --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --follow --non-interactive
-aspire stop --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
+dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --clients 1,8 --workspaces 1,16 --iterations 200 --output artifacts/lists-performance/report.json
 ```
+
+Without `ConnectionStrings__lists`, the executable uses the shared application
+AppHost fixture to start and dispose its own PostgreSQL environment. The fixture
+omits WebDemo, capture and persistent storage. An explicitly supplied connection
+must permit database and role creation. The benchmark creates and drops only its
+own generated database and runtime login.
 
 The log ends with the report path. Check the executable exit code and JSON
-`successful` field. A terminal resource state alone does not establish success.
-Stop only the session started for this workflow. Leave other worktrees' AppHosts
-and developer databases alone.
-
-Workload arguments use a JSON array in `ListsBenchmark__Arguments` before
-`aspire start`. These inputs choose measurements, not resources or startup topology:
+`successful` field. To offer 4,000 writes per minute in the loopback HTTP mode:
 
 ```sh
-ListsBenchmark__Arguments='["--clients","8","--workspaces","16","--iterations","500","--modes","http","--records-skip","--target-per-minute","4000","--output","artifacts/lists-performance/paced.json"]' \
-aspire start --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --isolated --non-interactive
+dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --clients 8 --workspaces 16 --iterations 500 --modes http --records-skip --target-per-minute 4000 --output artifacts/lists-performance/paced.json
 ```
 
-Then wait for PostgreSQL and explicitly start `lists-benchmark` as above. The
-create case offers 4,000 writes over one minute; the patch case does the same in
-its own interval. Staggered writer deadlines retain the full offered interval
+The create case offers 4,000 writes over one minute; the patch case does the same
+in its own interval. Staggered writer deadlines retain the full offered interval
 in the rate denominator. Late operations count toward latency and extend elapsed
 time. This is a paced workload with a bounded writer count.
 
@@ -65,7 +59,7 @@ Records have a title, integer counter and deterministic ASCII payload generated
 once before measurement. `--payload-bytes` defaults to 1,024 and accepts 0 through
 60,000. The report retains payload and serialized values sizes. Use external
 process/container limits when comparing constrained machines and record those
-settings with the results. The AppHost does not apply machine-specific CPU IDs.
+settings with the results. The disposable environment does not apply machine-specific CPU IDs.
 These commands establish the measurement workflow; they are not a SQL baseline.
 
 ## Interpret the report

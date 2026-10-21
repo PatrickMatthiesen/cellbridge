@@ -6,6 +6,7 @@
     <ProjectReference Include="../../src/CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <ProjectReference Include="../../tests/CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
+    <ProjectReference Include="../../tests/CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
     <Compile Include="../BenchmarkMetadata.cs" Link="BenchmarkMetadata.cs" />
   </ItemGroup>
 </Project>

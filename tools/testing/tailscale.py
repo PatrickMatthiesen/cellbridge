@@ -6,7 +6,7 @@ from pathlib import Path
 import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[2]
-APPHOST = ROOT / "aspire/CellBridge.AppHost.csproj"
+APPHOST = ROOT / "src/CellBridge.AppHost/CellBridge.AppHost.csproj"
 
 
 def cli_json(command):

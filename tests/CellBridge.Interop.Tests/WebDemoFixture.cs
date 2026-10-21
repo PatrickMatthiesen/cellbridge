@@ -4,7 +4,10 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Aspire.Hosting;
+using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Dotnet;
 using Aspire.Hosting.Testing;
+using CellBridge.TestInfrastructure;
 
 namespace CellBridge.Interop.Tests;
 
@@ -15,6 +18,7 @@ public sealed class WebDemoCollection : ICollectionFixture<WebDemoFixture>;
 public sealed class WebDemoFixture : IAsyncLifetime
 {
     private DistributedApplication? application;
+    private IDistributedApplicationTestingBuilder? testingBuilder;
     private readonly Dictionary<string, string?> previous = new();
 
     public async Task InitializeAsync()
@@ -24,9 +28,40 @@ public sealed class WebDemoFixture : IAsyncLifetime
             return;
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(4));
         var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) + "Aa1!";
-        var builder = await DistributedApplicationTestingBuilder.CreateAsync<Projects.CellBridge_WebDemo_AppHost>(
-            ["--environment", "Testing"], timeout.Token);
+        var builder = testingBuilder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
         builder.Configuration["Parameters:TestPassword"] = password;
+        var database = builder.CreateResourceBuilder<PostgresDatabaseResource>("cellbridge");
+        var initialization = builder.CreateResourceBuilder<DotnetProjectResource>("storage-init");
+        var primary = builder.CreateResourceBuilder<DotnetProjectResource>("webdemo");
+        // Add path-based projects through the original builder so they share
+        // the AppHost's coordinated build with its existing projects.
+        var appHost = primary.ApplicationBuilder;
+        var account = appHost.AddDotnetProject("test-account",
+                Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../../tools/CellBridge.Admin/CellBridge.Admin.csproj")),
+                options => options.LaunchProfileName = null)
+            .WithArgs("seed-test-user")
+            .WithEnvironment("DOTNET_ENVIRONMENT", "Testing")
+            .WithEnvironment("Seed__Password", builder.AddParameter("TestPassword", secret: true))
+            .WithReference(database)
+            .WaitForCompletion(initialization);
+        var peer = appHost.AddDotnetProject("webdemo-peer",
+                Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../CellBridge.WebDemo/CellBridge.WebDemo.csproj")),
+                options => options.LaunchProfileName = null)
+            .WithHttpEndpoint(name: "http")
+            .WithHttpsEndpoint(name: "https")
+            .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
+            .WithEnvironment("Storage__Provider", "PostgreSql")
+            .WithHttpHealthCheck("/health")
+            .WithReference(database);
+        foreach (var host in new[] { primary, peer })
+        {
+            host.WithEnvironment("Storage__MultipleInstances", "true")
+                .WithEnvironment("Authentication__PublicOrigin", "https://cellbridge.test")
+                .WithEnvironment("Protocol__PublicOrigin", "https://cellbridge.test")
+                .WithEnvironment("Protocol__MaxConcurrentRequests", "32")
+                .WithEnvironment("Protocol__MaxConcurrentRequestsPerSubject", "32")
+                .WaitForCompletion(account);
+        }
         application = await builder.BuildAsync(timeout.Token);
         try
         {
@@ -86,6 +121,8 @@ public sealed class WebDemoFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        await using var ownedBuilder = testingBuilder;
+        testingBuilder = null;
         foreach (var (name, value) in previous) Environment.SetEnvironmentVariable(name, value);
         if (application is not null) { await application.DisposeAsync(); application = null; }
     }

@@ -57,7 +57,7 @@ Aspire wires its `WireCaptureDirectory` parameter into that variable for `webdem
 
 ```sh
 export Parameters__WireCaptureDirectory="$PWD/artifacts/office-wire"
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 The Aspire parameter defaults to empty. For an existing app, finish outstanding
@@ -127,9 +127,9 @@ The default upstream is a placeholder. Aspire declares the proxy but starts it
 only on request:
 
 ```sh
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire resource sharepoint start --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire wait sharepoint --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire resource sharepoint start --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait sharepoint --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 | Aspire parameter | Default | Purpose |

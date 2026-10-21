@@ -11,6 +11,7 @@ using CellBridge.Storage.FileSystem;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;
+using CellBridge.TestInfrastructure;
 using Npgsql;
 using Microsoft.Extensions.Configuration;
 
@@ -32,10 +33,14 @@ bool allowQuota = args.Contains("--allow-quota", StringComparer.Ordinal);
 var limits = new ConfigurationBuilder().AddEnvironmentVariables().Build().GetSection("Storage").Get<StorageLimits>() ?? new StorageLimits();
 limits.Validate();
 var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge");
+if (string.IsNullOrWhiteSpace(connectionString)) connectionString = null;
 var backend = Option("--content", connectionString is null ? "memory" : "postgresql");
-if (backend is not ("memory" or "postgresql" or "filesystem") || (backend != "memory" && connectionString is null))
-    throw new ArgumentException("Durable benchmarks require ConnectionStrings__cellbridge; content must be memory, postgresql or filesystem.");
+if (backend is not ("memory" or "postgresql" or "filesystem"))
+    throw new ArgumentException("Content must be memory, postgresql or filesystem.");
 var initialization = Stopwatch.StartNew();
+await using var environment = backend != "memory" && connectionString is null
+    ? await PostgreSqlEnvironment.StartAsync() : null;
+connectionString ??= environment?.ConnectionString;
 await using var database = await BenchmarkDatabase.OpenAsync(backend == "memory" ? null : connectionString, limits);
 var source = database?.Source;
 var filesystemRoot = Path.Combine(Path.GetFullPath(Option("--root", Path.GetTempPath())), "cellbridge-benchmark-" + Guid.NewGuid().ToString("N"));

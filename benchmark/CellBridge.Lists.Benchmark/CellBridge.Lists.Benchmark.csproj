@@ -11,5 +11,6 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
     <ProjectReference Include="../../src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
+    <ProjectReference Include="../../tests/CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
   </ItemGroup>
 </Project>

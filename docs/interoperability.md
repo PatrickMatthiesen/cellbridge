@@ -126,8 +126,8 @@ a single-desktop test, with no coauthoring transition qualification.
 
 ## Automated checks
 
-The [integration fixtures](automated-testing.md) start disposable PostgreSQL
-and two WebDemo hosts through project-based Aspire AppHosts. It covers protocol replay, provider consistency, quota
+The [integration fixtures](automated-testing.md) reuse `CellBridge.AppHost` with
+disposable PostgreSQL and two WebDemo instances. They cover protocol replay, provider consistency, quota
 races, retry/failure behavior, metadata retention and quiescent cleanup.
 Query tests reconstruct saved files from prior client knowledge and returned
 parts. CI also uses the independent [Office Inspectors parser](office-inspectors.md).

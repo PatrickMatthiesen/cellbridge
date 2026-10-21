@@ -31,8 +31,8 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 - `src/CellBridge.FssHttpB`: binary serialization and object graphs.
 - `src/CellBridge.Storage`: protocol document state and persistence codecs.
 - `src/CellBridge.Storage.*`: provider contracts, backends and conformance checks.
-- `aspire/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, durable PostgreSQL, initialization and optional capture.
-- `benchmark/`: isolated measurements and focused benchmark AppHost.
+- `src/CellBridge.AppHost/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, durable PostgreSQL, initialization and optional capture.
+- `benchmark/`: isolated measurements using the shared disposable environment.
 - `tests/`: protocol, storage and interoperability tests.
 - `tools/capture/`: SharePoint capture tooling.
 
@@ -41,16 +41,16 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 Use the Aspire CLI to run the app, rather than raw `dotnet run`:
 
 ```sh
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire ps --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire describe --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire stop --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire ps --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire describe --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 - Stop Aspire before building outputs that its processes have locked.
 - Run checks relevant to the change. Main solution: `CellBridge.slnx`.
-  Linux PostgreSQL and replay fixtures own their disposable Aspire environments.
+  Linux PostgreSQL and replay fixtures reuse the main AppHost with disposable storage.
   Live remote Office tests are opt-in; see
   [interop instructions](tests/CellBridge.Interop.Tests/README.md).
 - For desktop Office failures, inspect request logs first. Use a hostname Windows

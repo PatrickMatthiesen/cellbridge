@@ -2,7 +2,7 @@
 
 ## Routine Linux checks
 
-Install .NET 10, Docker and an Aspire CLI compatible with the pinned AppHost SDK.
+Install .NET 10, Docker and an Aspire CLI compatible with the pinned Aspire packages.
 Build and run the main solution from the repository root:
 
 ```sh
@@ -11,10 +11,16 @@ dotnet test CellBridge.slnx -m:1 --logger trx --results-directory artifacts/test
 ```
 
 Protocol, replay, provider and API tests run without a Windows desktop.
-PostgreSQL suites use project-based Aspire AppHosts through Hosting.Testing.
-Fixtures start their own disposable PostgreSQL resources, apply the existing
-initialization, wait for health/completion, and dispose their own application.
-They do not use the development database or volume. Storage tests always own their database. Lists accepts an explicitly supplied
+PostgreSQL suites reuse `src/CellBridge.AppHost` through Hosting.Testing.
+Fixtures remove the persistent database mount and capture resource before
+starting their own instance. Provider tests omit WebDemo; HTTP tests retain it
+and add their account and peer. Recovery tests configure the same database
+resource for controlled interruption. These changes live in the fixtures; the
+development AppHost has no test topology switches.
+
+Fixtures apply the existing initialization and dispose their own application.
+They do not use the development database or volume. Storage tests always own
+their database. Lists accepts an explicitly supplied
 `CELLBRIDGE_LISTS_TEST_CONNECTION_STRING` for an externally managed test database.
 
 Run a focused suite with `dotnet test tests/CellBridge.Storage.Tests`,
@@ -61,10 +67,10 @@ validates from `main`; use a new version for changed source.
 ## Development AppHost
 
 ```sh
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire describe --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire stop --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire describe --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 The fixed development graph contains durable PostgreSQL, schema/authentication
@@ -77,7 +83,7 @@ is WebDemo's allocated HTTPS endpoint.
 Other external inputs are `Parameters__ApplicationName`,
 `Parameters__WireCaptureDirectory`, `Parameters__CaptureUpstream`,
 `Parameters__CaptureOutput` and `Parameters__CaptureUpstreamCa`.
-Non-secret local values can live in ignored `aspire/apphost.settings.json`;
+Non-secret local values can live in ignored `src/CellBridge.AppHost/apphost.settings.json`;
 environment variables override the file. These inputs do not select resources.
 Never stop another worktree's AppHost. Finish an active capture with
 `tools/capture/stop.py` before stopping its AppHost.
@@ -89,23 +95,23 @@ Performance projects live under `benchmark/`. Correctness assertions live under
 See [list measurements](list-performance.md) and
 [isolated allocation measurements](allocation-measurements.md).
 
+Run the benchmark executables directly. A durable run without a supplied
+connection starts a disposable database through the shared AppHost fixture:
+
 ```sh
-dotnet build benchmark/CellBridge.Benchmark.AppHost -c Release
-aspire start --isolated --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
-aspire wait benchmark-postgres --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
-aspire resource storage-benchmark start --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
-aspire logs storage-benchmark --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
-aspire stop --apphost benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj --non-interactive
+dotnet run -c Release --project benchmark/CellBridge.Storage.Benchmark -- --content postgresql --sizes 1 --clients 1,8 --iterations 64 --workload delta-chain --output artifacts/storage-growth.json
+dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --clients 1,8 --workspaces 1,16 --iterations 200 --output artifacts/lists-performance/report.json
 ```
 
-Both `storage-benchmark` and `lists-benchmark` require explicit start. Configure
-workload arguments with `StorageBenchmark__Arguments` or
-`ListsBenchmark__Arguments` as JSON arrays before starting this focused AppHost.
+Explicit `ConnectionStrings__cellbridge` or `ConnectionStrings__lists` values
+select an external administrative connection. Each benchmark still owns only its generated
+database. The memory storage workload needs no database.
+
 Each run retains workload, setup, warm-up and measured-interval metadata.
-Steady-state timings exclude startup/schema setup and warm-up; process peak
-memory remains cumulative. Preserve raw reports with runtime, hardware, source
-and backend details when comparing runs. This harness does not establish a final
-SQL baseline.
+Steady-state timings exclude environment startup/schema setup and warm-up;
+process peak memory remains cumulative. Preserve raw reports with runtime,
+hardware, source and backend details when comparing runs. These measurements
+do not establish a final SQL baseline.
 
 For a small repeated-save/state-growth check without PostgreSQL:
 
@@ -138,7 +144,7 @@ that origin and server capture enabled:
 ```sh
 export Parameters__PublicOrigin='https://dev-machine.example.ts.net:8444'
 export Parameters__WireCaptureDirectory="$PWD/artifacts/office-wire"
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 python3 tools/testing/tailscale.py --https-port 8444
 tailscale serve status
 ```
@@ -155,7 +161,7 @@ whose ports change. The library, sign-in, documents and SOAP share
 ### Keep server capture enabled
 
 Shell exports last for the shell session. To retain the capture setting across
-restarts, add an absolute directory to ignored `aspire/apphost.settings.json`:
+restarts, add an absolute directory to ignored `src/CellBridge.AppHost/apphost.settings.json`:
 
 ```json
 {
@@ -243,7 +249,7 @@ Finish the laptop session, remove only its Serve listener and stop Aspire:
 
 ```sh
 tailscale serve --https=8444 off
-aspire stop --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 The named PostgreSQL volume retains documents and accounts.

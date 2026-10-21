@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/CellBridge.AppHost/CellBridge.AppHost.csproj" />
     <Project Path="src/CellBridge.Lists/CellBridge.Lists.csproj" />
     <Project Path="src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
     <Project Path="src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
@@ -19,12 +20,9 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/CellBridge.HostAuthorization.Tests/CellBridge.HostAuthorization.Tests.csproj" />
-    <Project Path="tests/CellBridge.Recovery.AppHost/CellBridge.Recovery.AppHost.csproj" />
-    <Project Path="tests/CellBridge.WebDemo.AppHost/CellBridge.WebDemo.AppHost.csproj" />
     <Project Path="tests/CellBridge.WebDemo.Tests/CellBridge.WebDemo.Tests.csproj" />
     <Project Path="tests/CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
     <Project Path="tests/CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
-    <Project Path="tests/CellBridge.TestAppHost/CellBridge.TestAppHost.csproj" />
     <Project Path="tests/CellBridge.Benchmarks.Tests/CellBridge.Benchmarks.Tests.csproj" />
     <Project Path="tests/CellBridge.Lists.Tests/CellBridge.Lists.Tests.csproj" />
     <Project Path="tests/CellBridge.Lists.PostgreSql.Tests/CellBridge.Lists.PostgreSql.Tests.csproj" />
@@ -43,13 +41,9 @@
     <Project Path="tools/CellBridge.Storage.ProcessProbe/CellBridge.Storage.ProcessProbe.csproj" />
     <Project Path="tools/CellBridge.Storage.Portability/CellBridge.Storage.Portability.csproj" />
   </Folder>
-  <Folder Name="/aspire/">
-    <Project Path="aspire/CellBridge.AppHost.csproj" />
-  </Folder>
   <Folder Name="/benchmark/">
     <Project Path="benchmark/CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />
     <Project Path="benchmark/CellBridge.Lists.Benchmark/CellBridge.Lists.Benchmark.csproj" />
     <Project Path="benchmark/CellBridge.Allocations.Benchmark/CellBridge.Allocations.Benchmark.csproj" />
-    <Project Path="benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj" />
   </Folder>
 </Solution>

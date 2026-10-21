@@ -51,16 +51,16 @@ and save-delivery status.
 It stores actual destination files separately from CellBridge state and tests
 recovery after lost save replies. Its built-in identities are for local testing.
 
-Install the .NET 10 SDK, an Aspire CLI compatible with the preview SDK pinned
-in `aspire/CellBridge.AppHost.csproj`, Docker and Python 3.12 or newer.
+Install the .NET 10 SDK, an Aspire CLI compatible with the preview packages pinned
+in `src/CellBridge.AppHost/CellBridge.AppHost.csproj`, Docker and Python 3.12 or newer.
 Desktop editing requires Office on Windows.
 
 From the repository root:
 
 ```sh
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire ps --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire ps --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 Aspire starts durable PostgreSQL, initializes the schema and then starts WebDemo.

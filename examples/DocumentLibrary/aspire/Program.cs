@@ -9,7 +9,7 @@ const string runtimeRole = "cellbridge_library_runtime";
 var generatedRuntimePassword = Guid.NewGuid().ToString("N");
 var runtimePassword = builder.AddParameter("LibraryRuntimePassword", () => generatedRuntimePassword, secret: true);
 
-var setup = builder.AddProject<Projects.CellBridge_DocumentLibrary_Setup>("document-library-setup")
+var setup = builder.AddDotnetProject("document-library-setup", "../Setup/CellBridge.DocumentLibrary.Setup.csproj")
     .WithReference(database)
     .WithEnvironment("Lists__Enabled", "true")
     .WithEnvironment("Lists__RuntimeRole", runtimeRole)
@@ -17,7 +17,7 @@ var setup = builder.AddProject<Projects.CellBridge_DocumentLibrary_Setup>("docum
     .WaitFor(database);
 
 var destinationRoot = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../../../artifacts/document-library/destination"));
-builder.AddProject<Projects.CellBridge_DocumentLibrary>("document-library", launchProfileName: null)
+builder.AddDotnetProject("document-library", "../CellBridge.DocumentLibrary.csproj", options => options.ExcludeLaunchProfile = true)
     .WithReference(database)
     .WithReference(database, connectionName: "lists")
     .WithEnvironment(async context =>

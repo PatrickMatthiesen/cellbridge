@@ -16,7 +16,6 @@
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <ProjectReference Include="../../src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
     <ProjectReference Include="../../src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
-    <ProjectReference Include="../../benchmark/CellBridge.Benchmark.AppHost/CellBridge.Benchmark.AppHost.csproj" />
     <Compile Include="../../benchmark/CellBridge.Storage.Benchmark/SyntheticWorkload.cs" Link="Workloads/SyntheticWorkload.cs" />
     <Compile Include="../../benchmark/CellBridge.Lists.Benchmark/BenchmarkDatabase.cs" Link="Workloads/BenchmarkDatabase.cs" />
     <Compile Include="../../benchmark/CellBridge.Lists.Benchmark/BenchmarkHttpHost.cs" Link="Workloads/BenchmarkHttpHost.cs" />

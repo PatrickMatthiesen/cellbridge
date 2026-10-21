@@ -9,9 +9,9 @@ endpoints in one process, available as Aspire's `webdemo` resource at `/library`
 From the repository root:
 
 ```sh
-aspire start --isolated --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire wait webdemo --apphost aspire/CellBridge.AppHost.csproj --non-interactive
-aspire describe --apphost aspire/CellBridge.AppHost.csproj --non-interactive
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire describe --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
 [Provision an account](authentication.md#first-setup), open

@@ -28,5 +28,4 @@
     <ProjectReference Include="../../src/CellBridge.Authentication/CellBridge.Authentication.csproj" />
   </ItemGroup>
   <ItemGroup><ProjectReference Include="../CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" /></ItemGroup>
-  <ItemGroup><ProjectReference Include="../CellBridge.Recovery.AppHost/CellBridge.Recovery.AppHost.csproj" /></ItemGroup>
 </Project>

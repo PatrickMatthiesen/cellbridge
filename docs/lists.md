@@ -429,21 +429,16 @@ Focused checks run independently of Office protocol tests:
 dotnet test tests/CellBridge.Lists.Tests/CellBridge.Lists.Tests.csproj
 dotnet test tests/CellBridge.Lists.AspNetCore.Tests/CellBridge.Lists.AspNetCore.Tests.csproj
 node tools/testing/test-list-example-ui.cjs
-dotnet build tests/CellBridge.Lists.PostgreSql.Tests/CellBridge.Lists.PostgreSql.Tests.csproj
-aspire start --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/CellBridge.AppHost.csproj --non-interactive
-aspire resource lists-tests start --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/CellBridge.AppHost.csproj --non-interactive
-aspire describe --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/CellBridge.AppHost.csproj --non-interactive
-aspire stop --apphost tests/CellBridge.Lists.PostgreSql.Tests/aspire/CellBridge.AppHost.csproj --non-interactive
+dotnet test tests/CellBridge.Lists.PostgreSql.Tests
 ```
 
 The example regression script uses Node 24 and checks retained drafts, exact
 numeric values and workspace targeting across delayed or failed requests.
 Both Linux and Windows CI run it.
 
-Wait for the explicit `lists-tests` resource to finish before stopping. Its TRX
-results are written under ignored `artifacts/lists-tests`; the dedicated AppHost
-requires the real database rather than accepting skipped durable checks. Stop
-Aspire before rebuilding locked outputs. The
+The PostgreSQL tests reuse the application AppHost with disposable storage and
+require a working container runtime. They apply the current setup and clean up
+their own instance. The
 [package-only example](../examples/DocumentLibrary/README.md) consumes the optional
 packages through its configured NuGet feed; keep its list setup and runtime
 credentials separate.
