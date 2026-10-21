@@ -40,9 +40,8 @@ SOAP dependencies determine which subsequent operations execute.
   more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
 - Mixed and repeated queries deduplicate immutable elements. A later failure
   preserves earlier payloads and save acknowledgements. Metadata starts as a
-  storage-index-only response until a complete graph is uploaded. The legacy
-  buffered executor continues to return that response and rejects metadata writes;
-  durable execution reads and publishes opaque graphs.
+  storage-index-only response until a complete graph is uploaded. The document
+  service reads and publishes opaque graphs with both InMemory and PostgreSQL.
 - `QueryKnowledge`, `QueryRawStorage`, `PutRawStorage`,
   and `QueryDiagnosticStoreInfo` are unsupported. These legacy enum values are
   outside the current normative four-operation inventory.
@@ -132,11 +131,13 @@ races, retry/failure behavior, metadata retention and quiescent cleanup.
 Query tests reconstruct saved files from prior client knowledge and returned
 parts. CI also uses the independent [Office Inspectors parser](office-inspectors.md).
 
-Buffered and streaming reconstruction use the same reviewed save captures.
+Direct-service and HTTP replay tests use reviewed save captures with InMemory
+and PostgreSQL.
 HTTP tests check multipart preambles/headers, content length and capture/output
-byte equality. Save tests compare streamed graph, response, versions and
-metadata with the buffered path, including ingestion failure, cancellation and
-expanded ZIP limits before saving changes.
+byte equality. Save tests compare decoded responses, reconstructed files, versions
+and metadata.
+They cover ingestion failure, cancellation and expanded ZIP limits before saving
+changes.
 
 See [automated testing](automated-testing.md) for commands and desktop test
 procedures. Hardware power loss, asynchronous database failover and Office

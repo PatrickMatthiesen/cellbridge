@@ -1,46 +1,12 @@
 using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
-using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.FssHttp.Tests;
 
 public sealed class NegotiatedHashExecutionTests
 {
     private static readonly ProtocolHashingOptions Configuration = new(new byte[32]);
-
-    [Theory]
-    [InlineData(false)] [InlineData(true)]
-    public void ReturnFileHashIsByteEquivalentIgnoredIndependentlyOfDataElementHashNegotiation(bool negotiated)
-    {
-        var document = new DocumentStore().Put("/file-hash.docx", [1, 2, 3]);
-        var request = new FsshttpbCellRequest { HashOptions = negotiated ? new(IncludeHashes: true) : null,
-            SubRequests = { Query(1) } };
-        byte[] Execute() => CellBinaryRequestExecutor.Execute(document, document.FilePartition, request,
-            DocumentAccess.Read, hashing: Configuration).ToByteArray(FsshttpbSerializationProfile.SharePoint13_11);
-        var ordinary = Execute();
-        Assert.IsType<QueryChangesSubRequestData>(request.SubRequests[0].Data).ReturnFileHash = true;
-        Assert.Equal(ordinary, Execute());
-    }
-
-    [Theory]
-    [InlineData(false, false)] [InlineData(false, true)] [InlineData(true, false)] [InlineData(true, true)]
-    public void RequestWideNegotiationAppliesToRepeatedQueriesWithoutChangingStoredGraph(bool instead, bool include)
-    {
-        var document = new DocumentStore().Put("/hash.docx", new byte[300]);
-        var request = new FsshttpbCellRequest { HashOptions = new(1, instead, include),
-            SubRequests = { Query(1), Query(2), new(RequestTypes.QueryAccess) { RequestId = 3 } } };
-        var snapshot = System.Text.Json.JsonSerializer.Serialize(document.FilePartition.FileGraph.Elements);
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request,
-            DocumentAccess.Read | DocumentAccess.Write, hashing: Configuration);
-        Assert.All(response.SubResponses, s => Assert.False(s.Status));
-        var group = Assert.Single(response.DataElementPackage!.DataElements.Where(e => e.DataElementType == DataElementType.ObjectGroupDataElementData));
-        Assert.Equal(instead || include, IsHash(group));
-        Assert.Equal(snapshot, System.Text.Json.JsonSerializer.Serialize(document.FilePartition.FileGraph.Elements));
-        var ordinary = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request,
-            DocumentAccess.Read, hashing: ProtocolHashingOptions.Disabled);
-        Assert.False(IsHash(Assert.Single(ordinary.DataElementPackage!.DataElements.Where(e => e.DataElementType == DataElementType.ObjectGroupDataElementData))));
-    }
 
     [Theory]
     [InlineData(true)] [InlineData(false)]
@@ -100,25 +66,6 @@ public sealed class NegotiatedHashExecutionTests
         Assert.True(Assert.Single(response.DataElementPackage!.DataElements).SerialNumber.IsNull);
     }
 
-    [Theory]
-    [InlineData(10, 11, 1)] [InlineData(15, 11, 1)] [InlineData(13, 12, 1)] [InlineData(13, 11, 2)]
-    public void InvalidEnvelopeRejectsBeforeAnyOperation(int version, int minimum, int schema)
-    {
-        var document = new DocumentStore().Put("/bad.docx", [1]);
-        var request = new FsshttpbCellRequest { ProtocolVersion = (ushort)version, MinimumVersion = (ushort)minimum,
-            HashOptions = new((ulong)schema), SubRequests = { new(RequestTypes.PutChanges) { Data = new PutChangesSubRequestData() }, Query(2) } };
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, DocumentAccess.Read | DocumentAccess.Write,
-            hashing: ProtocolHashingOptions.Disabled);
-        Assert.True(response.Status);
-        Assert.Empty(response.SubResponses);
-        Assert.Equal(ErrorType.Cell, response.Error!.Type);
-        Assert.Equal((ulong)(version is not (12 or 13 or 14) || minimum != 11
-            ? CellErrorCode.IncompatibleProtocolVersion : CellErrorCode.RequestStreamSchemaError), response.Error.ErrorCode);
-        Assert.Equal(new byte[] { 1 }, document.Content);
-    }
-
-    private static FsshttpbCellSubRequest Query(ulong id) => new(RequestTypes.QueryChanges)
-    { RequestId = id, Data = new QueryChangesSubRequestData { IncludeCellChanges = true, IncludeStorageManifest = true } };
     private static DataElement RawGroup(int length) => Assert.Single(StorageManifestBuilder.BuildQueryChangesResponse(1,
         new byte[length]).DataElementPackage!.DataElements
         .Where(e => e.DataElementType == DataElementType.ObjectGroupDataElementData)) is { } element

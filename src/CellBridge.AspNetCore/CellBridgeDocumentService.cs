@@ -20,7 +20,7 @@ public sealed record CellExecution(FsshttpbResponse Response, DocumentState Stat
     internal CellBridgeActor? ResponseActor { get; init; }
 }
 
-/// <summary>Prepares file revisions outside coordination transactions and publishes them durably.</summary>
+/// <summary>Executes document operations and prepares file revisions outside coordination transactions.</summary>
 public sealed partial class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null,
     ICellBridgeAuthorizationPolicy? authorizationPolicy = null, ProtocolHashingOptions? hashing = null,
     IDocumentAuthorizationProvider? documentAuthorizationProvider = null, TimeProvider? authorizationTimeProvider = null)
@@ -137,10 +137,11 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
         var state = await CurrentAsync(id, cancellationToken);
         var operationActor = actor;
-        if (request.TryGetValidationError(out _, out _))
+        if (request.TryGetValidationError(out var validationCode, out var validationMessage))
         {
-            var emptyDocument = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-            return new(CellBinaryRequestExecutor.Execute(emptyDocument, emptyDocument.GetPartition(kind), request, Access(actor, state)), state);
+            response.Status = true;
+            response.Error = new ResponseError(ErrorType.Cell, (ulong)validationCode, validationMessage);
+            return new(response, state);
         }
         if (!CellSubRequestDataValidation.TryValidate(attributes, requireBinaryDataSize: false, out _))
             return new(response, state, "InvalidArgument");
@@ -159,7 +160,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                     operation.RequestType == RequestTypes.QueryAccess ? DocumentAccess.None :
                     operation.RequestType is RequestTypes.PutChanges or RequestTypes.AllocateExtendedGuidRange
                         ? DocumentAccess.Write : DocumentAccess.Read, cancellationToken, fresh: true);
-                if (!CellBinaryRequestExecutor.TryResolveTarget(operation, kind, out var selectedKind))
+                if (!CellPartitionSelector.TryResolveTarget(operation, kind, out var selectedKind))
                 {
                     state = await CurrentAsync(id, cancellationToken);
                     var accessForTarget = Access(operationActor, state);
@@ -167,7 +168,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         ? DocumentAccess.Write : DocumentAccess.Read;
                     response.SubResponses.Add(operation.RequestType != RequestTypes.QueryAccess && !accessForTarget.HasFlag(requiredForTarget)
                         ? CellBridgeAuthorization.Denied(operation)
-                        : CellBinaryRequestExecutor.UnsupportedSubResponse(operation.RequestId, operation.RequestType));
+                        : UnsupportedSubResponse(operation.RequestId, operation.RequestType));
                     continue;
                 }
                 if (operation.RequestType == RequestTypes.PutChanges)
@@ -225,15 +226,23 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         continue;
                     }
                 }
-                var document = StoredDocument.RestoreMetadata(state, observedNow);
-                var single = new FsshttpbCellRequest { DataElementPackage = request.DataElementPackage };
-                single.SubRequests.Add(operation);
-                var partition = document.GetPartition(selectedKind);
-                var result = CellBinaryRequestExecutor.Execute(document, partition, single, access,
-                    maxResponseBytes: provider.Limits.MaxGraphBytes,
-                    partitionEditorsQueryChanges: (p, requestId) => EditorsQuery(document, p, requestId, state));
-                if (operation.RequestType == RequestTypes.QueryChanges) queries.Append(result, operation.Data as QueryChangesSubRequestData);
-                else response.SubResponses.AddRange(result.SubResponses);
+                switch (operation.RequestType)
+                {
+                    case RequestTypes.QueryChanges:
+                        var document = StoredDocument.RestoreMetadata(state, observedNow);
+                        queries.Append(GeneratedPartitionQuery(document, document.GetPartition(selectedKind), operation, state),
+                            operation.Data as QueryChangesSubRequestData);
+                        break;
+                    case RequestTypes.QueryAccess:
+                        response.SubResponses.Add(QueryAccessSubResponse(operation.RequestId, access));
+                        break;
+                    case RequestTypes.AllocateExtendedGuidRange:
+                        response.SubResponses.Add(AllocateRange(operation));
+                        break;
+                    default:
+                        response.SubResponses.Add(UnsupportedSubResponse(operation.RequestId, operation.RequestType));
+                        break;
+                }
             }
             // MS-FSSHTTP GetFileProps describes the updated version after the Cell
             // operations. Capture its metadata here; the SOAP adapter never rereads it.

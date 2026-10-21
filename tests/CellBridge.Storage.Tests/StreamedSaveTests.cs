@@ -13,7 +13,7 @@ namespace CellBridge.Storage.Tests;
 public sealed class StreamedSaveTests
 {
     [Fact]
-    public async Task StreamedSaveMatchesBufferedGraphResponseAndMetadataWithoutReadingOldPackage()
+    public async Task StreamedSaveMatchesProposedGraphAndMetadataWithoutReadingOldPackage()
     {
         var stateStore = new InMemoryStateStore();
         var inner = new InMemoryContentStore();
@@ -21,37 +21,34 @@ public sealed class StreamedSaveTests
         var provider = new StorageProvider(stateStore, tracking);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/streamed.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var buffered = await StoredDocument.RestoreAsync(state, inner);
+        var currentGraph = await DocumentPartition.RestoreFileGraphAsync(state, inner, provider.Limits);
         var request = Fixture(state);
-        var expectedResponse = FilePartitionSaveHandler.Apply(buffered, buffered.FilePartition,
-            request.SubRequests.Single(), request.DataElementPackage, provider.Limits);
-        Assert.False(expectedResponse.Status);
-        var expected = await buffered.CaptureAsync(inner);
+        var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests.Single().Data);
+        var expectedBytes = currentGraph.Merge(request.DataElementPackage!.DataElements, put.StorageIndex).Materialize();
+        var addedIds = request.DataElementPackage.DataElements.Select(e => e.DataElementExtendedGuid)
+            .Except(currentGraph.Elements.Select(e => e.DataElementExtendedGuid)).ToArray();
         tracking.ForbiddenReadKey = state.Content.Key;
         var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request,
             new Dictionary<string, string>(), TestActor.Value);
-        Assert.False(Assert.Single(saved.Response.SubResponses).Status);
-        var wrapped = new FsshttpbResponse(); wrapped.SubResponses.Add(expectedResponse);
-        Assert.Equal(wrapped.ToByteArray(), saved.Response.ToByteArray());
-        Assert.Equal(expected.Content, saved.State.Content);
-        Assert.Equal(expected.ContentVersion, saved.State.ContentVersion);
-        foreach (var partition in expected.Partitions)
-        {
-            var actual = saved.State.Partitions.Single(p => p.Kind == partition.Kind);
-            Assert.Equal(partition.Identity, actual.Identity);
-            Assert.Equal(partition.Knowledge, actual.Knowledge);
-            Assert.Equal(partition.StorageIndex, actual.StorageIndex);
-            Assert.Equal(partition.Content, actual.Content);
-            Assert.Equal(partition.Elements.Select(e => (e.Id, e.Serial, e.Payload)),
-                actual.Elements.Select(e => (e.Id, e.Serial, e.Payload)));
-        }
+        var response = Assert.Single(FsshttpbResponse.Deserialize(new(saved.Response.ToByteArray())).SubResponses);
+        Assert.False(response.Status);
+        Assert.Equal(request.SubRequests[0].RequestId, response.RequestId);
+        var acknowledgement = Assert.IsType<PutChangesSubResponseData>(response.Data);
+        Assert.Equal(addedIds, acknowledgement.PutChangesResponse!.DataElementAdded);
+        Assert.Equal(state.ContentVersion + 1, saved.State.ContentVersion);
+        foreach (var partition in state.Partitions)
+            Assert.Equal(partition.Identity, saved.State.Partitions.Single(p => p.Kind == partition.Kind).Identity);
+        Assert.Equal(StorageIds.Capture(put.StorageIndex), saved.State.Partitions.Single(p => p.Kind == 0).StorageIndex);
+        var knowledge = ClientKnowledge.Deserialize(new(acknowledgement.KnowledgeBytes!));
+        Assert.All(saved.State.Partitions.Single(p => p.Kind == 0).Elements,
+            element => Assert.True(knowledge.Contains(new SerialNumber(element.Serial.Guid, element.Serial.Value))));
         var metadata = XDocument.Parse(Encoding.UTF8.GetString(saved.State.Partitions.Single(p => p.Kind == 1).InlineContent.AsSpan()));
         Assert.Equal(saved.State.ContentVersion.ToString(), (string?)metadata.Root!.Attribute("ContentVersion"));
         Assert.Equal(saved.State.ModifiedUtc.Ticks.ToString(), (string?)metadata.Root.Attribute("Modified"));
         Assert.Equal(1, tracking.StagedWrites);
         Assert.False(File.Exists(tracking.LastStagingPath));
         var restored = await StoredDocument.RestoreAsync(saved.State, inner);
-        Assert.Equal(buffered.Content, restored.Content);
+        Assert.Equal(expectedBytes, restored.Content);
         Assert.Equal(restored.Content, restored.FilePartition.FileGraph.Materialize());
     }
 

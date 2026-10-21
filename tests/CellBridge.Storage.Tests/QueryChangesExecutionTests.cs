@@ -1,20 +1,27 @@
 using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
+using CellBridge.Storage.Abstractions;
 using CellBridge.TestFixtures;
 
-namespace CellBridge.FssHttp.Tests;
+namespace CellBridge.Storage.Tests;
 
-public sealed class QueryChangesResponseShaperTests
+[Collection("PostgreSQL")]
+public sealed class QueryChangesExecutionTests
 {
-    [Fact]
-    public void FileContentsQueryReturnsTheStableManifestGraph()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FileContentsQueryReturnsTheStableManifestGraph(bool postgreSql)
     {
-        var store = new DocumentStore();
-        var document = store.Put("/test.docx", [1, 2, 3]);
+        await using var scope = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = scope.Provider;
+        var service = new CellBridgeDocumentService(provider);
+        var document = (await service.CreateAsync($"/query-{Guid.NewGuid():N}.docx", [1, 2, 3], TestActor.Value))!;
         var request = QueryChanges(includeStorageManifest: true, includeCellChanges: true);
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
+        var response = (await service.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents, request,
+            new Dictionary<string, string>(), TestActor.Value)).Response;
 
         Assert.Equal(
             new[]
@@ -26,7 +33,9 @@ public sealed class QueryChangesResponseShaperTests
                 DataElementType.StorageIndexDataElementData,
             },
             response.DataElementPackage!.DataElements.Select(element => element.DataElementType));
-        Assert.Equal(new byte[] { 1, 2, 3 }, document.FilePartition.Content);
+        var persisted = (await provider.State.FindByResourceIdAsync(document.ResourceId))!;
+        Assert.Equal(new byte[] { 1, 2, 3 }, await provider.Content.ReadVerifiedAsync(
+            persisted.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents).Content));
         Assert.False(Assert.IsType<QueryChangesSubResponseData>(
             Assert.Single(response.SubResponses).Data).PartialResult);
 
@@ -40,14 +49,19 @@ public sealed class QueryChangesResponseShaperTests
             relationship => relationship.Kind == "storage-index");
     }
 
-    [Fact]
-    public void QueryChangesHonorsManifestAndCellChangeFlags()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task QueryChangesHonorsManifestAndCellChangeFlags(bool postgreSql)
     {
-        var store = new DocumentStore();
-        var document = store.Put("/test.docx", [1]);
+        await using var scope = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = scope.Provider;
+        var service = new CellBridgeDocumentService(provider);
+        var document = (await service.CreateAsync($"/query-{Guid.NewGuid():N}.docx", [1], TestActor.Value))!;
         var request = QueryChanges(includeStorageManifest: false, includeCellChanges: false);
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
+        var response = (await service.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents, request,
+            new Dictionary<string, string>(), TestActor.Value)).Response;
         var types = response.DataElementPackage!.DataElements.Select(element => element.DataElementType);
 
         Assert.DoesNotContain(DataElementType.StorageManifestDataElementData, types);
@@ -55,11 +69,15 @@ public sealed class QueryChangesResponseShaperTests
         Assert.Contains(DataElementType.StorageIndexDataElementData, types);
     }
 
-    [Fact]
-    public void QueryChangesRejectsAnUnrepresentableByteBudget()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task QueryChangesRejectsAnUnrepresentableByteBudget(bool postgreSql)
     {
-        var store = new DocumentStore();
-        var document = store.Put("/test.docx", [1]);
+        await using var scope = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = scope.Provider;
+        var service = new CellBridgeDocumentService(provider);
+        var document = (await service.CreateAsync($"/query-{Guid.NewGuid():N}.docx", [1], TestActor.Value))!;
         var request = QueryChanges(includeStorageManifest: true, includeCellChanges: true);
         request.SubRequests[0].Data = new QueryChangesSubRequestData
         {
@@ -69,7 +87,8 @@ public sealed class QueryChangesResponseShaperTests
             MaxDataElements = 1,
         };
 
-        var response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, CellBridge.Storage.Abstractions.DocumentAccess.Read | CellBridge.Storage.Abstractions.DocumentAccess.Write);
+        var response = (await service.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents, request,
+            new Dictionary<string, string>(), TestActor.Value)).Response;
         var subResponse = Assert.Single(response.SubResponses);
 
         Assert.Null(response.DataElementPackage);

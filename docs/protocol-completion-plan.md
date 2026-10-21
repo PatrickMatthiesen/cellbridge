@@ -57,7 +57,7 @@ Acceptance criteria are expanded in the phases below.
 | Q4 | `AllocateExtendedGuidRange` has typed codecs and authorized execution using fresh UUID namespaces. | Implemented operation | Exact count, exclusive upper bound and concurrent host decoding tests; no durable shared counter required. |
 | Q5 | Negotiated schema-1 data-element hashing and excluded-data query responses are implemented. The selected product profile ignores the separate file-hash request. | Implemented negotiated facility and valid profile fallback | #26 is closed. Remaining advertised-field/reference audit belongs to #18; storage SHA-256 is separate. |
 | W1 | Complete file and opaque metadata graphs publish atomically, including requested applied indexes and partition-scoped receipts. Partial/staged uploads, alternate coherency modes and buffered/coalescing metadata writes remain unsupported. | Implemented complete saves; missing synchronization modes | Durable staging needs an evidenced association/commit/retry contract under #27. `MultiRequestPutHint` alone does not define one. |
-| M1 | Durable metadata queries return uploaded opaque graphs and scoped knowledge; complete noncoalescing metadata writes publish atomically. Uninitialized metadata and the legacy buffered executor retain the index-only response. | Implemented durable partition behavior; qualification remains | SharePoint application metadata reference traffic and client interpretation remain #28. See [metadata limits](application-metadata.md). |
+| M1 | Durable metadata queries return uploaded opaque graphs and scoped knowledge; complete noncoalescing metadata writes publish atomically. Uninitialized metadata retains the index-only response with either provider. | Implemented durable partition behavior; qualification remains | SharePoint application metadata reference traffic and client interpretation remain #28. See [metadata limits](application-metadata.md). |
 | L1 | Exclusive/schema conversions and coauthor transition acknowledgement use durable explicit membership. | Implemented server transitions; qualification remains | Provider/HTTP tests establish state behavior. Reference traffic and two-desktop transition qualification remain in #29/#5. |
 | S1 | Durable dispatch implements Rename, Versioning list/restore and Properties enumerate/get. Other suboperations return explicit unsupported errors. | Implemented bounded outer operations; applicability/reference gates remain | #30 owns remaining suboperation applicability and reference acceptance. See [revision history](revision-history.md#outer-document-operations). |
 | N1 | OneNote schemas, graph publication strategy and a qualified native desktop workflow are absent. | New requested compatibility target | Desktop OneNote open/edit/sync, using G1–G3 and synchronization work. Large milestone; the format adapter is only part of the work. |
@@ -65,8 +65,7 @@ Acceptance criteria are expanded in the phases below.
 Evidence locations: [graph selection](../src/CellBridge.FssHttpB/PartitionGraphSnapshot.cs),
 [object graph](../src/CellBridge.FssHttpB/ObjectGroupGraph.cs),
 [binary request types](../src/CellBridge.FssHttpB/Enums.cs),
-[buffered executor](../src/CellBridge.AspNetCore/CellBinaryRequestExecutor.cs),
-[durable execution](../src/CellBridge.AspNetCore/CellBridgeDocumentService.cs),
+[document execution](../src/CellBridge.AspNetCore/CellBridgeDocumentService.cs),
 [query selection](../src/CellBridge.AspNetCore/FileQueryResponseBuilder.cs),
 [file save restrictions](../src/CellBridge.AspNetCore/FilePartitionSaveHandler.cs),
 [response budgets](../src/CellBridge.AspNetCore/QueryChangesResponseShaper.cs),

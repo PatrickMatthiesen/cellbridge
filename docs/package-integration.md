@@ -295,6 +295,12 @@ including supported metadata, editor/session, lock and Cell operations, ordered
 subrequest dependencies, current-state authorization and durable provider
 coordination. Unsupported operations retain explicit protocol errors.
 
+For decoded binary Cell requests, call `CellBridgeDocumentService.ExecuteAsync`
+with the document resource ID, SOAP partition default, request attributes and
+validated actor. The processor uses this same method. InMemory and PostgreSQL
+share target selection, ordered execution, save receipts and query assembly.
+File and metadata operation handlers are internal implementation details.
+
 The host owns authentication, request admission limits, SOAP/MTOM parsing,
 resolving MIME references into binary subrequest data, cancellation, response
 serialization and transport headers. Use `MtomMessageParser` and
