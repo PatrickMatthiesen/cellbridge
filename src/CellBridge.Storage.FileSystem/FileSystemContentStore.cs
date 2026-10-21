@@ -20,7 +20,7 @@ public sealed class FileSystemContentStore : IContentStore
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxObjectBytes);
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
-            throw new PlatformNotSupportedException("Durable filesystem publication is implemented for Windows and Linux.");
+            throw new PlatformNotSupportedException("Filesystem content storage is supported on Windows and Linux.");
         _root = Path.GetFullPath(root);
         _maxObjectBytes = maxObjectBytes;
         Shared = shared;
@@ -63,7 +63,7 @@ public sealed class FileSystemContentStore : IContentStore
             if (OperatingSystem.IsWindows())
             {
                 if (!MoveFileEx(temporary, destination, 8) && !File.Exists(destination))
-                    throw new IOException("Durable content publication failed.", Marshal.GetLastWin32Error());
+                    throw new IOException("Saving file content failed.", Marshal.GetLastWin32Error());
             }
             else
             {
@@ -101,7 +101,7 @@ public sealed class FileSystemContentStore : IContentStore
     /// <summary>Only for maintenance with every reader and writer stopped.</summary>
     public static void DeleteQuiescentObject(string root, string key)
     {
-        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Durable reclamation is currently qualified on Linux only.");
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Content cleanup is supported on Linux only.");
         if (key.Length != 64 || key.Any(c => !char.IsAsciiHexDigit(c)) || key != key.ToLowerInvariant())
             throw new StorageCorruptionException("Invalid content key.");
         File.Delete(Path.Combine(root, key + ".blob"));

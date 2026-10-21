@@ -89,8 +89,8 @@ public static class ProviderRecovery
             StorageLimits.Check("retained state snapshots", states.Length, limits.MaxRetainedStateSnapshots);
             foreach (var state in states)
             {
-                // Keep this guard effective when the parallel host-policy contract becomes a known codec field.
-                // Recovery v1 cannot coordinate backups of that host-owned permission store.
+                // Recovery v1 cannot back up the host's external permission store.
+                // Reject states that depend on it, including when AuthorizationPolicy is a known codec field.
                 var security = JsonSerializer.SerializeToElement(state.Security);
                 if (security.TryGetProperty("AuthorizationPolicy", out var binding) && binding.ValueKind != JsonValueKind.Null)
                     throw new NotSupportedException("Portable recovery of externally bound authorization state is unsupported.");

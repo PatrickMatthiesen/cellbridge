@@ -134,9 +134,9 @@ parts. CI also uses the independent [Office Inspectors parser](office-inspectors
 
 Buffered and streaming reconstruction use the same reviewed save captures.
 HTTP tests check multipart preambles/headers, content length and capture/output
-byte equality. Durable-save tests compare streamed graph, response, versions and
+byte equality. Save tests compare streamed graph, response, versions and
 metadata with the buffered path, including ingestion failure, cancellation and
-expanded ZIP limits before publication.
+expanded ZIP limits before saving changes.
 
 See [automated testing](automated-testing.md) for commands and desktop test
 procedures. Hardware power loss, asynchronous database failover and Office

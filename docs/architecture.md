@@ -73,13 +73,16 @@ against the retained graph and reconstruct the Office package through
 `PartitionGraphSnapshot`. Reconstruction follows graph references rather than
 choosing an individual binary object by size.
 
-## Save publication
+## Saving a document
 
-Durable saves reconstruct the package into an exclusive temporary file and check
-every ZIP member under the expanded-byte budget before storing immutable content.
+The document service reconstructs the package into an exclusive temporary file.
+It checks every ZIP member against the limit on expanded bytes before storing
+immutable content.
 The staging file is deleted on success, failure or cancellation. The synchronous
-in-memory save API remains buffered. This work precedes the document's row lock.
-It then reads the current state and database time, rechecks Write permission,
+in-memory save API remains buffered. This work happens before acquiring the
+document's row lock.
+
+The service then reads the current state and database time, rechecks Write permission,
 coherency and leases, and commits the selected revision with a save receipt.
 Different documents can progress independently. Sessions use the same coordination.
 

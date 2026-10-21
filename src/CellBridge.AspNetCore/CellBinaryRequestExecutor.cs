@@ -146,7 +146,7 @@ public static class CellBinaryRequestExecutor
         else
         {
             // This legacy buffered path has no opaque metadata graph executor.
-            // Durable execution reads uploaded graphs through MetadataQueryAsync.
+            // CellBridgeDocumentService reads uploaded graphs through MetadataQueryAsync.
             response = StorageManifestBuilder.BuildStorageIndexOnlyQueryChangesResponse(
                 requestId,
                 new ExGuid(1, partition.ProtocolIdentity.SerialGuid),

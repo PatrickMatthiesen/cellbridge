@@ -5,7 +5,10 @@ Office challenges, protocol responses and library open links use it rather than
 an incoming Host header. Without a fixed origin, remote protocol requests need
 a specific `AllowedHosts` list; loopback is available for local testing.
 
-This example hosts CellBridge from NuGet packages. It keeps CellBridge state and content in PostgreSQL. A separate destination directory stores immutable Office files. Each document has one atomically replaced manifest that selects the current file revision and retains delivery receipts.
+This example hosts CellBridge from NuGet packages. It keeps CellBridge state and
+content in PostgreSQL. A separate destination directory stores immutable Office
+files. Each document has a manifest that selects the current file revision and
+stores delivery receipts. Updates replace the whole manifest atomically.
 
 This is separate from the repository's Razor Pages demo at `/library`. Both
 support creating blank Word, Excel and PowerPoint files. This example also

@@ -94,7 +94,10 @@ public sealed class DocumentStore
         }
     }
 
-    /// <summary>Conditionally removes only this local cached instance. Durable state and detached readers are unaffected.</summary>
+    /// <summary>
+    /// Removes this cached instance if it still matches the expected content version.
+    /// Stored state and readers that already hold a reference are unaffected.
+    /// </summary>
     public bool TryEvict(StoredDocument expected, uint expectedContentVersion)
     {
         ArgumentNullException.ThrowIfNull(expected);

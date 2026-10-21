@@ -81,7 +81,7 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
             ProviderRecovery.CheckReceipt(accepted, expected);
             return accepted;
         }
-        // Early gate avoids charged orphans for known collisions and active coordination.
+        // Check for existing data before storing objects that a rejected import would leave unused.
         var existing = await recovery.CaptureRecoveryAsync(cancellationToken);
         if (!existing.Heads.IsEmpty || !existing.Snapshots.IsEmpty || !existing.Receipts.IsEmpty)
         {

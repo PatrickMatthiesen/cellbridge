@@ -10,9 +10,9 @@ namespace CellBridge.AspNetCore;
 /// Builds the two metadata responses that Word requests when the server
 /// advertises FSSHTTP 1.1 or later.
 ///
-/// Durable state lists recoverable publications. The legacy detached-document
-/// overload reports only current state with versioning disabled. Neither invents
-/// SharePoint list identity or settings URLs.
+/// The DocumentState overload lists versions that can be restored. The legacy
+/// detached-document overload reports only current state with versioning disabled.
+/// Neither invents SharePoint list identity or settings URLs.
 /// </summary>
 public static class MetadataVersioningResponseBuilder
 {

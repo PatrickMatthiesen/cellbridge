@@ -28,7 +28,7 @@ public sealed partial class CellBridgeDocumentService
         return FindRevision(state, revisionNumber);
     }
 
-    /// <summary>Restores a revision with an explicit retry key and optimistic expected publication number.</summary>
+    /// <summary>Restores a revision using a retry key and the expected current history revision number.</summary>
     public async ValueTask<RestoreRevisionResult> RestoreRevisionAsync(Guid resourceId, ulong revisionNumber,
         ulong expectedRevision, string operationKey, CellBridgeActor actor,
         IReadOnlyDictionary<string, string>? lockAttributes = null, CancellationToken cancellationToken = default)

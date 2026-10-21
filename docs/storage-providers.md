@@ -160,13 +160,15 @@ size only; its PostgreSQL wrapper adds shared accounting.
 
 ## Commit and retry behavior
 
-A durable save verifies and combines the retained graph without loading the previous
-complete package. It reconstructs into an exclusively created temporary file,
-validates every ZIP member under the expanded-byte budget and rewinds for content
-storage. Graph payloads still load eagerly. The staging file is deleted on every
-exit path. The save then locks the document row, reads
-the current state and database time, rechecks permission, coherency and leases,
-and publishes a snapshot with a save receipt. File I/O happens outside the lock;
+The document service verifies and combines the retained graph without loading
+the previous complete package. It reconstructs the file into an exclusively
+created temporary file, checks every ZIP member against the limit on expanded
+bytes and rewinds the stream for storage. Graph payloads still load eagerly.
+The staging file is deleted on success, failure or cancellation.
+
+The service then locks the document row, reads the current state and database
+time, rechecks permission, coherency and leases, and saves a snapshot with a
+save receipt. File I/O happens outside the lock;
 different documents have independent locks.
 
 Receipts bind the proposed storage index to the operation digest, accepted

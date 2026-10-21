@@ -95,8 +95,8 @@ Performance projects live under `benchmark/`. Correctness assertions live under
 See [list measurements](list-performance.md) and
 [isolated allocation measurements](allocation-measurements.md).
 
-Run the benchmark executables directly. A durable run without a supplied
-connection starts a disposable database through the shared AppHost fixture:
+Run the benchmark executables directly. A PostgreSQL run without a supplied
+connection string starts a disposable database through the shared AppHost fixture:
 
 ```sh
 dotnet run -c Release --project benchmark/CellBridge.Storage.Benchmark -- --content postgresql --sizes 1 --clients 1,8 --iterations 64 --workload delta-chain --output artifacts/storage-growth.json
@@ -104,8 +104,10 @@ dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --client
 ```
 
 Explicit `ConnectionStrings__cellbridge` or `ConnectionStrings__lists` values
-select an external administrative connection. Each benchmark still owns only its generated
-database. The memory storage workload needs no database.
+select an external administrative connection. The benchmark creates a new
+database there and removes only that database when it finishes. The Lists
+benchmark also creates and removes its own database role. The memory storage
+workload needs no database.
 
 Each run retains workload, setup, warm-up and measured-interval metadata.
 Steady-state timings exclude environment startup/schema setup and warm-up;

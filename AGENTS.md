@@ -4,12 +4,16 @@ CellBridge is an experimental ASP.NET Core implementation of MS-FSSHTTP and
 MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 [README.md](README.md) for current capabilities and limitations.
 
-## Protocol scope
+## Beta compatibility policy
 
 - During beta, make needed breaking changes directly and update repository
   callers, tests, examples and current docs. Do not add compatibility shims,
   deprecation periods or consumer migration guides for superseded designs.
   Preserve real database migrations and existing developer data.
+- Release all shipping CellBridge NuGet packages together with the same version
+  throughout beta. Keep document and Lists dependencies independent.
+
+## Protocol scope
 
 - Use MS-OCPROTO, MS-FSSHTTP and MS-FSSHTTPB as protocol authorities.
 - Implement both layers. MS-FSSHTTP is the outer SOAP/MTOM protocol at
@@ -31,7 +35,7 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 - `src/CellBridge.FssHttpB`: binary serialization and object graphs.
 - `src/CellBridge.Storage`: protocol document state and persistence codecs.
 - `src/CellBridge.Storage.*`: provider contracts, backends and conformance checks.
-- `src/CellBridge.AppHost/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, durable PostgreSQL, initialization and optional capture.
+- `src/CellBridge.AppHost/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, PostgreSQL, initialization and optional capture.
 - `benchmark/`: isolated measurements using the shared disposable environment.
 - `tests/`: protocol, storage and interoperability tests.
 - `tools/capture/`: SharePoint capture tooling.
@@ -61,9 +65,9 @@ aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-int
 
 ## Implementation constraints
 
-- Aspire defaults to durable PostgreSQL state and content storage. The optional
-  in-memory provider is volatile. Imports create only missing documents; saves
-  do not write back to the import directory. See
+- Aspire uses PostgreSQL for state and content by default. The in-memory provider
+  loses its contents when the process stops. Imports create only missing documents.
+  Saves do not write back to the import directory. See
   [storage setup and provider contracts](docs/storage-providers.md).
 - Resolve supplied resource IDs correctly. Do not create documents on SOAP lookup
   misses or hide unknown IDs with a URL fallback. See

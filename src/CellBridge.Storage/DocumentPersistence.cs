@@ -158,7 +158,7 @@ public sealed partial class DocumentPartition
             new GenericGraphLimits(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes));
     }
 
-    /// <summary>Stages all retained graph elements. The caller still owns authorization and publication.</summary>
+    /// <summary>Stores all retained graph elements. The caller must still check access and commit the document state.</summary>
     public static async ValueTask<PartitionState> CaptureGraphAsync(PartitionState source,
         GenericPartitionGraphSnapshot graph, ulong knowledgeSequence, IContentStore content,
         StorageLimits limits, CancellationToken cancellationToken = default)
@@ -200,7 +200,7 @@ public sealed partial class DocumentPartition
         return PartitionGraphSnapshot.Create(elements, StorageIds.Restore(partition.StorageIndex));
     }
 
-    /// <summary>Persists a detached graph around an already durable, validated package handle.</summary>
+    /// <summary>Stores a detached graph that references an already stored and validated package.</summary>
     public static async ValueTask<PartitionState> CaptureFileGraphAsync(PartitionState source,
         PartitionGraphSnapshot graph, ulong knowledgeSequence, ContentHandle package,
         IContentStore content, CancellationToken cancellationToken = default)

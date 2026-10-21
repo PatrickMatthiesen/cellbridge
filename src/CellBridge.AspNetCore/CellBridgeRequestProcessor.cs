@@ -16,7 +16,7 @@ public sealed record CellStorageExecution(CellStorageResponse Response, Immutabl
 public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service,
     ILogger<CellBridgeRequestProcessor>? logger = null)
 {
-    /// <summary>Executes against existing documents, preserving authorization, dependencies and durable publication.</summary>
+    /// <summary>Executes requests against existing documents, checking permissions and dependencies before saving changes.</summary>
     public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, string publicOrigin,
         CellBridgeActor actor, CancellationToken cancellationToken = default) =>
         ExecuteAsync(request, publicOrigin, actor, cancellationToken, "");

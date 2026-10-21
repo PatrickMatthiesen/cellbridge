@@ -13,8 +13,8 @@ Create or import a file, open it in Word, Excel or PowerPoint, and save changes
 back to CellBridge. Use the sample to try desktop editing, or add the endpoints
 to your own ASP.NET Core application.
 
-CellBridge is experimental. The APIs may change, and production-scale operation
-has not been qualified.
+CellBridge is experimental. The APIs may change, and CellBridge has not been
+tested at production scale.
 
 Optional [customer workspace list libraries](docs/lists.md) provide typed schemas,
 company templates, custom fields, record merge previews, references and authorized
@@ -26,7 +26,7 @@ provide their own customer lifecycle and user interface.
 | Feature | Current support |
 | --- | --- |
 | Word editing | Open, edit, save and reopen tested while signed in. |
-| Excel editing | Open, edit, save and reopen tested while signed in on the durable host. |
+| Excel editing | Open, edit, save and reopen tested while signed in on the PostgreSQL-backed host. |
 | PowerPoint editing | Save and reopen presentations, including complex Copilot-generated slides. |
 | Document library | Create blank Office files, import existing documents and download saved files. |
 | Accounts and permissions | Local sign-in, document ownership, read-only/editing access and revocation. |
@@ -77,7 +77,7 @@ with `tools/capture/stop.py` first, then run `aspire stop --non-interactive`.
 
 ## Use in ASP.NET Core
 
-After configuring authentication and a durable `StorageProvider`, register the
+After configuring authentication and a `StorageProvider`, register the
 services and endpoints in `Program.cs`:
 
 ```csharp

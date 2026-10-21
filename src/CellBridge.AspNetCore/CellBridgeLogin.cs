@@ -44,7 +44,7 @@ public class CellBridgeLoginOptions
     /// <summary>Optional Office HTML, including the two-factor stage when Identity is used.</summary>
     public Func<CellBridgeLoginPageContext, string>? RenderOfficePage { get; set; }
     public PathString OfficeLoginPath { get; set; } = new("/_cellbridge/auth/login");
-    /// <summary>Optional host request gate, applied to both login methods before any credential or token processing.</summary>
+    /// <summary>Optional host request check, applied to both login methods before processing credentials or tokens.</summary>
     public Func<HttpContext, bool>? IsRequestAllowed { get; set; }
     /// <summary>Browser destination when no safe return URL is supplied. Relative to the app's PathBase.</summary>
     public PathString DefaultReturnPath { get; set; } = new("/");

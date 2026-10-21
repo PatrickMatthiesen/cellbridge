@@ -68,7 +68,8 @@ return 409. Requests use the signed-in caller's cookies and antiforgery token.
 
 A supplied protocol ResourceID takes precedence over the URL. Unknown IDs fail;
 lookup never creates a document or redirects an obsolete ID to another file.
-After restarting volatile storage, create a fresh document to get a new identity.
+The in-memory provider loses documents when the process stops. After a restart,
+create a new document; it receives a new resource ID.
 GET and HEAD return content and headers from one saved revision.
 
 ## Test the demo

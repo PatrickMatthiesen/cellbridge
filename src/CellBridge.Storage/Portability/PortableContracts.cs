@@ -14,7 +14,7 @@ public sealed record RecoveryAuthorizationContext(string Mode, int ContractVersi
     }
 }
 
-/// <summary>Operator confirms this binding resolves to the same external system and durable delivery receipt ledger.</summary>
+/// <summary>The operator confirms that this binding points to the same external system and its stored delivery receipts.</summary>
 public sealed record RecoveryExternalContext(Guid BindingId, string Destination, string ReceiptDomain);
 public sealed record RecoveryContext(RecoveryAuthorizationContext Authorization,
     ImmutableArray<RecoveryExternalContext> ExternalDestinations);

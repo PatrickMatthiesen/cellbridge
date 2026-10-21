@@ -5,9 +5,10 @@ using Microsoft.Extensions.Logging;
 
 namespace CellBridge.AspNetCore;
 
-/// <summary>Polls durable pending revisions and resumes delivery after a host restart.</summary>
-/// <remarks>Passes are serialized within this instance. Delivery across instances still requires
-/// the destination's durable idempotency contract. Conflicts require explicit publisher retry.</remarks>
+/// <summary>Checks pending revisions and resumes delivery after a host restart.</summary>
+/// <remarks>Only one delivery pass runs at a time within this instance. The destination
+/// must store receipts that prevent duplicate writes across instances and restarts.
+/// Conflicts require an explicit publisher retry.</remarks>
 public sealed class ExternalRevisionPublicationWorker : BackgroundService
 {
     private readonly StorageProvider _provider;
@@ -68,7 +69,7 @@ public sealed class ExternalRevisionPublicationWorker : BackgroundService
                     if (attempt == PublicationAttempt.Delivered) delivered++;
                     else if (attempt == PublicationAttempt.TransientFailure) transientFailure = true;
                     else if (attempt is PublicationAttempt.Conflict or PublicationAttempt.ContentUnavailable)
-                        _logger.LogWarning("Destination publication for {ResourceId} stopped with {Attempt}.",
+                        _logger.LogWarning("File delivery for {ResourceId} stopped with {Attempt}.",
                             summary.ResourceId, attempt);
                 }
                 offset += page.Count;
@@ -101,7 +102,7 @@ public sealed class ExternalRevisionPublicationWorker : BackgroundService
             catch (Exception ex)
             {
                 requiresDelay = true;
-                _logger.LogError(ex, "The destination publication pass failed.");
+                _logger.LogError(ex, "The file delivery pass failed.");
             }
 
             if (requiresDelay)
