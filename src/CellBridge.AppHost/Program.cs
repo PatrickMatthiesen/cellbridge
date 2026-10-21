@@ -31,14 +31,17 @@ webdemo.WithEnvironment(context =>
     context.EnvironmentVariables["Authentication__PublicOrigin"] =
         builder.Configuration["Parameters:PublicOrigin"] is { Length: > 0 } origin
             ? origin : webdemo.GetEndpoint("https"));
-webdemo.WithEnvironment("Authentication__ApplicationName", builder.AddParameter("ApplicationName", "CellBridge"));
+webdemo.WithEnvironment("Authentication__ApplicationName", builder.AddParameter("ApplicationName",
+    () => builder.Configuration["Parameters:ApplicationName"] ?? "CellBridge"));
 webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.Configuration["Parameters:WireCaptureDirectory"] ?? "");
 
 // Capture is available on demand and keeps mitmproxy's direct TLS listener.
 // Python is required by mitmproxy, rather than used to own .NET app lifecycles.
 var captureDirectory = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../../tools/capture"));
-var captureUpstream = builder.AddParameter("CaptureUpstream", "http://sharepoint.example.test:42292");
-var captureOutput = builder.AddParameter("CaptureOutput", Path.Combine(captureDirectory, "captures"));
+var captureUpstream = builder.AddParameter("CaptureUpstream",
+    () => builder.Configuration["Parameters:CaptureUpstream"] ?? "http://sharepoint.example.test:42292");
+var captureOutput = builder.AddParameter("CaptureOutput",
+    () => builder.Configuration["Parameters:CaptureOutput"] ?? Path.Combine(captureDirectory, "captures"));
 var captureUpstreamCa = builder.Configuration["Parameters:CaptureUpstreamCa"];
 #pragma warning disable ASPIRECERTIFICATES001
 builder.AddPythonApp("sharepoint", captureDirectory, "run.py")
