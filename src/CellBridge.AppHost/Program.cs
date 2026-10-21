@@ -22,7 +22,7 @@ var webdemo = builder.AddDotnetProject("webdemo", "../CellBridge.WebDemo/CellBri
     .WithReference(database)
     .WithEnvironment("Storage__Provider", "PostgreSql")
     .WaitForCompletion(initialization)
-    .WithHttpHealthCheck("/health")
+    .WithHttpHealthCheck("/health", endpointName: "http")
     .WithExternalHttpEndpoints();
 
 // A remote Office client may require a different externally supplied origin.

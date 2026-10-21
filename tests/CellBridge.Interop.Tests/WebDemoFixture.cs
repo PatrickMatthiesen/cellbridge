@@ -51,7 +51,7 @@ public sealed class WebDemoFixture : IAsyncLifetime
             .WithHttpsEndpoint(name: "https")
             .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
             .WithEnvironment("Storage__Provider", "PostgreSql")
-            .WithHttpHealthCheck("/health")
+            .WithHttpHealthCheck("/health", endpointName: "http")
             .WithReference(database);
         foreach (var host in new[] { primary, peer })
         {
