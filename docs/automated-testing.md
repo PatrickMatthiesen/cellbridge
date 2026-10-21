@@ -73,12 +73,17 @@ aspire describe --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non
 aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
-The fixed development graph contains durable PostgreSQL, schema/authentication
+The development AppHost starts PostgreSQL, schema/authentication
 initialization, WebDemo and an explicitly started SharePoint capture resource.
 It starts no tests or benchmarks. Aspire allocates ports and passes connection
 and endpoint references. `Parameters__PublicOrigin` supplies an external HTTPS
 origin when desktop Office connects through another hostname. Its local default
 is WebDemo's allocated HTTPS endpoint.
+
+PostgreSQL uses the `cellbridge-storage-data` volume. Set
+`Parameters__StorageVolume` to use another existing volume or to give concurrent
+checkouts separate databases. Test fixtures remove this volume mount and use
+temporary storage.
 
 Other external inputs are `Parameters__ApplicationName`,
 `Parameters__WireCaptureDirectory`, `Parameters__CaptureUpstream`,
@@ -174,7 +179,8 @@ restarts, add an absolute directory to ignored `src/CellBridge.AppHost/apphost.s
 ```
 
 Restart Aspire and verify a SOAP request creates request/response/summary files.
-Environment overrides take precedence; test fixtures do not load this file. Remove
+Environment overrides take precedence. Test fixtures load this file but disable
+server capture and remove the SharePoint capture process before starting. Remove
 the setting when finished.
 
 Keep routes at their original roots. The host accepts forwarded HTTPS/Host

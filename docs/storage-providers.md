@@ -68,8 +68,8 @@ in addition to this limit. Recovery also has a fixed 128 MiB aggregate limit on
 graph-reference bytes across retained snapshots.
 
 Environment variables use double underscores, such as
-`Storage__ContentProvider=FileSystem`. Multi-host integration tests use a separate
-project-based AppHost with disposable storage; they do not alter the development graph.
+`Storage__ContentProvider=FileSystem`. Multi-host integration tests customize the
+main AppHost before starting it, with a fresh database and a second WebDemo process.
 
 ### Deployment constraints
 

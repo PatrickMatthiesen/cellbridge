@@ -5,9 +5,10 @@ builder.Configuration.AddUserSecrets<Program>()
     .AddJsonFile(Path.Combine(builder.AppHostDirectory, "apphost.settings.json"), optional: true)
     .AddEnvironmentVariables();
 
-// Aspire scopes the default volume name to this application. Tests own separate,
-// disposable PostgreSQL resources and never select the development volume.
-var postgres = builder.AddPostgres("storage").WithDataVolume();
+// Keep the existing development database when changing AppHost project paths.
+// Concurrent checkouts can select their own volume; tests remove this mount.
+var postgres = builder.AddPostgres("storage")
+    .WithDataVolume(builder.Configuration["Parameters:StorageVolume"] ?? "cellbridge-storage-data");
 var database = postgres.AddDatabase("cellbridge");
 var initialization = builder.AddDotnetProject("storage-init", "../../tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj")
     .WithReference(database)
