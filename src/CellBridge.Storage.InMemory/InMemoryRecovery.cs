@@ -10,7 +10,7 @@ public sealed partial class InMemoryStateStore
     private readonly Dictionary<Guid, RecoveryReceipt> _recoveryReceipts = [];
     private long UnpinnedBytes(DocumentState state) => _importedSnapshots.Any(s =>
         s.ResourceId == state.ResourceId && s.StateVersion == state.StateVersion)
-        ? 0 : JsonSerializer.SerializeToUtf8Bytes(state).LongLength;
+        ? 0 : DocumentStateJson.GetSerializedSize(state);
 
     private void AdjustRecoveryTransition(DocumentState current, DocumentState next, DocumentState? replacement = null)
     {
@@ -18,9 +18,9 @@ public sealed partial class InMemoryStateStore
         var obsolete = _importedSnapshots.Where(s => s.ResourceId == next.ResourceId)
             .OrderByDescending(s => s.StateVersion).Skip(Budget.Limits.MaxRetainedStateSnapshots - 1).ToArray();
         var retained = _importedSnapshots.Except(obsolete).ToImmutableArray();
-        long bytes = JsonSerializer.SerializeToUtf8Bytes(next).LongLength - UnpinnedBytes(current) -
-            obsolete.Sum(s => JsonSerializer.SerializeToUtf8Bytes(s).LongLength);
-        if (replacement is not null) bytes = checked(bytes + JsonSerializer.SerializeToUtf8Bytes(replacement).LongLength);
+        long bytes = DocumentStateJson.GetSerializedSize(next) - UnpinnedBytes(current) -
+            obsolete.Sum(s => DocumentStateJson.GetSerializedSize(s));
+        if (replacement is not null) bytes = checked(bytes + DocumentStateJson.GetSerializedSize(replacement));
         Budget.Adjust(bytes, replacement is null ? 0 : 1);
         _importedSnapshots = retained;
     }
@@ -67,7 +67,7 @@ public sealed partial class InMemoryStateStore
             ProviderRecovery.CheckAdmission(snapshot, Budget.Limits, DateTime.UtcNow);
             if (snapshot.Receipts.Any(r => r.OperationId == receipt.OperationId) || snapshot.Receipts.Length >= 1000)
                 throw new RecoveryConflictException("Recovery receipt identity collision or ledger limit.");
-            long bytes = snapshot.Snapshots.Sum(s => JsonSerializer.SerializeToUtf8Bytes(s).LongLength) +
+            long bytes = snapshot.Snapshots.Sum(s => DocumentStateJson.GetSerializedSize(s)) +
                 snapshot.Receipts.Append(receipt).Sum(r => JsonSerializer.SerializeToUtf8Bytes(r).LongLength);
             Budget.Adjust(bytes, snapshot.Heads.Length);
             _importedSnapshots = snapshot.Snapshots;

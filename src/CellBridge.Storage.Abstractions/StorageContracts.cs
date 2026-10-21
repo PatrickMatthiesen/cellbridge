@@ -51,6 +51,8 @@ public sealed record DocumentRevision(Guid ResourceId, long LifecycleGeneration,
     ImmutableArray<PartitionState> Partitions);
 public sealed record RestoreReceipt(long LifecycleGeneration, string OwnerSubject, string OperationKey,
     string Digest, ulong RevisionNumber);
+public sealed record WholeFileSaveReceipt(long LifecycleGeneration, string OwnerSubject, string OperationKey,
+    string Digest, ulong RevisionNumber);
 
 /// <summary>One detached state version. Referenced content is immutable; reclamation requires quiescent maintenance.</summary>
 public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Path, string PathKey,
@@ -70,6 +72,7 @@ public sealed record DocumentState(int FormatVersion, Guid ResourceId, string Pa
     public ImmutableArray<DocumentRevision> Revisions { get; init; } = [];
     public ImmutableArray<string> RetiredPathKeys { get; init; } = [];
     public ImmutableArray<RestoreReceipt> RestoreReceipts { get; init; } = [];
+    public ImmutableArray<WholeFileSaveReceipt> WholeFileSaveReceipts { get; init; } = [];
     public string Etag => $"\"{{{ResourceId.ToString("D").ToUpperInvariant()}}},{ContentVersion}\"";
 }
 
@@ -85,6 +88,8 @@ public sealed record DocumentSummary(Guid ResourceId, string Path, long Length,
     uint ContentVersion, DateTime ModifiedUtc, int ActiveEditors)
 {
     public DocumentSecurity Security { get; init; } = DocumentSecurity.Empty;
+    public int PendingDeliveryCount { get; init; }
+    public string? DeliveryBlock { get; init; }
 }
 
 /// <summary>Content writes must complete durably before their handles can be published.</summary>

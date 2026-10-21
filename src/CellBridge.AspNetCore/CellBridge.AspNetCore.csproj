@@ -4,6 +4,10 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../CellBridge.FssHttp/CellBridge.FssHttp.csproj" />
     <ProjectReference Include="../CellBridge.Storage/CellBridge.Storage.csproj" />
+    <Compile Include="../SharedAuthorization/BoundedAuthorizationCache.cs" Link="Authorization/BoundedAuthorizationCache.cs" />
   </ItemGroup>
-  <ItemGroup><InternalsVisibleTo Include="CellBridge.FssHttp.Tests" /></ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="CellBridge.FssHttp.Tests" />
+    <InternalsVisibleTo Include="CellBridge.Storage.Tests" />
+  </ItemGroup>
 </Project>

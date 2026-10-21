@@ -26,6 +26,19 @@ namespace CellBridge.Lists.AspNetCore.Tests;
 public sealed partial class HttpTests
 {
     [Fact]
+    public async Task List_page_endpoint_forwards_opaque_continuations_and_bounds_page_size()
+    {
+        await using var host = await Host.Create();
+        var response = await host.Client.GetAsync(host.ListsPath + "/page?pageSize=17&continuation=opaque-token");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        Assert.Equal("next-token", json["continuation"]!.GetValue<string>());
+        Assert.Equal((17, "opaque-token"), host.Engine.LastListPage);
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await host.Client.GetAsync(host.ListsPath + "/page?pageSize=257")).StatusCode);
+    }
+
+    [Fact]
     public async Task Backend_failure_returns_controlled_error_without_affecting_other_requests()
     {
         await using var host = await Host.Create();
@@ -367,6 +380,7 @@ public sealed partial class HttpTests
     {
         public HttpClient Client { get; } = client;
         public FakeEngine Engine { get; } = engine;
+        public string ListsPath => pathBase + $"/api/workspaces/{Engine.Workspace}/lists";
         public string Path => pathBase + $"/api/workspaces/{Engine.Workspace}/lists/{Engine.Definition.Id}";
         public Task<HttpResponseMessage> Post(string path, string body) => Client.PostAsync(Path + path, new StringContent(body, Encoding.UTF8, "application/json"));
         public static async Task<Host> Create(Action<CellBridgeListsOptions>? configure = null, Action<HttpContext>? requestSetup = null,
@@ -418,7 +432,7 @@ public sealed partial class HttpTests
             : AuthenticateResult.Fail("Invalid token"));
     }
 
-    private sealed class FakeEngine : IListEngine
+    private sealed class FakeEngine : IListEngine, IPagedListEngine
     {
         public Guid Workspace { get; } = Guid.NewGuid();
         public Guid Text { get; } = Guid.NewGuid();
@@ -435,6 +449,7 @@ public sealed partial class HttpTests
         public ListQuery? LastQuery { get; private set; }
         public Func<CancellationToken, Task>? QueryWait { get; set; }
         public Func<ListActor, Guid, CancellationToken, Task>? ListsWait { get; set; }
+        public (int PageSize, string? Continuation)? LastListPage { get; private set; }
         public FakeEngine()
         {
             Definition = new ListDefinition(Guid.NewGuid(), Workspace, "Test", 1,
@@ -452,6 +467,14 @@ public sealed partial class HttpTests
         { Calls++; Queries++; LastQuery = query; if (QueryWait is { } wait) await wait(ct); return new RecordPage([Record], query.AfterRecordId is null ? Record.Id : null, Definition.SchemaVersion); }
         public async Task<IReadOnlyList<ListDefinition>> GetListsAsync(ListActor actor, Guid workspaceId, CancellationToken ct = default)
         { Calls++; if (ListsWait is { } wait) await wait(actor, workspaceId, ct); return [Definition]; }
+        public Task<ListDefinitionPage> GetListsPageAsync(ListActor actor, Guid workspaceId,
+            string? continuation = null, int candidateLimit = 256, CancellationToken ct = default)
+        {
+            Calls++;
+            LastListPage = (candidateLimit, continuation);
+            if (candidateLimit is < 1 or > 256) throw new ListException(ListFailure.Validation, "bad page");
+            return Task.FromResult(new ListDefinitionPage([Definition], "next-token"));
+        }
         public Task<ListDefinition> CreateListAsync(ListActor actor, Guid workspaceId, CreateListRequest request, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<ListDefinition> PublishSchemaAsync(ListActor actor, Guid workspaceId, Guid listId, PublishSchemaRequest request, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<CreateRecordResult> CreateRecordAsync(ListActor actor, Guid workspaceId, Guid listId, CreateRecordRequest request, CancellationToken ct = default) => throw new NotImplementedException();

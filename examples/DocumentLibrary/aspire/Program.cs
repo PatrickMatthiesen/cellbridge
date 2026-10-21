@@ -36,6 +36,12 @@ builder.AddDotnetProject("document-library", "../CellBridge.DocumentLibrary.cspr
     .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
     .WithEnvironment("DocumentLibrary__StorageProvider", "PostgreSql")
     .WithEnvironment("DocumentLibrary__DestinationRoot", destinationRoot)
+    .WithEnvironment("DocumentLibrary__AuthorizationCache__Enabled",
+        builder.Configuration["DocumentLibrary:AuthorizationCache:Enabled"] ?? "false")
+    .WithEnvironment("DocumentLibrary__AuthorizationCache__Capacity",
+        builder.Configuration["DocumentLibrary:AuthorizationCache:Capacity"] ?? "1024")
+    .WithEnvironment("DocumentLibrary__AuthorizationCache__DecisionTtl",
+        builder.Configuration["DocumentLibrary:AuthorizationCache:DecisionTtl"] ?? "00:00:10")
     .WaitForCompletion(setup)
     .WithHttpsEndpoint()
     .WithHttpHealthCheck("/health")

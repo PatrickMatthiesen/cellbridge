@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/HostAuthorizedLists/HostAuthorizedLists.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/CellBridge.AppHost/CellBridge.AppHost.csproj" />
     <Project Path="src/CellBridge.Lists/CellBridge.Lists.csproj" />

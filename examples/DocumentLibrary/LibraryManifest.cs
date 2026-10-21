@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.DocumentLibrary;
@@ -45,4 +46,14 @@ public sealed record LibraryManifest(
     ImmutableDictionary<Guid, DeliveryReceipt> Receipts)
 {
     public const int CurrentFormat = 1;
+
+    // Legacy snapshots remain intact when authority moves to operation-time checks.
+    public ImmutableDictionary<string, DocumentAccess>? CurrentPermissions { get; init; }
+
+    // A staged interactive upload cannot be imported by recovery before Create succeeds.
+    public bool PendingCreation { get; init; }
+
+    [JsonIgnore]
+    public ImmutableDictionary<string, DocumentAccess> Permissions =>
+        CurrentPermissions ?? PermissionSnapshots[DesiredPermissionRevision].Decisions;
 }

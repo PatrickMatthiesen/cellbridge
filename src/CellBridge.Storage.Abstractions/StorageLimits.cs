@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace CellBridge.Storage.Abstractions;
 
 /// <summary>Admission limits, not a claim about supported Office file sizes.</summary>
@@ -8,6 +6,8 @@ public sealed record StorageLimits
     public long MaxDocumentBytes { get; init; } = 128L * 1024 * 1024;
     public long MaxGraphBytes { get; init; } = 512L * 1024 * 1024;
     public int MaxGraphElements { get; init; } = 100_000;
+    /// <summary>Reference slots across current and historical graph arrays, not a total heap or storage quota.</summary>
+    public long MaxDecodedGraphMembershipBytes { get; init; } = 128L * 1024 * 1024;
     public long MaxDocumentStoredBytes { get; init; } = 1024L * 1024 * 1024;
     public long MaxStoredBytes { get; init; } = 10L * 1024 * 1024 * 1024;
     public int MaxDocuments { get; init; } = 10_000;
@@ -18,6 +18,7 @@ public sealed record StorageLimits
     public int MaxRetainedStateSnapshots { get; init; } = 64;
     public int MaxHistoryRevisions { get; init; } = 1_000;
     public int MaxRestoreReceipts { get; init; } = 1_000;
+    public int MaxWholeFileSaveReceipts { get; init; } = 10_000;
     public int MaxRetiredPathKeys { get; init; } = 128;
 
     public void Validate()
@@ -25,6 +26,7 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocumentBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxGraphBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxGraphElements);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDecodedGraphMembershipBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocumentStoredBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxStoredBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocuments);
@@ -35,11 +37,13 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxPendingExternalBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxHistoryRevisions);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRestoreReceipts);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxWholeFileSaveReceipts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetiredPathKeys);
     }
 
     public void CheckDocument(DocumentState state)
     {
+        Check("decoded graph membership bytes", GetDecodedGraphMembershipBytes(state), MaxDecodedGraphMembershipBytes);
         Check("document bytes", state.Content.Length, MaxDocumentBytes);
         long graphBytes = 0;
         long elements = 0;
@@ -58,12 +62,25 @@ public sealed record StorageLimits
             Check("pending external bytes", publication.Pending.Sum(r => r.Content.Length), MaxPendingExternalBytes);
         }
         Check("history revisions", state.Revisions.Length, MaxHistoryRevisions);
+        foreach (var revision in state.Revisions)
+            foreach (var partition in revision.Partitions)
+                Check("graph elements", partition.Elements.Length, MaxGraphElements);
         Check("restore receipts", state.RestoreReceipts.Length, MaxRestoreReceipts);
+        Check("whole-file save receipts", state.WholeFileSaveReceipts.Length, MaxWholeFileSaveReceipts);
         Check("retired path keys", state.RetiredPathKeys.Length, MaxRetiredPathKeys);
-        long stored = JsonSerializer.SerializeToUtf8Bytes(state).LongLength;
+        long stored = DocumentStateJson.GetSerializedSize(state);
         foreach (var handle in StorageReferences.Handles(state).DistinctBy(h => h.Key))
             stored = checked(stored + handle.Length);
         Check("document stored bytes", stored, MaxDocumentStoredBytes);
+    }
+
+    public static long GetDecodedGraphMembershipBytes(DocumentState state)
+    {
+        long members = 0;
+        foreach (var partition in state.Partitions) members = checked(members + partition.Elements.Length);
+        foreach (var revision in state.Revisions)
+            foreach (var partition in revision.Partitions) members = checked(members + partition.Elements.Length);
+        return checked(members * IntPtr.Size);
     }
 
     public static void Check(string budget, long used, long limit)

@@ -24,12 +24,18 @@ before serving requests. [Provision an account](authentication.md#first-setup)
 to use the library. Removing the volume removes its persisted data.
 
 Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
-`ConnectionStrings__cellbridge` before starting the host. Initialization accepts
-a fresh database or storage schema version 4, and explicitly migrates version 3
-to 4 while preserving documents. Stop hosts using that database before migration;
-schema-3 writers fail closed afterward. Older schemas are rejected without
-modifying them. Initialization sets authoritative byte/document limits. Existing
-data stays intact when a limit is reduced. See [external host reliability](external-host-reliability.md#storage-compatibility-and-validation).
+`ConnectionStrings__cellbridge` before starting the host. Setup accepts fresh
+or schema-6 databases and upgrades schemas 3, 4 and 5 while preserving documents
+and retained snapshots. Stop all hosts and workers using the database first.
+Unsupported schemas, corruption or exceeded limits abort the upgrade without
+changing persisted data. Follow the [upgrade procedure](#upgrading-a-durable-host)
+for backups and rollback.
+
+Current metadata and paged revision summaries avoid loading complete document
+history with the built-in stores. See [reading document metadata and history](async-document-authorization.md#read-document-metadata-and-history).
+Graph operations, saves and restores still load complete states. Derived read
+indexes take physical disk space in addition to the authoritative state and
+content counted by storage quotas.
 
 ### Configuration
 
@@ -39,6 +45,7 @@ data stays intact when a limit is reduced. See [external host reliability](exter
 | `ConnectionStrings:cellbridge` | Required PostgreSQL connection string, supplied by Aspire in local development. |
 | `Storage:ContentProvider` | `PostgreSql`, the default for PostgreSQL state, or `FileSystem`. |
 | `Storage:ContentRoot` | Absolute filesystem content directory, required for FileSystem. |
+| `Storage:MaxDecodedGraphMembershipBytes` | Maximum graph-reference bytes per document state, default 128 MiB. Applies to reads, writes and upgrades. This is separate from disk quotas and does not limit total process memory. |
 | `Storage:MaxObjectBytes` | Maximum bytes per binary object, default 512 MiB. This is a quota, not a tested document-size promise. |
 | `Storage:MultipleInstances` | Require shared state and content; reject incompatible provider combinations. |
 | `Storage:SharedContent` | Operator declaration that the filesystem root is shared with verified flush/rename semantics. Default false. |
@@ -53,6 +60,12 @@ data stays intact when a limit is reduced. See [external host reliability](exter
 | `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
 | `Protocol:CaptureDirectory` | Opt-in directory for correlated raw requests/responses. Default disabled. Restrict access and manage retention. |
 
+
+The graph-reference limit covers current and historical graph arrays. Exceeding
+it rejects the operation without removing history. Raise it only with enough
+memory for concurrent operations; graph objects and file buffers consume memory
+in addition to this limit. Recovery also has a fixed 128 MiB aggregate limit on
+graph-reference bytes across retained snapshots.
 
 Environment variables use double underscores, such as
 `Storage__ContentProvider=FileSystem`. Multi-host integration tests use a separate
@@ -281,15 +294,16 @@ power-loss and shared-filesystem behavior need deployment-specific qualification
    Test restoration in a separate environment.
 3. Update all CellBridge package references together. Build the application and
    the repository's `CellBridge.Storage.Setup` tool from matching source.
-4. Run setup against the stopped database. It migrates storage schema 3 to 4,
-   preserves documents and initializes recovery schema 1. Older development
-   schemas need a separate migration or recreation; setup rejects them.
+4. Run setup against the stopped database. It migrates storage schema 3, 4 or 5 to 6,
+   preserves documents and all retained snapshots, builds the selective read indexes,
+   and initializes recovery schema 1.
+   Older development schemas need a separate migration or recreation; setup rejects them.
 5. Start one upgraded host. Check provider health, document identities,
    permissions, downloads and a save/reopen cycle before enabling other writers.
    Verify publication workers' destination bindings and durable receipt stores
    before restarting them.
 
-There is no schema-4-to-3 downgrade. For rollback, stop upgraded writers and
+There is no schema-6 downgrade. For rollback, stop upgraded writers and
 restore the previous database, matching content objects, binaries and
 configuration. This loses changes made after the backup unless you reconcile
 them separately. Do not run older writers against the migrated database.
@@ -301,6 +315,17 @@ Implement `IDocumentStateStore` and `IContentStore`, then compose a
 the complete deployed backend.
 
 ### State contract
+
+Use `DocumentStateJson` to read and write persisted state and calculate its
+encoded size. It supports compact storage encoding 1 and legacy expanded JSON.
+The public `DocumentState` records remain logical format 2. Preserve all revision
+graph identities and content handles when implementing a provider.
+
+Providers can implement `IDocumentReadStore` for current metadata and paged
+revision summaries. Return each selection with the current authorization and
+lifecycle metadata from one coherent view. Update any derived read records
+atomically with state changes, including recovery import. Without this optional
+capability, the service reads complete states.
 
 `TransitionAsync` acquires exclusive coordination for the resource, loads one
 coherent snapshot and supplies authoritative time. Invoke the callback once.

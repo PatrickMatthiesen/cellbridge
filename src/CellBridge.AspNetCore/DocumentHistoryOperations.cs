@@ -16,6 +16,8 @@ public sealed partial class CellBridgeDocumentService
         CancellationToken cancellationToken = default)
     {
         var state = await CurrentAsync(resourceId, cancellationToken);
+        actor = await AuthorizeActorAsync(actor, state, DocumentAccess.Read, cancellationToken);
+        state = await RevalidateReadStateAsync(state, cancellationToken) ?? throw new KeyNotFoundException("Document does not exist.");
         Demand(actor, state, DocumentAccess.Read);
         return RevisionHistory.Initialize(state).Revisions.Reverse().ToArray();
     }
@@ -24,6 +26,8 @@ public sealed partial class CellBridgeDocumentService
         CancellationToken cancellationToken = default)
     {
         var state = await CurrentAsync(resourceId, cancellationToken);
+        actor = await AuthorizeActorAsync(actor, state, DocumentAccess.Read, cancellationToken);
+        state = await RevalidateReadStateAsync(state, cancellationToken) ?? throw new KeyNotFoundException("Document does not exist.");
         Demand(actor, state, DocumentAccess.Read);
         return FindRevision(state, revisionNumber);
     }
@@ -35,6 +39,7 @@ public sealed partial class CellBridgeDocumentService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationKey);
         if (operationKey.Length > 256) throw new ArgumentException("The restore key exceeds 256 characters.", nameof(operationKey));
+        actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Write, cancellationToken);
         var before = await provider.State.TransitionAsync(resourceId, (current, now) =>
         {
             Demand(actor, current, DocumentAccess.Write);

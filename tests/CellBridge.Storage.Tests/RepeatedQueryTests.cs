@@ -121,10 +121,25 @@ public class RepeatedQueryTests
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         var other = state.Partitions[0].Elements.Single(e => e.Id == StorageIds.Capture(f.OtherGroup));
         var shared = other.Serial;
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Partitions = current.Partitions.Select(p => p.Kind != 0 ? p : p with
-            { Elements = p.Elements.Select(e => e.Id == StorageIds.Capture(f.BaseGroup)
-                ? e with { Serial = shared } : e).ToImmutableArray() }).ToImmutableArray() }, true));
+        var aliasedId = StorageIds.Capture(f.BaseGroup);
+        static PartitionState ApplyAlias(PartitionState value, ExtendedId id, SerialId serial) => value.Kind != 0 ? value : value with
+        {
+            Elements = value.Elements.Select(element => element.Id == id
+                ? element with { Serial = serial } : element).ToImmutableArray(),
+        };
+        await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+        {
+            // Keep retained copies consistent while preserving ambiguity between the two distinct group IDs.
+            var next = current with
+            {
+                Partitions = current.Partitions.Select(partition => ApplyAlias(partition, aliasedId, shared)).ToImmutableArray(),
+                Revisions = current.Revisions.Select(revision => revision with
+                {
+                    Partitions = revision.Partitions.Select(partition => ApplyAlias(partition, aliasedId, shared)).ToImmutableArray(),
+                }).ToImmutableArray(),
+            };
+            return new StateTransition<bool>(next, true);
+        });
         var known = ClientKnowledge.FromElements([new DataElement(DataElementType.ObjectGroupDataElementData,
             f.OtherGroup, new SerialNumber(shared.Guid, shared.Value))]);
         var query = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,

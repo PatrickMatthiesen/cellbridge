@@ -35,6 +35,7 @@ public sealed class HistoricalGraphRestorerTests
     public void RestoreRetainsInheritedObjectsBlobRootsAndCells(bool blob)
     {
         var fixture = new GraphFixture("historical bytes"u8.ToArray(), blob);
+        fixture.ConnectCells(false);
         var original = fixture.Generic();
         var publication = HistoricalGraphRestorer.Rebase(original, original, Guid.NewGuid(), 5000);
         Assert.Equal(original.SchemaGuid, publication.Graph.SchemaGuid);
@@ -77,6 +78,14 @@ public sealed class HistoricalGraphRestorerTests
         Assert.Single(restored.Cells);
         Assert.DoesNotContain(fixture.OtherCell, restored.Cells);
         Assert.Contains(restored.Elements, e => e.DataElementExtendedGuid.Equals(fixture.OtherGroup));
+        var selectedIndex = restored.Elements.Single(e => e.DataElementExtendedGuid.Equals(restored.StorageIndex));
+        var revisions = StorageIndexMappingSerials.ReadMappings(selectedIndex.Data!)
+            .Where(mapping => mapping.Revision is not null).ToArray();
+        Assert.Equal(3, revisions.Length); // Two selected ancestor/current mappings and one fresh wrapper.
+        Assert.Contains(revisions, mapping => mapping.Revision!.Equals(fixture.BaseRevision));
+        Assert.Contains(revisions, mapping => mapping.Revision!.Equals(fixture.Revision));
+        Assert.DoesNotContain(revisions, mapping => mapping.Revision!.Equals(fixture.OtherRevision));
+        Assert.Equal(fixture.Bytes, PartitionGraphSnapshot.Create(restored.Elements, restored.StorageIndex).Materialize());
     }
 
     [Fact]
@@ -95,9 +104,31 @@ public sealed class HistoricalGraphRestorerTests
         var fixture = new GraphFixture([1]); var graph = fixture.Generic();
         var ns = GraphFixture.Mapping(fixture.Manifest).Guid;
         var watermark = graph.MappingSerials.Values.SelectMany(s => s).Max(s => s.Value);
-        var result = HistoricalGraphRestorer.Rebase(graph, graph, ns, 0);
-        var fresh = result.Graph.Elements.Where(e => !graph.Elements.Any(old => old.DataElementExtendedGuid.Equals(e.DataElementExtendedGuid)));
+        var selectedNamespace = Guid.NewGuid();
+        var selected = new GraphFixture([2], identity: value => new(value, selectedNamespace)).Generic();
+        var result = HistoricalGraphRestorer.Rebase(graph, selected, ns, 0);
+        var fresh = result.Graph.Elements.Where(e => e.SerialNumber.Guid == ns &&
+            !graph.Elements.Any(old => old.DataElementExtendedGuid.Equals(e.DataElementExtendedGuid))).ToArray();
+        Assert.NotEmpty(fresh);
         Assert.All(fresh, e => Assert.True(e.SerialNumber.Value > watermark));
         Assert.True(result.Knowledge > watermark);
+    }
+
+    [Fact]
+    public void UnselectedRetainedIndexesStillRejectConflictingRevisionMappings()
+    {
+        var fixture = new GraphFixture([1]);
+        var conflicting = GraphFixture.Element(DataElementType.StorageIndexDataElementData,
+            new(1, Guid.NewGuid()), writer => GraphFixture.Record(writer,
+                StreamObjectTypeHeaderStart.StorageIndexRevisionMapping, body =>
+                {
+                    fixture.Revision.Serialize(body);
+                    fixture.BaseElement.Serialize(body);
+                    new SerialNumber(Guid.NewGuid(), 1).Serialize(body);
+                }));
+        var current = GenericPartitionGraphSnapshot.Create(fixture.Elements.Append(conflicting), fixture.Index);
+        var selectedNamespace = Guid.NewGuid();
+        var selected = new GraphFixture([2], identity: value => new(value, selectedNamespace)).Generic();
+        Assert.Throws<InvalidDataException>(() => HistoricalGraphRestorer.Rebase(current, selected, Guid.NewGuid(), 0));
     }
 }

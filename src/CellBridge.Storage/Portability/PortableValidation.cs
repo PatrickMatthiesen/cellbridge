@@ -55,7 +55,11 @@ public sealed partial class PortableArchive
                     state.RestoreReceipts.Select(r => (r.LifecycleGeneration, r.OwnerSubject, r.OperationKey)).Distinct().Count() != state.RestoreReceipts.Length ||
                     state.RestoreReceipts.Any(r => r.LifecycleGeneration != state.LifecycleGeneration || string.IsNullOrWhiteSpace(r.OwnerSubject) ||
                         string.IsNullOrWhiteSpace(r.OperationKey) || string.IsNullOrWhiteSpace(r.Digest) ||
-                        !state.Revisions.Any(v => v.RevisionNumber == r.RevisionNumber)))
+                        !state.Revisions.Any(v => v.RevisionNumber == r.RevisionNumber)) ||
+                    state.WholeFileSaveReceipts.Select(r => (r.LifecycleGeneration, r.OwnerSubject, r.OperationKey)).Distinct().Count() != state.WholeFileSaveReceipts.Length ||
+                    state.WholeFileSaveReceipts.Any(r => r.LifecycleGeneration != state.LifecycleGeneration || string.IsNullOrWhiteSpace(r.OwnerSubject) ||
+                        string.IsNullOrWhiteSpace(r.OperationKey) || r.OperationKey.Length > 256 || string.IsNullOrWhiteSpace(r.Digest) || r.Digest.Length != 64 ||
+                        r.Digest.Any(c => !char.IsAsciiHexDigit(c)) || !state.Revisions.Any(v => v.RevisionNumber == r.RevisionNumber)))
                     throw new StorageCorruptionException("Invalid or conflicting durable receipts.");
                 if (state.Publication is { } publication)
                 {
@@ -89,7 +93,7 @@ public sealed partial class PortableArchive
             state.Security is null || state.Security.Grants is null || state.Security.Grants.Any(g => string.IsNullOrWhiteSpace(g.Key) ||
                 (g.Value & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0) ||
             state.Partitions.IsDefault || state.Editors.IsDefault || state.Receipts.IsDefault || state.Revisions.IsDefault ||
-            state.RestoreReceipts.IsDefault || state.RetiredPathKeys.IsDefault || state.Coordination is null ||
+            state.RestoreReceipts.IsDefault || state.WholeFileSaveReceipts.IsDefault || state.RetiredPathKeys.IsDefault || state.Coordination is null ||
             state.Coordination.SchemaOwners.IsDefault || state.Coordination.CoauthorClients.IsDefault ||
             state.Coordination.Generation < 0 || state.Partitions.Length != 3 ||
             !state.Partitions.Select(p => p.Kind).Order().SequenceEqual(new[] { 0, 1, 2 }) ||
@@ -154,7 +158,7 @@ public sealed partial class PortableArchive
                 _ = await DocumentPartition.RestoreGraphAsync(partition, content, _storage, cancellationToken);
         }
         var file = partitions.Single(p => p.Kind == 0);
-        var state = owner with { Content = package, Partitions = partitions, Revisions = [], Receipts = [], RestoreReceipts = [], Publication = null };
+        var state = owner with { Content = package, Partitions = partitions, Revisions = [], Receipts = [], RestoreReceipts = [], WholeFileSaveReceipts = [], Publication = null };
         var graph = await DocumentPartition.RestoreFileGraphAsync(state, content, _storage, cancellationToken);
         string temporary = Path.Combine(Path.GetTempPath(), "cellbridge-recovered-package-" + Guid.NewGuid().ToString("N"));
         await using var reconstructed = ConfidentialFileSystem.CreateFile(temporary, FileAccess.ReadWrite,
@@ -204,15 +208,18 @@ public sealed partial class PortableArchive
             for (int i = 1; i < ordered.Length; i++)
             {
                 var previous = ordered[i - 1]; var next = ordered[i];
+                // Receipt order is not identity. Every earlier accepted record must remain unchanged.
+                var wholeFileReceipts = next.WholeFileSaveReceipts.ToHashSet();
                 if (previous.LifecycleGeneration != next.LifecycleGeneration || previous.CreatedUtc != next.CreatedUtc ||
                     previous.ContentVersion > next.ContentVersion ||
                     previous.RetiredPathKeys.Any(k => !next.RetiredPathKeys.Contains(k)) ||
                     previous.PathKey != next.PathKey && !next.RetiredPathKeys.Contains(previous.PathKey) ||
                     previous.IsDeleted && (!next.IsDeleted || previous.DeletedFromStateVersion != next.DeletedFromStateVersion) ||
                     previous.ReplacedBy is not null && previous.ReplacedBy != next.ReplacedBy ||
+                    previous.WholeFileSaveReceipts.Any(r => !wholeFileReceipts.Contains(r)) ||
                     previous.Revisions.Any(r => !next.Revisions.Any(n => n.RevisionNumber == r.RevisionNumber &&
                         JsonSerializer.Serialize(n) == JsonSerializer.Serialize(r))))
-                    throw new StorageCorruptionException("Retained snapshots disagree on identity, lifecycle, history or permanent path reservations.");
+                    throw new StorageCorruptionException("Retained snapshots disagree on identity, lifecycle, history, whole-file receipts or permanent path reservations.");
             }
         }
         var parents = new Dictionary<Guid, Guid>();

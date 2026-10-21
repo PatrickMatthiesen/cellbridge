@@ -11,20 +11,22 @@ scope and qualification criteria; this guide describes the current libraries.
 
 `CellBridge.Lists` defines schemas, templates, validation, bounded queries and
 three-way merge previews. `IListEngine` is the authorized operation contract.
-The PostgreSQL provider stores list state, memberships, grants, receipts and
-audit events in its own `cellbridge_lists` schema. The ASP.NET Core adapter maps
-native JSON endpoints, exports and a limited read-only OData feed.
+The PostgreSQL provider stores list state, receipts and audit events in its own
+`cellbridge_lists` schema. A workspace can use the built-in membership and grant
+tables or an [asynchronous host authority](host-list-authorization.md). The
+ASP.NET Core adapter maps native JSON endpoints, exports and a limited read-only
+OData feed.
 
 The host authenticates callers and maps each validated identity to a stable,
 issuer-qualified `ListActor.Subject`. It owns workspace registration, account
 lifecycle, authentication schemes, integration identities, UI rendering and
 operator setup. A caller-supplied subject or workspace ID never proves access.
-Document permissions do not grant list permissions. An integration identity
-needs its own workspace membership and explicit grants to its allowed lists.
-The current authority has no separate OAuth scope registry.
+Document permissions do not grant list permissions. In built-in mode, an
+integration identity needs its own workspace membership and explicit grants to
+its allowed lists. The built-in authority has no separate OAuth scope registry.
 
-Every operation requires current workspace membership. List grants are flags,
-not a hierarchy:
+In built-in mode, every operation requires current workspace membership. List
+grants are flags, not a hierarchy:
 
 | Operation | Additional authority |
 | --- | --- |
@@ -40,12 +42,12 @@ A grant administrator can assign grants to themselves. That power does not
 implicitly grant record access. All list readers can read every field and record
 in that list. Put confidential fields in a separately restricted list.
 
-The provider takes a shared workspace authorization lock before reading
-permissions and holds it through the transaction. Authority changes take the
-conflicting exclusive lock. Operations ordered after a committed revocation are
-denied; an operation ordered before it may finish. Revocation cannot retract
-already delivered data. Workspace RLS backs up these application checks and does
-not replace list grants.
+The built-in provider takes a shared workspace authorization lock before reading
+permissions and holds it through the transaction. Built-in authority changes
+take the conflicting exclusive lock. Operations ordered after a committed
+revocation are denied; an operation ordered before it may finish. Revocation
+cannot retract already delivered data. Workspace RLS backs up these application
+checks and does not replace list grants or host policy decisions.
 
 ## Definitions, values and presentation
 
@@ -293,17 +295,19 @@ have forced RLS with matching read/write checks. The provider sets verified
 workspace context transaction-locally and checks schema version/runtime privileges
 before use. Runtime credentials cannot register operator templates.
 
-The current provider requires list schema version 2. Before upgrading a version 1
+The current provider requires list schema version 3. Before upgrading a version 1
 installation, stop every old list host and integration worker, back up the list
 schema, and run `InitializeAsync` with operator credentials. Setup creates
 per-list counters and normalized reference links, then recalculates each
 workspace's logical byte usage from its retained version 1 rows. This one-time
 recalculation charges memberships and creator grants that early version 1 code
 did not charge, without charging rows again if a later version 1 build already
-corrected them. Setup records version 2 in the same transaction. Repeated setup
-on version 2 does not scan retained rows again. A workspace whose recalculated
+corrected them. Setup then adds the immutable authorization mode, domain, and
+tenant-scope columns used by host-authorized workspaces and records version 3 in
+the same transaction. Repeated setup on version 3 does not scan retained rows
+again. A workspace whose recalculated
 usage exceeds its configured quota cannot add storage until its usage falls
-below the limit. Start only version 2 providers afterward. Running old providers
+below the limit. Start only version 3 providers afterward. Running old providers
 during this migration can leave the new counters or links incomplete.
 
 Record mutations use shared schema locks, record row locks and foreign keys.
@@ -311,8 +315,9 @@ Creates atomically allocate the next per-list number and lifetime identity count
 Updates preserve conditional revisions. Number allocation and shared workspace
 accounting still coordinate through their counter rows near commit; they do not
 take an exclusive workspace mutation lock for the whole operation. The separate
-authorization lock remains shared for data operations and exclusive for permission
-changes, so revocation and writes retain their transaction ordering.
+authorization lock remains shared for data operations and exclusive for built-in
+permission changes. External host decisions use operation-time admission instead.
+An operation admitted before a host revocation may finish.
 
 Run provisioning separately from the web host using the actual public setup APIs:
 
@@ -330,10 +335,11 @@ await PostgreSqlListSetup.RegisterTemplateAsync(setup,
         [new ListField(titleFieldId, "Title", ListFieldType.Text, Required: true)]));
 ```
 
-Workspace registration bootstraps a member with create-list and grant-management
-rights. Use the same subject mapping as the authenticated host. Bootstrap is
-operator provisioning; use `IListEngine.SetMembershipAsync` and
-`SetListGrantAsync` for subsequent changes under the authorization lock and audit.
+Built-in workspace registration bootstraps a member with create-list and
+grant-management rights. Use the same subject mapping as the authenticated host.
+Bootstrap is operator provisioning; use `IListEngine.SetMembershipAsync` and
+`SetListGrantAsync` for subsequent built-in changes under the authorization lock
+and audit.
 There is no public membership or audit HTTP endpoint in the current adapter.
 
 Runtime registration uses only the runtime connection:

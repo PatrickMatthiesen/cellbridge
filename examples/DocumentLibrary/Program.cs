@@ -29,9 +29,25 @@ if (listsEnabled)
 builder.Services.AddAuthorization(options => options.AddPolicy("permission-admin",
     policy => policy.RequireClaim("document-library:permission-admin", "true")));
 
-builder.Services.AddCellBridge<DocumentLibraryPermissionPolicy>(provider,
-    requireDurability: !builder.Environment.IsEnvironment("Testing"),
-    configure: options => options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"]);
+builder.Services.AddSingleton<DocumentLibraryPermissionProvider>();
+if (builder.Configuration.GetValue("DocumentLibrary:AuthorizationCache:Enabled", false))
+{
+    builder.Services.AddSingleton(services =>
+    {
+        var cache = services.GetRequiredService<DocumentLibraryOptions>().AuthorizationCache;
+        return new CachedDocumentAuthorizationProvider(services.GetRequiredService<DocumentLibraryPermissionProvider>(),
+            new() { Capacity = cache.Capacity, DecisionTtl = cache.DecisionTtl });
+    });
+    builder.Services.AddCellBridgeWithExternalAuthorization<CachedDocumentAuthorizationProvider>(provider,
+        requireDurability: !builder.Environment.IsEnvironment("Testing"),
+        configure: options => options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"]);
+}
+else
+{
+    builder.Services.AddCellBridgeWithExternalAuthorization<DocumentLibraryPermissionProvider>(provider,
+        requireDurability: !builder.Environment.IsEnvironment("Testing"),
+        configure: options => options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"]);
+}
 builder.Services.AddCellBridgeExternalPublishing<DocumentLibraryDestination>(options =>
     options.PollingInterval = builder.Configuration.GetValue("DocumentLibrary:PublicationInterval", TimeSpan.FromSeconds(1)));
 

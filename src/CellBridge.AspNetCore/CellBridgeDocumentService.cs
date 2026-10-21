@@ -17,20 +17,29 @@ public sealed record AcceptedSave(Guid ResourceId, uint ContentVersion, ContentH
 public sealed record CellExecution(FsshttpbResponse Response, DocumentState State, string? LockError = null)
 {
     public ImmutableArray<AcceptedSave> AcceptedSaves { get; init; } = [];
+    internal CellBridgeActor? ResponseActor { get; init; }
 }
 
 /// <summary>Prepares file revisions outside coordination transactions and publishes them durably.</summary>
 public sealed partial class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null,
-    ICellBridgeAuthorizationPolicy? authorizationPolicy = null, ProtocolHashingOptions? hashing = null)
+    ICellBridgeAuthorizationPolicy? authorizationPolicy = null, ProtocolHashingOptions? hashing = null,
+    IDocumentAuthorizationProvider? documentAuthorizationProvider = null, TimeProvider? authorizationTimeProvider = null)
 {
+    // Keep the beta.4 constructor signature for previously compiled consumers.
+    public CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator,
+        ICellBridgeAuthorizationPolicy? authorizationPolicy, ProtocolHashingOptions? hashing)
+        : this(provider, accessEvaluator, authorizationPolicy, hashing, null, null) { }
+
     private readonly ICellBridgeAccessEvaluator? _access = accessEvaluator;
     private readonly ICellBridgeAuthorizationPolicy _policy = authorizationPolicy ?? new StoredGrantAuthorizationPolicy();
+    private readonly IDocumentAuthorizationProvider? _externalAuthorization = ValidateExternalProvider(documentAuthorizationProvider, authorizationPolicy, accessEvaluator);
+    private readonly TimeProvider _authorizationTime = authorizationTimeProvider ?? TimeProvider.System;
     public StorageProvider Provider => provider;
     public DocumentAccess Access(CellBridgeActor actor, DocumentState state)
     {
         if (state.IsDeleted) return DocumentAccess.None;
         if (actor.AccessLimit is { } limit && limit.ResourceId != state.ResourceId) return DocumentAccess.None;
-        var access = SubjectAccess(actor, state);
+        var access = _externalAuthorization is null ? SubjectAccess(actor, state) : AdmittedAccess(actor, state);
         if (actor.AccessLimit is { } ceiling) access &= ceiling.Access;
         return access;
     }
@@ -39,6 +48,11 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         CancellationToken cancellationToken = default)
     {
         var state = await LookupAsync(request, cancellationToken);
+        if (state is not null)
+        {
+            actor = await AuthorizeActorAsync(actor, state, DocumentAccess.Read, cancellationToken);
+            state = await RevalidateReadStateAsync(state, cancellationToken);
+        }
         if (state is not null && !Access(actor, state).HasFlag(DocumentAccess.Read))
             throw new UnauthorizedAccessException("Document access denied.");
         return state;
@@ -95,7 +109,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
     }
 
     private async ValueTask<DocumentState?> CreateOwnedAsync(string escapedPath, byte[] bytes, DocumentSecurity security,
-        CancellationToken cancellationToken, Guid? resourceId = null)
+        CancellationToken cancellationToken, Guid? resourceId = null, DocumentAuthorizationBinding? externalBinding = null)
     {
         StorageLimits.Check("document bytes", bytes.LongLength, provider.Limits.MaxDocumentBytes);
         if (resourceId is { } id && await provider.State.FindByResourceIdAsync(id, cancellationToken) is not null)
@@ -107,7 +121,8 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         document.Security = security;
         var state = await document.CaptureAsync(provider.Content, cancellationToken: cancellationToken);
         if (resourceId is { } selectedId) state = state with { ResourceId = selectedId };
-        state = BindNewDocument(state);
+        state = externalBinding is null ? BindNewDocument(state) : state with
+            { Security = state.Security with { AuthorizationPolicy = externalBinding } };
         state = RevisionHistory.Initialize(state);
         provider.Limits.CheckDocument(state);
         return await provider.State.TryCreateAsync(state, cancellationToken) ? state : null;
@@ -121,6 +136,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         var response = new FsshttpbResponse();
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
         var state = await CurrentAsync(id, cancellationToken);
+        var operationActor = actor;
         if (request.TryGetValidationError(out _, out _))
         {
             var emptyDocument = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
@@ -138,10 +154,15 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             foreach (var operation in request.SubRequests)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (_externalAuthorization is not null) state = await CurrentAsync(id, cancellationToken);
+                operationActor = await AuthorizeActorAsync(actor, state,
+                    operation.RequestType == RequestTypes.QueryAccess ? DocumentAccess.None :
+                    operation.RequestType is RequestTypes.PutChanges or RequestTypes.AllocateExtendedGuidRange
+                        ? DocumentAccess.Write : DocumentAccess.Read, cancellationToken, fresh: true);
                 if (!CellBinaryRequestExecutor.TryResolveTarget(operation, kind, out var selectedKind))
                 {
                     state = await CurrentAsync(id, cancellationToken);
-                    var accessForTarget = Access(actor, state);
+                    var accessForTarget = Access(operationActor, state);
                     var requiredForTarget = operation.RequestType is RequestTypes.PutChanges or RequestTypes.AllocateExtendedGuidRange
                         ? DocumentAccess.Write : DocumentAccess.Read;
                     response.SubResponses.Add(operation.RequestType != RequestTypes.QueryAccess && !accessForTarget.HasFlag(requiredForTarget)
@@ -152,7 +173,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 if (operation.RequestType == RequestTypes.PutChanges)
                 {
                     CellExecution saved;
-                    try { saved = await SaveAsync(id, selectedKind, operation, request.DataElementPackage, attributes, actor, queries.CanAppend, cancellationToken); }
+                    try { saved = await SaveAsync(id, selectedKind, operation, request.DataElementPackage, attributes, operationActor, queries.CanAppend, cancellationToken); }
                     catch (StorageQuotaExceededException ex)
                     {
                         var rejected = new FsshttpbResponse();
@@ -168,11 +189,12 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                     queries.AppendSave(saved.Response);
                     accepted.AddRange(saved.AcceptedSaves);
                     state = saved.State;
-                    if (saved.LockError is not null) return new(response, state, saved.LockError) { AcceptedSaves = accepted.ToImmutable() };
+                    if (saved.LockError is not null) return new(response, state, saved.LockError)
+                        { AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor };
                     continue;
                 }
                 state = await CurrentAsync(id, cancellationToken);
-                var access = Access(actor, state);
+                var access = Access(operationActor, state);
                 var requiredAccess = operation.RequestType == RequestTypes.AllocateExtendedGuidRange
                     ? DocumentAccess.Write : DocumentAccess.Read;
                 if (operation.RequestType != RequestTypes.QueryAccess && !access.HasFlag(requiredAccess))
@@ -195,8 +217,8 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 var observedNow = DateTime.UtcNow;
                 if (selectedKind == DocumentPartitionKind.EditorsTable && operation.RequestType == RequestTypes.QueryChanges)
                 {
-                    (state, observedNow) = await ExpireEditorsAsync(id, actor, cancellationToken);
-                    access = Access(actor, state);
+                    (state, observedNow) = await ExpireEditorsAsync(id, operationActor, cancellationToken);
+                    access = Access(operationActor, state);
                     if (!access.HasFlag(DocumentAccess.Read))
                     {
                         response.SubResponses.Add(CellBridgeAuthorization.Denied(operation));
@@ -215,7 +237,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             }
             // MS-FSSHTTP GetFileProps describes the updated version after the Cell
             // operations. Capture its metadata here; the SOAP adapter never rereads it.
-            return new(response, state) { AcceptedSaves = accepted.ToImmutable() };
+            return new(response, state) { AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor };
         }
         catch (Exception ex) when (accepted.Count != 0 && AcceptedSaveException.CanWrap(ex))
         {
@@ -604,10 +626,12 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
     private FsshttpbResponse EditorsQuery(StoredDocument doc, DocumentPartition partition, ulong requestId, DocumentState state) =>
+        // Ordinary external mode reports the recorded session flag. It does not evaluate
+        // all other subjects or turn their unexpired leases into permission grants.
         EditorsTablePartitionBuilder.BuildSharePointV13QueryChangesResponse(requestId,
             doc.Sessions.Select(s => new EditorsTableEditor(s.ClientId.ToString("D"), s.ExpiresUtc.Ticks,
                 s.Owner?.DisplayName ?? s.UserName, s.Owner?.Login ?? s.UserName, HasEditorPermission: s.AsEditor && s.Owner is not null &&
-                    Access(new(s.Owner), state).HasFlag(DocumentAccess.Write), Metadata: s.Metadata)), partition.FssHttpBIdentity.CellId,
+                    (_externalAuthorization is not null || Access(new(s.Owner), state).HasFlag(DocumentAccess.Write)), Metadata: s.Metadata)), partition.FssHttpBIdentity.CellId,
             partition.FssHttpBIdentity.SerialGuid, partition.KnowledgeSequence);
     private sealed record PublishResult(DocumentState State, SaveReceipt? Receipt, string? LockError, bool Retry);
 }

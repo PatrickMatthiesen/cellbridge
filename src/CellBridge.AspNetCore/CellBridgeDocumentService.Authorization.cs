@@ -12,6 +12,7 @@ public sealed partial class CellBridgeDocumentService
     private bool ValidBinding(DocumentAuthorizationBinding? binding) =>
         _policy is StoredGrantAuthorizationPolicy ? binding is null
         : binding is { ContractVersion: 1, Revision: > 0 } &&
+            binding.TenantId is null && binding.WorkspaceId is null &&
             !string.IsNullOrWhiteSpace(binding.PolicyDomain) &&
             string.Equals(binding.PolicyDomain, _policy.PolicyDomain, StringComparison.Ordinal);
 
@@ -51,6 +52,8 @@ public sealed partial class CellBridgeDocumentService
 
     private DocumentState BindNewDocument(DocumentState state)
     {
+        if (_externalAuthorization is not null)
+            throw new InvalidOperationException("Use CreateExternalAsync or ImportExternalAsync with an explicit trusted scope.");
         try
         {
             var binding = _policy.BindNewDocument(state.ResourceId);

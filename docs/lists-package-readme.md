@@ -7,7 +7,8 @@ protocols.
 - `CellBridge.Lists` defines schemas, templates, validation, typed queries and
   three-way merge previews.
 - `CellBridge.Lists.PostgreSql` stores JSONB records with workspace isolation,
-  explicit list grants, conditional updates, references, numbering and audit.
+  explicit list grants or an asynchronous host authority, conditional updates,
+  references, numbering and audit.
 - `CellBridge.Lists.AspNetCore` provides opt-in HTTP endpoints, protected paging,
   CSV/XLSX extracts and a restricted read-only OData feed.
 
@@ -26,5 +27,6 @@ The OData adapter is intended for Power Query exploration; native desktop and
 hosted scheduled-refresh compatibility require separate qualification.
 
 See the repository's [list guide](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/lists.md)
+and [host authorization guide](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/host-list-authorization.md)
 and [document-library example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/DocumentLibrary)
 for configuration, supported operations and limits. These packages are experimental.
