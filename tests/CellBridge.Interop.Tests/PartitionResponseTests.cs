@@ -10,7 +10,6 @@ namespace CellBridge.Interop.Tests;
 /// Keeping these checks offline makes a malformed graph fail before a Word
 /// session is needed. The opt-in live test below uses the identical decoders.
 /// </summary>
-[Collection("WebDemo integration")]
 public sealed class PartitionResponseTests
 {
     private static readonly Guid MetadataPartitionId =

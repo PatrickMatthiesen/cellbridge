@@ -41,7 +41,13 @@ internal static class BenchmarkMetadata
     {
         try
         {
-            var start = new ProcessStartInfo("git") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            var start = new ProcessStartInfo("git")
+            {
+                WorkingDirectory = RepositoryRoot(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
             using var process = Process.Start(start)!;
             var output = process.StandardOutput.ReadToEnd();
