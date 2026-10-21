@@ -7,6 +7,7 @@ using CellBridge.TestFixtures;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class GraphMetadataMigrationTests
 {
     [PostgreSqlFact]

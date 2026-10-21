@@ -47,7 +47,7 @@ Use the Aspire CLI to run the app, rather than raw `dotnet run`:
 ```sh
 aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-aspire ps --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire ps --non-interactive
 aspire describe --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```

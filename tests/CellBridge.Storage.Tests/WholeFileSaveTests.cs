@@ -11,6 +11,7 @@ using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class WholeFileSaveTests
 {
     private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());

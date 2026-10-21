@@ -8,6 +8,7 @@ using Npgsql;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class PostgreSqlGraphAdmissionTests
 {
     [PostgreSqlFact]

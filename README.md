@@ -60,7 +60,7 @@ From the repository root:
 ```sh
 aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-aspire ps --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire ps --non-interactive
 ```
 
 Aspire starts durable PostgreSQL, initializes the schema and then starts WebDemo.
