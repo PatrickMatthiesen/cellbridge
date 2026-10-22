@@ -18,7 +18,7 @@ public sealed class StorageMaintenance
         : this(PostgreSqlDatabase.CreateOptions(source), limits) { }
     public StorageMaintenance(DbContextOptions<CellBridgeDbContext> options, StorageLimits? limits = null)
     {
-        _options = PostgreSqlDatabase.ValidateOptions(options);
+        _options = PostgreSqlDatabase.NormalizeOptions(options);
         _limits = limits;
     }
 

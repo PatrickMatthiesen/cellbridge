@@ -303,10 +303,13 @@ migration history; Lists does not depend on document storage or the application'
 DbContext. Existing SQL-created list data remains in its current tables.
 EF generates ordinary table and index migrations. PostgreSQL migration SQL installs
 forced row security, the immutable authorization trigger and typed query functions.
-Each operation shares one context across its transaction and helpers. Concurrent
-operations use separate contexts, independently of HTTP request scopes.
+Each operation leases one context from the engine's private EF context pool and
+shares it across its transaction and helpers. Concurrent operations use separate
+contexts, independently of HTTP request scopes. Options containing an explicit
+`DbConnection` use unpooled contexts and preserve configured connection ownership.
 Configured EF connection settings, command timeouts, logging and interceptors
-remain active. Use a non-retrying EF execution strategy. The provider rejects
+remain active. Interceptors and custom EF services must support context reuse
+and concurrent operations. Use a non-retrying EF execution strategy. The provider rejects
 `EnableRetryOnFailure` because its explicit transactions and create receipts own
 retry behavior after uncertain outcomes.
 

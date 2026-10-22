@@ -1,3 +1,5 @@
+using System.Data;
+using System.Data.Common;
 using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.Storage;
@@ -6,6 +8,7 @@ using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
@@ -19,7 +22,9 @@ public sealed class EfPostgreSqlMigrationTests
     public void EfModelMatchesItsVersionedSnapshot()
     {
         using var context = new CellBridgeDbContext(new DbContextOptionsBuilder<CellBridgeDbContext>()
-            .UseNpgsql("Host=localhost;Database=model_inspection;Username=model_inspection").Options);
+            .UseNpgsql("Host=localhost;Database=model_inspection;Username=model_inspection",
+                postgres => postgres.MigrationsHistoryTable("__CellBridgeDocumentMigrationsHistory"))
+            .Options);
         Assert.False(context.Database.HasPendingModelChanges());
         Assert.Equal("20261022000100_BaselineSchema6",
             context.GetService<IMigrationsAssembly>().FindMigrationId("BaselineSchema6"));
@@ -34,6 +39,7 @@ public sealed class EfPostgreSqlMigrationTests
         Assert.Throws<ArgumentException>(() => new PostgreSqlStateStore(options));
         Assert.Throws<ArgumentException>(() => new PostgreSqlContentStore(options));
         Assert.Throws<ArgumentException>(() => new StorageMaintenance(options));
+        Assert.Throws<ArgumentException>(() => new PostgreSqlFileSystemContentStore(options, Path.GetTempPath()));
     }
 
     [PostgreSqlFact]
@@ -87,21 +93,178 @@ public sealed class EfPostgreSqlMigrationTests
     [PostgreSqlFact]
     public Task ConsumerConfiguredOptionsSupportSharedAccountingAndExplicitMigrations() => WithEmptyDatabase(async source =>
     {
+        var interceptor = new LeaseTrackingInterceptor();
         var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
-            .UseNpgsql(source, postgres => postgres.CommandTimeout(45)).EnableDetailedErrors().Options;
+            .UseNpgsql(source, postgres => postgres.CommandTimeout(45)).EnableDetailedErrors()
+            .AddInterceptors(interceptor).Options;
         var limits = new StorageLimits { MaxDocuments = 2 };
         await new PostgreSqlStorageMigrator(options, limits).MigrateAsync();
         var store = new PostgreSqlStateStore(options, limits);
         var content = new PostgreSqlContentStore(options, limits.MaxObjectBytes);
+        Assert.Same(options, store.BudgetScope);
+        Assert.Same(options, content.BudgetScope);
         var provider = new StorageProvider(store, content, limits);
         await provider.CheckHealthAsync();
         var bytes = MinimalDocx.Create("configured");
         var state = (await new CellBridgeDocumentService(provider).CreateAsync(
             "/configured-ef.docx", bytes, TestActor.Value))!;
         Assert.Equal(bytes, await content.ReadVerifiedAsync(state.Content));
+        Assert.NotEmpty(interceptor.CommandTimeouts);
+        Assert.All(interceptor.CommandTimeouts, timeout => Assert.Equal(45, timeout));
         await using var context = new CellBridgeDbContext(options);
         Assert.Equal(45, context.Database.GetCommandTimeout());
     });
+
+    [PostgreSqlFact]
+    public Task RuntimePoolReusesContextsAfterCancellationAndFailure() => WithEmptyDatabase(async source =>
+    {
+        await new PostgreSqlStorageMigrator(source).MigrateAsync();
+        var interceptor = new LeaseTrackingInterceptor();
+        var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
+            .UseNpgsql(source).AddInterceptors(interceptor).Options;
+        var store = new PostgreSqlStateStore(options);
+        var missing = Guid.NewGuid();
+
+        interceptor.FailNext(new OperationCanceledException("Injected cancellation."));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            store.FindByResourceIdAsync(missing).AsTask());
+        var context = Assert.Single(interceptor.Contexts.Distinct());
+
+        interceptor.Clear();
+        Assert.Null(await store.FindByResourceIdAsync(missing));
+        Assert.Same(context, Assert.Single(interceptor.Contexts.Distinct()));
+
+        interceptor.Clear();
+        interceptor.FailNext(new InvalidOperationException("Injected command failure."));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            store.FindByResourceIdAsync(missing).AsTask());
+        Assert.Same(context, Assert.Single(interceptor.Contexts.Distinct()));
+
+        interceptor.Clear();
+        Assert.Null(await store.FindByResourceIdAsync(missing));
+        Assert.Same(context, Assert.Single(interceptor.Contexts.Distinct()));
+    });
+
+    [PostgreSqlFact]
+    public Task ExplicitConnectionOptionsStayUnpooledAndKeepCallerOwnership() => WithEmptyDatabase(async source =>
+    {
+        await new PostgreSqlStorageMigrator(source).MigrateAsync();
+        await using var connection = await source.OpenConnectionAsync();
+        var interceptor = new LeaseTrackingInterceptor();
+        var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
+            .UseNpgsql(connection).AddInterceptors(interceptor).Options;
+        var store = new PostgreSqlStateStore(options);
+        var content = new PostgreSqlContentStore(options);
+        Assert.Same(options, store.BudgetScope);
+        Assert.Same(options, content.BudgetScope);
+
+        Assert.Null(await store.FindByResourceIdAsync(Guid.NewGuid()));
+        var first = Assert.Single(interceptor.Contexts.Distinct());
+        interceptor.Clear();
+        Assert.Null(await store.FindByResourceIdAsync(Guid.NewGuid()));
+        var second = Assert.Single(interceptor.Contexts.Distinct());
+
+        Assert.NotSame(first, second);
+        Assert.Equal(ConnectionState.Open, connection.State);
+        var handle = await content.WriteAsync(new MemoryStream(new byte[] { 1, 2, 3 }, writable: false));
+        Assert.Equal(new byte[] { 1, 2, 3 }, await content.ReadVerifiedAsync(handle));
+        Assert.Equal(ConnectionState.Open, connection.State);
+    });
+
+    [PostgreSqlFact]
+    public Task PartialStreamDisposalIsIdempotentAndReturnsFailedEnumeratorLease() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var interceptor = new LeaseTrackingInterceptor();
+            var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
+                .UseNpgsql(source).AddInterceptors(interceptor).Options;
+            var content = new PostgreSqlContentStore(options);
+            var bytes = Enumerable.Range(0, 2 * 65536).Select(index => (byte)(index * 31)).ToArray();
+            var handle = await content.WriteAsync(new MemoryStream(bytes, writable: false));
+
+            foreach (var disposeSynchronously in new[] { false, true })
+            {
+                interceptor.Clear();
+                var first = await content.OpenReadAsync(handle);
+                Assert.Equal(17, await first.ReadAsync(new byte[17].AsMemory()));
+                var leasedContext = Assert.Single(interceptor.Contexts.Distinct());
+                var disposalFailure = interceptor.DelayNextReaderDisposeFailure();
+                var firstDisposal = disposeSynchronously
+                    ? Task.Run(first.Dispose)
+                    : Task.Run(async () => await first.DisposeAsync());
+                await disposalFailure.Started;
+                var concurrentDisposal = disposeSynchronously
+                    ? first.DisposeAsync().AsTask()
+                    : Task.Run(first.Dispose);
+                Assert.False(firstDisposal.IsCompleted);
+                Assert.False(concurrentDisposal.IsCompleted);
+                disposalFailure.Release();
+                await Assert.ThrowsAsync<InvalidOperationException>(() => firstDisposal);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => concurrentDisposal);
+                Assert.False(first.CanRead);
+                Assert.Throws<ObjectDisposedException>(() => first.Read(new byte[1], 0, 1));
+                await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+                    first.ReadAsync(new byte[1].AsMemory()).AsTask());
+
+                interceptor.Clear();
+                await using var second = await content.OpenReadAsync(handle);
+                Assert.Same(leasedContext, Assert.Single(interceptor.Contexts.Distinct()));
+                Assert.Throws<InvalidOperationException>(first.Dispose);
+                await Assert.ThrowsAsync<InvalidOperationException>(() => first.DisposeAsync().AsTask());
+                using var copy = new MemoryStream();
+                await second.CopyToAsync(copy);
+                Assert.Equal(bytes, copy.ToArray());
+                Assert.All(interceptor.Contexts, context => Assert.Same(leasedContext, context));
+            }
+        });
+
+    [PostgreSqlFact]
+    public Task StreamDisposalWaitsForActiveReadBeforeReturningContextLease() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var interceptor = new LeaseTrackingInterceptor();
+            var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
+                .UseNpgsql(source).AddInterceptors(interceptor).Options;
+            var content = new PostgreSqlContentStore(options);
+            var bytes = Enumerable.Range(0, 2 * 65536).Select(index => (byte)(index * 17)).ToArray();
+            var handle = await content.WriteAsync(new MemoryStream(bytes, writable: false));
+
+            foreach (var disposeSynchronously in new[] { false, true })
+            {
+                interceptor.Clear();
+                var delay = interceptor.DelayNextChunkReader();
+                var first = await content.OpenReadAsync(handle);
+                var leasedContext = Assert.Single(interceptor.Contexts.Distinct());
+                var read = first.ReadAsync(new byte[17].AsMemory()).AsTask();
+                await delay.Started;
+
+                var firstDisposal = disposeSynchronously
+                    ? Task.Run(first.Dispose)
+                    : first.DisposeAsync().AsTask();
+                var concurrentDisposal = disposeSynchronously
+                    ? first.DisposeAsync().AsTask()
+                    : Task.Run(first.Dispose);
+                await delay.CancellationObserved;
+                Assert.False(firstDisposal.IsCompleted);
+                Assert.False(concurrentDisposal.IsCompleted);
+                await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+                    first.ReadAsync(new byte[1].AsMemory()).AsTask());
+
+                await using var second = await content.OpenReadAsync(handle);
+                var contextsWhileReadIsActive = interceptor.Contexts.Distinct().ToArray();
+                Assert.Equal(2, contextsWhileReadIsActive.Length);
+                Assert.Same(leasedContext, contextsWhileReadIsActive[0]);
+                Assert.NotSame(leasedContext, contextsWhileReadIsActive[1]);
+
+                delay.Release();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => read);
+                await Task.WhenAll(firstDisposal, concurrentDisposal);
+
+                interceptor.Clear();
+                await using var returnedLease = await content.OpenReadAsync(handle);
+                Assert.Same(leasedContext, Assert.Single(interceptor.Contexts.Distinct()));
+            }
+        });
 
     [PostgreSqlFact]
     public Task SqlSchema6UpgradePreservesSnapshotsGraphsRepliesHistoryAndContent() => WithEmptyDatabase(async source =>
@@ -274,6 +437,104 @@ public sealed class EfPostgreSqlMigrationTests
         {
             await using var drop = admin.CreateCommand($"DROP DATABASE {database} WITH (FORCE)");
             await drop.ExecuteNonQueryAsync();
+        }
+    }
+
+    private sealed class LeaseTrackingInterceptor : DbCommandInterceptor
+    {
+        private Exception? _nextFailure;
+        private DelayedDisposeFailure? _nextReaderDisposeFailure;
+        private DelayedReader? _nextChunkReaderDelay;
+        public List<DbContext> Contexts { get; } = [];
+        public List<int?> CommandTimeouts { get; } = [];
+
+        public void Clear()
+        {
+            Contexts.Clear();
+            CommandTimeouts.Clear();
+        }
+        public void FailNext(Exception exception) => _nextFailure = exception;
+        public DelayedDisposeFailure DelayNextReaderDisposeFailure()
+        {
+            var failure = new DelayedDisposeFailure();
+            if (Interlocked.CompareExchange(ref _nextReaderDisposeFailure, failure, null) is not null)
+                throw new InvalidOperationException("A reader disposal failure is already pending.");
+            return failure;
+        }
+        public DelayedReader DelayNextChunkReader()
+        {
+            var delay = new DelayedReader();
+            if (Interlocked.CompareExchange(ref _nextChunkReaderDelay, delay, null) is not null)
+                throw new InvalidOperationException("A chunk reader delay is already pending.");
+            return delay;
+        }
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (eventData.Context is { } context)
+            {
+                Contexts.Add(context);
+                CommandTimeouts.Add(context.Database.GetCommandTimeout());
+            }
+            var failure = Interlocked.Exchange(ref _nextFailure, null);
+            if (failure is not null) throw failure;
+            if (command.CommandText.Contains("cellbridge_chunks", StringComparison.OrdinalIgnoreCase) &&
+                Interlocked.Exchange(ref _nextChunkReaderDelay, null) is { } delay)
+                await delay.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return result;
+        }
+
+        public override InterceptionResult DataReaderDisposing(DbCommand command,
+            DataReaderDisposingEventData eventData, InterceptionResult result)
+        {
+            Interlocked.Exchange(ref _nextReaderDisposeFailure, null)?.WaitAndThrow();
+            return result;
+        }
+    }
+
+    private sealed class DelayedDisposeFailure
+    {
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => _started.Task;
+        public void Release() => _release.TrySetResult();
+
+        public void WaitAndThrow()
+        {
+            _started.TrySetResult();
+            _release.Task.GetAwaiter().GetResult();
+            throw new InvalidOperationException("Injected reader disposal failure.");
+        }
+    }
+
+    private sealed class DelayedReader
+    {
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _cancellationObserved =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => _started.Task;
+        public Task CancellationObserved => _cancellationObserved.Task;
+        public void Release() => _release.TrySetResult();
+
+        public async Task WaitAsync(CancellationToken cancellationToken)
+        {
+            _started.TrySetResult();
+            try { await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException)
+            {
+                _cancellationObserved.TrySetResult();
+                await _release.Task.ConfigureAwait(false);
+                throw;
+            }
         }
     }
 }

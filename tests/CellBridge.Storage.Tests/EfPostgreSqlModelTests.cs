@@ -17,7 +17,10 @@ public sealed class EfPostgreSqlModelTests
     {
         await new PostgreSqlStorageMigrator(source).MigrateAsync();
         await using var context = new CellBridgeDbContext(
-            new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source).Options);
+            new DbContextOptionsBuilder<CellBridgeDbContext>()
+                .UseNpgsql(source, postgres =>
+                    postgres.MigrationsHistoryTable("__CellBridgeDocumentMigrationsHistory"))
+                .Options);
         var entities = context.GetService<IDesignTimeModel>().Model.GetEntityTypes()
             .Where(entity => entity.GetTableName() is { } table && table.StartsWith("cellbridge_", StringComparison.Ordinal))
             .ToArray();

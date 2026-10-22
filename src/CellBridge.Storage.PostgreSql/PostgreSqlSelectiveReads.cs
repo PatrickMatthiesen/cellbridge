@@ -19,7 +19,7 @@ public sealed partial class PostgreSqlStateStore
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             var row = await CurrentReadRows(context, resourceId, pathKey, false)
                 .SingleOrDefaultAsync(cancellationToken);
             return row is null ? null : DecodeReadMetadata(row);
@@ -34,7 +34,7 @@ public sealed partial class PostgreSqlStateStore
         DocumentReadModels.ValidatePage(offset, limit);
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             var rows = await (from current in CurrentReadRows(context, resourceId, null, false)
                               from revision in context.RevisionSummaries.AsNoTracking()
                                   .Where(candidate => candidate.ResourceId == current.ResourceId &&
@@ -62,7 +62,7 @@ public sealed partial class PostgreSqlStateStore
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             var row = await (from current in CurrentReadRows(context, resourceId, null, false)
                              from revision in context.RevisionSummaries.AsNoTracking()
                                  .Where(candidate => candidate.ResourceId == current.ResourceId &&

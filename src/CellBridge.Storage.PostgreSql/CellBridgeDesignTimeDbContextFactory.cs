@@ -6,7 +6,7 @@ namespace CellBridge.Storage.PostgreSql;
 internal sealed class CellBridgeDesignTimeDbContextFactory : IDesignTimeDbContextFactory<CellBridgeDbContext>
 {
     public CellBridgeDbContext CreateDbContext(string[] args) => new(
-        new DbContextOptionsBuilder<CellBridgeDbContext>()
+        PostgreSqlDatabase.NormalizeOptions(new DbContextOptionsBuilder<CellBridgeDbContext>()
             .UseNpgsql("Host=localhost;Database=cellbridge_document_design")
-            .Options);
+            .Options));
 }

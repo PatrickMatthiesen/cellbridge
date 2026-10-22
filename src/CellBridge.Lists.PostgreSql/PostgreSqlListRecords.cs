@@ -17,9 +17,8 @@ public sealed partial class PostgreSqlListEngine
             [ListAuthorizationAction.Write], assignedFieldIds, ct);
         var result = await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            var context = await ReadWriteContextAsync(db, connection, transaction, workspaceId, listId,
+            var context = await ReadCreateContextAsync(db, connection, transaction, workspaceId, listId,
                 request.Id, actor.Subject, ListAccess.Write, deleteLock: false, ct, authorization);
-            RequireWriteContext(context, ListAccess.Write);
             if (context.Receipt is { Live: true } receipt)
             {
                 if (receipt.Actor != actor.Subject || receipt.Digest != digest || receipt.SchemaVersion != request.SchemaVersion)
@@ -35,7 +34,7 @@ public sealed partial class PostgreSqlListEngine
                 return new CreateRecordResult(request.Id, 0, 0);
             }
 
-            var definition = context.Definition!;
+            var definition = context.Definition;
             if (request.SchemaVersion != definition.SchemaVersion) throw Conflict("The current schema version is required.");
             ListValidation.ValidateValues(definition, request.Values, _limits);
             var references = ReferenceAssignments(definition, request.Values);
@@ -88,10 +87,9 @@ public sealed partial class PostgreSqlListEngine
             [ListAuthorizationAction.Read, ListAuthorizationAction.Write], assignedReferenceFields, ct);
         return await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            var context = await ReadWriteContextAsync(db, connection, transaction, workspaceId, listId,
+            var context = await ReadMutationContextAsync(db, connection, transaction, workspaceId, listId,
                 recordId, actor.Subject, ListAccess.Read | ListAccess.Write, deleteLock: false, ct, authorization);
-            RequireWriteContext(context, ListAccess.Read | ListAccess.Write);
-            var definition = context.Definition!;
+            var definition = context.Definition;
             if (request.SchemaVersion != definition.SchemaVersion) throw Conflict("The current schema version is required.");
             var current = context.Record ?? throw NotFound();
             if (current.Revision != request.ExpectedRevision) throw Conflict("The record revision changed.");
@@ -129,9 +127,8 @@ public sealed partial class PostgreSqlListEngine
             [(listId, ListAuthorizationAction.Write)], ct);
         await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            var context = await ReadWriteContextAsync(db, connection, transaction, workspaceId, listId,
+            var context = await ReadMutationContextAsync(db, connection, transaction, workspaceId, listId,
                 recordId, actor.Subject, ListAccess.Write, deleteLock: true, ct, authorization);
-            RequireWriteContext(context, ListAccess.Write);
             var current = context.Record ?? throw NotFound();
             if (current.Revision != expectedRevision) throw Conflict("The record revision changed.");
             try
@@ -210,15 +207,12 @@ public sealed partial class PostgreSqlListEngine
             return await GetDefinitionAsync(db, connection, transaction, workspaceId, listId, false, ct);
         }, ct);
 
-    private async Task<RecordWriteContext> ReadWriteContextAsync(PostgreSqlListDbContext db,
+    private async Task<ListDefinition> ReadListDefinitionAsync(PostgreSqlListDbContext db,
         NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
-        Guid recordId, string subject, ListAccess requiredAccess, bool deleteLock,
-        CancellationToken ct, OperationAuthorization? authorization)
+        string subject, ListAccess requiredAccess, CancellationToken ct, OperationAuthorization? authorization)
     {
         if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
-        await LockRecordContextAsync(connection, transaction, workspaceId, listId, recordId,
-            deleteLock, ct);
-
+        await LockRecordContextAsync(connection, transaction, workspaceId, listId, Guid.Empty, false, ct);
         var projection = await (
             from workspace in db.Workspaces.AsNoTracking()
             from list in db.Lists.AsNoTracking().Where(row =>
@@ -226,9 +220,38 @@ public sealed partial class PostgreSqlListEngine
             from schema in db.ListSchemas.AsNoTracking().Where(row =>
                 row.WorkspaceId == list.WorkspaceId && row.ListId == list.ListId &&
                 row.SchemaVersion == list.SchemaVersion)
-            from record in db.Records.AsNoTracking().Where(row => recordId != Guid.Empty &&
-                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId &&
-                row.RecordId == recordId).DefaultIfEmpty()
+            where workspace.WorkspaceId == workspaceId
+            select new ListDefinitionProjection
+            {
+                SecurityAuditCount = workspace.SecurityAuditCount,
+                IsMember = authorization != null || db.Memberships.Any(row =>
+                    row.WorkspaceId == workspaceId && row.Subject == subject),
+                Access = authorization != null
+                    ? (int)requiredAccess
+                    : db.ListGrants.Where(row => row.WorkspaceId == workspaceId &&
+                            row.ListId == listId && row.Subject == subject)
+                        .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
+                DefinitionJson = schema.Definition
+            }).SingleOrDefaultAsync(ct) ?? throw Forbidden();
+        RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
+            requiredAccess);
+        return PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson);
+    }
+
+    private async Task<CreateRecordContext> ReadCreateContextAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
+        Guid recordId, string subject, ListAccess requiredAccess, bool deleteLock,
+        CancellationToken ct, OperationAuthorization? authorization)
+    {
+        if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
+        await LockRecordContextAsync(connection, transaction, workspaceId, listId, recordId, deleteLock, ct);
+        var projection = await (
+            from workspace in db.Workspaces.AsNoTracking()
+            from list in db.Lists.AsNoTracking().Where(row =>
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
+            from schema in db.ListSchemas.AsNoTracking().Where(row =>
+                row.WorkspaceId == list.WorkspaceId && row.ListId == list.ListId &&
+                row.SchemaVersion == list.SchemaVersion)
             from receipt in db.CreateReceipts.AsNoTracking().Where(row => recordId != Guid.Empty &&
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId &&
                 row.RecordId == recordId).DefaultIfEmpty()
@@ -236,7 +259,7 @@ public sealed partial class PostgreSqlListEngine
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId &&
                 row.SchemaVersion == receipt.SchemaVersion).DefaultIfEmpty()
             where workspace.WorkspaceId == workspaceId
-            select new RecordContextProjection
+            select new CreateContextProjection
             {
                 SecurityAuditCount = workspace.SecurityAuditCount,
                 IsMember = authorization != null || db.Memberships.Any(row =>
@@ -247,29 +270,68 @@ public sealed partial class PostgreSqlListEngine
                             row.ListId == listId && row.Subject == subject)
                         .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
                 DefinitionJson = schema.Definition,
-                Record = record,
                 Receipt = receipt,
                 ReceiptLive = receipt != null && receipt.ExpiresUtc > PostgreSqlListDbContext.ClockTimestamp(),
                 ReceiptDefinitionJson = receiptSchema == null ? null : receiptSchema.Definition
             }).SingleOrDefaultAsync(ct) ?? throw Forbidden();
-        if (projection.SecurityAuditCount >= _limits.MaxSecurityAuditEvents)
-            throw new ListException(ListFailure.Unavailable, "The workspace security audit reserve is exhausted.");
-        if (!projection.IsMember) throw Forbidden();
-        var access = (ListAccess)projection.Access;
-        var definition = (access & requiredAccess) == requiredAccess
-            ? PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson)
-            : null;
-        var recordRow = definition is null ? null : projection.Record;
-        var currentRecord = recordRow is null ? null : ToListRecord(recordRow);
-        var recordBytes = recordRow is null ? 0 : Encoding.UTF8.GetByteCount(recordRow.ValuesJson);
-        var receiptRow = definition is null ? null : projection.Receipt;
+        RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
+            requiredAccess);
+        var definition = PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson);
+        var receiptRow = projection.Receipt;
         var currentReceipt = receiptRow is null ? null : new Receipt(receiptRow.Actor, receiptRow.SchemaVersion,
-            receiptRow.RequestDigest, receiptRow.Revision, receiptRow.Number,
-            projection.ReceiptLive);
+            receiptRow.RequestDigest, receiptRow.Revision, receiptRow.Number, projection.ReceiptLive);
         var receiptDefinition = projection.ReceiptDefinitionJson is null
             ? null : PostgreSqlListJson.Deserialize<ListDefinition>(projection.ReceiptDefinitionJson);
-        return new RecordWriteContext(access, definition, currentRecord, recordRow, recordBytes, currentReceipt,
-            receiptDefinition);
+        return new CreateRecordContext(definition, currentReceipt, receiptDefinition);
+    }
+
+    private async Task<RecordMutationContext> ReadMutationContextAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
+        Guid recordId, string subject, ListAccess requiredAccess, bool deleteLock,
+        CancellationToken ct, OperationAuthorization? authorization)
+    {
+        if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
+        await LockRecordContextAsync(connection, transaction, workspaceId, listId, recordId, deleteLock, ct);
+        var projection = await (
+            from workspace in db.Workspaces.AsNoTracking()
+            from list in db.Lists.AsNoTracking().Where(row =>
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
+            from schema in db.ListSchemas.AsNoTracking().Where(row =>
+                row.WorkspaceId == list.WorkspaceId && row.ListId == list.ListId &&
+                row.SchemaVersion == list.SchemaVersion)
+            from record in db.Records.AsNoTracking().Where(row => recordId != Guid.Empty &&
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId &&
+                row.RecordId == recordId).DefaultIfEmpty()
+            where workspace.WorkspaceId == workspaceId
+            select new MutationContextProjection
+            {
+                SecurityAuditCount = workspace.SecurityAuditCount,
+                IsMember = authorization != null || db.Memberships.Any(row =>
+                    row.WorkspaceId == workspaceId && row.Subject == subject),
+                Access = authorization != null
+                    ? (int)requiredAccess
+                    : db.ListGrants.Where(row => row.WorkspaceId == workspaceId &&
+                            row.ListId == listId && row.Subject == subject)
+                        .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
+                DefinitionJson = schema.Definition,
+                Record = record
+            }).SingleOrDefaultAsync(ct) ?? throw Forbidden();
+        RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
+            requiredAccess);
+        var recordRow = projection.Record;
+        return new RecordMutationContext(
+            PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson),
+            recordRow is null ? null : ToListRecord(recordRow), recordRow,
+            recordRow is null ? 0 : Encoding.UTF8.GetByteCount(recordRow.ValuesJson));
+    }
+
+    private void RequireProjectionAccess(int securityAuditCount, bool isMember, int access,
+        ListAccess requiredAccess)
+    {
+        if (securityAuditCount >= _limits.MaxSecurityAuditEvents)
+            throw new ListException(ListFailure.Unavailable, "The workspace security audit reserve is exhausted.");
+        if (!isMember) throw Forbidden();
+        if (((ListAccess)access & requiredAccess) != requiredAccess) throw NotFound();
     }
 
     private static async Task LockRecordContextAsync(NpgsqlConnection connection,
@@ -299,11 +361,6 @@ public sealed partial class PostgreSqlListEngine
         await using var reader = await batch.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) throw NotFound();
         if (recordId != Guid.Empty) await reader.NextResultAsync(ct);
-    }
-
-    private static void RequireWriteContext(RecordWriteContext context, ListAccess required)
-    {
-        if (context.Definition is null || (context.Access & required) != required) throw NotFound();
     }
 
     private async Task ValidateReferenceAssignmentsAsync(PostgreSqlListDbContext db,
@@ -678,20 +735,38 @@ public sealed partial class PostgreSqlListEngine
         row.SchemaVersion, row.Revision, row.Number, PostgreSqlListJson.Object(row.ValuesJson),
         row.CreatedUtc, row.ModifiedUtc, row.CreatedBy, row.ModifiedBy);
 
-    private sealed record RecordWriteContext(ListAccess Access, ListDefinition? Definition, ListRecord? Record,
-        RecordRow? RecordRow, long RecordBytes, Receipt? Receipt, ListDefinition? ReceiptDefinition);
+    private sealed record CreateRecordContext(ListDefinition Definition, Receipt? Receipt,
+        ListDefinition? ReceiptDefinition);
+    private sealed record RecordMutationContext(ListDefinition Definition, ListRecord? Record,
+        RecordRow? RecordRow, long RecordBytes);
     private sealed record ReferenceAssignment(Guid FieldId, Guid TargetListId, Guid TargetRecordId, Guid? DisplayFieldId);
     private sealed record Receipt(string Actor, long SchemaVersion, string Digest, long Revision, long Number, bool Live);
-    private sealed class RecordContextProjection
+    private sealed class ListDefinitionProjection
+    {
+        public int SecurityAuditCount { get; init; }
+        public bool IsMember { get; init; }
+        public int Access { get; init; }
+        public required string DefinitionJson { get; init; }
+    }
+
+    private sealed class CreateContextProjection
+    {
+        public int SecurityAuditCount { get; init; }
+        public bool IsMember { get; init; }
+        public int Access { get; init; }
+        public required string DefinitionJson { get; init; }
+        public CreateReceiptRow? Receipt { get; init; }
+        public bool ReceiptLive { get; init; }
+        public string? ReceiptDefinitionJson { get; init; }
+    }
+
+    private sealed class MutationContextProjection
     {
         public int SecurityAuditCount { get; init; }
         public bool IsMember { get; init; }
         public int Access { get; init; }
         public required string DefinitionJson { get; init; }
         public RecordRow? Record { get; init; }
-        public CreateReceiptRow? Receipt { get; init; }
-        public bool ReceiptLive { get; init; }
-        public string? ReceiptDefinitionJson { get; init; }
     }
 
     private sealed class ReceiptReplayProjection

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 
@@ -12,6 +13,7 @@ namespace CellBridge.Lists.PostgreSql;
 public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
 {
     private readonly DbContextOptions<PostgreSqlListDbContext> _dbOptions;
+    private readonly PooledDbContextFactory<PostgreSqlListDbContext>? _contextFactory;
     private readonly ListLimits _limits;
     private readonly SemaphoreSlim _healthGate = new(1, 1);
     private bool _healthy;
@@ -34,6 +36,8 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         byte[]? continuationKey = null)
     {
         _dbOptions = PostgreSqlListSetup.NormalizeOptions(options ?? throw new ArgumentNullException(nameof(options)));
+        if (RelationalOptionsExtension.Extract(_dbOptions).Connection is null)
+            _contextFactory = new PooledDbContextFactory<PostgreSqlListDbContext>(_dbOptions);
         _limits = limits ?? new ListLimits();
         _limits.Validate();
         if (continuationKey is not null)
@@ -317,10 +321,8 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
             [(listId, ListAuthorizationAction.Read)], ct);
         return await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            var context = await ReadWriteContextAsync(db, connection, transaction, workspaceId, listId,
-                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct, authorization);
-            RequireWriteContext(context, ListAccess.Read);
-            return context.Definition!;
+            return await ReadListDefinitionAsync(db, connection, transaction, workspaceId, listId,
+                actor.Subject, ListAccess.Read, ct, authorization);
         }, ct);
     }
 
@@ -821,7 +823,8 @@ public sealed partial class PostgreSqlListEngine : IListEngine, IPagedListEngine
         string json, CancellationToken ct) => ScalarAsync<long>(connection, transaction,
             "SELECT octet_length(($1::jsonb)::text)::bigint", ct, json);
 
-    private PostgreSqlListDbContext CreateContext() => new(_dbOptions);
+    private PostgreSqlListDbContext CreateContext() =>
+        _contextFactory?.CreateDbContext() ?? new PostgreSqlListDbContext(_dbOptions);
 
     private static void ValidateActor(ListActor actor)
     {

@@ -28,7 +28,7 @@ public sealed partial class PostgreSqlStateStore
     public async ValueTask CheckRecoveryAsync(CancellationToken cancellationToken = default)
     {
         await CheckHealthAsync(cancellationToken);
-        await using var context = new CellBridgeDbContext(_options);
+        await using var context = CreateContext();
         await CheckRecoverySchemaAsync(context, cancellationToken);
     }
 
@@ -36,7 +36,7 @@ public sealed partial class PostgreSqlStateStore
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             await using var transaction = await context.Database.BeginTransactionAsync(
                 IsolationLevel.RepeatableRead, cancellationToken);
             await ConfigureTransactionAsync(context, cancellationToken);
@@ -98,7 +98,7 @@ public sealed partial class PostgreSqlStateStore
     public async ValueTask<RecoveryReceipt?> FindRecoveryReceiptAsync(Guid operationId,
         CancellationToken cancellationToken = default)
     {
-        await using var context = new CellBridgeDbContext(_options);
+        await using var context = CreateContext();
         var json = await context.RecoveryReceipts.AsNoTracking().Where(row => row.OperationId == operationId)
             .Select(row => row.ReceiptJson).SingleOrDefaultAsync(cancellationToken);
         return json is null ? null : RecoveryJson.Read<RecoveryReceipt>(Encoding.UTF8.GetBytes(json));
@@ -109,7 +109,7 @@ public sealed partial class PostgreSqlStateStore
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             await using var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
             await ConfigureTransactionAsync(context, cancellationToken);
             await CheckRecoverySchemaAsync(context, cancellationToken);

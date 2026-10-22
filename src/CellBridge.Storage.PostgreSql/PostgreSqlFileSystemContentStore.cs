@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.FileSystem;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
@@ -10,6 +11,7 @@ namespace CellBridge.Storage.PostgreSql;
 public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBudgetParticipant
 {
     private readonly DbContextOptions<CellBridgeDbContext> _options;
+    private readonly PooledDbContextFactory<CellBridgeDbContext>? _contextFactory;
     private readonly object _budgetScope;
     private readonly FileSystemContentStore _files;
     private readonly long _maxObjectBytes;
@@ -29,7 +31,8 @@ public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBu
     private PostgreSqlFileSystemContentStore(DbContextOptions<CellBridgeDbContext> options, string root,
         long maxObjectBytes, bool shared, object budgetScope)
     {
-        _options = PostgreSqlDatabase.ValidateOptions(options);
+        _options = PostgreSqlDatabase.NormalizeOptions(options);
+        _contextFactory = PostgreSqlDatabase.CreateRuntimeFactory(_options);
         _budgetScope = budgetScope;
         _maxObjectBytes = maxObjectBytes;
         _files = new(root, maxObjectBytes, shared);
@@ -56,7 +59,7 @@ public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBu
             }
             var digest = Convert.ToHexStringLower(hash.GetHashAndReset());
             var reserved = new ContentHandle(digest, length, digest);
-            await using (var context = new CellBridgeDbContext(_options))
+            await using (var context = CreateContext())
             await using (var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken))
             {
                 await PostgreSqlStateStore.ConfigureTransactionAsync(context, cancellationToken);
@@ -95,4 +98,7 @@ public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBu
 
     public ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default) =>
         _files.OpenReadAsync(handle, cancellationToken);
+
+    private CellBridgeDbContext CreateContext() =>
+        _contextFactory?.CreateDbContext() ?? new CellBridgeDbContext(_options);
 }

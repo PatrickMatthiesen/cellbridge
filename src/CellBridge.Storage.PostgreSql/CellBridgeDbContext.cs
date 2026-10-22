@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Diagnostics;
 using System.Reflection;
 
 namespace CellBridge.Storage.PostgreSql;
@@ -20,15 +19,6 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
     internal DbSet<RecoveryReceiptRow> RecoveryReceipts => Set<RecoveryReceiptRow>();
     internal static DateTime ClockTimestamp() => throw new InvalidOperationException("Database translation only.");
     internal static int OctetLength(string value) => throw new InvalidOperationException("Database translation only.");
-
-    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-    {
-        optionsBuilder.UseNpgsql(postgres => postgres.MigrationsHistoryTable(MigrationsHistoryTable));
-        // Explicit initialization owns one transaction so legacy transforms, EF
-        // migrations, quota validation and the history record cannot diverge.
-        optionsBuilder.ConfigureWarnings(warnings =>
-            warnings.Ignore(RelationalEventId.MigrationsUserTransactionWarning));
-    }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder) => ConfigureModel(modelBuilder);
 

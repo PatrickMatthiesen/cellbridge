@@ -1,6 +1,7 @@
 using System.Text;
 using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
@@ -10,6 +11,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     IStorageBudgetParticipant, IAtomicDocumentRenameStore, IProviderRecoveryStore, IDocumentReadStore
 {
     private readonly DbContextOptions<CellBridgeDbContext> _options;
+    private readonly PooledDbContextFactory<CellBridgeDbContext>? _contextFactory;
     private readonly object _budgetScope;
     private readonly StorageLimits _limits;
 
@@ -21,7 +23,8 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
 
     private PostgreSqlStateStore(DbContextOptions<CellBridgeDbContext> options, StorageLimits? limits, object budgetScope)
     {
-        _options = PostgreSqlDatabase.ValidateOptions(options);
+        _options = PostgreSqlDatabase.NormalizeOptions(options);
+        _contextFactory = PostgreSqlDatabase.CreateRuntimeFactory(_options);
         _budgetScope = budgetScope;
         _limits = limits ?? new StorageLimits();
         _limits.Validate();
@@ -30,6 +33,8 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     public object BudgetScope => _budgetScope;
     public bool Durable => true;
     public bool Shared => true;
+    private CellBridgeDbContext CreateContext() =>
+        _contextFactory?.CreateDbContext() ?? new CellBridgeDbContext(_options);
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         new PostgreSqlStorageMigrator(_options, _limits).MigrateAsync(cancellationToken);
 
@@ -45,7 +50,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             var query = from document in context.Documents.AsNoTracking()
                         join state in context.States.AsNoTracking()
                             on new { document.ResourceId, document.StateVersion }
@@ -66,7 +71,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
-        await using var context = new CellBridgeDbContext(_options);
+        await using var context = CreateContext();
         var rows = await CurrentReadRows(context, null, null, false).OrderBy(row => row.PathKey)
             .Skip(offset).Take(limit).ToListAsync(cancellationToken);
         return rows.Select(row => DecodeReadMetadata(row).ToSummary(row.DatabaseUtc)).ToArray();
@@ -77,7 +82,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
         DocumentPathReservations.ValidateCreate(state);
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
             await ConfigureTransactionAsync(context, cancellationToken);
             var (connection, npgsqlTransaction) = PostgreSqlDatabase.GetTransaction(context);
@@ -116,7 +121,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             await using var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
             await ConfigureTransactionAsync(context, cancellationToken);
             var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
@@ -189,7 +194,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             await using var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
             await ConfigureTransactionAsync(context, cancellationToken);
             var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
@@ -301,7 +306,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     {
         try
         {
-            await using var context = new CellBridgeDbContext(_options);
+            await using var context = CreateContext();
             if (!await ValidateDatabaseConfigurationAsync(context, cancellationToken))
                 throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 6.");
         }

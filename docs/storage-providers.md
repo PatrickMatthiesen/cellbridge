@@ -160,12 +160,19 @@ To use local filesystem content, replace the content store with
 
 For EF configuration, supply `DbContextOptions<CellBridgeDbContext>` built with
 `UseNpgsql` to the state store, PostgreSQL content store and migrator. The context
-is library-owned and sealed. Each operation creates its own context; the stores
-can share the consumer's configured `NpgsqlDataSource` and connection pool.
-Helpers within a transaction share that operation's context. HTTP request scopes
-do not determine the context lifetime, and concurrent operations never share one.
+is library-owned and sealed. Runtime stores lease one context per operation from
+their private EF context pools. They can share the consumer's configured
+`NpgsqlDataSource` and connection pool. Helpers within a transaction share that
+operation's context. HTTP request scopes do not determine its lifetime, and
+concurrent operations never share one context. Dispose content read streams to
+return their context leases. Options containing an explicit `DbConnection` use
+unpooled contexts and preserve the configured connection ownership.
 Pass the same options instance to both stores for shared storage accounting.
 Connection settings, command timeouts, logging and interceptors remain active.
+Interceptors and custom EF services must support context reuse and concurrent
+operations. The context constructor accepts the supplied EF options unchanged;
+the stores and migrator configure the library's migration history table. Use
+`PostgreSqlStorageMigrator` for initialization and existing-data upgrades.
 Configure a non-retrying EF execution strategy. The provider rejects
 `EnableRetryOnFailure` because its explicit transactions and receipt checks own
 retries after uncertain outcomes.

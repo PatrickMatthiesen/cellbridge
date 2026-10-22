@@ -146,6 +146,51 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
     }
 
     [PostgreSqlFact]
+    public async Task OperationProjectionsSelectOnlyTheDataTheirCallersUse()
+    {
+        var workspace = await database.NewWorkspaceAsync("bounded operation projections");
+        var field = new ListField(Guid.NewGuid(), "Title", ListFieldType.Text);
+        var definition = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new(Guid.NewGuid(), "Projection shape", [field]));
+        var interceptor = new QueryCommandInterceptor();
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(database.RuntimeSource!)
+            .AddInterceptors(interceptor)
+            .Options;
+        var engine = new PostgreSqlListEngine(options);
+        await engine.CheckHealthAsync();
+
+        interceptor.Clear();
+        await engine.GetListAsync(database.AdminActor, workspace, definition.Id);
+        AssertListReadProjection(Assert.Single(interceptor.Commands, IsAuthorizationSchemaProjection));
+
+        interceptor.Clear();
+        await engine.QueryAsync(database.AdminActor, workspace, definition.Id, new());
+        AssertListReadProjection(Assert.Single(interceptor.Commands, IsAuthorizationSchemaProjection));
+
+        var recordId = Guid.NewGuid();
+        interceptor.Clear();
+        await engine.CreateRecordAsync(database.AdminActor, workspace, definition.Id,
+            new(recordId, 1, new() { [field.Id.ToString("D")] = "original" }));
+        var createProjection = Assert.Single(interceptor.Commands, command =>
+            IsAuthorizationSchemaProjection(command) && Table(command, "create_receipts"));
+        Assert.False(Table(createProjection, "records"));
+
+        interceptor.Clear();
+        await engine.UpdateRecordAsync(database.AdminActor, workspace, definition.Id, recordId,
+            new(1, 1, [new(field.Id, JsonValue.Create("updated"))]));
+        Assert.Single(interceptor.Commands, command =>
+            IsAuthorizationSchemaProjection(command) && Table(command, "records"));
+        Assert.DoesNotContain(interceptor.Commands, command => Table(command, "create_receipts"));
+
+        interceptor.Clear();
+        await engine.DeleteRecordAsync(database.AdminActor, workspace, definition.Id, recordId, 2);
+        Assert.Single(interceptor.Commands, command =>
+            IsAuthorizationSchemaProjection(command) && Table(command, "records"));
+        Assert.DoesNotContain(interceptor.Commands, command => Table(command, "create_receipts"));
+    }
+
+    [PostgreSqlFact]
     public async Task SqlQueriesAtOneHundredThousandRecordsMaterializeOnlyTheRequestedPage()
     {
         var workspace = await database.NewWorkspaceAsync("large SQL query");
@@ -213,6 +258,19 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
             definition.WorkspaceId, definition.Id, query));
         Assert.Equal(ListFailure.Validation, error.Failure);
     }
+
+    private static void AssertListReadProjection(CapturedCommand command)
+    {
+        Assert.False(Table(command, "records"));
+        Assert.False(Table(command, "create_receipts"));
+    }
+
+    private static bool IsAuthorizationSchemaProjection(CapturedCommand command) =>
+        Table(command, "workspaces") && Table(command, "list_schemas");
+
+    private static bool Table(CapturedCommand command, string table) =>
+        command.Text.Replace("\"", "", StringComparison.Ordinal)
+            .Contains($"cellbridge_lists.{table}", StringComparison.OrdinalIgnoreCase);
 
     private async Task<(ListDefinition Definition, IReadOnlyList<ListRecord> Records)> TypedRecordsAsync()
     {

@@ -16,7 +16,7 @@ public sealed class PostgreSqlStorageMigrator
 
     public PostgreSqlStorageMigrator(DbContextOptions<CellBridgeDbContext> options, StorageLimits? limits = null)
     {
-        _options = PostgreSqlDatabase.ValidateOptions(options);
+        _options = PostgreSqlDatabase.NormalizeOptions(options);
         _limits = limits ?? new StorageLimits();
         _limits.Validate();
     }

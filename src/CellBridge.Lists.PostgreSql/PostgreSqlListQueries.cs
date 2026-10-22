@@ -20,10 +20,8 @@ public sealed partial class PostgreSqlListEngine
                 [(listId, ListAuthorizationAction.Read)], ct);
             return await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
             {
-                var context = await ReadWriteContextAsync(db, connection, transaction, workspaceId, listId,
-                    Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct, authorization);
-                RequireWriteContext(context, ListAccess.Read);
-                var definition = context.Definition!;
+                var definition = await ReadListDefinitionAsync(db, connection, transaction, workspaceId, listId,
+                    actor.Subject, ListAccess.Read, ct, authorization);
                 ListValidation.ValidateQuery(definition, query, _limits);
                 IQueryable<RecordRow> records = db.Records.AsNoTracking()
                     .Where(row => row.WorkspaceId == workspaceId && row.ListId == listId);
