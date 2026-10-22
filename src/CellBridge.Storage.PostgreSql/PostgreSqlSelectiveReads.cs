@@ -2,46 +2,30 @@ using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
 using CellBridge.Storage.Abstractions;
-using Npgsql;
+using Microsoft.EntityFrameworkCore;
 
 namespace CellBridge.Storage.PostgreSql;
 
 public sealed partial class PostgreSqlStateStore
 {
-    private const int ReadHeadColumnCount = 11;
-    private const string ReadHeadColumns = "d.resource_id,d.path_key,d.state_version,d.is_deleted,h.state_version,h.lifecycle_generation,h.revision_count,h.metadata_json,a.total,a.current_count,a.latest";
-    private const string ReadHeadJoins = """
-        LEFT JOIN cellbridge_read_heads h ON h.resource_id=d.resource_id AND h.state_version=d.state_version
-        LEFT JOIN LATERAL (
-            SELECT count(*) AS total,
-                   count(*) FILTER (WHERE r.lifecycle_generation=h.lifecycle_generation) AS current_count,
-                   max(r.revision_number) FILTER (WHERE r.lifecycle_generation=h.lifecycle_generation) AS latest
-            FROM cellbridge_revision_summaries r WHERE r.resource_id=d.resource_id
-        ) a ON true
-        """;
-
     public ValueTask<DocumentReadMetadata?> FindReadMetadataByResourceIdAsync(Guid resourceId,
-        CancellationToken cancellationToken = default) =>
-        FindReadMetadataAsync("d.resource_id=$1", resourceId, cancellationToken);
+        CancellationToken cancellationToken = default) => FindReadMetadataAsync(resourceId, null, cancellationToken);
 
     public ValueTask<DocumentReadMetadata?> FindReadMetadataByPathKeyAsync(string pathKey,
-        CancellationToken cancellationToken = default) =>
-        FindReadMetadataAsync("d.path_key=$1", pathKey, cancellationToken);
+        CancellationToken cancellationToken = default) => FindReadMetadataAsync(null, pathKey, cancellationToken);
 
-    private async ValueTask<DocumentReadMetadata?> FindReadMetadataAsync(string predicate, object value,
+    private async ValueTask<DocumentReadMetadata?> FindReadMetadataAsync(Guid? resourceId, string? pathKey,
         CancellationToken cancellationToken)
     {
         try
         {
-            await using var command = dataSource.CreateCommand($"SELECT {ReadHeadColumns} FROM cellbridge_documents d {ReadHeadJoins} WHERE {predicate} AND NOT d.is_deleted");
-            command.Parameters.Add(new NpgsqlParameter { Value = value });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken)) return null;
-            var metadata = DecodeReadMetadata(reader);
-            if (await reader.ReadAsync(cancellationToken)) throw new StorageCorruptionException("Multiple current metadata projections.");
-            return metadata;
+            await using var context = new CellBridgeDbContext(_options);
+            var row = await CurrentReadRows(context, resourceId, pathKey, false)
+                .SingleOrDefaultAsync(cancellationToken);
+            return row is null ? null : DecodeReadMetadata(row);
         }
-        catch (NpgsqlException ex) { throw new StorageUnavailableException("Document metadata could not be read.", ex); }
+        catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
+        { throw new StorageUnavailableException("Document metadata could not be read.", ex); }
     }
 
     public async ValueTask<DocumentRevisionReadPage?> ReadRevisionSummariesAsync(Guid resourceId, int offset, int limit,
@@ -50,38 +34,27 @@ public sealed partial class PostgreSqlStateStore
         DocumentReadModels.ValidatePage(offset, limit);
         try
         {
-            // The pointer, current authority fence and page are one MVCC statement.
-            // LEFT joins distinguish a missing document from a corrupt projection.
-            await using var command = dataSource.CreateCommand($"""
-                SELECT {ReadHeadColumns},p.revision_number,p.summary_json
-                FROM cellbridge_documents d {ReadHeadJoins}
-                LEFT JOIN LATERAL (
-                    SELECT r.revision_number,r.summary_json FROM cellbridge_revision_summaries r
-                    WHERE r.resource_id=d.resource_id AND r.lifecycle_generation=h.lifecycle_generation
-                    ORDER BY r.revision_number DESC OFFSET $2 LIMIT $3
-                ) p ON true
-                WHERE d.resource_id=$1 AND NOT d.is_deleted
-                ORDER BY p.revision_number DESC
-                """);
-            command.Parameters.AddWithValue(resourceId);
-            command.Parameters.AddWithValue(offset);
-            command.Parameters.AddWithValue(limit);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken)) return null;
-            var metadata = DecodeReadMetadata(reader);
-            var count = reader.GetInt32(6);
-            var revisions = ImmutableArray.CreateBuilder<DocumentRevisionSummary>();
-            do
-            {
-                if (!reader.IsDBNull(ReadHeadColumnCount))
-                    revisions.Add(DecodeRevisionSummary(reader, metadata));
-            } while (await reader.ReadAsync(cancellationToken));
-            var expected = Math.Min(limit, Math.Max(0, count - offset));
-            if (revisions.Count != expected) throw new StorageCorruptionException("Revision projection page is incomplete.");
-            var next = (long)offset + revisions.Count;
-            return new(metadata, revisions.ToImmutable(), next < count ? checked((int)next) : null);
+            await using var context = new CellBridgeDbContext(_options);
+            var rows = await (from current in CurrentReadRows(context, resourceId, null, false)
+                              from revision in context.RevisionSummaries.AsNoTracking()
+                                  .Where(candidate => candidate.ResourceId == current.ResourceId &&
+                                      candidate.LifecycleGeneration == current.LifecycleGeneration)
+                                  .OrderByDescending(candidate => candidate.RevisionNumber).Skip(offset).Take(limit)
+                                  .DefaultIfEmpty()
+                              select new RevisionReadProjection { Current = current, Revision = revision })
+                .ToListAsync(cancellationToken);
+            if (rows.Count == 0) return null;
+            var metadata = DecodeReadMetadata(rows[0].Current);
+            var revisions = rows.Where(row => row.Revision is not null)
+                .Select(row => DecodeRevisionSummary(row.Revision!, metadata)).ToImmutableArray();
+            var expected = Math.Min(limit, Math.Max(0, metadata.RevisionCount - offset));
+            if (revisions.Length != expected)
+                throw new StorageCorruptionException("Revision projection page is incomplete.");
+            var next = (long)offset + revisions.Length;
+            return new(metadata, revisions, next < metadata.RevisionCount ? checked((int)next) : null);
         }
-        catch (NpgsqlException ex) { throw new StorageUnavailableException("Revision summaries could not be read.", ex); }
+        catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
+        { throw new StorageUnavailableException("Revision summaries could not be read.", ex); }
     }
 
     public async ValueTask<DocumentRevisionRead?> ReadRevisionSummaryAsync(Guid resourceId, ulong revisionNumber,
@@ -89,54 +62,86 @@ public sealed partial class PostgreSqlStateStore
     {
         try
         {
-            await using var command = dataSource.CreateCommand($"""
-                SELECT {ReadHeadColumns},r.revision_number,r.summary_json
-                FROM cellbridge_documents d {ReadHeadJoins}
-                LEFT JOIN cellbridge_revision_summaries r ON r.resource_id=d.resource_id
-                    AND r.lifecycle_generation=h.lifecycle_generation AND r.revision_number=$2
-                WHERE d.resource_id=$1 AND NOT d.is_deleted
-                """);
-            command.Parameters.AddWithValue(resourceId);
-            command.Parameters.AddWithValue((decimal)revisionNumber);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (!await reader.ReadAsync(cancellationToken)) return null;
-            var metadata = DecodeReadMetadata(reader);
-            var revision = reader.IsDBNull(ReadHeadColumnCount) ? null : DecodeRevisionSummary(reader, metadata);
-            if (await reader.ReadAsync(cancellationToken)) throw new StorageCorruptionException("Multiple selected revision projections.");
-            return new(metadata, revision);
+            await using var context = new CellBridgeDbContext(_options);
+            var row = await (from current in CurrentReadRows(context, resourceId, null, false)
+                             from revision in context.RevisionSummaries.AsNoTracking()
+                                 .Where(candidate => candidate.ResourceId == current.ResourceId &&
+                                     candidate.LifecycleGeneration == current.LifecycleGeneration &&
+                                     candidate.RevisionNumber == (decimal)revisionNumber).DefaultIfEmpty()
+                             select new RevisionReadProjection { Current = current, Revision = revision })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (row is null) return null;
+            var metadata = DecodeReadMetadata(row.Current);
+            return new(metadata, row.Revision is null ? null : DecodeRevisionSummary(row.Revision, metadata));
         }
-        catch (NpgsqlException ex) { throw new StorageUnavailableException("Revision summary could not be read.", ex); }
+        catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
+        { throw new StorageUnavailableException("Revision summary could not be read.", ex); }
     }
 
-    private static DocumentReadMetadata DecodeReadMetadata(NpgsqlDataReader reader)
+    private static IQueryable<ReadProjection> CurrentReadRows(CellBridgeDbContext context, Guid? resourceId,
+        string? pathKey, bool includeDeleted)
     {
-        if (reader.IsDBNull(4) || reader.IsDBNull(7))
+        return from document in context.Documents.AsNoTracking()
+               join matchingHead in context.ReadHeads.AsNoTracking()
+                   on new { document.ResourceId, document.StateVersion }
+                   equals new { matchingHead.ResourceId, matchingHead.StateVersion } into heads
+               from head in heads.DefaultIfEmpty()
+               where (resourceId == null || document.ResourceId == resourceId) &&
+                     (pathKey == null || document.PathKey == pathKey) &&
+                     (includeDeleted || !document.IsDeleted)
+               select new ReadProjection
+               {
+                   ResourceId = document.ResourceId,
+                   PathKey = document.PathKey,
+                   StateVersion = document.StateVersion,
+                   IsDeleted = document.IsDeleted,
+                   HeadStateVersion = head == null ? null : head.StateVersion,
+                   LifecycleGeneration = head == null ? null : head.LifecycleGeneration,
+                   RevisionCount = head == null ? null : head.RevisionCount,
+                   MetadataJson = head == null ? null : head.MetadataJson,
+                   TotalRevisionCount = context.RevisionSummaries.Count(revision =>
+                       revision.ResourceId == document.ResourceId),
+                   CurrentRevisionCount = context.RevisionSummaries.Count(revision =>
+                       revision.ResourceId == document.ResourceId &&
+                       revision.LifecycleGeneration == head!.LifecycleGeneration),
+                   LatestRevisionNumber = context.RevisionSummaries
+                       .Where(revision => revision.ResourceId == document.ResourceId &&
+                           revision.LifecycleGeneration == head!.LifecycleGeneration)
+                       .Max(revision => (decimal?)revision.RevisionNumber),
+                   DatabaseUtc = CellBridgeDbContext.ClockTimestamp(),
+               };
+    }
+
+    private static DocumentReadMetadata DecodeReadMetadata(ReadProjection row)
+    {
+        if (row.HeadStateVersion is null || row.LifecycleGeneration is null || row.RevisionCount is null ||
+            row.MetadataJson is null)
             throw new StorageCorruptionException("The current metadata projection is missing or stale.");
-        var metadata = RecoveryJson.Read<DocumentReadMetadata>(Encoding.UTF8.GetBytes(reader.GetString(7)));
-        if (metadata.ResourceId != reader.GetGuid(0) || metadata.PathKey != reader.GetString(1) ||
-            metadata.StateVersion != reader.GetInt64(2) || metadata.StateVersion != reader.GetInt64(4) ||
-            metadata.IsDeleted != reader.GetBoolean(3) || metadata.LifecycleGeneration != reader.GetInt64(5) ||
+        var metadata = RecoveryJson.Read<DocumentReadMetadata>(Encoding.UTF8.GetBytes(row.MetadataJson));
+        if (metadata.ResourceId != row.ResourceId || metadata.PathKey != row.PathKey ||
+            metadata.StateVersion != row.StateVersion || metadata.StateVersion != row.HeadStateVersion.Value ||
+            metadata.IsDeleted != row.IsDeleted || metadata.LifecycleGeneration != row.LifecycleGeneration.Value ||
             metadata.Security is null || metadata.Security.Grants is null || metadata.EditorExpiries.IsDefault ||
-            metadata.PendingDeliveryCount < 0 ||
-            string.IsNullOrWhiteSpace(metadata.Path) || metadata.ContentVersion == 0 || metadata.LifecycleGeneration < 1 ||
+            metadata.PendingDeliveryCount < 0 || string.IsNullOrWhiteSpace(metadata.Path) ||
+            metadata.ContentVersion == 0 || metadata.LifecycleGeneration < 1 ||
             metadata.CreatedUtc.Kind != DateTimeKind.Utc || metadata.ModifiedUtc.Kind != DateTimeKind.Utc ||
-            metadata.RevisionCount != reader.GetInt32(6) || reader.GetInt32(6) < 1 || reader.GetInt64(8) != reader.GetInt32(6) ||
-            reader.GetInt64(9) != reader.GetInt32(6) || reader.IsDBNull(10) ||
-            reader.GetDecimal(10) != (decimal)metadata.LatestRevisionNumber)
+            metadata.RevisionCount != row.RevisionCount.Value || row.RevisionCount.Value < 1 ||
+            row.TotalRevisionCount != row.RevisionCount.Value || row.CurrentRevisionCount != row.RevisionCount.Value ||
+            row.LatestRevisionNumber != (decimal)metadata.LatestRevisionNumber)
             throw new StorageCorruptionException("The current metadata projection disagrees with its pointer or history.");
         ValidateReadContent(metadata.Content);
         return metadata;
     }
 
-    private static DocumentRevisionSummary DecodeRevisionSummary(NpgsqlDataReader reader, DocumentReadMetadata metadata)
+    private static DocumentRevisionSummary DecodeRevisionSummary(RevisionSummaryRow row,
+        DocumentReadMetadata metadata)
     {
-        if (reader.IsDBNull(ReadHeadColumnCount + 1)) throw new StorageCorruptionException("Missing revision summary JSON.");
-        var revision = RecoveryJson.Read<DocumentRevisionSummary>(Encoding.UTF8.GetBytes(reader.GetString(ReadHeadColumnCount + 1)));
+        var revision = RecoveryJson.Read<DocumentRevisionSummary>(Encoding.UTF8.GetBytes(row.SummaryJson));
         if (revision.ResourceId != metadata.ResourceId || revision.LifecycleGeneration != metadata.LifecycleGeneration ||
-            (decimal)revision.RevisionNumber != reader.GetDecimal(ReadHeadColumnCount) ||
-            revision.RevisionNumber == 0 || revision.RevisionNumber > metadata.LatestRevisionNumber ||
-            revision.ContentVersion == 0 || revision.CreatedUtc.Kind != DateTimeKind.Utc ||
-            revision.Author is null || string.IsNullOrWhiteSpace(revision.Author.Subject))
+            (decimal)revision.RevisionNumber != row.RevisionNumber || revision.RevisionNumber == 0 ||
+            revision.RevisionNumber > metadata.LatestRevisionNumber || revision.ContentVersion == 0 ||
+            revision.CreatedUtc.Kind != DateTimeKind.Utc || revision.Author is null ||
+            string.IsNullOrWhiteSpace(revision.Author.Subject))
             throw new StorageCorruptionException("The revision summary disagrees with its current history.");
         ValidateReadContent(revision.Content);
         return revision;
@@ -149,55 +154,84 @@ public sealed partial class PostgreSqlStateStore
             throw new StorageCorruptionException("Invalid content metadata in read projection.");
     }
 
-    private static async Task WriteSelectiveReadsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        DocumentState state, CancellationToken cancellationToken)
+    private static async Task WriteSelectiveReadsAsync(CellBridgeDbContext context, DocumentState state,
+        CancellationToken cancellationToken)
     {
-        // Recovery may supply retained snapshots in any order. Only the newest
-        // state can supply the current index; the pointer is published in this transaction.
-        await using (var current = new NpgsqlCommand("SELECT state_version FROM cellbridge_read_heads WHERE resource_id=$1", connection, transaction))
-        {
-            current.Parameters.AddWithValue(state.ResourceId);
-            if (await current.ExecuteScalarAsync(cancellationToken) is long existing && existing > state.StateVersion) return;
-        }
+        var head = context.ReadHeads.Local.SingleOrDefault(row => row.ResourceId == state.ResourceId)
+            ?? await context.ReadHeads.SingleOrDefaultAsync(row => row.ResourceId == state.ResourceId, cancellationToken);
+        if (head is not null && head.StateVersion > state.StateVersion) return;
         var metadata = DocumentReadModels.Metadata(state);
         var revisions = DocumentReadModels.Revisions(state).ToArray();
-        if (revisions.Length == 0 || revisions.Length != metadata.RevisionCount || revisions.Any(revision => revision.ResourceId != state.ResourceId ||
-            revision.LifecycleGeneration != state.LifecycleGeneration || revision.RevisionNumber == 0) ||
+        if (revisions.Length == 0 || revisions.Length != metadata.RevisionCount ||
+            revisions.Any(revision => revision.ResourceId != state.ResourceId ||
+                revision.LifecycleGeneration != state.LifecycleGeneration || revision.RevisionNumber == 0) ||
             revisions.Select(revision => revision.RevisionNumber).Distinct().Count() != revisions.Length ||
             revisions.Max(revision => revision.RevisionNumber) != metadata.LatestRevisionNumber)
             throw new StorageCorruptionException("Cannot index inconsistent revision history.");
-        var revisionJson = JsonSerializer.Serialize(revisions);
-        // Compare the complete current membership, including removals made by an
-        // explicit imported state. Unchanged immutable summaries are not rewritten.
-        await using (var sync = new NpgsqlCommand("""
-            WITH removed AS (DELETE FROM cellbridge_revision_summaries r WHERE r.resource_id=$1 AND NOT EXISTS (
-                SELECT 1 FROM jsonb_array_elements($2::jsonb) item
-                WHERE (item->>'LifecycleGeneration')::bigint=r.lifecycle_generation
-                    AND (item->>'RevisionNumber')::numeric=r.revision_number))
-            INSERT INTO cellbridge_revision_summaries(resource_id,lifecycle_generation,revision_number,summary_json)
-                SELECT $1,(item->>'LifecycleGeneration')::bigint,(item->>'RevisionNumber')::numeric,item::text
-                FROM jsonb_array_elements($2::jsonb) item
-                ON CONFLICT(resource_id,lifecycle_generation,revision_number) DO UPDATE
-                    SET summary_json=excluded.summary_json
-                    WHERE cellbridge_revision_summaries.summary_json<>excluded.summary_json
-            """, connection, transaction))
+
+        var databaseRows = await context.RevisionSummaries
+            .Where(row => row.ResourceId == state.ResourceId).ToListAsync(cancellationToken);
+        var existing = databaseRows.Concat(context.RevisionSummaries.Local.Where(row => row.ResourceId == state.ResourceId))
+            .DistinctBy(row => (row.LifecycleGeneration, row.RevisionNumber))
+            .ToDictionary(row => (row.LifecycleGeneration, row.RevisionNumber));
+        var desired = revisions.ToDictionary(revision =>
+            (revision.LifecycleGeneration, (decimal)revision.RevisionNumber));
+        foreach (var pair in existing)
         {
-            sync.Parameters.AddWithValue(state.ResourceId);
-            sync.Parameters.AddWithValue(revisionJson);
-            await sync.ExecuteNonQueryAsync(cancellationToken);
+            if (!desired.ContainsKey(pair.Key)) context.RevisionSummaries.Remove(pair.Value);
         }
-        await using var head = new NpgsqlCommand("""
-            INSERT INTO cellbridge_read_heads(resource_id,state_version,lifecycle_generation,revision_count,metadata_json)
-                VALUES($1,$2,$3,$4,$5)
-                ON CONFLICT(resource_id) DO UPDATE SET state_version=excluded.state_version,
-                    lifecycle_generation=excluded.lifecycle_generation,revision_count=excluded.revision_count,
-                    metadata_json=excluded.metadata_json
-            """, connection, transaction);
-        head.Parameters.AddWithValue(state.ResourceId);
-        head.Parameters.AddWithValue(state.StateVersion);
-        head.Parameters.AddWithValue(state.LifecycleGeneration);
-        head.Parameters.AddWithValue(revisions.Length);
-        head.Parameters.AddWithValue(JsonSerializer.Serialize(metadata));
-        await head.ExecuteNonQueryAsync(cancellationToken);
+        foreach (var pair in desired)
+        {
+            var json = JsonSerializer.Serialize(pair.Value);
+            if (existing.TryGetValue(pair.Key, out var row)) row.SummaryJson = json;
+            else context.RevisionSummaries.Add(new RevisionSummaryRow
+            {
+                ResourceId = state.ResourceId,
+                LifecycleGeneration = pair.Key.LifecycleGeneration,
+                RevisionNumber = pair.Key.Item2,
+                SummaryJson = json,
+            });
+        }
+        var metadataJson = JsonSerializer.Serialize(metadata);
+        if (head is null)
+        {
+            context.ReadHeads.Add(new ReadHeadRow
+            {
+                ResourceId = state.ResourceId,
+                StateVersion = state.StateVersion,
+                LifecycleGeneration = state.LifecycleGeneration,
+                RevisionCount = revisions.Length,
+                MetadataJson = metadataJson,
+            });
+        }
+        else
+        {
+            head.StateVersion = state.StateVersion;
+            head.LifecycleGeneration = state.LifecycleGeneration;
+            head.RevisionCount = revisions.Length;
+            head.MetadataJson = metadataJson;
+        }
+    }
+
+    private sealed class ReadProjection
+    {
+        public Guid ResourceId { get; init; }
+        public required string PathKey { get; init; }
+        public long StateVersion { get; init; }
+        public bool IsDeleted { get; init; }
+        public long? HeadStateVersion { get; init; }
+        public long? LifecycleGeneration { get; init; }
+        public int? RevisionCount { get; init; }
+        public string? MetadataJson { get; init; }
+        public int TotalRevisionCount { get; init; }
+        public int CurrentRevisionCount { get; init; }
+        public decimal? LatestRevisionNumber { get; init; }
+        public DateTime DatabaseUtc { get; init; }
+    }
+
+    private sealed class RevisionReadProjection
+    {
+        public required ReadProjection Current { get; init; }
+        public RevisionSummaryRow? Revision { get; init; }
     }
 }

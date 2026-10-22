@@ -7,8 +7,12 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../CellBridge.Lists/CellBridge.Lists.csproj" />
-    <PackageReference Include="Npgsql" Version="10.0.3" />
-    <EmbeddedResource Include="Schema.sql" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <EmbeddedResource Include="Migrations/*.sql" />
   </ItemGroup>
   <PropertyGroup><Description>Experimental typed customer workspace lists with validation, authorized persistence and optional HTTP adapters.</Description></PropertyGroup>
   <ItemGroup>

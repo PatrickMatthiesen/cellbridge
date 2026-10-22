@@ -61,7 +61,7 @@ public sealed class StorageInitializationTests
             var store = new PostgreSqlStateStore(source);
             var document = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
                 .CreateAsync("/migration.docx", MinimalDocx.Create(), TestActor.Value))!;
-            await using (var oldSchema = source.CreateCommand("DROP INDEX cellbridge_live_paths; ALTER TABLE cellbridge_documents DROP COLUMN is_deleted; ALTER TABLE cellbridge_documents ADD CONSTRAINT cellbridge_documents_path_key_key UNIQUE(path_key); UPDATE cellbridge_schema SET version=3"))
+            await using (var oldSchema = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; DROP INDEX cellbridge_live_paths; ALTER TABLE cellbridge_documents DROP COLUMN is_deleted; ALTER TABLE cellbridge_documents ADD CONSTRAINT cellbridge_documents_path_key_key UNIQUE(path_key); UPDATE cellbridge_schema SET version=3"))
                 await oldSchema.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
             await store.InitializeAsync();

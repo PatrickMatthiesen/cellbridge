@@ -20,6 +20,7 @@
     <None Include="../../testdata/api/word-save-fresh*.bin" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../testdata/protocol/MS-FSSHTTP-FSSHTTPB.wsdl" Link="Fixtures/MS-FSSHTTP-FSSHTTPB.wsdl" CopyToOutputDirectory="PreserveNewest" />
     <Using Include="Xunit" />
+    <EmbeddedResource Include="../../testdata/storage/postgresql-schema6.sql" LogicalName="CellBridge.Storage.Tests.Fixtures.PostgreSqlSchema6.sql" />
   </ItemGroup>
   <Target Name="CopyProcessProbe" AfterTargets="Build">
     <ItemGroup><ProbeFiles Include="../../tools/CellBridge.Storage.ProcessProbe/bin/$(Configuration)/net10.0/**/*" /></ItemGroup>

@@ -1,5 +1,9 @@
+using System.Data.Common;
 using CellBridge.Lists;
 using Npgsql;
+using CellBridge.Lists.PostgreSql;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using System.Text.Json.Nodes;
 
 namespace CellBridge.Lists.PostgreSql.Tests;
@@ -66,6 +70,41 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
             new(cursor.Revision, 1, [new(integer.Id, JsonValue.Create(-1L))]));
         await RejectCursorAsync(definition, new(Filters: [new(integer.Id, FilterOperator.GreaterOrEqual, JsonValue.Create(0L))],
             SortFieldId: integer.Id, AfterRecordId: cursor.Id));
+    }
+
+    [PostgreSqlFact]
+    public async Task CursorAnchorValidationAndPageAreOneUnlockedEfCommand()
+    {
+        var workspace = await database.NewWorkspaceAsync("single statement cursor");
+        var text = new ListField(Guid.NewGuid(), "Text", ListFieldType.Text);
+        var definition = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new(Guid.NewGuid(), "Single statement", [text]));
+        foreach (var value in new[] { "a", "b" })
+            await database.Engine.CreateRecordAsync(database.AdminActor, workspace, definition.Id,
+                new(Guid.NewGuid(), 1, new() { [text.Id.ToString("D")] = value }));
+
+        var interceptor = new QueryCommandInterceptor();
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(database.RuntimeSource!)
+            .AddInterceptors(interceptor)
+            .Options;
+        var engine = new PostgreSqlListEngine(options);
+        var query = new ListQuery(SortFieldId: text.Id, Limit: 1);
+        var first = await engine.QueryAsync(database.AdminActor, workspace, definition.Id, query);
+        interceptor.Clear();
+
+        var second = await engine.QueryAsync(database.AdminActor, workspace, definition.Id,
+            query with { AfterRecordId = first.NextRecordId });
+
+        Assert.Single(second.Records);
+        var recordCommand = Assert.Single(interceptor.Commands, command =>
+            command.Replace("\"", "", StringComparison.Ordinal)
+                .Contains("cellbridge_lists.records", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("LEFT JOIN", recordCommand, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("EXISTS", recordCommand, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FOR UPDATE", recordCommand, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FOR KEY SHARE", recordCommand, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FOR NO KEY UPDATE", recordCommand, StringComparison.OrdinalIgnoreCase);
     }
 
     [PostgreSqlFact]
@@ -184,5 +223,20 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
             records.Add(await database.Engine.GetRecordAsync(database.AdminActor, workspace, definition.Id, id));
         }
         return (definition, records);
+    }
+
+    private sealed class QueryCommandInterceptor : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = [];
+
+        public void Clear() => Commands.Clear();
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
     }
 }

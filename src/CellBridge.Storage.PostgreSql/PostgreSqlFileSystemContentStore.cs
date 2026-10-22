@@ -1,28 +1,36 @@
 using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.FileSystem;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
 
-/// <summary>
-/// Charges durable filesystem objects to the shared PostgreSQL ledger before
-/// publication. Failed writes remain charged until quiescent maintenance verifies them.
-/// </summary>
+/// <summary>Charges filesystem objects to PostgreSQL before publication.</summary>
 public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBudgetParticipant
 {
-    public object BudgetScope => _source;
-    private readonly NpgsqlDataSource _source;
+    private readonly DbContextOptions<CellBridgeDbContext> _options;
+    private readonly object _budgetScope;
     private readonly FileSystemContentStore _files;
     private readonly long _maxObjectBytes;
     private readonly SemaphoreSlim _writers = new(4);
+    public object BudgetScope => _budgetScope;
     public bool Durable => true;
     public bool Shared => _files.Shared;
 
     public PostgreSqlFileSystemContentStore(NpgsqlDataSource source, string root,
         long maxObjectBytes = 512L * 1024 * 1024, bool shared = false)
+        : this(PostgreSqlDatabase.CreateOptions(source), root, maxObjectBytes, shared, source) { }
+
+    public PostgreSqlFileSystemContentStore(DbContextOptions<CellBridgeDbContext> options, string root,
+        long maxObjectBytes = 512L * 1024 * 1024, bool shared = false)
+        : this(options, root, maxObjectBytes, shared, options) { }
+
+    private PostgreSqlFileSystemContentStore(DbContextOptions<CellBridgeDbContext> options, string root,
+        long maxObjectBytes, bool shared, object budgetScope)
     {
-        _source = source;
+        _options = PostgreSqlDatabase.ValidateOptions(options);
+        _budgetScope = budgetScope;
         _maxObjectBytes = maxObjectBytes;
         _files = new(root, maxObjectBytes, shared);
     }
@@ -48,31 +56,40 @@ public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBu
             }
             var digest = Convert.ToHexStringLower(hash.GetHashAndReset());
             var reserved = new ContentHandle(digest, length, digest);
-            await using (var connection = await _source.OpenConnectionAsync(cancellationToken))
-            await using (var transaction = await connection.BeginTransactionAsync(cancellationToken))
+            await using (var context = new CellBridgeDbContext(_options))
+            await using (var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken))
             {
-                await PostgreSqlStateStore.ConfigureTransactionAsync(connection, transaction, cancellationToken);
-                await using var insert = new NpgsqlCommand("INSERT INTO cellbridge_objects VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", connection, transaction);
-                insert.Parameters.Add(new NpgsqlParameter { Value = digest });
-                insert.Parameters.Add(new NpgsqlParameter { Value = length });
-                if (await insert.ExecuteNonQueryAsync(cancellationToken) != 0)
-                    await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, length, 0, cancellationToken);
+                await PostgreSqlStateStore.ConfigureTransactionAsync(context, cancellationToken);
+                var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
+                int inserted;
+                // The reservation must be conflict-tolerant across hosts.
+                await using (var insert = new NpgsqlCommand(
+                    "INSERT INTO cellbridge_objects VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", connection, transaction))
+                {
+                    insert.Parameters.AddWithValue(digest);
+                    insert.Parameters.AddWithValue(length);
+                    inserted = await insert.ExecuteNonQueryAsync(cancellationToken);
+                }
+                if (inserted != 0)
+                    await PostgreSqlStorageBudget.AdjustAsync(context, length, 0, cancellationToken);
                 else
                 {
-                    await using var verify = new NpgsqlCommand("SELECT length,sha256 FROM cellbridge_objects WHERE object_key=$1", connection, transaction);
-                    verify.Parameters.Add(new NpgsqlParameter { Value = digest });
-                    await using var metadata = await verify.ExecuteReaderAsync(cancellationToken);
-                    if (!await metadata.ReadAsync(cancellationToken) || metadata.GetInt64(0) != length || metadata.GetString(1) != digest)
+                    var metadata = await context.Objects.AsNoTracking().SingleOrDefaultAsync(
+                        row => row.ObjectKey == digest, cancellationToken);
+                    if (metadata is null || metadata.Length != length || metadata.Sha256 != digest)
                         throw new StorageCorruptionException("Invalid reserved filesystem object metadata.");
                 }
-                await transaction.CommitAsync(CancellationToken.None);
+                await context.SaveChangesAsync(cancellationToken);
+                await databaseTransaction.CommitAsync(CancellationToken.None);
             }
             spool.Position = 0;
             var published = await _files.WriteAsync(spool, cancellationToken);
-            if (published != reserved) throw new StorageCorruptionException("Filesystem content disagrees with its reservation.");
+            if (published != reserved)
+                throw new StorageCorruptionException("Filesystem content disagrees with its reservation.");
             return published;
         }
-        catch (NpgsqlException ex) { throw new StorageUnavailableException("Content reservation failed or its outcome is unknown.", ex); }
+        catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
+        { throw new StorageUnavailableException("Content reservation failed or its outcome is unknown.", ex); }
         finally { _writers.Release(); }
     }
 

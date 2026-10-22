@@ -48,13 +48,13 @@ See [authentication and permissions](authentication.md).
 | `CellBridge.FssHttpB` | Binary framing, manifests, graph data and synchronization messages |
 | `CellBridge.Storage.Abstractions` | Immutable document records, state transitions and content handles |
 | `CellBridge.Storage` | Detached protocol documents and persistence codecs |
-| `CellBridge.Storage.PostgreSql` | Durable state, per-document coordination and chunked binary content |
+| `CellBridge.Storage.PostgreSql` | EF Core document persistence, explicit migrations, per-document coordination and chunked content |
 | `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory durability operations |
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
 | `CellBridge.Storage.Conformance` | Provider contract checks for consumers |
 | `CellBridge.AspNetCore` | Save orchestration, discovery, download and cellstorage endpoints |
 | `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
-| `CellBridge.Lists.PostgreSql` | Independent list schema, JSONB records, workspace isolation and list grants |
+| `CellBridge.Lists.PostgreSql` | Independent EF Core list persistence and migrations, JSONB records, workspace isolation and grants |
 | `CellBridge.Lists.AspNetCore` | Opt-in list APIs, protected paging, CSV/XLSX and read-only OData subset |
 | `CellBridge.WebDemo` | Non-packable development host, Razor Pages, package generation and catalog APIs |
 | `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |

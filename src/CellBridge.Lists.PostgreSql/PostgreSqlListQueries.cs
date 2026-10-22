@@ -1,9 +1,7 @@
-using System.Globalization;
-using System.Text;
+using System.Linq.Expressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Npgsql;
-using NpgsqlTypes;
+using Microsoft.EntityFrameworkCore;
 
 namespace CellBridge.Lists.PostgreSql;
 
@@ -22,156 +20,348 @@ public sealed partial class PostgreSqlListEngine
                 [(listId, ListAuthorizationAction.Read)], ct);
             return await InRecordTransactionAsync(workspaceId, authorization, async (connection, transaction) =>
             {
-            var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
-                Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct, authorization);
-            RequireWriteContext(context, ListAccess.Read);
-            var definition = context.Definition!;
-            ListValidation.ValidateQuery(definition, query, _limits);
-            await using var command = new NpgsqlCommand { Connection = connection, Transaction = transaction };
-            var workspace = QueryParameter(command, NpgsqlDbType.Uuid, workspaceId);
-            var list = QueryParameter(command, NpgsqlDbType.Uuid, listId);
-            var cursor = QueryParameter(command, NpgsqlDbType.Uuid, query.AfterRecordId);
-            var pageLimit = QueryParameter(command, NpgsqlDbType.Bigint, (long)query.Limit + 1);
-            var fields = definition.Fields.ToDictionary(field => field.Id);
-            var keys = new Dictionary<Guid, string>();
-            string Raw(ListField field)
-            {
-                if (!keys.TryGetValue(field.Id, out var key))
+                var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
+                    Guid.Empty, actor.Subject, ListAccess.Read, deleteLock: false, ct, authorization);
+                RequireWriteContext(context, ListAccess.Read);
+                var definition = context.Definition!;
+                ListValidation.ValidateQuery(definition, query, _limits);
+                await using var db = CreateContext(connection, transaction);
+                IQueryable<RecordRow> records = db.Records.AsNoTracking()
+                    .Where(row => row.WorkspaceId == workspaceId && row.ListId == listId);
+                var fields = definition.Fields.ToDictionary(field => field.Id);
+                foreach (var filter in query.Filters ?? [])
+                    records = ApplyFilter(records, fields[filter.FieldId], filter);
+
+                var filtered = records;
+                if (query.AfterRecordId is { } cursor)
                 {
-                    key = QueryParameter(command, NpgsqlDbType.Text, field.Id.ToString("D"));
-                    keys.Add(field.Id, key);
+                    var anchor = filtered.Where(row => row.RecordId == cursor);
+                    records = query.SortFieldId is { } sortId
+                        ? ApplyAfterAnchor(records, anchor, fields[sortId], query.Descending)
+                        : query.Descending
+                            ? records.Where(row => row.RecordId.CompareTo(cursor) < 0 && anchor.Any())
+                            : records.Where(row => row.RecordId.CompareTo(cursor) > 0 && anchor.Any());
                 }
-                return $"(r.values_json ->> {key})";
-            }
-            var predicates = new List<string> { $"r.workspace_id={workspace}", $"r.list_id={list}" };
-            foreach (var filter in query.Filters ?? [])
-            {
-                var field = fields[filter.FieldId];
-                var raw = Raw(field);
-                if (filter.Value is null)
+
+                records = query.SortFieldId is { } fieldId
+                    ? ApplyOrder(records, fields[fieldId], query.Descending)
+                    : query.Descending
+                        ? records.OrderByDescending(row => row.RecordId)
+                        : records.OrderBy(row => row.RecordId);
+                var page = records.Take(query.Limit + 1);
+                var sortField = query.SortFieldId is { } selected ? fields[selected] : null;
+                var sortKey = sortField?.Id.ToString("D") ?? string.Empty;
+                var projected = page.Select(row => new QueryEnvelope
+                    {
+                        RecordId = row.RecordId,
+                        SchemaVersion = row.SchemaVersion,
+                        Revision = row.Revision,
+                        Number = row.Number,
+                        ValuesJson = row.ValuesJson,
+                        CreatedUtc = row.CreatedUtc,
+                        ModifiedUtc = row.ModifiedUtc,
+                        CreatedBy = row.CreatedBy,
+                        ModifiedBy = row.ModifiedBy,
+                        LongSort = sortField != null && sortField.Type == ListFieldType.Integer
+                            ? Convert.ToInt64(PostgreSqlListDbContext.JsonText(row.ValuesJson, sortKey)) : null,
+                        DecimalSort = sortField != null && sortField.Type == ListFieldType.Decimal
+                            ? Convert.ToDecimal(PostgreSqlListDbContext.JsonText(row.ValuesJson, sortKey)) : null,
+                        BooleanSort = sortField != null && sortField.Type == ListFieldType.Boolean
+                            ? Convert.ToBoolean(PostgreSqlListDbContext.JsonText(row.ValuesJson, sortKey)) : null,
+                        BytesSort = sortField != null &&
+                            (sortField.Type == ListFieldType.Text || sortField.Type == ListFieldType.Choice)
+                            ? PostgreSqlListDbContext.Utf16Key(PostgreSqlListDbContext.JsonText(row.ValuesJson, sortKey)) : null,
+                        StringSort = sortField != null && sortField.Type == ListFieldType.Timestamp
+                            ? PostgreSqlListDbContext.TimestampKey(PostgreSqlListDbContext.JsonText(row.ValuesJson, sortKey))
+                            : sortField != null ? PostgreSqlListDbContext.JsonText(row.ValuesJson, sortKey) : null
+                    });
+                var seeded = db.SchemaVersions.AsNoTracking().Take(1)
+                    .SelectMany(_ => projected.DefaultIfEmpty(), (_, envelope) => new QueryEnvelope
+                    {
+                        HasRecord = envelope!.RecordId != null,
+                        CursorValid = query.AfterRecordId == null ||
+                            filtered.Any(candidate => candidate.RecordId == query.AfterRecordId),
+                        RecordId = envelope.RecordId,
+                        SchemaVersion = envelope.SchemaVersion,
+                        Revision = envelope.Revision,
+                        Number = envelope.Number,
+                        ValuesJson = envelope.ValuesJson,
+                        CreatedUtc = envelope.CreatedUtc,
+                        ModifiedUtc = envelope.ModifiedUtc,
+                        CreatedBy = envelope.CreatedBy,
+                        ModifiedBy = envelope.ModifiedBy,
+                        LongSort = envelope.LongSort,
+                        DecimalSort = envelope.DecimalSort,
+                        BooleanSort = envelope.BooleanSort,
+                        BytesSort = envelope.BytesSort,
+                        StringSort = envelope.StringSort
+                    });
+                var envelopes = await ApplyEnvelopeOrder(seeded, sortField, query.Descending).ToListAsync(ct);
+                if (envelopes.Count == 0 || !envelopes[0].CursorValid)
+                    throw Validation("Page cursor is no longer present in this filtered list.");
+                var rows = envelopes.Where(envelope => envelope.HasRecord).Select(envelope => new RecordRow
                 {
-                    predicates.Add($"{raw} IS {(filter.Operator == FilterOperator.NotEqual ? "NOT " : "")}NULL");
-                    continue;
-                }
-                var ordered = filter.Operator is not FilterOperator.Equal and not FilterOperator.NotEqual;
-                var expression = QueryScalarExpression(field.Type, raw, ordered);
-                var (type, value) = QueryScalarParameter(field.Type, filter.Value, ordered);
-                var parameter = QueryParameter(command, type, value);
-                // C equality has the same exact string identity as .NET ordinal equality;
-                // only ordered text comparisons require UTF-16 code-unit keys.
-                if (type == NpgsqlDbType.Text) parameter += " COLLATE \"C\"";
-                var op = filter.Operator switch
-                {
-                    FilterOperator.Equal => "IS NOT DISTINCT FROM",
-                    FilterOperator.NotEqual => "IS DISTINCT FROM",
-                    FilterOperator.GreaterThan => ">",
-                    FilterOperator.GreaterOrEqual => ">=",
-                    FilterOperator.LessThan => "<",
-                    FilterOperator.LessOrEqual => "<=",
-                    _ => throw Validation("Unknown query operator.")
-                };
-                predicates.Add($"{expression} {op} {parameter}");
-            }
-            var sort = query.SortFieldId is { } sortId
-                ? QueryScalarExpression(fields[sortId].Type, Raw(fields[sortId]), ordered: true) : "r.record_id";
-            var comparison = query.Descending ? "<" : ">";
-            var direction = query.Descending ? "DESC NULLS LAST" : "ASC NULLS FIRST";
-            // Null placement is part of the cursor order, not PostgreSQL's default.
-            var after = query.SortFieldId is null
-                ? $"r.record_id {comparison} a.record_id"
-                : query.Descending
-                    ? $"(({sort} IS NULL AND a.sort_key IS NOT NULL) OR {sort} < a.sort_key OR ({sort} IS NOT DISTINCT FROM a.sort_key AND r.record_id < a.record_id))"
-                    : $"(({sort} IS NOT NULL AND a.sort_key IS NULL) OR {sort} > a.sort_key OR ({sort} IS NOT DISTINCT FROM a.sort_key AND r.record_id > a.record_id))";
-            var where = string.Join(" AND ", predicates.Select(predicate => "(" + predicate + ")"));
-            command.CommandText = $"""
-                WITH anchor AS MATERIALIZED (
-                  SELECT r.record_id,{sort} AS sort_key
-                  FROM cellbridge_lists.records r
-                  WHERE {where} AND r.record_id={cursor}
-                ), page AS (
-                  SELECT r.record_id,r.schema_version,r.revision,r.number,r.values_json::text,
-                         r.created_utc,r.modified_utc,r.created_by,r.modified_by,{sort} AS sort_key
-                  FROM cellbridge_lists.records r
-                  LEFT JOIN anchor a ON true
-                  WHERE {where} AND ({cursor} IS NULL OR (a.record_id IS NOT NULL AND ({after})))
-                  ORDER BY {sort} {direction},r.record_id {direction}
-                  LIMIT {pageLimit}
-                )
-                SELECT p.record_id,p.schema_version,p.revision,p.number,p.values_json,
-                       p.created_utc,p.modified_utc,p.created_by,p.modified_by,
-                       ({cursor} IS NULL OR EXISTS(SELECT 1 FROM anchor)) AS cursor_valid
-                FROM (SELECT 1) seed LEFT JOIN page p ON true
-                ORDER BY p.sort_key {direction},p.record_id {direction}
-                """;
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            var records = new List<ListRecord>(query.Limit);
-            var hasMore = false;
-            while (await reader.ReadAsync(ct))
-            {
-                if (!reader.GetBoolean(9)) throw Validation("Page cursor is no longer present in this filtered list.");
-                if (reader.IsDBNull(0)) continue;
-                if (records.Count == query.Limit) { hasMore = true; break; }
-                records.Add(ReadRecord(reader, workspaceId, listId));
-            }
-            return new RecordPage(records, hasMore ? records[^1].Id : null, definition.SchemaVersion);
+                    WorkspaceId = workspaceId,
+                    ListId = listId,
+                    RecordId = envelope.RecordId!.Value,
+                    SchemaVersion = envelope.SchemaVersion!.Value,
+                    Revision = envelope.Revision!.Value,
+                    Number = envelope.Number!.Value,
+                    ValuesJson = envelope.ValuesJson!,
+                    CreatedUtc = envelope.CreatedUtc!.Value,
+                    ModifiedUtc = envelope.ModifiedUtc!.Value,
+                    CreatedBy = envelope.CreatedBy!,
+                    ModifiedBy = envelope.ModifiedBy!
+                }).ToList();
+                var hasMore = rows.Count > query.Limit;
+                if (hasMore) rows.RemoveAt(rows.Count - 1);
+                var result = rows.Select(ToListRecord).ToArray();
+                return new RecordPage(result, hasMore ? result[^1].Id : null, definition.SchemaVersion);
             }, ct);
         }
     }
 
-    private static string QueryParameter(NpgsqlCommand command, NpgsqlDbType type, object? value)
+    private static IQueryable<RecordRow> ApplyFilter(IQueryable<RecordRow> query, ListField field,
+        RecordFilter filter)
     {
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = type, Value = value ?? DBNull.Value });
-        return "$" + command.Parameters.Count.ToString(CultureInfo.InvariantCulture);
+        var key = field.Id.ToString("D");
+        if (filter.Value is null)
+            return filter.Operator == FilterOperator.NotEqual
+                ? query.Where(row => PostgreSqlListDbContext.JsonText(row.ValuesJson, key) != null)
+                : query.Where(row => PostgreSqlListDbContext.JsonText(row.ValuesJson, key) == null);
+
+        using var document = JsonDocument.Parse(filter.Value.ToJsonString());
+        var json = document.RootElement;
+        var stringValue = json.ValueKind == JsonValueKind.String ? json.GetString() : null;
+        return field.Type switch
+        {
+            ListFieldType.Integer => Compare(query,
+                row => (long?)Convert.ToInt64(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)),
+                filter.Operator, (long?)json.GetInt64()),
+            ListFieldType.Decimal => Compare(query,
+                row => (decimal?)Convert.ToDecimal(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)),
+                filter.Operator, (decimal?)json.GetDecimal()),
+            ListFieldType.Boolean when filter.Operator is FilterOperator.Equal or FilterOperator.NotEqual =>
+                Compare(query,
+                    row => (bool?)Convert.ToBoolean(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)),
+                    filter.Operator, (bool?)json.GetBoolean()),
+            ListFieldType.Text or ListFieldType.Choice when filter.Operator is not FilterOperator.Equal and not FilterOperator.NotEqual =>
+                Compare(query, row => PostgreSqlListDbContext.Utf16Compare(
+                    PostgreSqlListDbContext.JsonText(row.ValuesJson, key), stringValue), filter.Operator, 0),
+            ListFieldType.Timestamp when filter.Operator is not FilterOperator.Equal and not FilterOperator.NotEqual =>
+                Compare(query, row => PostgreSqlListDbContext.TimestampCompare(
+                    PostgreSqlListDbContext.JsonText(row.ValuesJson, key), stringValue), filter.Operator, 0),
+            ListFieldType.Timestamp => Compare(query, row => EF.Functions.Collate(
+                    PostgreSqlListDbContext.TimestampKey(
+                        PostgreSqlListDbContext.JsonText(row.ValuesJson, key))!, "C"),
+                filter.Operator, QueryTimestampKey(stringValue!)),
+            _ when filter.Operator is FilterOperator.Equal or FilterOperator.NotEqual =>
+                Compare(query, row => EF.Functions.Collate(
+                    PostgreSqlListDbContext.JsonText(row.ValuesJson, key)!, "C"), filter.Operator,
+                    stringValue),
+            _ => Compare(query, row => PostgreSqlListDbContext.CCompare(
+                PostgreSqlListDbContext.JsonText(row.ValuesJson, key), stringValue), filter.Operator, 0)
+        };
     }
 
-    private static string QueryScalarExpression(ListFieldType type, string raw, bool ordered) => type switch
+    private static IQueryable<RecordRow> ApplyOrder(IQueryable<RecordRow> query, ListField field, bool descending)
     {
-        ListFieldType.Integer => $"({raw})::bigint",
-        ListFieldType.Decimal => $"({raw})::numeric",
-        ListFieldType.Boolean => $"({raw})::boolean",
-        ListFieldType.Text or ListFieldType.Choice when ordered => QueryOrdinalExpression(raw),
-        ListFieldType.Timestamp => QueryTimestampExpression(raw),
-        _ => $"{raw} COLLATE \"C\""
-    };
-
-    private static (NpgsqlDbType Type, object Value) QueryScalarParameter(ListFieldType type, JsonNode node, bool ordered)
-    {
-        using var document = JsonDocument.Parse(node.ToJsonString());
-        var json = document.RootElement;
-        return type switch
+        var key = field.Id.ToString("D");
+        return field.Type switch
         {
-            ListFieldType.Integer => (NpgsqlDbType.Bigint, json.GetInt64()),
-            ListFieldType.Decimal => (NpgsqlDbType.Numeric, json.GetDecimal()),
-            ListFieldType.Boolean => (NpgsqlDbType.Boolean, json.GetBoolean()),
-            ListFieldType.Text or ListFieldType.Choice when ordered => (NpgsqlDbType.Bytea, Encoding.BigEndianUnicode.GetBytes(json.GetString()!)),
-            ListFieldType.Timestamp => (NpgsqlDbType.Text, QueryTimestampKey(json.GetString()!)),
-            _ => (NpgsqlDbType.Text, json.GetString()!)
+            ListFieldType.Integer => Order(query,
+                row => (long?)Convert.ToInt64(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)), descending),
+            ListFieldType.Decimal => Order(query,
+                row => (decimal?)Convert.ToDecimal(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)), descending),
+            ListFieldType.Boolean => Order(query,
+                row => (bool?)Convert.ToBoolean(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)), descending),
+            ListFieldType.Text or ListFieldType.Choice => Order(query,
+                row => PostgreSqlListDbContext.Utf16Key(
+                    PostgreSqlListDbContext.JsonText(row.ValuesJson, key)), descending),
+            ListFieldType.Timestamp => Order(query,
+                row => EF.Functions.Collate(PostgreSqlListDbContext.TimestampKey(
+                    PostgreSqlListDbContext.JsonText(row.ValuesJson, key))!, "C"), descending),
+            _ => Order(query, row => EF.Functions.Collate(
+                PostgreSqlListDbContext.JsonText(row.ValuesJson, key)!, "C"), descending)
         };
+    }
+
+    private static IQueryable<RecordRow> ApplyAfterAnchor(IQueryable<RecordRow> query,
+        IQueryable<RecordRow> anchor, ListField field, bool descending)
+    {
+        var key = field.Id.ToString("D");
+        return field.Type switch
+        {
+            ListFieldType.Integer => AfterAnchor(query, anchor,
+                row => (long?)Convert.ToInt64(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)), descending),
+            ListFieldType.Decimal => AfterAnchor(query, anchor,
+                row => (decimal?)Convert.ToDecimal(PostgreSqlListDbContext.JsonText(row.ValuesJson, key)), descending),
+            ListFieldType.Boolean => AfterAnchorByComparison(query, anchor,
+                row => PostgreSqlListDbContext.JsonText(row.ValuesJson, key),
+                nameof(PostgreSqlListDbContext.CCompare), descending),
+            ListFieldType.Text or ListFieldType.Choice => AfterAnchorByComparison(query, anchor,
+                row => PostgreSqlListDbContext.JsonText(row.ValuesJson, key),
+                nameof(PostgreSqlListDbContext.Utf16Compare), descending),
+            ListFieldType.Timestamp => AfterAnchorByComparison(query, anchor,
+                row => PostgreSqlListDbContext.JsonText(row.ValuesJson, key),
+                nameof(PostgreSqlListDbContext.TimestampCompare), descending),
+            _ => AfterAnchorByComparison(query, anchor,
+                row => PostgreSqlListDbContext.JsonText(row.ValuesJson, key),
+                nameof(PostgreSqlListDbContext.CCompare), descending)
+        };
+    }
+
+    private static IQueryable<RecordRow> Compare<T>(IQueryable<RecordRow> query,
+        Expression<Func<RecordRow, T>> selector, FilterOperator operation, T value)
+    {
+        var right = Expression.Constant(value, typeof(T));
+        var comparison = operation switch
+        {
+            FilterOperator.Equal => Expression.Equal(selector.Body, right),
+            FilterOperator.NotEqual => Expression.NotEqual(selector.Body, right),
+            FilterOperator.GreaterThan => Expression.GreaterThan(selector.Body, right),
+            FilterOperator.GreaterOrEqual => Expression.GreaterThanOrEqual(selector.Body, right),
+            FilterOperator.LessThan => Expression.LessThan(selector.Body, right),
+            FilterOperator.LessOrEqual => Expression.LessThanOrEqual(selector.Body, right),
+            _ => throw Validation("Unknown query operator.")
+        };
+        return query.Where(Expression.Lambda<Func<RecordRow, bool>>(comparison, selector.Parameters));
+    }
+
+    private static IOrderedQueryable<RecordRow> Order<T>(IQueryable<RecordRow> query,
+        Expression<Func<RecordRow, T>> selector, bool descending)
+    {
+        var nullValue = Expression.Constant(null, typeof(T));
+        var isNull = Expression.Lambda<Func<RecordRow, bool>>(
+            Expression.Equal(selector.Body, nullValue), selector.Parameters);
+        return descending
+            ? query.OrderBy(isNull).ThenByDescending(selector).ThenByDescending(row => row.RecordId)
+            : query.OrderByDescending(isNull).ThenBy(selector).ThenBy(row => row.RecordId);
     }
 
     private static string QueryTimestampKey(string value) => value[..19] +
         (value.Length > 20 ? value[20..^1] : "").PadRight(7, '0');
 
-    // PostgreSQL timestamptz stores microseconds. Preserve the accepted seventh
-    // fractional digit by ordering the canonical UTC seconds and padded fraction.
-    private static string QueryTimestampExpression(string raw) => $"""
-        (CASE WHEN {raw} IS NULL THEN NULL ELSE
-          substring({raw} FROM 1 FOR 19) ||
-          rpad(CASE WHEN length({raw})>20 THEN substring({raw} FROM 21 FOR length({raw})-21) ELSE '' END,7,'0')
-         END) COLLATE "C"
-        """;
+    private static IQueryable<RecordRow> AfterAnchor<T>(IQueryable<RecordRow> query,
+        IQueryable<RecordRow> anchor, Expression<Func<RecordRow, T?>> selector, bool descending) where T : struct
+    {
+        var pairs = query.SelectMany(_ => anchor, (row, anchorRow) => new RecordPair { Row = row, Anchor = anchorRow });
+        var parameter = Expression.Parameter(typeof(RecordPair), "pair");
+        var row = Expression.Property(parameter, nameof(RecordPair.Row));
+        var anchorRow = Expression.Property(parameter, nameof(RecordPair.Anchor));
+        var rowValue = new ReplaceParameterVisitor(selector.Parameters[0], row).Visit(selector.Body)!;
+        var anchorValue = new ReplaceParameterVisitor(selector.Parameters[0], anchorRow).Visit(selector.Body)!;
+        var rowId = Expression.Property(row, nameof(RecordRow.RecordId));
+        var anchorId = Expression.Property(anchorRow, nameof(RecordRow.RecordId));
+        var compareId = Expression.Call(rowId, nameof(Guid.CompareTo), Type.EmptyTypes, anchorId);
+        var tied = descending ? Expression.LessThan(compareId, Expression.Constant(0))
+            : Expression.GreaterThan(compareId, Expression.Constant(0));
+        var rowNull = Expression.Equal(rowValue, Expression.Constant(null, typeof(T?)));
+        var anchorNull = Expression.Equal(anchorValue, Expression.Constant(null, typeof(T?)));
+        var ordered = descending ? Expression.LessThan(rowValue, anchorValue)
+            : Expression.GreaterThan(rowValue, anchorValue);
+        var equal = Expression.Equal(rowValue, anchorValue);
+        var nullOrder = descending
+            ? Expression.AndAlso(rowNull, Expression.Not(anchorNull))
+            : Expression.AndAlso(Expression.Not(rowNull), anchorNull);
+        var body = Expression.OrElse(nullOrder, Expression.OrElse(ordered, Expression.AndAlso(equal, tied)));
+        return pairs.Where(Expression.Lambda<Func<RecordPair, bool>>(body, parameter)).Select(pair => pair.Row);
+    }
 
-    // UTF-8/C collation puts supplementary codepoints after BMP characters. .NET
-    // ordinal compares UTF-16 code units, so encode surrogate pairs explicitly.
-    // Keep this server-side expression limited to ordered text operations.
-    private static string QueryOrdinalExpression(string raw) => $"""
-        CASE WHEN {raw} IS NULL THEN NULL ELSE decode(coalesce((
-          SELECT string_agg(CASE WHEN ascii(substring({raw} FROM utf16.n FOR 1))<=65535
-            THEN lpad(to_hex(ascii(substring({raw} FROM utf16.n FOR 1))),4,'0')
-            ELSE lpad(to_hex(((ascii(substring({raw} FROM utf16.n FOR 1))-65536)>>10)+55296),4,'0') ||
-                 lpad(to_hex(((ascii(substring({raw} FROM utf16.n FOR 1))-65536)&1023)+56320),4,'0')
-            END,'' ORDER BY utf16.n)
-          FROM generate_series(1,char_length({raw})) utf16(n)
-        ),''),'hex') END
-        """;
+    private static IQueryable<RecordRow> AfterAnchorByComparison(IQueryable<RecordRow> query,
+        IQueryable<RecordRow> anchor, Expression<Func<RecordRow, string?>> selector,
+        string comparisonMethod, bool descending)
+    {
+        var pairs = query.SelectMany(_ => anchor, (row, anchorRow) => new RecordPair { Row = row, Anchor = anchorRow });
+        var parameter = Expression.Parameter(typeof(RecordPair), "pair");
+        var row = Expression.Property(parameter, nameof(RecordPair.Row));
+        var anchorRow = Expression.Property(parameter, nameof(RecordPair.Anchor));
+        var rowValue = new ReplaceParameterVisitor(selector.Parameters[0], row).Visit(selector.Body)!;
+        var anchorValue = new ReplaceParameterVisitor(selector.Parameters[0], anchorRow).Visit(selector.Body)!;
+        var method = typeof(PostgreSqlListDbContext).GetMethod(comparisonMethod,
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var comparison = Expression.Call(method, rowValue, anchorValue);
+        var rowNull = Expression.Equal(rowValue, Expression.Constant(null, typeof(string)));
+        var anchorNull = Expression.Equal(anchorValue, Expression.Constant(null, typeof(string)));
+        var rowId = Expression.Property(row, nameof(RecordRow.RecordId));
+        var anchorId = Expression.Property(anchorRow, nameof(RecordRow.RecordId));
+        var compareId = Expression.Call(rowId, nameof(Guid.CompareTo), Type.EmptyTypes, anchorId);
+        var tied = descending ? Expression.LessThan(compareId, Expression.Constant(0))
+            : Expression.GreaterThan(compareId, Expression.Constant(0));
+        var ordered = descending ? Expression.LessThan(comparison, Expression.Constant(0))
+            : Expression.GreaterThan(comparison, Expression.Constant(0));
+        var nullOrder = descending
+            ? Expression.AndAlso(rowNull, Expression.Not(anchorNull))
+            : Expression.AndAlso(Expression.Not(rowNull), anchorNull);
+        var bothNull = Expression.AndAlso(rowNull, anchorNull);
+        var equal = Expression.OrElse(bothNull,
+            Expression.AndAlso(Expression.Not(rowNull), Expression.AndAlso(Expression.Not(anchorNull),
+                Expression.Equal(comparison, Expression.Constant(0)))));
+        var body = Expression.OrElse(nullOrder, Expression.OrElse(ordered, Expression.AndAlso(equal, tied)));
+        return pairs.Where(Expression.Lambda<Func<RecordPair, bool>>(body, parameter)).Select(pair => pair.Row);
+    }
+
+    private static IOrderedQueryable<QueryEnvelope> ApplyEnvelopeOrder(IQueryable<QueryEnvelope> query,
+        ListField? field, bool descending)
+    {
+        if (field is null)
+            return descending ? query.OrderByDescending(row => row.RecordId) : query.OrderBy(row => row.RecordId);
+        return field.Type switch
+        {
+            ListFieldType.Integer => descending
+                ? query.OrderBy(row => row.LongSort == null).ThenByDescending(row => row.LongSort)
+                    .ThenByDescending(row => row.RecordId)
+                : query.OrderByDescending(row => row.LongSort == null).ThenBy(row => row.LongSort)
+                    .ThenBy(row => row.RecordId),
+            ListFieldType.Decimal => descending
+                ? query.OrderBy(row => row.DecimalSort == null).ThenByDescending(row => row.DecimalSort)
+                    .ThenByDescending(row => row.RecordId)
+                : query.OrderByDescending(row => row.DecimalSort == null).ThenBy(row => row.DecimalSort)
+                    .ThenBy(row => row.RecordId),
+            ListFieldType.Boolean => descending
+                ? query.OrderBy(row => row.BooleanSort == null).ThenByDescending(row => row.BooleanSort)
+                    .ThenByDescending(row => row.RecordId)
+                : query.OrderByDescending(row => row.BooleanSort == null).ThenBy(row => row.BooleanSort)
+                    .ThenBy(row => row.RecordId),
+            ListFieldType.Text or ListFieldType.Choice => descending
+                ? query.OrderBy(row => row.BytesSort == null).ThenByDescending(row => row.BytesSort)
+                    .ThenByDescending(row => row.RecordId)
+                : query.OrderByDescending(row => row.BytesSort == null).ThenBy(row => row.BytesSort)
+                    .ThenBy(row => row.RecordId),
+            _ => descending
+                ? query.OrderBy(row => row.StringSort == null)
+                    .ThenByDescending(row => EF.Functions.Collate(row.StringSort!, "C"))
+                    .ThenByDescending(row => row.RecordId)
+                : query.OrderByDescending(row => row.StringSort == null)
+                    .ThenBy(row => EF.Functions.Collate(row.StringSort!, "C"))
+                    .ThenBy(row => row.RecordId)
+        };
+    }
+
+    private sealed class ReplaceParameterVisitor(ParameterExpression source, Expression target)
+        : ExpressionVisitor
+    {
+        protected override Expression VisitParameter(ParameterExpression node) => node == source ? target : node;
+    }
+
+    private sealed class RecordPair { public required RecordRow Row { get; init; } public required RecordRow Anchor { get; init; } }
+    private sealed class QueryEnvelope
+    {
+        public bool HasRecord { get; init; }
+        public bool CursorValid { get; init; }
+        public Guid? RecordId { get; init; }
+        public long? SchemaVersion { get; init; }
+        public long? Revision { get; init; }
+        public long? Number { get; init; }
+        public string? ValuesJson { get; init; }
+        public DateTimeOffset? CreatedUtc { get; init; }
+        public DateTimeOffset? ModifiedUtc { get; init; }
+        public string? CreatedBy { get; init; }
+        public string? ModifiedBy { get; init; }
+        public long? LongSort { get; init; }
+        public decimal? DecimalSort { get; init; }
+        public bool? BooleanSort { get; init; }
+        public byte[]? BytesSort { get; init; }
+        public string? StringSort { get; init; }
+    }
 }

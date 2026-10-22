@@ -1,19 +1,38 @@
 using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
 
 /// <summary>Immutable, deduplicated content in bounded database chunks; reclamation is quiescent.</summary>
-public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long maxObjectBytes = 512L * 1024 * 1024) : IContentStore, IStorageBudgetParticipant
+public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetParticipant
 {
-    public object BudgetScope => dataSource;
+    private readonly DbContextOptions<CellBridgeDbContext> _options;
+    private readonly object _budgetScope;
+    private readonly long _maxObjectBytes;
     private readonly SemaphoreSlim _writers = new(4);
+
+    public PostgreSqlContentStore(NpgsqlDataSource dataSource, long maxObjectBytes = 512L * 1024 * 1024)
+        : this(PostgreSqlDatabase.CreateOptions(dataSource), maxObjectBytes, dataSource) { }
+
+    public PostgreSqlContentStore(DbContextOptions<CellBridgeDbContext> options,
+        long maxObjectBytes = 512L * 1024 * 1024) : this(options, maxObjectBytes, options) { }
+
+    private PostgreSqlContentStore(DbContextOptions<CellBridgeDbContext> options, long maxObjectBytes, object budgetScope)
+    {
+        _options = PostgreSqlDatabase.ValidateOptions(options);
+        _maxObjectBytes = maxObjectBytes;
+        _budgetScope = budgetScope;
+    }
+
+    public object BudgetScope => _budgetScope;
     public bool Durable => true;
     public bool Shared => true;
+
     public async ValueTask<ContentHandle> WriteAsync(Stream source, CancellationToken cancellationToken = default)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxObjectBytes);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_maxObjectBytes);
         await _writers.WaitAsync(cancellationToken);
         try { return await WriteCoreAsync(source, cancellationToken); }
         finally { _writers.Release(); }
@@ -31,85 +50,88 @@ public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long max
         while ((read = await source.ReadAsync(buffer, cancellationToken)) != 0)
         {
             length = checked(length + read);
-            StorageLimits.Check("object bytes", length, maxObjectBytes);
+            StorageLimits.Check("object bytes", length, _maxObjectBytes);
             hash.AppendData(buffer.AsSpan(0, read));
             await spool.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
         }
         var digest = Convert.ToHexStringLower(hash.GetHashAndReset());
         var handle = new ContentHandle(digest, length, digest);
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        await PostgreSqlStateStore.ConfigureTransactionAsync(connection, transaction, cancellationToken);
-        await using var insert = new NpgsqlCommand("INSERT INTO cellbridge_objects VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", connection, transaction);
-        insert.Parameters.Add(new NpgsqlParameter { Value = digest });
-        insert.Parameters.Add(new NpgsqlParameter { Value = length });
-        if (await insert.ExecuteNonQueryAsync(cancellationToken) != 0)
+        await using var context = new CellBridgeDbContext(_options);
+        await using var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
+        await PostgreSqlStateStore.ConfigureTransactionAsync(context, cancellationToken);
+        var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
+        int inserted;
+        // Deduplication needs one atomic insert across hosts; EF has no ON CONFLICT LINQ operation.
+        await using (var insert = new NpgsqlCommand(
+            "INSERT INTO cellbridge_objects VALUES ($1,$2,$1) ON CONFLICT DO NOTHING", connection, transaction))
         {
-            await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, length, 0, cancellationToken);
+            insert.Parameters.AddWithValue(digest);
+            insert.Parameters.AddWithValue(length);
+            inserted = await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+        if (inserted != 0)
+        {
+            await PostgreSqlStorageBudget.AdjustAsync(context, length, 0, cancellationToken);
+            await context.SaveChangesAsync(cancellationToken);
             spool.Position = 0;
-            int ordinal = 0;
+            var ordinal = 0;
             while ((read = await spool.ReadAsync(buffer, cancellationToken)) != 0)
             {
-                await using var chunk = new NpgsqlCommand("INSERT INTO cellbridge_chunks VALUES ($1,$2,$3)", connection, transaction);
-                chunk.Parameters.Add(new NpgsqlParameter { Value = digest });
-                chunk.Parameters.Add(new NpgsqlParameter { Value = ordinal++ });
-                chunk.Parameters.Add(new NpgsqlParameter { Value = buffer.AsSpan(0, read).ToArray() });
-                await chunk.ExecuteNonQueryAsync(cancellationToken);
+                var chunk = new ChunkRow
+                {
+                    ObjectKey = digest,
+                    Ordinal = ordinal++,
+                    Bytes = buffer.AsSpan(0, read).ToArray(),
+                };
+                context.Chunks.Add(chunk);
+                await context.SaveChangesAsync(cancellationToken);
+                context.Entry(chunk).State = EntityState.Detached;
             }
         }
         else
         {
-            // Verify existing content before returning a reused handle.
-            // An existing key alone does not prove that its content is complete.
-            await using (var metadata = new NpgsqlCommand(
-                "SELECT length,sha256 FROM cellbridge_objects WHERE object_key=$1", connection, transaction))
-            {
-                metadata.Parameters.Add(new NpgsqlParameter { Value = digest });
-                await using var reader = await metadata.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken) || reader.GetInt64(0) != length || reader.GetString(1) != digest)
-                    throw new StorageCorruptionException("Existing content has invalid metadata.");
-            }
-            await using var chunks = new NpgsqlCommand(
-                "SELECT ordinal,bytes FROM cellbridge_chunks WHERE object_key=$1 ORDER BY ordinal", connection, transaction);
-            chunks.Parameters.Add(new NpgsqlParameter { Value = digest });
-            await using var stored = await chunks.ExecuteReaderAsync(cancellationToken);
+            var metadata = await context.Objects.AsNoTracking().SingleOrDefaultAsync(
+                row => row.ObjectKey == digest, cancellationToken);
+            if (metadata is null || metadata.Length != length || metadata.Sha256 != digest)
+                throw new StorageCorruptionException("Existing content has invalid metadata.");
             using var verification = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             long storedLength = 0;
-            int ordinal = 0;
-            while (await stored.ReadAsync(cancellationToken))
+            var ordinal = 0;
+            await foreach (var chunk in context.Chunks.AsNoTracking().Where(row => row.ObjectKey == digest)
+                               .OrderBy(row => row.Ordinal).AsAsyncEnumerable().WithCancellation(cancellationToken))
             {
-                var bytes = stored.GetFieldValue<byte[]>(1);
-                storedLength = checked(storedLength + bytes.Length);
-                if (stored.GetInt32(0) != ordinal++ || bytes.Length == 0 || storedLength > length)
+                storedLength = checked(storedLength + chunk.Bytes.Length);
+                if (chunk.Ordinal != ordinal++ || chunk.Bytes.Length == 0 || storedLength > length)
                     throw new StorageCorruptionException("Existing content has invalid chunks.");
-                verification.AppendData(bytes);
+                verification.AppendData(chunk.Bytes);
             }
             if (storedLength != length || Convert.ToHexStringLower(verification.GetHashAndReset()) != digest)
                 throw new StorageCorruptionException("Existing content chunks failed integrity verification.");
         }
-        await transaction.CommitAsync(CancellationToken.None);
+        await databaseTransaction.CommitAsync(CancellationToken.None);
         return handle;
     }
+
     public async ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default)
     {
-        var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        var context = new CellBridgeDbContext(_options);
         try
         {
-            await using (var check = new NpgsqlCommand("SELECT length,sha256 FROM cellbridge_objects WHERE object_key=$1", connection))
-            {
-                check.Parameters.Add(new NpgsqlParameter { Value = handle.Key });
-                await using var metadata = await check.ExecuteReaderAsync(cancellationToken);
-                if (!await metadata.ReadAsync(cancellationToken) || metadata.GetInt64(0) != handle.Length || metadata.GetString(1) != handle.Sha256)
-                    throw new StorageCorruptionException("Referenced content is missing or has invalid metadata.");
-            }
-            var command = new NpgsqlCommand("SELECT bytes FROM cellbridge_chunks WHERE object_key=$1 ORDER BY ordinal", connection);
-            command.Parameters.Add(new NpgsqlParameter { Value = handle.Key });
-            var reader = await command.ExecuteReaderAsync(cancellationToken);
-            return new ChunkStream(connection, command, reader, handle);
+            var metadata = await context.Objects.AsNoTracking().SingleOrDefaultAsync(
+                row => row.ObjectKey == handle.Key, cancellationToken);
+            if (metadata is null || metadata.Length != handle.Length || metadata.Sha256 != handle.Sha256)
+                throw new StorageCorruptionException("Referenced content is missing or has invalid metadata.");
+            var readCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var chunks = context.Chunks.AsNoTracking().Where(row => row.ObjectKey == handle.Key)
+                .OrderBy(row => row.Ordinal).Select(row => row.Bytes).AsAsyncEnumerable()
+                .GetAsyncEnumerator(readCancellation.Token);
+            return new ChunkStream(context, chunks, readCancellation, handle);
         }
-        catch { await connection.DisposeAsync(); throw; }
+        catch { await context.DisposeAsync(); throw; }
     }
-    private sealed class ChunkStream(NpgsqlConnection connection, NpgsqlCommand command, NpgsqlDataReader reader, ContentHandle handle) : Stream
+
+    private sealed class ChunkStream(CellBridgeDbContext context, IAsyncEnumerator<byte[]> chunks,
+        CancellationTokenSource readCancellation, ContentHandle handle) : Stream
     {
         private byte[] _chunk = [];
         private int _offset;
@@ -121,26 +143,25 @@ public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long max
         public override bool CanWrite => false;
         public override long Length => handle.Length;
         public override long Position { get => _position; set => throw new NotSupportedException(); }
-        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
         {
             if (buffer.Length == 0 || _verified) return 0;
             if (_offset == _chunk.Length)
             {
-                if (!await reader.ReadAsync(cancellationToken))
+                if (!await MoveNextAsync(cancellationToken))
                 {
-                    if (!_verified)
-                    {
-                        _verified = true;
-                        if (_position != handle.Length || Convert.ToHexStringLower(_hash.GetHashAndReset()) != handle.Sha256)
-                            throw new StorageCorruptionException("Content chunks failed integrity verification.");
-                    }
+                    _verified = true;
+                    if (_position != handle.Length || Convert.ToHexStringLower(_hash.GetHashAndReset()) != handle.Sha256)
+                        throw new StorageCorruptionException("Content chunks failed integrity verification.");
                     return 0;
                 }
-                _chunk = reader.GetFieldValue<byte[]>(0);
+                _chunk = chunks.Current;
                 if (_chunk.Length == 0) throw new StorageCorruptionException("An empty content chunk is invalid.");
                 _offset = 0;
             }
-            int count = Math.Min(buffer.Length, _chunk.Length - _offset);
+            var count = Math.Min(buffer.Length, _chunk.Length - _offset);
             _chunk.AsMemory(_offset, count).CopyTo(buffer);
             _hash.AppendData(_chunk.AsSpan(_offset, count));
             _offset += count;
@@ -148,26 +169,42 @@ public sealed class PostgreSqlContentStore(NpgsqlDataSource dataSource, long max
             if (_position > handle.Length) throw new StorageCorruptionException("Content exceeds its declared length.");
             if (_position == handle.Length)
             {
-                // Validate before returning the final bytes to HTTP streaming.
-                // An error after writing the full Content-Length could otherwise
-                // look like a completed download to its caller.
-                if (_offset != _chunk.Length || await reader.ReadAsync(cancellationToken) ||
+                if (_offset != _chunk.Length || await MoveNextAsync(cancellationToken) ||
                     Convert.ToHexStringLower(_hash.GetHashAndReset()) != handle.Sha256)
                     throw new StorageCorruptionException("Content chunks failed integrity verification.");
                 _verified = true;
             }
             return count;
         }
-        public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
-        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        private async ValueTask<bool> MoveNextAsync(CancellationToken cancellationToken)
+        {
+            using var registration = cancellationToken.Register(static state =>
+                ((CancellationTokenSource)state!).Cancel(), readCancellation);
+            return await chunks.MoveNextAsync();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { reader.Dispose(); command.Dispose(); connection.Dispose(); _hash.Dispose(); }
+            if (disposing)
+            {
+                chunks.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                context.Dispose();
+                readCancellation.Dispose();
+                _hash.Dispose();
+            }
             base.Dispose(disposing);
         }
         public override async ValueTask DisposeAsync()
         {
-            await reader.DisposeAsync(); await command.DisposeAsync(); await connection.DisposeAsync(); _hash.Dispose();
+            await chunks.DisposeAsync();
+            await context.DisposeAsync();
+            readCancellation.Dispose();
+            _hash.Dispose();
             GC.SuppressFinalize(this);
         }
         public override void Flush() { }

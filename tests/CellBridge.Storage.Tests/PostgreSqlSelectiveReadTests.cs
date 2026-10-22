@@ -94,7 +94,7 @@ public sealed class PostgreSqlSelectiveReadTests
                 usage = (long)(await ledger.ExecuteScalarAsync())!;
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
             await store.InitializeAsync();
@@ -173,7 +173,7 @@ public sealed class PostgreSqlSelectiveReadTests
             var before = await SnapshotJson(source);
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await store.InitializeAsync();
             Assert.Equal(before, await SnapshotJson(source));
@@ -227,7 +227,7 @@ public sealed class PostgreSqlSelectiveReadTests
                 .CreateAsync("/projection-rollback.docx", MinimalDocx.Create(), TestActor.Value))!;
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await using (var corrupt = source.CreateCommand("UPDATE cellbridge_states SET state_json='not JSON'"))
                 await corrupt.ExecuteNonQueryAsync();

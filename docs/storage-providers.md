@@ -8,6 +8,11 @@ document identities, current revisions, synchronization graphs, save receipts,
 sessions and leases. Content uses PostgreSQL chunks or immutable filesystem
 objects. In-memory stores are available for disposable development.
 
+The PostgreSQL package owns its EF Core model and versioned migrations. It does
+not add entities to the application's DbContext. Document storage and native
+Lists use independent contexts, migration histories and package dependencies.
+Only PostgreSQL is implemented and tested by these providers.
+
 ## Run the durable sample
 
 With Aspire stopped, build and start from the repository root:
@@ -30,6 +35,21 @@ and retained snapshots. Stop all hosts and workers using the database first.
 Unsupported schemas, corruption or exceeded limits abort the upgrade without
 changing persisted data. Follow the [upgrade procedure](#upgrading-a-durable-host)
 for backups and rollback.
+
+Consumers can invoke the same migration implementation from their own initializer
+or deployment application. The implementation is in the reusable
+`CellBridge.Storage.PostgreSql` package:
+
+```csharp
+await using var source = NpgsqlDataSource.Create(connectionString);
+await new PostgreSqlStorageMigrator(source, limits).MigrateAsync();
+```
+
+Run this step with setup credentials and every writer stopped. Service
+registration, health checks and ordinary document operations do not create or
+migrate tables. Existing SQL-created schemas keep their documents, content,
+graphs, replies and retained snapshots when setup records the EF migration
+history. The application keeps ownership of its own business tables.
 
 Current metadata and paged revision summaries avoid loading complete document
 history with the built-in stores. See [reading document metadata and history](async-document-authorization.md#read-document-metadata-and-history).
@@ -134,6 +154,19 @@ To use local filesystem content, replace the content store with
 `new PostgreSqlFileSystemContentStore(source, root)` and set
 `multipleInstances: false`. Volatile stores require
 `AddCellBridge(..., requireDurability: false)`.
+
+For EF configuration, supply `DbContextOptions<CellBridgeDbContext>` built with
+`UseNpgsql` to the state store, PostgreSQL content store and migrator. The context
+is library-owned and sealed. Each operation creates its own context; the stores
+can share the consumer's configured `NpgsqlDataSource` and connection pool.
+Pass the same options instance to both stores for shared storage accounting.
+Connection settings, command timeouts, logging and interceptors remain active.
+Configure a non-retrying EF execution strategy. The provider rejects
+`EnableRetryOnFailure` because its explicit transactions and receipt checks own
+retries after uncertain outcomes.
+PostgreSQL row and advisory locks still coordinate document transitions,
+namespace changes and shared storage accounting. EF does not replace those
+database guarantees.
 
 The host supplies authentication and maps validated principals to CellBridge
 subjects. Document grants deny access by default. See
@@ -296,7 +329,7 @@ power-loss and shared-filesystem behavior need deployment-specific qualification
    the repository's `CellBridge.Storage.Setup` tool from matching source.
 4. Run setup against the stopped database. It migrates storage schema 3, 4 or 5 to 6,
    preserves documents and all retained snapshots, builds the selective read indexes,
-   and initializes recovery schema 1.
+   initializes recovery schema 1 and records the document EF migration history.
    Older development schemas need a separate migration or recreation; setup rejects them.
 5. Start one upgraded host. Check provider health, document identities,
    permissions, downloads and a save/reopen cycle before enabling other writers.

@@ -230,6 +230,7 @@ public sealed class WritePerformanceRegressionTests(ListDatabaseFixture database
                 var replay = await loser;
                 Assert.True(replay.Replayed);
                 Assert.Equal((winner.Number, winner.Revision), (replay.Number, replay.Revision));
+                Assert.True(blocker.DatabaseClockReads > 0);
             }
             finally
             {
@@ -267,6 +268,9 @@ public sealed class WritePerformanceRegressionTests(ListDatabaseFixture database
         private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _enabled;
         private int _claimed;
+        private int _databaseClockReads;
+
+        public int DatabaseClockReads => Volatile.Read(ref _databaseClockReads);
 
         public ILogger CreateLogger(string categoryName) => new BlockingLogger(this);
         public void Dispose() => _release.TrySetResult();
@@ -288,8 +292,13 @@ public sealed class WritePerformanceRegressionTests(ListDatabaseFixture database
             public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
                 Func<TState, Exception?, string> formatter)
             {
+                var message = formatter(state, exception);
+                if (Volatile.Read(ref owner._enabled) != 0 &&
+                    message.Contains("SELECT clock_timestamp()", StringComparison.Ordinal))
+                    Interlocked.Increment(ref owner._databaseClockReads);
                 if (Volatile.Read(ref owner._enabled) == 0 ||
-                    !formatter(state, exception).Contains("WITH requested AS", StringComparison.Ordinal) ||
+                    !message.Contains("SELECT record_id FROM cellbridge_lists.records", StringComparison.Ordinal) ||
+                    !message.Contains("FOR KEY SHARE", StringComparison.Ordinal) ||
                     Interlocked.CompareExchange(ref owner._claimed, 1, 0) != 0)
                     return;
                 owner._blocked.TrySetResult();

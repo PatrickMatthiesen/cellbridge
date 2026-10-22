@@ -338,8 +338,9 @@ public sealed class DatabaseRecoveryTests
         Assert.NotEmpty(names);
         foreach (var name in names)
         {
-            Assert.Matches("^cellbridge_[a-z_]+$", name);
-            await using var query = db.CreateCommand($"SELECT row FROM (SELECT to_jsonb(t)::text AS row FROM {name} t) rows ORDER BY row COLLATE \"C\"");
+            if (name != "__CellBridgeDocumentMigrationsHistory")
+                Assert.Matches("^cellbridge_[a-z_]+$", name);
+            await using var query = db.CreateCommand($"SELECT row FROM (SELECT to_jsonb(t)::text AS row FROM \"{name}\" t) rows ORDER BY row COLLATE \"C\"");
             var rows = new List<string>();
             await using var reader = await query.ExecuteReaderAsync();
             while (await reader.ReadAsync()) rows.Add(reader.GetString(0));

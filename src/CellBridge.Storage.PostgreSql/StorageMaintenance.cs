@@ -1,4 +1,5 @@
 using CellBridge.Storage.Abstractions;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
@@ -6,84 +7,84 @@ namespace CellBridge.Storage.PostgreSql;
 public sealed record StorageMaintenanceReport(long StoredBytes, long Documents, long Snapshots,
     long ReferencedObjects, long OrphanObjects, long OrphanBytes, bool Applied);
 
-/// <summary>
-/// Quiescent maintenance only. All hosts, readers and writers must be stopped.
-/// Every historic snapshot remains a root; this does not expire protocol history.
-/// </summary>
-public sealed class StorageMaintenance(NpgsqlDataSource source, StorageLimits? limits)
+/// <summary>Runs quiescent object collection after every host, reader and writer has stopped.</summary>
+public sealed class StorageMaintenance
 {
+    private readonly DbContextOptions<CellBridgeDbContext> _options;
+    private readonly StorageLimits? _limits;
+
     public StorageMaintenance(NpgsqlDataSource source) : this(source, null) { }
+    public StorageMaintenance(NpgsqlDataSource source, StorageLimits? limits)
+        : this(PostgreSqlDatabase.CreateOptions(source), limits) { }
+    public StorageMaintenance(DbContextOptions<CellBridgeDbContext> options, StorageLimits? limits = null)
+    {
+        _options = PostgreSqlDatabase.ValidateOptions(options);
+        _limits = limits;
+    }
+
     public async Task<StorageMaintenanceReport> CollectOrphansAsync(bool apply = false,
         bool quiescent = false, string? fileSystemRoot = null, CancellationToken cancellationToken = default)
     {
-        if (apply && !quiescent) throw new InvalidOperationException("Applying maintenance requires all readers and writers to be stopped.");
-        await using var connection = await source.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        await PostgreSqlStateStore.ConfigureTransactionAsync(connection, transaction, cancellationToken);
-        // Mutations take document/object locks before the ledger, matching normal publication.
-        // LOCK TABLE excludes concurrent SQL publication during the mark/sweep transaction.
-        await using (var gate = new NpgsqlCommand("LOCK TABLE cellbridge_documents,cellbridge_states,cellbridge_objects,cellbridge_chunks IN SHARE ROW EXCLUSIVE MODE", connection, transaction))
+        if (apply && !quiescent)
+            throw new InvalidOperationException("Applying maintenance requires all readers and writers to be stopped.");
+        await using var context = new CellBridgeDbContext(_options);
+        await using var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
+        await PostgreSqlStateStore.ConfigureTransactionAsync(context, cancellationToken);
+        var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
+        // The table barrier preserves the existing mark/sweep snapshot across all hosts.
+        await using (var gate = new NpgsqlCommand(
+            "LOCK TABLE cellbridge_documents,cellbridge_states,cellbridge_objects,cellbridge_chunks IN SHARE ROW EXCLUSIVE MODE",
+            connection, transaction))
             await gate.ExecuteNonQueryAsync(cancellationToken);
         var references = new Dictionary<string, ContentHandle>(StringComparer.Ordinal);
         long snapshots = 0;
-        await using (var states = new NpgsqlCommand("SELECT state_json FROM cellbridge_states", connection, transaction))
-        await using (var reader = await states.ExecuteReaderAsync(cancellationToken))
+        await foreach (var json in context.States.AsNoTracking().Select(row => row.StateJson)
+                           .AsAsyncEnumerable().WithCancellation(cancellationToken))
         {
-            while (await reader.ReadAsync(cancellationToken))
+            var state = DocumentStateJson.Deserialize(json, strict: true, limits: _limits);
+            if (state is null || state.FormatVersion != DocumentState.CurrentFormat)
+                throw new StorageCorruptionException("Unsupported state encountered during maintenance.");
+            snapshots++;
+            foreach (var handle in StorageReferences.Handles(state))
             {
-                var state = DocumentStateJson.Deserialize(reader.GetString(0), strict: true, limits: limits);
-                if (state is null || state.FormatVersion != DocumentState.CurrentFormat)
-                    throw new StorageCorruptionException("Unsupported state encountered during maintenance.");
-                snapshots++;
-                foreach (var handle in StorageReferences.Handles(state))
-                {
-                    if (references.TryGetValue(handle.Key, out var other) && handle != other)
-                        throw new StorageCorruptionException("Conflicting metadata for a referenced content key.");
-                    references[handle.Key] = handle;
-                }
+                if (references.TryGetValue(handle.Key, out var other) && handle != other)
+                    throw new StorageCorruptionException("Conflicting metadata for a referenced content key.");
+                references[handle.Key] = handle;
             }
         }
         var orphans = new List<ContentHandle>();
-        await using (var objects = new NpgsqlCommand("SELECT object_key,length,sha256 FROM cellbridge_objects", connection, transaction))
-        await using (var reader = await objects.ExecuteReaderAsync(cancellationToken))
+        await foreach (var row in context.Objects.AsNoTracking().AsAsyncEnumerable().WithCancellation(cancellationToken))
         {
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var handle = new ContentHandle(reader.GetString(0), reader.GetInt64(1), reader.GetString(2));
-                if (!references.Remove(handle.Key, out var expected)) orphans.Add(handle);
-                else if (expected != handle) throw new StorageCorruptionException("Referenced object metadata is corrupt.");
-            }
+            var handle = new ContentHandle(row.ObjectKey, row.Length, row.Sha256);
+            if (!references.Remove(handle.Key, out var expected)) orphans.Add(handle);
+            else if (expected != handle)
+                throw new StorageCorruptionException("Referenced object metadata is corrupt.");
         }
-        if (references.Count != 0) throw new StorageCorruptionException("Referenced objects are absent from the usage inventory. Recreate the development store; importing untracked filesystem objects is not supported.");
-        long orphanBytes = orphans.Sum(h => h.Length);
+        if (references.Count != 0)
+            throw new StorageCorruptionException("Referenced objects are absent from the usage inventory. Recreate the development store; importing untracked filesystem objects is not supported.");
+        var orphanBytes = orphans.Sum(handle => handle.Length);
         if (apply)
         {
             foreach (var orphan in orphans)
             {
                 if (fileSystemRoot is not null)
                 {
-                    if (orphan.Key.Length != 64 || orphan.Key.Any(c => !char.IsAsciiHexDigit(c)))
+                    if (orphan.Key.Length != 64 || orphan.Key.Any(character => !char.IsAsciiHexDigit(character)))
                         throw new StorageCorruptionException("Invalid orphan key.");
-                    // Unlink before releasing its charge. A crash leaves a repeatable charged reservation.
-                    CellBridge.Storage.FileSystem.FileSystemContentStore.DeleteQuiescentObject(fileSystemRoot, orphan.Key);
+                    CellBridge.Storage.FileSystem.FileSystemContentStore.DeleteQuiescentObject(
+                        fileSystemRoot, orphan.Key);
                 }
-                foreach (var table in new[] { "cellbridge_chunks", "cellbridge_objects" })
-                {
-                    await using var delete = new NpgsqlCommand($"DELETE FROM {table} WHERE object_key=$1", connection, transaction);
-                    delete.Parameters.Add(new NpgsqlParameter { Value = orphan.Key });
-                    await delete.ExecuteNonQueryAsync(cancellationToken);
-                }
+                await context.Chunks.Where(row => row.ObjectKey == orphan.Key).ExecuteDeleteAsync(cancellationToken);
+                await context.Objects.Where(row => row.ObjectKey == orphan.Key).ExecuteDeleteAsync(cancellationToken);
             }
-            await PostgreSqlStorageBudget.AdjustAsync(connection, transaction, -orphanBytes, 0, cancellationToken);
+            await PostgreSqlStorageBudget.AdjustAsync(context, -orphanBytes, 0, cancellationToken);
+            await context.SaveChangesAsync(cancellationToken);
         }
-        long bytes, documents, objectCount;
-        await using (var usage = new NpgsqlCommand("SELECT stored_bytes,document_count,(SELECT COUNT(*) FROM cellbridge_objects) FROM cellbridge_usage", connection, transaction))
-        await using (var reader = await usage.ExecuteReaderAsync(cancellationToken))
-        {
-            if (!await reader.ReadAsync(cancellationToken)) throw new StorageCorruptionException("Missing usage ledger.");
-            bytes = reader.GetInt64(0); documents = reader.GetInt64(1); objectCount = reader.GetInt64(2);
-        }
-        await transaction.CommitAsync(CancellationToken.None);
-        return new(bytes, documents, snapshots, objectCount - (apply ? 0 : orphans.Count), orphans.Count, orphanBytes, apply);
+        var usage = await context.Usage.AsNoTracking().SingleOrDefaultAsync(cancellationToken)
+            ?? throw new StorageCorruptionException("Missing usage ledger.");
+        var objectCount = await context.Objects.LongCountAsync(cancellationToken);
+        await databaseTransaction.CommitAsync(CancellationToken.None);
+        return new(usage.StoredBytes, usage.DocumentCount, snapshots,
+            objectCount - (apply ? 0 : orphans.Count), orphans.Count, orphanBytes, apply);
     }
 }

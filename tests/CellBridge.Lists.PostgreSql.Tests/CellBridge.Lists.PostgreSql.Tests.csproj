@@ -19,4 +19,9 @@
     <Using Include="Xunit" />
   </ItemGroup>
   <ItemGroup><ProjectReference Include="../CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" /></ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../testdata/lists/postgresql-schema3.sql">
+      <LogicalName>CellBridge.Lists.PostgreSql.Tests.Fixtures.postgresql-schema3.sql</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
 </Project>

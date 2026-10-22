@@ -1,4 +1,4 @@
-using Npgsql;
+using Microsoft.EntityFrameworkCore;
 
 namespace CellBridge.Lists.PostgreSql;
 
@@ -15,35 +15,31 @@ public sealed partial class PostgreSqlListEngine
             var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, null);
             if (!administrator.CanManageGrants) throw Forbidden();
             await LockQuotaAsync(connection, transaction, workspaceId, ct);
-            await using var existingCommand = Command(connection, transaction,
-                "SELECT can_create_lists,can_manage_grants FROM cellbridge_lists.memberships WHERE workspace_id=$1 AND subject=$2",
-                workspaceId, subject);
-            await using var reader = await existingCommand.ExecuteReaderAsync(ct);
-            bool? oldCreate = null;
-            bool? oldManage = null;
-            if (await reader.ReadAsync(ct))
-            {
-                oldCreate = reader.GetBoolean(0);
-                oldManage = reader.GetBoolean(1);
-            }
-            await reader.DisposeAsync();
+            await using var db = CreateContext(connection, transaction);
+            var existing = await db.Memberships.SingleOrDefaultAsync(
+                row => row.WorkspaceId == workspaceId && row.Subject == subject, ct);
+            bool? oldCreate = existing?.CanCreateLists;
+            bool? oldManage = existing?.CanManageGrants;
             var reduction = oldCreate is not null && (!member || oldCreate.Value && !canCreateLists || oldManage!.Value && !canManageGrants);
             if (member)
             {
                 if (oldCreate is null) await ReserveStorageAsync(connection, transaction, workspaceId, 128 + System.Text.Encoding.UTF8.GetByteCount(subject), ct);
-                await ExecuteAsync(connection, transaction, """
-                    INSERT INTO cellbridge_lists.memberships(workspace_id,subject,can_create_lists,can_manage_grants)
-                    VALUES ($1,$2,$3,$4) ON CONFLICT (workspace_id,subject) DO UPDATE
-                    SET can_create_lists=EXCLUDED.can_create_lists,can_manage_grants=EXCLUDED.can_manage_grants
-                    """, ct, workspaceId, subject, canCreateLists, canManageGrants);
+                if (existing is null)
+                    db.Memberships.Add(new MembershipRow { WorkspaceId = workspaceId, Subject = subject,
+                        CanCreateLists = canCreateLists, CanManageGrants = canManageGrants });
+                else
+                {
+                    existing.CanCreateLists = canCreateLists;
+                    existing.CanManageGrants = canManageGrants;
+                }
+                await db.SaveChangesAsync(ct);
             }
             else if (oldCreate is not null)
             {
-                var grantCount = await ScalarAsync<long>(connection, transaction,
-                    "SELECT count(*) FROM cellbridge_lists.list_grants WHERE workspace_id=$1 AND subject=$2", ct,
-                    workspaceId, subject);
-                await ExecuteAsync(connection, transaction,
-                    "DELETE FROM cellbridge_lists.memberships WHERE workspace_id=$1 AND subject=$2", ct, workspaceId, subject);
+                var grantCount = await db.ListGrants.LongCountAsync(
+                    row => row.WorkspaceId == workspaceId && row.Subject == subject, ct);
+                db.Memberships.Remove(existing!);
+                await db.SaveChangesAsync(ct);
                 var subjectBytes = System.Text.Encoding.UTF8.GetByteCount(subject);
                 await ReserveStorageAsync(connection, transaction, workspaceId,
                     -(128 + subjectBytes + grantCount * (80 + subjectBytes)), ct);
@@ -67,21 +63,23 @@ public sealed partial class PostgreSqlListEngine
             var administrator = await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, null);
             if (!administrator.CanManageGrants) throw Forbidden();
             await LockQuotaAsync(connection, transaction, workspaceId, ct);
-            if (await ScalarAsync<long>(connection, transaction,
-                "SELECT count(*) FROM cellbridge_lists.lists WHERE workspace_id=$1 AND list_id=$2", ct, workspaceId, listId) == 0)
+            await using var db = CreateContext(connection, transaction);
+            if (!await db.Lists.AnyAsync(row => row.WorkspaceId == workspaceId && row.ListId == listId, ct))
                 throw NotFound();
-            if (access != ListAccess.None && await ScalarAsync<long>(connection, transaction,
-                "SELECT count(*) FROM cellbridge_lists.memberships WHERE workspace_id=$1 AND subject=$2", ct, workspaceId, subject) == 0)
+            if (access != ListAccess.None && !await db.Memberships.AnyAsync(
+                    row => row.WorkspaceId == workspaceId && row.Subject == subject, ct))
                 throw Validation("The grant subject is not a workspace member.");
-            var old = (ListAccess)(await ScalarAsync<int?>(connection, transaction,
-                "SELECT access FROM cellbridge_lists.list_grants WHERE workspace_id=$1 AND list_id=$2 AND subject=$3", ct,
-                workspaceId, listId, subject) ?? 0);
+            var existing = await db.ListGrants.SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
+                row.ListId == listId && row.Subject == subject, ct);
+            var old = (ListAccess)(existing?.Access ?? 0);
             var reduction = (old & access) != old;
             if (access == ListAccess.None)
             {
-                await ExecuteAsync(connection, transaction,
-                    "DELETE FROM cellbridge_lists.list_grants WHERE workspace_id=$1 AND list_id=$2 AND subject=$3", ct,
-                    workspaceId, listId, subject);
+                if (existing is not null)
+                {
+                    db.ListGrants.Remove(existing);
+                    await db.SaveChangesAsync(ct);
+                }
                 if (old != ListAccess.None)
                     await ReserveStorageAsync(connection, transaction, workspaceId,
                         -(80 + System.Text.Encoding.UTF8.GetByteCount(subject)), ct);
@@ -89,10 +87,12 @@ public sealed partial class PostgreSqlListEngine
             else
             {
                 if (old == ListAccess.None) await ReserveStorageAsync(connection, transaction, workspaceId, 80 + System.Text.Encoding.UTF8.GetByteCount(subject), ct);
-                await ExecuteAsync(connection, transaction, """
-                    INSERT INTO cellbridge_lists.list_grants(workspace_id,list_id,subject,access) VALUES ($1,$2,$3,$4)
-                    ON CONFLICT (workspace_id,list_id,subject) DO UPDATE SET access=EXCLUDED.access
-                    """, ct, workspaceId, listId, subject, (int)access);
+                if (existing is null)
+                    db.ListGrants.Add(new ListGrantRow { WorkspaceId = workspaceId, ListId = listId,
+                        Subject = subject, Access = (int)access });
+                else
+                    existing.Access = (int)access;
+                await db.SaveChangesAsync(ct);
             }
             await AuditAsync(connection, transaction, workspaceId, actor.Subject, "grant.set", listId, null, null,
                 Array.Empty<Guid>(), reduction, ct, subject);
@@ -107,18 +107,11 @@ public sealed partial class PostgreSqlListEngine
         return ReadAsync(actor, workspaceId, async (connection, transaction, member, authorization) =>
         {
             if (authorization is null && !member.CanManageGrants) throw Forbidden();
-            await using var command = Command(connection, transaction, """
-                SELECT id,utc,actor,action,list_id,record_id,revision,field_ids,target_subject
-                FROM cellbridge_lists.audit_events WHERE workspace_id=$1 ORDER BY id DESC LIMIT $2
-                """, workspaceId, limit);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            var events = new List<AuditEvent>();
-            while (await reader.ReadAsync(ct))
-                events.Add(new AuditEvent(reader.GetInt64(0), new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
-                    reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetGuid(4),
-                    reader.IsDBNull(5) ? null : reader.GetGuid(5), reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                    reader.GetFieldValue<Guid[]>(7), reader.IsDBNull(8) ? null : reader.GetString(8)));
-            return (IReadOnlyList<AuditEvent>)events;
+            await using var db = CreateContext(connection, transaction);
+            return (IReadOnlyList<AuditEvent>)await db.AuditEvents.AsNoTracking().Where(row => row.WorkspaceId == workspaceId)
+                .OrderByDescending(row => row.Id).Take(limit)
+                .Select(row => new AuditEvent(row.Id, row.Utc, row.Actor, row.Action, row.ListId,
+                    row.RecordId, row.Revision, row.FieldIds, row.TargetSubject)).ToListAsync(ct);
         }, [(null, ListAuthorizationAction.ReadAudit)], ct);
     }
 
