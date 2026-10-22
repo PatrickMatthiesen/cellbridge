@@ -73,7 +73,7 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
     }
 
     [PostgreSqlFact]
-    public async Task CursorAnchorValidationAndPageAreOneUnlockedEfCommand()
+    public async Task CursorAnchorValidationAndPageUseOneCorrelatedUnlockedEfCommand()
     {
         var workspace = await database.NewWorkspaceAsync("single statement cursor");
         var text = new ListField(Guid.NewGuid(), "Text", ListFieldType.Text);
@@ -98,13 +98,51 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
 
         Assert.Single(second.Records);
         var recordCommand = Assert.Single(interceptor.Commands, command =>
-            command.Replace("\"", "", StringComparison.Ordinal)
+            command.Text.Replace("\"", "", StringComparison.Ordinal)
+                .Contains("jsonb_extract_path_text", StringComparison.OrdinalIgnoreCase) &&
+            command.Text.Replace("\"", "", StringComparison.Ordinal)
                 .Contains("cellbridge_lists.records", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains("LEFT JOIN", recordCommand, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("EXISTS", recordCommand, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("FOR UPDATE", recordCommand, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("FOR KEY SHARE", recordCommand, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("FOR NO KEY UPDATE", recordCommand, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("LATERAL", recordCommand.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("EXISTS", recordCommand.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FOR UPDATE", recordCommand.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FOR KEY SHARE", recordCommand.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FOR NO KEY UPDATE", recordCommand.Text, StringComparison.OrdinalIgnoreCase);
+
+        var empty = await engine.QueryAsync(database.AdminActor, workspace, definition.Id,
+            query with { AfterRecordId = second.Records[0].Id });
+        Assert.Empty(empty.Records);
+        Assert.Null(empty.NextRecordId);
+    }
+
+    [PostgreSqlFact]
+    public async Task DynamicFilterValuesAreCommandParametersWithOneQueryShape()
+    {
+        var workspace = await database.NewWorkspaceAsync("parameterized filters");
+        var integer = new ListField(Guid.NewGuid(), "Count", ListFieldType.Integer);
+        var definition = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new(Guid.NewGuid(), "Parameters", [integer]));
+        var interceptor = new QueryCommandInterceptor();
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(database.RuntimeSource!)
+            .AddInterceptors(interceptor)
+            .Options;
+        var engine = new PostgreSqlListEngine(options);
+
+        await engine.QueryAsync(database.AdminActor, workspace, definition.Id,
+            new(Filters: [new(integer.Id, FilterOperator.GreaterOrEqual, JsonValue.Create(41L))]));
+        var first = Assert.Single(interceptor.Commands, command =>
+            command.Text.Contains("jsonb_extract_path_text", StringComparison.OrdinalIgnoreCase));
+        interceptor.Clear();
+        await engine.QueryAsync(database.AdminActor, workspace, definition.Id,
+            new(Filters: [new(integer.Id, FilterOperator.GreaterOrEqual, JsonValue.Create(42L))]));
+        var second = Assert.Single(interceptor.Commands, command =>
+            command.Text.Contains("jsonb_extract_path_text", StringComparison.OrdinalIgnoreCase));
+
+        Assert.Equal(first.Text, second.Text);
+        Assert.Contains(41L, first.ParameterValues);
+        Assert.Contains(42L, second.ParameterValues);
+        Assert.DoesNotContain(" >= 41", first.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(" >= 42", second.Text, StringComparison.Ordinal);
     }
 
     [PostgreSqlFact]
@@ -227,7 +265,7 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
 
     private sealed class QueryCommandInterceptor : DbCommandInterceptor
     {
-        public List<string> Commands { get; } = [];
+        public List<CapturedCommand> Commands { get; } = [];
 
         public void Clear() => Commands.Clear();
 
@@ -235,8 +273,11 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
             CommandEventData eventData, InterceptionResult<DbDataReader> result,
             CancellationToken cancellationToken = default)
         {
-            Commands.Add(command.CommandText);
+            Commands.Add(new CapturedCommand(command.CommandText,
+                command.Parameters.Cast<DbParameter>().Select(parameter => parameter.Value).ToArray()));
             return ValueTask.FromResult(result);
         }
     }
+
+    private sealed record CapturedCommand(string Text, IReadOnlyList<object?> ParameterValues);
 }

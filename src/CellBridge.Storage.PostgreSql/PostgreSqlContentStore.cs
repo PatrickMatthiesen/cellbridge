@@ -8,6 +8,8 @@ namespace CellBridge.Storage.PostgreSql;
 /// <summary>Immutable, deduplicated content in bounded database chunks; reclamation is quiescent.</summary>
 public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetParticipant
 {
+    private const int ChunkSize = 65536;
+    private const int ChunksPerBatch = 16;
     private readonly DbContextOptions<CellBridgeDbContext> _options;
     private readonly object _budgetScope;
     private readonly long _maxObjectBytes;
@@ -45,7 +47,7 @@ public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetPartic
             FileOptions.Asynchronous | FileOptions.DeleteOnClose);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long length = 0;
-        var buffer = new byte[65536];
+        var buffer = new byte[ChunkSize];
         int read;
         while ((read = await source.ReadAsync(buffer, cancellationToken)) != 0)
         {
@@ -72,33 +74,35 @@ public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetPartic
         if (inserted != 0)
         {
             await PostgreSqlStorageBudget.AdjustAsync(context, length, 0, cancellationToken);
-            await context.SaveChangesAsync(cancellationToken);
             spool.Position = 0;
             var ordinal = 0;
+            var pending = new List<ChunkRow>(ChunksPerBatch);
             while ((read = await spool.ReadAsync(buffer, cancellationToken)) != 0)
             {
-                var chunk = new ChunkRow
+                pending.Add(new ChunkRow
                 {
                     ObjectKey = digest,
                     Ordinal = ordinal++,
                     Bytes = buffer.AsSpan(0, read).ToArray(),
-                };
-                context.Chunks.Add(chunk);
-                await context.SaveChangesAsync(cancellationToken);
-                context.Entry(chunk).State = EntityState.Detached;
+                });
+                if (pending.Count == ChunksPerBatch)
+                    await SaveChunkBatchAsync(context, pending, cancellationToken);
             }
+            if (pending.Count != 0) await SaveChunkBatchAsync(context, pending, cancellationToken);
+            else if (ordinal == 0) await context.SaveChangesAsync(cancellationToken);
         }
         else
         {
-            var metadata = await context.Objects.AsNoTracking().SingleOrDefaultAsync(
-                row => row.ObjectKey == digest, cancellationToken);
+            var metadata = await context.Objects.AsNoTracking().Where(row => row.ObjectKey == digest)
+                .Select(row => new { row.Length, row.Sha256 }).SingleOrDefaultAsync(cancellationToken);
             if (metadata is null || metadata.Length != length || metadata.Sha256 != digest)
                 throw new StorageCorruptionException("Existing content has invalid metadata.");
             using var verification = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             long storedLength = 0;
             var ordinal = 0;
             await foreach (var chunk in context.Chunks.AsNoTracking().Where(row => row.ObjectKey == digest)
-                               .OrderBy(row => row.Ordinal).AsAsyncEnumerable().WithCancellation(cancellationToken))
+                               .OrderBy(row => row.Ordinal).Select(row => new { row.Ordinal, row.Bytes })
+                               .AsAsyncEnumerable().WithCancellation(cancellationToken))
             {
                 storedLength = checked(storedLength + chunk.Bytes.Length);
                 if (chunk.Ordinal != ordinal++ || chunk.Bytes.Length == 0 || storedLength > length)
@@ -112,13 +116,23 @@ public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetPartic
         return handle;
     }
 
+    private static async Task SaveChunkBatchAsync(CellBridgeDbContext context, List<ChunkRow> pending,
+        CancellationToken cancellationToken)
+    {
+        context.Chunks.AddRange(pending);
+        await context.SaveChangesAsync(cancellationToken);
+        foreach (var chunk in pending) context.Entry(chunk).State = EntityState.Detached;
+        pending.Clear();
+    }
+
     public async ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default)
     {
         var context = new CellBridgeDbContext(_options);
         try
         {
-            var metadata = await context.Objects.AsNoTracking().SingleOrDefaultAsync(
-                row => row.ObjectKey == handle.Key, cancellationToken);
+            await context.Database.OpenConnectionAsync(cancellationToken);
+            var metadata = await context.Objects.AsNoTracking().Where(row => row.ObjectKey == handle.Key)
+                .Select(row => new { row.Length, row.Sha256 }).SingleOrDefaultAsync(cancellationToken);
             if (metadata is null || metadata.Length != handle.Length || metadata.Sha256 != handle.Sha256)
                 throw new StorageCorruptionException("Referenced content is missing or has invalid metadata.");
             var readCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

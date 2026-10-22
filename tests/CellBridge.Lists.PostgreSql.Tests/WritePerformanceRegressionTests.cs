@@ -294,7 +294,7 @@ public sealed class WritePerformanceRegressionTests(ListDatabaseFixture database
             {
                 var message = formatter(state, exception);
                 if (Volatile.Read(ref owner._enabled) != 0 &&
-                    message.Contains("SELECT clock_timestamp()", StringComparison.Ordinal))
+                    message.Contains("clock_timestamp()", StringComparison.Ordinal))
                     Interlocked.Increment(ref owner._databaseClockReads);
                 if (Volatile.Read(ref owner._enabled) == 0 ||
                     !message.Contains("SELECT record_id FROM cellbridge_lists.records", StringComparison.Ordinal) ||

@@ -12,6 +12,9 @@ The PostgreSQL package owns its EF Core model and versioned migrations. It does
 not add entities to the application's DbContext. Document storage and native
 Lists use independent contexts, migration histories and package dependencies.
 Only PostgreSQL is implemented and tested by these providers.
+EF generates the table and index migrations from the owned model. Legacy schema
+upgrades retain their data transforms. PostgreSQL locks remain explicit where EF
+does not express the required locking operation.
 
 ## Run the durable sample
 
@@ -159,6 +162,8 @@ For EF configuration, supply `DbContextOptions<CellBridgeDbContext>` built with
 `UseNpgsql` to the state store, PostgreSQL content store and migrator. The context
 is library-owned and sealed. Each operation creates its own context; the stores
 can share the consumer's configured `NpgsqlDataSource` and connection pool.
+Helpers within a transaction share that operation's context. HTTP request scopes
+do not determine the context lifetime, and concurrent operations never share one.
 Pass the same options instance to both stores for shared storage accounting.
 Connection settings, command timeouts, logging and interceptors remain active.
 Configure a non-retrying EF execution strategy. The provider rejects

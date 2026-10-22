@@ -105,6 +105,54 @@ public sealed class EfPostgreSqlModelTests
     });
 
     [PostgreSqlFact]
+    public Task CancellationAcrossAContentBatchBoundaryRollsBackChunksAndAccounting() =>
+        WithEmptyDatabase(async source =>
+        {
+            await new PostgreSqlStorageMigrator(source).MigrateAsync();
+            const int chunkSize = 65536;
+            var bytes = new byte[17 * chunkSize];
+            for (var index = 0; index < bytes.Length; index++) bytes[index] = (byte)(index * 31);
+            using var cancellation = new CancellationTokenSource();
+            var interceptor = new CancelAfterFirstSaveInterceptor(cancellation);
+            var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
+                .UseNpgsql(source)
+                .AddInterceptors(interceptor)
+                .Options;
+            var interrupted = new PostgreSqlContentStore(options, bytes.LongLength);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => interrupted.WriteAsync(
+                new MemoryStream(bytes, writable: false), cancellation.Token).AsTask());
+
+            Assert.True(interceptor.Triggered);
+            await using (var empty = source.CreateCommand("""
+                SELECT (SELECT count(*) FROM cellbridge_objects),
+                    (SELECT count(*) FROM cellbridge_chunks), stored_bytes
+                FROM cellbridge_usage
+                """))
+            await using (var reader = await empty.ExecuteReaderAsync())
+            {
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal(0, reader.GetInt64(0));
+                Assert.Equal(0, reader.GetInt64(1));
+                Assert.Equal(0, reader.GetInt64(2));
+            }
+
+            var content = new PostgreSqlContentStore(source, bytes.LongLength);
+            var handle = await content.WriteAsync(new MemoryStream(bytes, writable: false));
+            Assert.Equal(bytes, await content.ReadVerifiedAsync(handle));
+            var oversized = new byte[bytes.Length + 1];
+            bytes.CopyTo(oversized, 0);
+            oversized[^1] = 1;
+            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => content.WriteAsync(
+                new MemoryStream(oversized, writable: false)).AsTask());
+            Assert.Equal(bytes, await content.ReadVerifiedAsync(handle));
+            var emptyHandle = await content.WriteAsync(Stream.Null);
+            Assert.Empty(await content.ReadVerifiedAsync(emptyHandle));
+            await using var usage = source.CreateCommand("SELECT stored_bytes FROM cellbridge_usage");
+            Assert.Equal(bytes.LongLength, (long)(await usage.ExecuteScalarAsync())!);
+        });
+
+    [PostgreSqlFact]
     public async Task LegacyInitializationRejectsWrongOrMultipleRecoveryVersionsAndRollsBack()
     {
         foreach (var versions in new[] { new[] { 2 }, new[] { 1, 2 } })
@@ -178,6 +226,19 @@ public sealed class EfPostgreSqlModelTests
         {
             cancellation.Cancel();
             cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class CancelAfterFirstSaveInterceptor(CancellationTokenSource cancellation) : SaveChangesInterceptor
+    {
+        private int _triggered;
+        public bool Triggered => Volatile.Read(ref _triggered) != 0;
+
+        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Exchange(ref _triggered, 1) == 0) cancellation.Cancel();
             return ValueTask.FromResult(result);
         }
     }

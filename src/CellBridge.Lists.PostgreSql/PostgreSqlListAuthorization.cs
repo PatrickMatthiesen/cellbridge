@@ -113,9 +113,8 @@ public sealed partial class PostgreSqlListEngine
             await using var efTransaction = await db.Database.BeginTransactionAsync(ct);
             var connection = (NpgsqlConnection)db.Database.GetDbConnection();
             var transaction = (NpgsqlTransaction)efTransaction.GetDbTransaction();
-            await ConfigureAsync(connection, transaction, workspaceId, ct);
-            await using var queryDb = CreateContext(connection, transaction);
-            var result = await queryDb.Workspaces.AsNoTracking()
+            await ConfigureWorkspaceAsync(connection, transaction, workspaceId, ct);
+            var result = await db.Workspaces.AsNoTracking()
                 .Where(row => row.WorkspaceId == workspaceId)
                 .Select(row => new WorkspaceAnchor(row.WorkspaceId, row.AuthorizationMode,
                     row.AuthorizationDomain, row.AuthorizationScope)).SingleOrDefaultAsync(ct);
@@ -123,10 +122,9 @@ public sealed partial class PostgreSqlListEngine
             return result;
         });
 
-    private async Task RequireAnchorAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, OperationAuthorization? authorization, bool hostExpected, CancellationToken ct)
+    private async Task RequireAnchorAsync(PostgreSqlListDbContext db, Guid workspaceId,
+        OperationAuthorization? authorization, bool hostExpected, CancellationToken ct)
     {
-        await using var db = CreateContext(connection, transaction);
         var current = await db.Workspaces.AsNoTracking()
             .Where(row => row.WorkspaceId == workspaceId)
             .Select(row => new WorkspaceAnchor(row.WorkspaceId, row.AuthorizationMode,

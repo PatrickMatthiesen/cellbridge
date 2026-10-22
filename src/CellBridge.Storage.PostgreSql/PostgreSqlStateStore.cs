@@ -83,6 +83,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
             var (connection, npgsqlTransaction) = PostgreSqlDatabase.GetTransaction(context);
             await PostgreSqlNamespaceLock.AcquireAsync(connection, npgsqlTransaction, cancellationToken);
             await LockPathAsync(connection, npgsqlTransaction, state.PathKey, cancellationToken);
+            // The live-path index is partial. Keep tombstoned identities reserved too.
             if (await context.Documents.AnyAsync(row => row.PathKey == state.PathKey, cancellationToken)) return false;
             // EF has no conflict-tolerant insert that preserves this cross-host admission race.
             await using (var insert = new NpgsqlCommand("INSERT INTO cellbridge_documents(resource_id,path_key,state_version) VALUES ($1,$2,0) ON CONFLICT DO NOTHING", connection, npgsqlTransaction))
@@ -121,8 +122,6 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
             var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
             if (rename) await PostgreSqlNamespaceLock.AcquireAsync(connection, transaction, cancellationToken);
             var version = await LockDocumentAsync(connection, transaction, id, cancellationToken);
-            var pointer = await context.Documents.SingleAsync(row => row.ResourceId == id, cancellationToken);
-            if (pointer.StateVersion != version) throw new StorageCorruptionException("The locked document pointer changed unexpectedly.");
             var stateJson = await context.States.AsNoTracking().Where(row => row.ResourceId == id && row.StateVersion == version)
                 .Select(row => row.StateJson).SingleOrDefaultAsync(cancellationToken)
                 ?? throw new StorageCorruptionException("The current state is missing.");
@@ -149,6 +148,14 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
                 if (rename && next.PathKey != current.PathKey &&
                     await IsPathReservedAsync(connection, transaction, next.PathKey, id, cancellationToken))
                     throw new InvalidOperationException("The destination filename is reserved.");
+                var pointer = new DocumentRow
+                {
+                    ResourceId = id,
+                    PathKey = current.PathKey,
+                    StateVersion = version,
+                    IsDeleted = current.IsDeleted,
+                };
+                context.Documents.Attach(pointer);
                 pointer.StateVersion = next.StateVersion;
                 pointer.IsDeleted = next.IsDeleted;
                 pointer.PathKey = next.PathKey;
@@ -190,7 +197,6 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
             await LockPathAsync(connection, transaction, replacement.PathKey, cancellationToken);
             var version = await TryLockDocumentAsync(connection, transaction, id, cancellationToken);
             if (version is null) return false;
-            var pointer = await context.Documents.SingleAsync(row => row.ResourceId == id, cancellationToken);
             var json = await context.States.AsNoTracking().Where(row => row.ResourceId == id && row.StateVersion == version)
                 .Select(row => row.StateJson).SingleAsync(cancellationToken);
             var retired = Decode(json);
@@ -212,6 +218,14 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
             if (await IsRetiredPathReservedAsync(connection, transaction, replacement.PathKey, id, cancellationToken)) return false;
             await InsertStateAsync(context, replacement, cancellationToken);
             await InsertStateAsync(context, next, cancellationToken);
+            var pointer = new DocumentRow
+            {
+                ResourceId = id,
+                PathKey = retired.PathKey,
+                StateVersion = version.Value,
+                IsDeleted = retired.IsDeleted,
+            };
+            context.Documents.Attach(pointer);
             pointer.StateVersion = next.StateVersion;
             await context.SaveChangesAsync(cancellationToken);
             await databaseTransaction.CommitAsync(CancellationToken.None);
@@ -274,9 +288,11 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
 
     internal static async Task ConfigureTransactionAsync(CellBridgeDbContext context, CancellationToken cancellationToken)
     {
-        var versions = await context.SchemaVersions.AsNoTracking().Select(row => row.Version).ToListAsync(cancellationToken);
-        var fsync = await context.Database.SqlQueryRaw<string>("SELECT current_setting('fsync') AS \"Value\"").SingleAsync(cancellationToken);
-        if (fsync != "on" || versions.Count != 1 || versions[0] != 6)
+        // Every caller owns the transaction and abandons it after a failed save.
+        // Savepoints add work but cannot make these transactions reusable.
+        context.Database.AutoSavepointsEnabled = false;
+        var valid = await ValidateDatabaseConfigurationAsync(context, cancellationToken);
+        if (!valid)
             throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 6.");
         await context.Database.ExecuteSqlRawAsync("SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'", cancellationToken);
     }
@@ -286,9 +302,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
         try
         {
             await using var context = new CellBridgeDbContext(_options);
-            var versions = await context.SchemaVersions.AsNoTracking().Select(row => row.Version).ToListAsync(cancellationToken);
-            var fsync = await context.Database.SqlQueryRaw<string>("SELECT current_setting('fsync') AS \"Value\"").SingleAsync(cancellationToken);
-            if (fsync != "on" || versions.Count != 1 || versions[0] != 6)
+            if (!await ValidateDatabaseConfigurationAsync(context, cancellationToken))
                 throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 6.");
         }
         catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
@@ -297,5 +311,11 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
 
     private static Task<DateTime> ReadDatabaseClockAsync(CellBridgeDbContext context, CancellationToken cancellationToken) =>
         context.Database.SqlQueryRaw<DateTime>("SELECT clock_timestamp() AS \"Value\"").SingleAsync(cancellationToken);
+    private static Task<bool> ValidateDatabaseConfigurationAsync(CellBridgeDbContext context,
+        CancellationToken cancellationToken) => context.Database.SqlQueryRaw<bool>("""
+            SELECT count(*) = 1 AND min(version) = 6 AND max(version) = 6
+                AND current_setting('fsync') = 'on' AS "Value"
+            FROM cellbridge_schema
+            """).SingleAsync(cancellationToken);
     private DocumentState Decode(string json) => DocumentStateJson.Deserialize(json, limits: _limits);
 }

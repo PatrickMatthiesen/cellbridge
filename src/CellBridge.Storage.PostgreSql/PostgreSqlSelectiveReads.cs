@@ -158,7 +158,8 @@ public sealed partial class PostgreSqlStateStore
         CancellationToken cancellationToken)
     {
         var head = context.ReadHeads.Local.SingleOrDefault(row => row.ResourceId == state.ResourceId)
-            ?? await context.ReadHeads.SingleOrDefaultAsync(row => row.ResourceId == state.ResourceId, cancellationToken);
+            ?? await context.ReadHeads.AsNoTracking()
+                .SingleOrDefaultAsync(row => row.ResourceId == state.ResourceId, cancellationToken);
         if (head is not null && head.StateVersion > state.StateVersion) return;
         var metadata = DocumentReadModels.Metadata(state);
         var revisions = DocumentReadModels.Revisions(state).ToArray();
@@ -169,29 +170,58 @@ public sealed partial class PostgreSqlStateStore
             revisions.Max(revision => revision.RevisionNumber) != metadata.LatestRevisionNumber)
             throw new StorageCorruptionException("Cannot index inconsistent revision history.");
 
-        var databaseRows = await context.RevisionSummaries
-            .Where(row => row.ResourceId == state.ResourceId).ToListAsync(cancellationToken);
-        var existing = databaseRows.Concat(context.RevisionSummaries.Local.Where(row => row.ResourceId == state.ResourceId))
-            .DistinctBy(row => (row.LifecycleGeneration, row.RevisionNumber))
-            .ToDictionary(row => (row.LifecycleGeneration, row.RevisionNumber));
-        var desired = revisions.ToDictionary(revision =>
-            (revision.LifecycleGeneration, (decimal)revision.RevisionNumber));
-        foreach (var pair in existing)
-        {
-            if (!desired.ContainsKey(pair.Key)) context.RevisionSummaries.Remove(pair.Value);
-        }
+        var databaseRows = await context.RevisionSummaries.AsNoTracking()
+            .Where(row => row.ResourceId == state.ResourceId)
+            .Select(row => new RevisionSummaryProjection
+            {
+                LifecycleGeneration = row.LifecycleGeneration,
+                RevisionNumber = row.RevisionNumber,
+                SummaryJson = row.SummaryJson,
+            }).ToDictionaryAsync(row => (row.LifecycleGeneration, row.RevisionNumber), cancellationToken);
+        var tracked = context.ChangeTracker.Entries<RevisionSummaryRow>()
+            .Where(entry => entry.Entity.ResourceId == state.ResourceId && entry.State != EntityState.Detached)
+            .ToDictionary(entry => (entry.Entity.LifecycleGeneration, entry.Entity.RevisionNumber));
+        var desired = revisions.ToDictionary(
+            revision => (revision.LifecycleGeneration, (decimal)revision.RevisionNumber),
+            revision => JsonSerializer.Serialize(revision));
+
         foreach (var pair in desired)
         {
-            var json = JsonSerializer.Serialize(pair.Value);
-            if (existing.TryGetValue(pair.Key, out var row)) row.SummaryJson = json;
-            else context.RevisionSummaries.Add(new RevisionSummaryRow
+            if (tracked.TryGetValue(pair.Key, out var entry))
             {
-                ResourceId = state.ResourceId,
-                LifecycleGeneration = pair.Key.LifecycleGeneration,
-                RevisionNumber = pair.Key.Item2,
-                SummaryJson = json,
-            });
+                if (entry.State == EntityState.Deleted) entry.State = EntityState.Unchanged;
+                entry.Entity.SummaryJson = pair.Value;
+            }
+            else if (databaseRows.TryGetValue(pair.Key, out var databaseRow))
+            {
+                if (databaseRow.SummaryJson == pair.Value) continue;
+                var row = CreateRevisionSummaryRow(state.ResourceId, databaseRow);
+                context.RevisionSummaries.Attach(row);
+                row.SummaryJson = pair.Value;
+            }
+            else
+            {
+                context.RevisionSummaries.Add(new RevisionSummaryRow
+                {
+                    ResourceId = state.ResourceId,
+                    LifecycleGeneration = pair.Key.LifecycleGeneration,
+                    RevisionNumber = pair.Key.Item2,
+                    SummaryJson = pair.Value,
+                });
+            }
         }
+        foreach (var pair in tracked)
+        {
+            if (!desired.ContainsKey(pair.Key)) pair.Value.State = pair.Value.State == EntityState.Added
+                ? EntityState.Detached
+                : EntityState.Deleted;
+        }
+        foreach (var pair in databaseRows)
+        {
+            if (desired.ContainsKey(pair.Key) || tracked.ContainsKey(pair.Key)) continue;
+            context.RevisionSummaries.Remove(CreateRevisionSummaryRow(state.ResourceId, pair.Value));
+        }
+
         var metadataJson = JsonSerializer.Serialize(metadata);
         if (head is null)
         {
@@ -206,11 +236,28 @@ public sealed partial class PostgreSqlStateStore
         }
         else
         {
+            if (context.Entry(head).State == EntityState.Detached) context.ReadHeads.Attach(head);
             head.StateVersion = state.StateVersion;
             head.LifecycleGeneration = state.LifecycleGeneration;
             head.RevisionCount = revisions.Length;
             head.MetadataJson = metadataJson;
         }
+    }
+
+    private static RevisionSummaryRow CreateRevisionSummaryRow(Guid resourceId,
+        RevisionSummaryProjection projection) => new()
+    {
+        ResourceId = resourceId,
+        LifecycleGeneration = projection.LifecycleGeneration,
+        RevisionNumber = projection.RevisionNumber,
+        SummaryJson = projection.SummaryJson,
+    };
+
+    private sealed class RevisionSummaryProjection
+    {
+        public long LifecycleGeneration { get; init; }
+        public decimal RevisionNumber { get; init; }
+        public required string SummaryJson { get; init; }
     }
 
     private sealed class ReadProjection

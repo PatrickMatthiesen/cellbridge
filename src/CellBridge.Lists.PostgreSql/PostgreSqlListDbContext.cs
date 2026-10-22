@@ -16,6 +16,7 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
     internal static int Utf16Compare(string? left, string? right) => throw new NotSupportedException();
     internal static int TimestampCompare(string? left, string? right) => throw new NotSupportedException();
     internal static int CCompare(string? left, string? right) => throw new NotSupportedException();
+    internal static DateTimeOffset ClockTimestamp() => throw new NotSupportedException();
 
     internal DbSet<SchemaVersionRow> SchemaVersions => Set<SchemaVersionRow>();
     internal DbSet<TemplateRow> Templates => Set<TemplateRow>();
@@ -159,6 +160,7 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
         MapFunction(modelBuilder, nameof(Utf16Compare), "utf16_compare");
         MapFunction(modelBuilder, nameof(TimestampCompare), "timestamp_compare");
         MapFunction(modelBuilder, nameof(CCompare), "c_compare");
+        MapFunction(modelBuilder, nameof(ClockTimestamp), "clock_timestamp", schema: null, builtIn: true);
     }
 
     private static void Configure<TEntity>(EntityTypeBuilder<TEntity> entity, string table, string[] key)

@@ -129,8 +129,10 @@ public sealed partial class PostgreSqlStateStore
                 ProviderRecovery.CheckReceipt(accepted, receipt);
                 return accepted;
             }
-            if (await context.Documents.AnyAsync(cancellationToken) || await context.States.AnyAsync(cancellationToken) ||
-                await context.RecoveryReceipts.AnyAsync(cancellationToken))
+            var destinationRows = context.Documents.Select(_ => 1)
+                .Concat(context.States.Select(_ => 1))
+                .Concat(context.RecoveryReceipts.Select(_ => 1));
+            if (await destinationRows.AnyAsync(cancellationToken))
                 throw new RecoveryConflictException(
                     "Recovery destination must have no live or retired document identities or prior recovery operations.");
             var now = await ReadDatabaseClockAsync(context, cancellationToken);

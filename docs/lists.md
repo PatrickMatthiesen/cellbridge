@@ -301,6 +301,10 @@ for a consumer's initializer or deployment application. Registration and ordinar
 requests never apply migrations. The document provider has a separate context and
 migration history; Lists does not depend on document storage or the application's
 DbContext. Existing SQL-created list data remains in its current tables.
+EF generates ordinary table and index migrations. PostgreSQL migration SQL installs
+forced row security, the immutable authorization trigger and typed query functions.
+Each operation shares one context across its transaction and helpers. Concurrent
+operations use separate contexts, independently of HTTP request scopes.
 Configured EF connection settings, command timeouts, logging and interceptors
 remain active. Use a non-retrying EF execution strategy. The provider rejects
 `EnableRetryOnFailure` because its explicit transactions and create receipts own
