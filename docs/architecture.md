@@ -22,8 +22,16 @@ flowchart TD
 
 `/_vti_bin/cellstorage.svc` handles the outer MS-FSSHTTP envelope. Cell
 subrequests carry MS-FSSHTTPB requests inline as base64 or in MTOM attachments.
-The endpoint resolves document identity before dispatch and serializes each
-operation's protocol response. HTTP 200 alone does not indicate save success.
+`CellBridgeRequestProcessor` executes parsed SOAP requests for the mapped endpoint
+and direct callers. It resolves document identity and sends binary Cell requests
+to `CellBridgeDocumentService.ExecuteAsync`. Direct binary integrations use that
+same service. The service validates the request, selects each operation's target
+partition and runs the operations in request order. Internal handlers prepare
+file and metadata graphs and build query responses. Both InMemory and PostgreSQL
+use this execution path.
+
+The endpoint serializes each operation's protocol response. HTTP 200 alone does
+not indicate save success.
 See [protocol scope](protocol-version-decision.md).
 
 Authentication runs before parsing. The sample supplies PostgreSQL Identity
@@ -78,13 +86,18 @@ choosing an individual binary object by size.
 The document service reconstructs the package into an exclusive temporary file.
 It checks every ZIP member against the limit on expanded bytes before storing
 immutable content.
-The staging file is deleted on success, failure or cancellation. The synchronous
-in-memory save API remains buffered. This work happens before acquiring the
-document's row lock.
+The staging file is deleted on success, failure or cancellation. Both InMemory
+and PostgreSQL use this preparation before the coordinated state update.
 
 The service then reads the current state and database time, rechecks Write permission,
 coherency and leases, and commits the selected revision with a save receipt.
 Different documents can progress independently. Sessions use the same coordination.
+
+Cancellation after an established save stops remaining operations and returns an
+incomplete execution with `IsCancelled` and known file receipts. The SOAP
+processor preserves that result. Cancellation before acceptance can throw;
+completed saves are never rolled back. See [accepted saves](package-integration.md#accepted-saves-and-external-content)
+for uncertain commit outcomes and HTTP delivery limits.
 
 Downloads take content and headers from one snapshot. Receipts identify duplicate
 saves; shared budgets reject excessive growth before selecting a new revision.

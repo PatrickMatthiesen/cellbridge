@@ -5,54 +5,12 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.AspNetCore;
 
-/// <summary>Validates and commits a complete file graph, including retained delta objects.</summary>
-public static class FilePartitionSaveHandler
+/// <summary>Prepares a complete file graph, including retained delta objects.</summary>
+internal static class FilePartitionSaveHandler
 {
-    public static FsshttpbSubResponse Apply(StoredDocument document, DocumentPartition partition,
-        FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null)
-        => ApplyResponse(document, partition, subRequest, package, limits).SubResponses[0];
-
-    /// <summary>Applies a complete save and returns its mandatory applied-index payload when requested.</summary>
-    public static FsshttpbResponse ApplyResponse(StoredDocument document, DocumentPartition partition,
-        FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null)
-        => ApplyResponse(document, partition, subRequest, package, limits, _ => true);
-
-    internal static FsshttpbResponse ApplyResponse(StoredDocument document, DocumentPartition partition,
-        FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits,
-        Func<DataElementPackage?, bool> canAppend)
-    {
-        limits ??= new StorageLimits();
-        lock (document)
-        {
-            var prepared = Prepare(document, partition, subRequest, package, limits);
-            if (prepared.Graph is null) return Wrap(prepared.Response);
-            if (!canAppend(prepared.ResponsePackage))
-                return Wrap(Failure(subRequest.RequestId, CellErrorCode.RequestNotSupported,
-                    "The mandatory save payload exceeds the response budget or conflicts with earlier results."));
-            try
-            {
-                byte[] bytes;
-                try { bytes = prepared.Graph.Materialize(limits.MaxDocumentBytes); }
-                catch (GraphMaterializationLimitException)
-                { throw new StorageQuotaExceededException("document bytes", limits.MaxDocumentBytes + 1, limits.MaxDocumentBytes); }
-                using var stream = new MemoryStream(bytes, writable: false);
-                ValidateDocument(stream, document.Url, limits.MaxDocumentBytes);
-                if (!prepared.Repeat) document.CommitFileRevision(prepared.Graph, bytes, prepared.KnowledgeSequence);
-                return Wrap(prepared.Response, prepared.ResponsePackage);
-            }
-            catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
-            {
-                return Wrap(Failure(subRequest.RequestId, CellErrorCode.InvalidObject, ex.Message));
-            }
-        }
-    }
-
     internal sealed record PreparedFileSave(FsshttpbSubResponse Response,
         PartitionGraphSnapshot? Graph = null, ulong KnowledgeSequence = 0, bool Repeat = false,
         DataElementPackage? ResponsePackage = null);
-
-    private static FsshttpbResponse Wrap(FsshttpbSubResponse response, DataElementPackage? package = null)
-        => new() { SubResponses = { response }, DataElementPackage = package };
 
     private static PreparedFileSave Reject(ulong id, CellErrorCode code, string message)
         => new(Failure(id, code, message));
@@ -61,7 +19,7 @@ public static class FilePartitionSaveHandler
         FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null,
         PartitionGraphSnapshot? currentGraph = null)
     {
-        if (!CellBinaryRequestExecutor.MatchesTarget(subRequest, partition.Kind) ||
+        if (!CellPartitionSelector.MatchesTarget(subRequest, partition.Kind) ||
             partition.Kind != DocumentPartitionKind.FileContents ||
             subRequest.Data is not PutChangesSubRequestData put || package is null)
             return Reject(subRequest.RequestId, CellErrorCode.RequestNotSupported,
@@ -174,26 +132,6 @@ public static class FilePartitionSaveHandler
             graph.FileCell.ShortId, sequence,
             mappingSerials: graph.MappingSerials.Values.SelectMany(s => s)),
     };
-
-    private static void ValidateDocument(Stream content, string documentUrl, long maxExpandedBytes)
-    {
-        using var archive = OpenDocumentArchive(content, documentUrl);
-        // Read all parts before committing so truncated ZIP members cannot become stored content.
-        long expanded = 0;
-        var buffer = new byte[65536];
-        foreach (var entry in archive.Entries)
-        {
-            if (entry.Length > maxExpandedBytes - expanded)
-                throw new StorageQuotaExceededException("expanded package bytes", checked(expanded + entry.Length), maxExpandedBytes);
-            using var stream = entry.Open();
-            int read;
-            while ((read = stream.Read(buffer)) != 0)
-            {
-                expanded = checked(expanded + read);
-                StorageLimits.Check("expanded package bytes", expanded, maxExpandedBytes);
-            }
-        }
-    }
 
     private static ZipArchive OpenDocumentArchive(Stream content, string documentUrl)
     {

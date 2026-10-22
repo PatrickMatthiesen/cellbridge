@@ -1,9 +1,20 @@
+using CellBridge.FssHttpB;
 using CellBridge.Storage;
 
 namespace CellBridge.AspNetCore;
 
 public static class CellPartitionSelector
 {
+    internal static bool MatchesTarget(FsshttpbCellSubRequest request, DocumentPartitionKind kind) =>
+        TryResolveTarget(request, kind, out var selected) && selected == kind;
+
+    internal static bool TryResolveTarget(FsshttpbCellSubRequest request, DocumentPartitionKind fallback,
+        out DocumentPartitionKind kind)
+    {
+        kind = fallback;
+        return request.TargetPartitionId is not { } target || TryResolve(target, out kind);
+    }
+
     public static bool TryResolve(IReadOnlyDictionary<string, string> attributes, out DocumentPartitionKind kind)
     {
         kind = DocumentPartitionKind.FileContents;

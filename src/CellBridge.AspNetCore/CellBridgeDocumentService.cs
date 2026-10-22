@@ -17,10 +17,14 @@ public sealed record AcceptedSave(Guid ResourceId, uint ContentVersion, ContentH
 public sealed record CellExecution(FsshttpbResponse Response, DocumentState State, string? LockError = null)
 {
     public ImmutableArray<AcceptedSave> AcceptedSaves { get; init; } = [];
+    /// <summary>Cancellation stopped the request after an established save. The response is incomplete.</summary>
+    public bool IsCancelled { get; init; }
+    internal bool HasAcceptedSave => !AcceptedSaves.IsEmpty ||
+        Response.SubResponses.Any(operation => operation.RequestType == RequestTypes.PutChanges && !operation.Status);
     internal CellBridgeActor? ResponseActor { get; init; }
 }
 
-/// <summary>Prepares file revisions outside coordination transactions and publishes them durably.</summary>
+/// <summary>Executes document operations and prepares file revisions outside coordination transactions.</summary>
 public sealed partial class CellBridgeDocumentService(StorageProvider provider, ICellBridgeAccessEvaluator? accessEvaluator = null,
     ICellBridgeAuthorizationPolicy? authorizationPolicy = null, ProtocolHashingOptions? hashing = null,
     IDocumentAuthorizationProvider? documentAuthorizationProvider = null, TimeProvider? authorizationTimeProvider = null)
@@ -135,12 +139,14 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         ArgumentNullException.ThrowIfNull(actor);
         var response = new FsshttpbResponse();
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
+        bool hasAcceptedSave = false;
         var state = await CurrentAsync(id, cancellationToken);
         var operationActor = actor;
-        if (request.TryGetValidationError(out _, out _))
+        if (request.TryGetValidationError(out var validationCode, out var validationMessage))
         {
-            var emptyDocument = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-            return new(CellBinaryRequestExecutor.Execute(emptyDocument, emptyDocument.GetPartition(kind), request, Access(actor, state)), state);
+            response.Status = true;
+            response.Error = new ResponseError(ErrorType.Cell, (ulong)validationCode, validationMessage);
+            return new(response, state);
         }
         if (!CellSubRequestDataValidation.TryValidate(attributes, requireBinaryDataSize: false, out _))
             return new(response, state, "InvalidArgument");
@@ -159,7 +165,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                     operation.RequestType == RequestTypes.QueryAccess ? DocumentAccess.None :
                     operation.RequestType is RequestTypes.PutChanges or RequestTypes.AllocateExtendedGuidRange
                         ? DocumentAccess.Write : DocumentAccess.Read, cancellationToken, fresh: true);
-                if (!CellBinaryRequestExecutor.TryResolveTarget(operation, kind, out var selectedKind))
+                if (!CellPartitionSelector.TryResolveTarget(operation, kind, out var selectedKind))
                 {
                     state = await CurrentAsync(id, cancellationToken);
                     var accessForTarget = Access(operationActor, state);
@@ -167,7 +173,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         ? DocumentAccess.Write : DocumentAccess.Read;
                     response.SubResponses.Add(operation.RequestType != RequestTypes.QueryAccess && !accessForTarget.HasFlag(requiredForTarget)
                         ? CellBridgeAuthorization.Denied(operation)
-                        : CellBinaryRequestExecutor.UnsupportedSubResponse(operation.RequestId, operation.RequestType));
+                        : UnsupportedSubResponse(operation.RequestId, operation.RequestType));
                     continue;
                 }
                 if (operation.RequestType == RequestTypes.PutChanges)
@@ -186,9 +192,12 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         }); // ERROR_DISK_FULL.
                         saved = new(rejected, await CurrentAsync(id, cancellationToken));
                     }
-                    queries.AppendSave(saved.Response);
                     accepted.AddRange(saved.AcceptedSaves);
+                    hasAcceptedSave |= saved.HasAcceptedSave;
                     state = saved.State;
+                    queries.AppendSave(saved.Response);
+                    if (saved.IsCancelled) return Cancelled();
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (saved.LockError is not null) return new(response, state, saved.LockError)
                         { AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor };
                     continue;
@@ -225,23 +234,46 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         continue;
                     }
                 }
-                var document = StoredDocument.RestoreMetadata(state, observedNow);
-                var single = new FsshttpbCellRequest { DataElementPackage = request.DataElementPackage };
-                single.SubRequests.Add(operation);
-                var partition = document.GetPartition(selectedKind);
-                var result = CellBinaryRequestExecutor.Execute(document, partition, single, access,
-                    maxResponseBytes: provider.Limits.MaxGraphBytes,
-                    partitionEditorsQueryChanges: (p, requestId) => EditorsQuery(document, p, requestId, state));
-                if (operation.RequestType == RequestTypes.QueryChanges) queries.Append(result, operation.Data as QueryChangesSubRequestData);
-                else response.SubResponses.AddRange(result.SubResponses);
+                switch (operation.RequestType)
+                {
+                    case RequestTypes.QueryChanges:
+                        var document = StoredDocument.RestoreMetadata(state, observedNow);
+                        queries.Append(GeneratedPartitionQuery(document, document.GetPartition(selectedKind), operation, state),
+                            operation.Data as QueryChangesSubRequestData);
+                        break;
+                    case RequestTypes.QueryAccess:
+                        response.SubResponses.Add(QueryAccessSubResponse(operation.RequestId, access));
+                        break;
+                    case RequestTypes.AllocateExtendedGuidRange:
+                        response.SubResponses.Add(AllocateRange(operation));
+                        break;
+                    default:
+                        response.SubResponses.Add(UnsupportedSubResponse(operation.RequestId, operation.RequestType));
+                        break;
+                }
             }
+            cancellationToken.ThrowIfCancellationRequested();
             // MS-FSSHTTP GetFileProps describes the updated version after the Cell
             // operations. Capture its metadata here; the SOAP adapter never rereads it.
             return new(response, state) { AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor };
         }
+        catch (OperationCanceledException) when (hasAcceptedSave && cancellationToken.IsCancellationRequested)
+        {
+            return Cancelled();
+        }
         catch (Exception ex) when (accepted.Count != 0 && AcceptedSaveException.CanWrap(ex))
         {
             throw AcceptedSaveException.Wrap(accepted.ToImmutable(), ex);
+        }
+
+        CellExecution Cancelled()
+        {
+            response.Status = true;
+            response.Error = new ResponseError(ErrorType.Win32, 995, "The request was cancelled before completion.");
+            return new(response, state)
+            {
+                AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor, IsCancelled = true
+            };
         }
     }
 
@@ -466,6 +498,17 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
                 }, cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Cancellation of the commit await does not establish whether it committed.
+                // Only a matching, authorized receipt can establish acceptance.
+                var current = await CurrentAsync(id, CancellationToken.None);
+                if (current.LifecycleGeneration != initial.LifecycleGeneration ||
+                    current.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is not { } accepted) throw;
+                var recovered = await RepeatAsync(current, accepted, digest, operation.RequestId, actor, canAppend, CancellationToken.None);
+                if (!recovered.HasAcceptedSave) throw;
+                return recovered with { IsCancelled = true };
+            }
             catch (StorageUnavailableException)
             {
                 // A lost commit response is not a rollback. Resolve the durable
@@ -490,6 +533,19 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
     }
 
     private async ValueTask<CellExecution> RepeatAsync(DocumentState state, SaveReceipt receipt, string digest,
+        ulong requestId, CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
+    {
+        try { return await ReadSaveReceiptAsync(state, receipt, digest, requestId, actor, canAppend, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Finish only receipt verification after cancellation, never another save.
+            var recovered = await ReadSaveReceiptAsync(state, receipt, digest, requestId, actor, canAppend, CancellationToken.None);
+            if (!recovered.HasAcceptedSave) throw;
+            return recovered with { IsCancelled = true };
+        }
+    }
+
+    private async ValueTask<CellExecution> ReadSaveReceiptAsync(DocumentState state, SaveReceipt receipt, string digest,
         ulong requestId, CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
     {
         var generation = state.LifecycleGeneration;

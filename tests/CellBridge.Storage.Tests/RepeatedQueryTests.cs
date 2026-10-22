@@ -3,29 +3,31 @@ using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
-using CellBridge.Storage.InMemory;
 using CellBridge.Tests;
 using CellBridge.TestFixtures;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public class RepeatedQueryTests
 {
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task UnsupportedLegacyScopePreservesEarlierQueryAndSaveAcknowledgement(bool buffered)
+    public async Task UnsupportedLegacyScopePreservesEarlierQueryAndSaveAcknowledgement(bool postgreSql)
     {
-        var provider = Memory();
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/legacy-scope.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var state = (await service.CreateAsync("/legacy-scope-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var f = new GraphFixture(MinimalDocx.Create("after"));
         f.MakeSelfContainedWithUnmappedAncestor();
         var request = Query(1);
         request.DataElementPackage = new(); request.DataElementPackage.DataElements.AddRange(f.Elements);
         request.SubRequests.Add(Save(state, f));
         request.SubRequests.Add(Query(3, cell: f.Cell).SubRequests[0]);
-        var result = await Run(state, provider, request, buffered);
+        var result = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            request, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.False(result.SubResponses[0].Status);
         Assert.False(result.SubResponses[1].Status);
         Assert.True(result.SubResponses[2].Status);
@@ -33,22 +35,29 @@ public class RepeatedQueryTests
         Assert.NotEmpty(result.DataElementPackage!.DataElements);
     }
 
-    [Fact]
-    public async Task AggregateBudgetRejectsLaterCellWithoutDiscardingEarlierPayload()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AggregateBudgetRejectsLaterCellWithoutDiscardingEarlierPayload(bool postgreSql)
     {
-        var provider = Memory();
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var state = await PublishGraph(provider);
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
-        var document = await StoredDocument.RestoreAsync(state, provider.Content);
-        var first = CellBinaryRequestExecutor.Execute(document, document.FilePartition, Query(1, cell: f.Cell), DocumentAccess.Read);
+        var service = new CellBridgeDocumentService(provider);
+        var first = (await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            Query(1, cell: f.Cell), new Dictionary<string, string>(), TestActor.Value)).Response;
+        var second = (await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            Query(2, cell: f.OtherCell), new Dictionary<string, string>(), TestActor.Value)).Response;
         var budget = first.DataElementPackage!.DataElements.Sum(e =>
         {
             var writer = new BinaryWriterEx(); e.Serialize(writer); return (long)writer.Length;
         });
-        var request = Query(1, cell: f.Cell);
-        request.SubRequests.Add(Query(2, cell: f.OtherCell).SubRequests[0]);
-        var combined = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request,
-            DocumentAccess.Read, maxResponseBytes: budget);
+        // Exercise response aggregation independently of the provider's graph storage limit.
+        var combined = new FsshttpbResponse();
+        var assembler = new QueryChangesResponseAssembler(combined, budget);
+        assembler.Append(first);
+        assembler.Append(second);
         Assert.False(combined.SubResponses[0].Status);
         Assert.True(combined.SubResponses[1].Status);
         Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, combined.SubResponses[1].Error!.ErrorCode);
@@ -59,18 +68,21 @@ public class RepeatedQueryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task RepeatedQueriesKeepIndependentKnowledgeAndFailuresWithoutDiscardingEarlierPayloads(bool buffered)
+    public async Task RepeatedQueriesKeepIndependentKnowledgeAndFailuresWithoutDiscardingEarlierPayloads(bool postgreSql)
     {
-        var provider = Memory();
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/queries.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var full = await Run(state, provider, Query(1), buffered);
+        var state = (await service.CreateAsync("/queries-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
+        var full = (await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            Query(1), new Dictionary<string, string>(), TestActor.Value)).Response;
         var fullElements = full.DataElementPackage!.DataElements;
         var knowledge = ClientKnowledge.FromElements(fullElements);
         var request = Query(11, knowledge);
         request.SubRequests.Add(Query(22).SubRequests[0]);
         request.SubRequests.Add(Query(33, maximum: 1).SubRequests[0]);
-        var combined = await Run(state, provider, request, buffered);
+        var combined = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            request, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.Equal(new ulong[] { 11, 22, 33 }, combined.SubResponses.Select(s => s.RequestId));
         Assert.False(combined.SubResponses[0].Status);
         Assert.False(combined.SubResponses[1].Status);
@@ -87,12 +99,14 @@ public class RepeatedQueryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task CellQueriesFollowDependenciesAndKeepOtherCellsOutOfKnowledge(bool buffered)
+    public async Task CellQueriesFollowDependenciesAndKeepOtherCellsOutOfKnowledge(bool postgreSql)
     {
-        var provider = Memory();
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var state = await PublishGraph(provider);
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
-        var response = await Run(state, provider, Query(1, cell: f.Cell), buffered);
+        var response = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            Query(1, cell: f.Cell), new Dictionary<string, string>(), TestActor.Value)).Response;
         var data = Assert.IsType<QueryChangesSubResponseData>(Assert.Single(response.SubResponses).Data);
         Assert.Equal(0UL, data.Waterline);
         Assert.Equal(f.Cell.LongId.Guid, data.CellKnowledgeCellGuid);
@@ -103,20 +117,26 @@ public class RepeatedQueryTests
         Assert.False(knowledge.Contains(new SerialNumber(other.Serial.Guid, other.Serial.Value)));
         var repeated = Query(1, cell: f.Cell);
         repeated.SubRequests.Add(Query(2, cell: f.OtherCell).SubRequests[0]);
-        var union = await Run(state, provider, repeated, buffered);
+        var union = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            repeated, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.All(union.SubResponses, s => Assert.False(s.Status));
         Assert.Contains(union.DataElementPackage!.DataElements, e => e.DataElementExtendedGuid.Equals(f.OtherGroup));
         Assert.False(ClientKnowledge.Deserialize(new BinaryReaderEx(
             Assert.IsType<QueryChangesSubResponseData>(union.SubResponses[0].Data).KnowledgeBytes!))
             .Contains(new SerialNumber(other.Serial.Guid, other.Serial.Value)));
         var stale = new CellId(StorageIds.Restore(state.Partitions[0].Identity.CellLong), StorageIds.Restore(state.Partitions[0].Identity.CellShort));
-        Assert.True(Assert.Single((await Run(state, provider, Query(3, cell: stale), buffered)).SubResponses).Status);
+        var unsupported = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents, Query(3, cell: stale), new Dictionary<string, string>(), TestActor.Value);
+        Assert.True(Assert.Single(unsupported.Response.SubResponses).Status);
     }
 
-    [Fact]
-    public async Task ScopedSerialAmbiguityIsDetectedAcrossOtherCells()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScopedSerialAmbiguityIsDetectedAcrossOtherCells(bool postgreSql)
     {
-        var provider = Memory();
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var state = await PublishGraph(provider);
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         var other = state.Partitions[0].Elements.Single(e => e.Id == StorageIds.Capture(f.OtherGroup));
@@ -148,12 +168,15 @@ public class RepeatedQueryTests
         Assert.DoesNotContain(query.Response.DataElementPackage.DataElements, e => e.DataElementExtendedGuid.Equals(f.OtherGroup));
     }
 
-    [Fact]
-    public async Task QuerySaveQueryPreservesBothImmutableGraphsAndVersions()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task QuerySaveQueryPreservesBothImmutableGraphsAndVersions(bool postgreSql)
     {
-        var provider = Memory();
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
-        var before = (await service.CreateAsync("/order.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var before = (await service.CreateAsync("/order-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         var request = Query(1);
         request.DataElementPackage = new(); request.DataElementPackage.DataElements.AddRange(f.Elements);
@@ -171,11 +194,10 @@ public class RepeatedQueryTests
         Assert.Contains(result.Response.DataElementPackage.DataElements, e => e.DataElementExtendedGuid.Equals(f.Index));
     }
 
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
     private static async Task<DocumentState> PublishGraph(StorageProvider provider)
     {
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/scopes.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var state = (await service.CreateAsync("/scopes-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         var request = new FsshttpbCellRequest { DataElementPackage = new() };
         request.DataElementPackage.DataElements.AddRange(f.Elements); request.SubRequests.Add(Save(state, f));
@@ -190,14 +212,4 @@ public class RepeatedQueryTests
     private static FsshttpbCellRequest Query(ulong id, ClientKnowledge? knowledge = null, ulong? maximum = null, CellId? cell = null) => new()
     { SubRequests = { new(RequestTypes.QueryChanges) { RequestId = id, Data = new QueryChangesSubRequestData
         { IncludeStorageManifest = true, IncludeCellChanges = true, Knowledge = knowledge, MaxDataElements = maximum, CellId = cell } } } };
-    private static async Task<FsshttpbResponse> Run(DocumentState state, StorageProvider provider, FsshttpbCellRequest request, bool buffered)
-    {
-        if (buffered)
-        {
-            var document = await StoredDocument.RestoreAsync(state, provider.Content);
-            return CellBinaryRequestExecutor.Execute(document, document.FilePartition, request, DocumentAccess.Read | DocumentAccess.Write);
-        }
-        return (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            request, new Dictionary<string, string>(), TestActor.Value)).Response;
-    }
 }

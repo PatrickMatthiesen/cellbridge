@@ -80,6 +80,15 @@ public class PublicationTests
         Assert.Equal(state.ContentVersion + 1, final.ContentVersion);
         Assert.Single(final.Receipts);
         Assert.All(results, result => Assert.Equal(final.StateVersion, result.State.StateVersion));
+        var committed = Assert.Single(results, result => !Assert.Single(result.AcceptedSaves).IsReplay);
+        Assert.All(results, result =>
+        {
+            Assert.Equal(committed.Response.ToByteArray(), result.Response.ToByteArray());
+            var receipt = Assert.Single(result.AcceptedSaves);
+            Assert.Equal(final.Content, receipt.Content);
+            Assert.Equal(final.ContentVersion, receipt.ContentVersion);
+            Assert.Equal(final.Receipts[0].OperationKey, receipt.OperationKey);
+        });
     }
 
     [Fact]

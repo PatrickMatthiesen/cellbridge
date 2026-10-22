@@ -18,6 +18,11 @@ and add their account and peer. Recovery tests configure the same database
 resource for controlled interruption. These changes live in the fixtures; the
 development AppHost has no test topology switches.
 
+Direct protocol behavior tests use `CellBridgeDocumentService.ExecuteAsync` with
+both InMemory and PostgreSQL. They check decoded responses and resulting files,
+partition graphs and receipts. Codec and response-assembly tests keep independent
+binary and reference assertions.
+
 Fixtures apply the existing initialization and dispose their own application.
 They do not use the development database or volume. Storage tests always own
 their database. Lists accepts an explicitly supplied

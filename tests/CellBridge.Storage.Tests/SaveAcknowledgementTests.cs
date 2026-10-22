@@ -4,11 +4,11 @@ using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
-using CellBridge.Storage.InMemory;
 using CellBridge.TestFixtures;
 
 namespace CellBridge.Storage.Tests;
 
+[Collection("PostgreSQL")]
 public sealed class SaveAcknowledgementTests
 {
     [Theory]
@@ -18,11 +18,12 @@ public sealed class SaveAcknowledgementTests
     [InlineData(true, 0x06)]
     [InlineData(false, 0x8004)] // Excel also sets reserved bit 15.
     [InlineData(true, 0x8004)]
-    public async Task CompleteSaveAcknowledgesUniqueAdditionsAndRetainsAuthoritativeKnowledge(bool buffered, ushort flags)
+    public async Task CompleteSaveAcknowledgesUniqueAdditionsAndRetainsAuthoritativeKnowledge(bool postgreSql, ushort flags)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/ack.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var state = (await service.CreateAsync("/ack-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var document = await StoredDocument.RestoreAsync(state, provider.Content);
         var existing = document.FilePartition.FileGraph.Elements.ToDictionary(e => e.DataElementExtendedGuid);
         var request = StorageTests.Fixture("save-first");
@@ -34,25 +35,15 @@ public sealed class SaveAcknowledgementTests
         var addedIds = request.DataElementPackage.DataElements.Select(e => e.DataElementExtendedGuid)
             .Where(id => !existing.ContainsKey(id)).Distinct().ToArray();
 
-        FsshttpbResponse response;
-        if (buffered)
-        {
-            response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request,
-                DocumentAccess.Read | DocumentAccess.Write);
-            Assert.Equal(state.ContentVersion + 1, document.ContentVersion);
-        }
-        else
-        {
-            var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-                request, new Dictionary<string, string>(), TestActor.Value);
-            Assert.Equal(state.ContentVersion + 1, saved.State.ContentVersion);
-            response = saved.Response;
-            document = await StoredDocument.RestoreAsync(saved.State, provider.Content);
-            var retry = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId,
-                DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
-            Assert.Equal(saved.State.StateVersion, retry.State.StateVersion);
-            Assert.Equal(response.ToByteArray(), retry.Response.ToByteArray());
-        }
+        var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            request, new Dictionary<string, string>(), TestActor.Value);
+        Assert.Equal(state.ContentVersion + 1, saved.State.ContentVersion);
+        var response = saved.Response;
+        document = await StoredDocument.RestoreAsync(saved.State, provider.Content);
+        var retry = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
+        Assert.Equal(saved.State.StateVersion, retry.State.StateVersion);
+        Assert.Equal(response.ToByteArray(), retry.Response.ToByteArray());
 
         var sub = Assert.Single(response.SubResponses);
         Assert.False(sub.Status, sub.Error?.ErrorMessage);
@@ -71,11 +62,12 @@ public sealed class SaveAcknowledgementTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ReceiptFreeRepeatCannotAcknowledgeUnpublishedElements(bool buffered)
+    public async Task ReceiptFreeRepeatCannotAcknowledgeUnpublishedElements(bool postgreSql)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/repeat.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var state = (await service.CreateAsync("/repeat-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var document = await StoredDocument.RestoreAsync(state, provider.Content);
         var graph = document.FilePartition.FileGraph;
         var knownIndex = graph.Elements.Single(e => e.DataElementExtendedGuid.Equals(graph.StorageIndex));
@@ -89,26 +81,15 @@ public sealed class SaveAcknowledgementTests
         var newId = new ExGuid(1, Guid.NewGuid());
         request.DataElementPackage.DataElements.Add(new(knownIndex.DataElementType, newId, SerialNumber.Null)
             { Data = knownIndex.Data!.ToArray() });
-        FsshttpbResponse response;
-        if (buffered)
-        {
-            response = CellBinaryRequestExecutor.Execute(document, document.FilePartition, request,
-                DocumentAccess.Read | DocumentAccess.Write);
-            Assert.Same(graph, document.FilePartition.FileGraph);
-            Assert.Equal(state.ContentVersion, document.ContentVersion);
-            Assert.Equal(state.Partitions[0].Knowledge, document.FilePartition.KnowledgeSequence);
-        }
-        else
-        {
-            var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-                request, new Dictionary<string, string>(), TestActor.Value);
-            response = result.Response;
-            Assert.Equal(state.StateVersion, result.State.StateVersion);
-            Assert.Equal(state.Content, result.State.Content);
-            Assert.Equal(state.ContentVersion, result.State.ContentVersion);
-            Assert.Empty(result.State.Receipts);
-            Assert.DoesNotContain(result.State.Partitions[0].Elements, e => StorageIds.Restore(e.Id).Equals(newId));
-        }
+        var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            request, new Dictionary<string, string>(), TestActor.Value);
+        var response = result.Response;
+        Assert.Equal(state.StateVersion, result.State.StateVersion);
+        Assert.Equal(state.Content, result.State.Content);
+        Assert.Equal(state.ContentVersion, result.State.ContentVersion);
+        Assert.Equal(state.Partitions[0].Knowledge, result.State.Partitions[0].Knowledge);
+        Assert.Empty(result.State.Receipts);
+        Assert.DoesNotContain(result.State.Partitions[0].Elements, e => StorageIds.Restore(e.Id).Equals(newId));
         var sub = Assert.Single(response.SubResponses);
         Assert.True(sub.Status);
         Assert.Equal((ulong)CellErrorCode.InvalidObject, sub.Error!.ErrorCode);

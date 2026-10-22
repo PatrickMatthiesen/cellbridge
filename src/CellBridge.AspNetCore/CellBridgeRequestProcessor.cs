@@ -10,7 +10,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace CellBridge.AspNetCore;
 
 /// <summary>Protocol response and accepted save receipts produced while executing a parsed SOAP request.</summary>
-public sealed record CellStorageExecution(CellStorageResponse Response, ImmutableArray<AcceptedSave> AcceptedSaves);
+public sealed record CellStorageExecution(CellStorageResponse Response, ImmutableArray<AcceptedSave> AcceptedSaves)
+{
+    /// <summary>Cancellation stopped the request after an established save. The response is incomplete.</summary>
+    public bool IsCancelled { get; init; }
+}
 
 /// <summary>Executes parsed MS-FSSHTTP requests without an HTTP endpoint or transport dependency.</summary>
 public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service,
@@ -37,6 +41,8 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
         var publicBase = publicOrigin.TrimEnd('/') + DocumentUrlPaths.ValidateMount(applicationPathBase);
         var log = logger ?? NullLogger<CellBridgeRequestProcessor>.Instance;
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
+        bool hasAcceptedSave = false;
+        FssHttpResponse? currentResponse = null;
         // WebUrl must be same-origin with the request ([MS-FSSHTTP] 2.2.3.6).
         var response = new CellStorageResponse
         {
@@ -67,17 +73,19 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
         {
             foreach (var fileRequest in request.Requests)
             {
+                var fileResponse = new FssHttpResponse
+                {
+                    Url = fileRequest.Url, RequestToken = fileRequest.RequestToken,
+                };
+                currentResponse = fileResponse;
+                response.Responses.Add(fileResponse);
+                cancellationToken.ThrowIfCancellationRequested();
                 var initial = await service.LookupAsync(fileRequest, cancellationToken, applicationPathBase);
                 var doc = initial is null ? null : StoredDocument.RestoreMetadata(initial, DateTime.UtcNow);
                 if (doc is null)
                 {
-                    response.Responses.Add(new FssHttpResponse
-                    {
-                        Url = fileRequest.Url,
-                        RequestToken = fileRequest.RequestToken,
-                        ErrorCode = "FileNotExistsOrCannotBeCreated",
-                        ErrorMessage = "The requested file does not exist and cannot be created by this operation.",
-                    });
+                    fileResponse.ErrorCode = "FileNotExistsOrCannotBeCreated";
+                    fileResponse.ErrorMessage = "The requested file does not exist and cannot be created by this operation.";
                     continue;
                 }
 
@@ -86,13 +94,9 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 var currentIdentity = await service.RevalidateReadStateAsync(initial!, cancellationToken);
                 var canRead = currentIdentity is not null && service.Access(fileActor, currentIdentity).HasFlag(DocumentAccess.Read);
                 if (currentIdentity is not null) doc = StoredDocument.RestoreMetadata(currentIdentity, DateTime.UtcNow);
-                var fileResponse = new FssHttpResponse
-                {
-                    Url = canRead ? DocumentRequestResolver.CanonicalUrl(doc, publicBase) : fileRequest.Url,
-                    RequestToken = fileRequest.RequestToken,
-                    IntervalOverride = 0,
-                    ResourceId = canRead ? doc.TransitionId : null,
-                };
+                fileResponse.Url = canRead ? DocumentRequestResolver.CanonicalUrl(doc, publicBase) : fileRequest.Url;
+                fileResponse.IntervalOverride = 0;
+                fileResponse.ResourceId = canRead ? doc.TransitionId : null;
                 if (!canRead)
                 {
                     fileResponse.ErrorCode = "FileUnauthorizedAccess";
@@ -101,6 +105,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
 
                 foreach (var subRequest in fileRequest.SubRequests)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var subResponse = new FssHttpSubResponse
                     {
                         Type = subRequest.Type,
@@ -131,7 +136,13 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         }
                         else if (subRequest.Type == SubRequestType.Cell)
                         {
-                            await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, operationActor, accepted, cancellationToken);
+                            var cell = await HandleCellSubRequest(service, doc.TransitionId, subRequest, subResponse, log, operationActor, accepted, cancellationToken);
+                            hasAcceptedSave |= cell?.HasAcceptedSave ?? false;
+                            if (cell?.IsCancelled == true)
+                            {
+                                fileResponse.SubResponses.Add(subResponse);
+                                return Cancelled();
+                            }
                         }
                         else if (OuterDocumentOperations.Handles(subRequest.Type))
                             await OuterDocumentOperations.ExecuteAsync(service, doc.TransitionId, subRequest, subResponse,
@@ -178,19 +189,34 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                     }
 
                     fileResponse.SubResponses.Add(subResponse);
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
 
                 if (await service.Provider.State.FindByResourceIdAsync(doc.TransitionId, cancellationToken) is { } latest &&
                     service.Access(fileActor, latest).HasFlag(DocumentAccess.Read))
                     fileResponse.Url = DocumentRequestResolver.CanonicalUrl(StoredDocument.RestoreMetadata(latest, DateTime.UtcNow), publicBase);
-                response.Responses.Add(fileResponse);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return new(response, accepted.ToImmutable());
+        }
+        catch (OperationCanceledException) when ((hasAcceptedSave || accepted.Count != 0) && cancellationToken.IsCancellationRequested)
+        {
+            return Cancelled();
         }
         catch (Exception ex) when (accepted.Count != 0 && AcceptedSaveException.CanWrap(ex))
         {
             throw AcceptedSaveException.Wrap(accepted.ToImmutable(), ex);
+        }
+
+        CellStorageExecution Cancelled()
+        {
+            if (currentResponse is not null)
+            {
+                currentResponse.ErrorCode = "SubRequestFail";
+                currentResponse.ErrorMessage = "The request was cancelled before completion.";
+            }
+            return new(response, accepted.ToImmutable()) { IsCancelled = true };
         }
     }
 
@@ -348,6 +374,12 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
         var execution = await service.ExecuteAsync(resourceId, partitionKind, fsshttpbRequest,
             subRequest.SubRequestDataAttributes, actor, cancellationToken);
         accepted.AddRange(execution.AcceptedSaves);
+        if (execution.IsCancelled)
+        {
+            subResponse.ErrorCode = "CellRequestFail";
+            subResponse.HResult = "2147943395"; // HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED).
+            subResponse.ErrorMessage = "The request was cancelled before completion.";
+        }
         if (execution.LockError is not null)
         {
             subResponse.ErrorCode = execution.LockError;
