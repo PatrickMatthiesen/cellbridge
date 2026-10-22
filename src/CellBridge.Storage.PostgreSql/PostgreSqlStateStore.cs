@@ -1,7 +1,7 @@
-using System.Text;
 using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
@@ -14,6 +14,13 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
     private readonly PooledDbContextFactory<CellBridgeDbContext>? _contextFactory;
     private readonly object _budgetScope;
     private readonly StorageLimits _limits;
+    // Each store owns delegates for its supplied options. A different runtime
+    // model uses ordinary LINQ instead of sharing a compiled query across models.
+    private IModel? _queryModel;
+    private readonly Func<CellBridgeDbContext, Guid, long, CancellationToken, Task<string?>> _stateByVersion =
+        EF.CompileAsyncQuery((CellBridgeDbContext context, Guid resourceId, long version, CancellationToken token) =>
+            context.States.AsNoTracking().Where(row => row.ResourceId == resourceId && row.StateVersion == version)
+                .Select(row => row.StateJson).SingleOrDefault());
 
     public PostgreSqlStateStore(NpgsqlDataSource dataSource, StorageLimits? limits = null)
         : this(PostgreSqlDatabase.CreateOptions(dataSource), limits, dataSource) { }
@@ -127,8 +134,7 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
             var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
             if (rename) await PostgreSqlNamespaceLock.AcquireAsync(connection, transaction, cancellationToken);
             var version = await LockDocumentAsync(connection, transaction, id, cancellationToken);
-            var stateJson = await context.States.AsNoTracking().Where(row => row.ResourceId == id && row.StateVersion == version)
-                .Select(row => row.StateJson).SingleOrDefaultAsync(cancellationToken)
+            var stateJson = await ReadStateJsonAsync(context, id, version, cancellationToken)
                 ?? throw new StorageCorruptionException("The current state is missing.");
             var current = Decode(stateJson);
             var now = await ReadDatabaseClockAsync(context, cancellationToken);
@@ -282,11 +288,22 @@ public sealed partial class PostgreSqlStateStore : IDocumentStateStore, IDocumen
         return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
 
+    private Task<string?> ReadStateJsonAsync(CellBridgeDbContext context, Guid resourceId, long version,
+        CancellationToken cancellationToken)
+    {
+        var model = context.Model;
+        var boundModel = Interlocked.CompareExchange(ref _queryModel, model, null) ?? model;
+        return ReferenceEquals(boundModel, model)
+            ? _stateByVersion(context, resourceId, version, cancellationToken)
+            : context.States.AsNoTracking().Where(row => row.ResourceId == resourceId && row.StateVersion == version)
+                .Select(row => row.StateJson).SingleOrDefaultAsync(cancellationToken);
+    }
+
     private static async Task InsertStateAsync(CellBridgeDbContext context, DocumentState state,
         CancellationToken cancellationToken)
     {
         var json = DocumentStateJson.Serialize(state);
-        await PostgreSqlStorageBudget.AdjustAsync(context, Encoding.UTF8.GetByteCount(json), 0, cancellationToken);
+        await PostgreSqlStorageBudget.AdjustAsync(context, DocumentStateJson.GetSerializedSize(state), 0, cancellationToken);
         context.States.Add(new StateRow { ResourceId = state.ResourceId, StateVersion = state.StateVersion, StateJson = json });
         await WriteSelectiveReadsAsync(context, state, cancellationToken);
     }

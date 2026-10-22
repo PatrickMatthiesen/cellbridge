@@ -181,44 +181,45 @@ public sealed partial class PostgreSqlStateStore
         var tracked = context.ChangeTracker.Entries<RevisionSummaryRow>()
             .Where(entry => entry.Entity.ResourceId == state.ResourceId && entry.State != EntityState.Detached)
             .ToDictionary(entry => (entry.Entity.LifecycleGeneration, entry.Entity.RevisionNumber));
-        var desired = revisions.ToDictionary(
-            revision => (revision.LifecycleGeneration, (decimal)revision.RevisionNumber),
-            revision => JsonSerializer.Serialize(revision));
+        var desiredKeys = new HashSet<(long LifecycleGeneration, decimal RevisionNumber)>(revisions.Length);
 
-        foreach (var pair in desired)
+        foreach (var revision in revisions)
         {
-            if (tracked.TryGetValue(pair.Key, out var entry))
+            var key = (revision.LifecycleGeneration, RevisionNumber: (decimal)revision.RevisionNumber);
+            desiredKeys.Add(key);
+            var summaryJson = JsonSerializer.Serialize(revision);
+            if (tracked.TryGetValue(key, out var entry))
             {
                 if (entry.State == EntityState.Deleted) entry.State = EntityState.Unchanged;
-                entry.Entity.SummaryJson = pair.Value;
+                entry.Entity.SummaryJson = summaryJson;
             }
-            else if (databaseRows.TryGetValue(pair.Key, out var databaseRow))
+            else if (databaseRows.TryGetValue(key, out var databaseRow))
             {
-                if (databaseRow.SummaryJson == pair.Value) continue;
+                if (databaseRow.SummaryJson == summaryJson) continue;
                 var row = CreateRevisionSummaryRow(state.ResourceId, databaseRow);
                 context.RevisionSummaries.Attach(row);
-                row.SummaryJson = pair.Value;
+                row.SummaryJson = summaryJson;
             }
             else
             {
                 context.RevisionSummaries.Add(new RevisionSummaryRow
                 {
                     ResourceId = state.ResourceId,
-                    LifecycleGeneration = pair.Key.LifecycleGeneration,
-                    RevisionNumber = pair.Key.Item2,
-                    SummaryJson = pair.Value,
+                    LifecycleGeneration = key.LifecycleGeneration,
+                    RevisionNumber = key.RevisionNumber,
+                    SummaryJson = summaryJson,
                 });
             }
         }
         foreach (var pair in tracked)
         {
-            if (!desired.ContainsKey(pair.Key)) pair.Value.State = pair.Value.State == EntityState.Added
+            if (!desiredKeys.Contains(pair.Key)) pair.Value.State = pair.Value.State == EntityState.Added
                 ? EntityState.Detached
                 : EntityState.Deleted;
         }
         foreach (var pair in databaseRows)
         {
-            if (desired.ContainsKey(pair.Key) || tracked.ContainsKey(pair.Key)) continue;
+            if (desiredKeys.Contains(pair.Key) || tracked.ContainsKey(pair.Key)) continue;
             context.RevisionSummaries.Remove(CreateRevisionSummaryRow(state.ResourceId, pair.Value));
         }
 

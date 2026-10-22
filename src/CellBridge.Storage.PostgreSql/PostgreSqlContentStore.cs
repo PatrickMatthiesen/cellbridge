@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
@@ -17,6 +18,16 @@ public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetPartic
     private readonly object _budgetScope;
     private readonly long _maxObjectBytes;
     private readonly SemaphoreSlim _writers = new(4);
+    // Delegates belong to this store's options, not a process-wide default model.
+    private IModel? _queryModel;
+    private readonly Func<CellBridgeDbContext, string, CancellationToken, Task<ContentMetadata?>> _contentMetadata =
+        EF.CompileAsyncQuery((CellBridgeDbContext context, string key, CancellationToken token) =>
+            context.Objects.AsNoTracking().Where(row => row.ObjectKey == key)
+                .Select(row => new ContentMetadata { Length = row.Length, Sha256 = row.Sha256 }).SingleOrDefault());
+    private readonly Func<CellBridgeDbContext, string, IAsyncEnumerable<byte[]>> _contentChunks =
+        EF.CompileAsyncQuery((CellBridgeDbContext context, string key) =>
+            context.Chunks.AsNoTracking().Where(row => row.ObjectKey == key)
+                .OrderBy(row => row.Ordinal).Select(row => row.Bytes));
 
     public PostgreSqlContentStore(NpgsqlDataSource dataSource, long maxObjectBytes = 512L * 1024 * 1024)
         : this(PostgreSqlDatabase.CreateOptions(dataSource), maxObjectBytes, dataSource) { }
@@ -99,8 +110,7 @@ public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetPartic
         }
         else
         {
-            var metadata = await context.Objects.AsNoTracking().Where(row => row.ObjectKey == digest)
-                .Select(row => new { row.Length, row.Sha256 }).SingleOrDefaultAsync(cancellationToken);
+            var metadata = await ReadContentMetadataAsync(context, digest, cancellationToken);
             if (metadata is null || metadata.Length != length || metadata.Sha256 != digest)
                 throw new StorageCorruptionException("Existing content has invalid metadata.");
             using var verification = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -137,17 +147,40 @@ public sealed class PostgreSqlContentStore : IContentStore, IStorageBudgetPartic
         try
         {
             await context.Database.OpenConnectionAsync(cancellationToken);
-            var metadata = await context.Objects.AsNoTracking().Where(row => row.ObjectKey == handle.Key)
-                .Select(row => new { row.Length, row.Sha256 }).SingleOrDefaultAsync(cancellationToken);
+            var metadata = await ReadContentMetadataAsync(context, handle.Key, cancellationToken);
             if (metadata is null || metadata.Length != handle.Length || metadata.Sha256 != handle.Sha256)
                 throw new StorageCorruptionException("Referenced content is missing or has invalid metadata.");
+            var rows = ReadContentChunks(context, handle.Key);
             var readCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var chunks = context.Chunks.AsNoTracking().Where(row => row.ObjectKey == handle.Key)
-                .OrderBy(row => row.Ordinal).Select(row => row.Bytes).AsAsyncEnumerable()
-                .GetAsyncEnumerator(readCancellation.Token);
+            var chunks = rows.GetAsyncEnumerator(readCancellation.Token);
             return new ChunkStream(context, chunks, readCancellation, handle);
         }
         catch { await context.DisposeAsync(); throw; }
+    }
+
+    private bool UsesCompiledModel(CellBridgeDbContext context)
+    {
+        var model = context.Model;
+        return ReferenceEquals(Interlocked.CompareExchange(ref _queryModel, model, null) ?? model, model);
+    }
+
+    private Task<ContentMetadata?> ReadContentMetadataAsync(CellBridgeDbContext context, string key,
+        CancellationToken cancellationToken) => UsesCompiledModel(context)
+            ? _contentMetadata(context, key, cancellationToken)
+            : context.Objects.AsNoTracking().Where(row => row.ObjectKey == key)
+                .Select(row => new ContentMetadata { Length = row.Length, Sha256 = row.Sha256 })
+                .SingleOrDefaultAsync(cancellationToken);
+
+    private IAsyncEnumerable<byte[]> ReadContentChunks(CellBridgeDbContext context, string key) =>
+        UsesCompiledModel(context)
+            ? _contentChunks(context, key)
+            : context.Chunks.AsNoTracking().Where(row => row.ObjectKey == key)
+                .OrderBy(row => row.Ordinal).Select(row => row.Bytes).AsAsyncEnumerable();
+
+    private sealed class ContentMetadata
+    {
+        public long Length { get; init; }
+        public required string Sha256 { get; init; }
     }
 
     private sealed class ChunkStream(CellBridgeDbContext context, IAsyncEnumerator<byte[]> chunks,

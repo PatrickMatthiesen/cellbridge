@@ -103,11 +103,12 @@ public sealed partial class PostgreSqlListEngine
             var references = ReferenceAssignments(definition, values, assignedReferenceIds);
             if (references.Count != 0)
                 await ValidateReferenceAssignmentsAsync(db, connection, transaction, workspaceId, actor.Subject, references, ct, authorization);
+            var normalizedValues = PostgreSqlListJson.NormalizeOwnedRecordValues(values);
             try
             {
                 return await PersistUpdateAsync(db, connection, transaction, workspaceId, listId, current,
                     context.RecordRow!,
-                    definition.SchemaVersion, PostgreSqlListJson.RecordValues(values), actor.Subject, request.Changes,
+                    definition.SchemaVersion, normalizedValues.ToJsonString(), normalizedValues, actor.Subject, request.Changes,
                     changedReferenceIds, references, context.RecordBytes, ct);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation &&
@@ -213,7 +214,10 @@ public sealed partial class PostgreSqlListEngine
     {
         if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
         await LockRecordContextAsync(connection, transaction, workspaceId, listId, Guid.Empty, false, ct);
-        var projection = await (
+        var projection = (CanUseCompiledContextQueries(db)
+            ? await _compiledDefinitionContext(db, workspaceId, listId, subject, (int)requiredAccess,
+                authorization is not null, ct)
+            : await (
             from workspace in db.Workspaces.AsNoTracking()
             from list in db.Lists.AsNoTracking().Where(row =>
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
@@ -232,7 +236,7 @@ public sealed partial class PostgreSqlListEngine
                             row.ListId == listId && row.Subject == subject)
                         .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
                 DefinitionJson = schema.Definition
-            }).SingleOrDefaultAsync(ct) ?? throw Forbidden();
+            }).SingleOrDefaultAsync(ct)) ?? throw Forbidden();
         RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
             requiredAccess);
         return PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson);
@@ -245,7 +249,10 @@ public sealed partial class PostgreSqlListEngine
     {
         if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
         await LockRecordContextAsync(connection, transaction, workspaceId, listId, recordId, deleteLock, ct);
-        var projection = await (
+        var projection = (CanUseCompiledContextQueries(db)
+            ? await _compiledCreateContext(db, workspaceId, listId, recordId, subject,
+                (int)requiredAccess, authorization is not null, ct)
+            : await (
             from workspace in db.Workspaces.AsNoTracking()
             from list in db.Lists.AsNoTracking().Where(row =>
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
@@ -273,7 +280,7 @@ public sealed partial class PostgreSqlListEngine
                 Receipt = receipt,
                 ReceiptLive = receipt != null && receipt.ExpiresUtc > PostgreSqlListDbContext.ClockTimestamp(),
                 ReceiptDefinitionJson = receiptSchema == null ? null : receiptSchema.Definition
-            }).SingleOrDefaultAsync(ct) ?? throw Forbidden();
+            }).SingleOrDefaultAsync(ct)) ?? throw Forbidden();
         RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
             requiredAccess);
         var definition = PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson);
@@ -292,7 +299,10 @@ public sealed partial class PostgreSqlListEngine
     {
         if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
         await LockRecordContextAsync(connection, transaction, workspaceId, listId, recordId, deleteLock, ct);
-        var projection = await (
+        var projection = (CanUseCompiledContextQueries(db)
+            ? await _compiledMutationContext(db, workspaceId, listId, recordId, subject,
+                (int)requiredAccess, authorization is not null, ct)
+            : await (
             from workspace in db.Workspaces.AsNoTracking()
             from list in db.Lists.AsNoTracking().Where(row =>
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
@@ -315,7 +325,7 @@ public sealed partial class PostgreSqlListEngine
                         .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
                 DefinitionJson = schema.Definition,
                 Record = record
-            }).SingleOrDefaultAsync(ct) ?? throw Forbidden();
+            }).SingleOrDefaultAsync(ct)) ?? throw Forbidden();
         RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
             requiredAccess);
         var recordRow = projection.Record;
@@ -569,7 +579,7 @@ public sealed partial class PostgreSqlListEngine
     private async Task<ListRecord> PersistUpdateAsync(PostgreSqlListDbContext db,
         NpgsqlConnection connection, NpgsqlTransaction transaction,
         Guid workspaceId, Guid listId, ListRecord current, RecordRow record, long schemaVersion,
-        string valuesJson, string actor,
+        string valuesJson, JsonObject responseValues, string actor,
         IReadOnlyList<FieldChange> changes, IReadOnlySet<Guid> changedReferenceIds,
         IReadOnlyList<ReferenceAssignment> references, long previousBytes, CancellationToken ct)
     {
@@ -629,7 +639,10 @@ public sealed partial class PostgreSqlListEngine
             Actor = actor, Action = "record.update", ListId = listId, RecordId = current.Id,
             Revision = revision, FieldIds = auditFields });
         await db.SaveChangesAsync(ct);
-        return ToListRecord(record);
+        // Save interceptors may replace the tracked JSON before persistence.
+        return StringComparer.Ordinal.Equals(record.ValuesJson, valuesJson)
+            ? ToListRecord(record, responseValues)
+            : ToListRecord(record);
     }
 
     private async Task PersistDeleteAsync(PostgreSqlListDbContext db,
@@ -746,8 +759,10 @@ public sealed partial class PostgreSqlListEngine
         return row is null ? null : ToListRecord(row);
     }
 
-    private static ListRecord ToListRecord(RecordRow row) => new(row.RecordId, row.WorkspaceId, row.ListId,
-        row.SchemaVersion, row.Revision, row.Number, PostgreSqlListJson.Object(row.ValuesJson),
+    private static ListRecord ToListRecord(RecordRow row) => ToListRecord(row, PostgreSqlListJson.Object(row.ValuesJson));
+
+    private static ListRecord ToListRecord(RecordRow row, JsonObject values) => new(row.RecordId, row.WorkspaceId, row.ListId,
+        row.SchemaVersion, row.Revision, row.Number, values,
         row.CreatedUtc, row.ModifiedUtc, row.CreatedBy, row.ModifiedBy);
 
     private sealed record CreateRecordContext(ListDefinition Definition, Receipt? Receipt,

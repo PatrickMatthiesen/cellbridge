@@ -6,6 +6,7 @@ namespace CellBridge.Lists.PostgreSql;
 internal static class PostgreSqlListJson
 {
     private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
+    private static readonly JsonElement NumericZero = JsonSerializer.SerializeToElement(0);
 
     public static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Options);
     public static T Deserialize<T>(string json) => JsonSerializer.Deserialize<T>(json, Options)
@@ -29,6 +30,30 @@ internal static class PostgreSqlListJson
             }
         }
         return (normalized ?? values).ToJsonString();
+    }
+
+    // ApplyChanges has cloned both the stored object and caller-owned changes.
+    // Reuse parsed scalars. Convert CLR-backed scalars individually to preserve
+    // the JsonElement-backed getters of the former full-object parse, including
+    // values such as int, DateOnly and DateTimeOffset accepted by validation.
+    public static JsonObject NormalizeOwnedRecordValues(JsonObject values)
+    {
+        List<KeyValuePair<string, JsonNode?>>? replacements = null;
+        foreach (var property in values)
+        {
+            if (property.Value is not JsonValue scalar) continue;
+            JsonNode? replacement;
+            if (IsNumericZero(scalar))
+                replacement = JsonValue.Create(NumericZero);
+            else if (!scalar.TryGetValue<JsonElement>(out _))
+                replacement = JsonValue.Create(JsonSerializer.SerializeToElement(scalar));
+            else
+                continue;
+            (replacements ??= []).Add(new(property.Key, replacement));
+        }
+        if (replacements is not null)
+            foreach (var property in replacements) values[property.Key] = property.Value;
+        return values;
     }
 
     public static ListQuery NormalizeQuery(ListQuery query)

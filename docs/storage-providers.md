@@ -169,6 +169,8 @@ return their context leases. Options containing an explicit `DbConnection` use
 unpooled contexts and preserve the configured connection ownership.
 Pass the same options instance to both stores for shared storage accounting.
 Connection settings, command timeouts, logging and interceptors remain active.
+Each store's fixed compiled queries use its configured EF model. A context that
+selects a different model uses an ordinary EF query.
 Interceptors and custom EF services must support context reuse and concurrent
 operations. The context constructor accepts the supplied EF options unchanged;
 the stores and migrator configure migration and tracking settings on a copy of
