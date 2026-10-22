@@ -96,7 +96,9 @@ public sealed class EfPostgreSqlMigrationTests
         var interceptor = new LeaseTrackingInterceptor();
         var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
             .UseNpgsql(source, postgres => postgres.CommandTimeout(45)).EnableDetailedErrors()
+            .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
             .AddInterceptors(interceptor).Options;
+        Assert.Equal(QueryTrackingBehavior.NoTracking, options.FindExtension<CoreOptionsExtension>()!.QueryTrackingBehavior);
         var limits = new StorageLimits { MaxDocuments = 2 };
         await new PostgreSqlStorageMigrator(options, limits).MigrateAsync();
         var store = new PostgreSqlStateStore(options, limits);
@@ -105,14 +107,38 @@ public sealed class EfPostgreSqlMigrationTests
         Assert.Same(options, content.BudgetScope);
         var provider = new StorageProvider(store, content, limits);
         await provider.CheckHealthAsync();
+        var service = new CellBridgeDocumentService(provider);
         var bytes = MinimalDocx.Create("configured");
-        var state = (await new CellBridgeDocumentService(provider).CreateAsync(
+        var state = (await service.CreateAsync(
             "/configured-ef.docx", bytes, TestActor.Value))!;
         Assert.Equal(bytes, await content.ReadVerifiedAsync(state.Content));
+        Assert.Equal(DocumentStateJson.Serialize(state),
+            DocumentStateJson.Serialize((await store.FindByResourceIdAsync(state.ResourceId))!));
+
+        var savedBytes = MinimalDocx.Create("configured save");
+        var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
+            RevisionHistoryTests.Request(state, savedBytes), new Dictionary<string, string>(), TestActor.Value);
+        Assert.False(Assert.Single(result.Response.SubResponses).Status);
+        Assert.True(result.State.StateVersion > state.StateVersion);
+        var persisted = (await store.FindByResourceIdAsync(state.ResourceId))!;
+        Assert.Equal(DocumentStateJson.Serialize(result.State), DocumentStateJson.Serialize(persisted));
+        var graph = await DocumentPartition.RestoreFileGraphAsync(persisted, content, limits);
+        Assert.Equal(savedBytes, graph.Materialize());
+        await using (var accounting = source.CreateCommand("""
+            SELECT document_count = 1 AND max_documents = 2 AND stored_bytes =
+                (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)
+                + (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)
+                + (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts)
+            FROM cellbridge_usage
+            """))
+            Assert.Equal(true, await accounting.ExecuteScalarAsync());
+
         Assert.NotEmpty(interceptor.CommandTimeouts);
         Assert.All(interceptor.CommandTimeouts, timeout => Assert.Equal(45, timeout));
         await using var context = new CellBridgeDbContext(options);
         Assert.Equal(45, context.Database.GetCommandTimeout());
+        Assert.Equal(QueryTrackingBehavior.NoTracking, context.ChangeTracker.QueryTrackingBehavior);
+        Assert.Equal(QueryTrackingBehavior.NoTracking, options.FindExtension<CoreOptionsExtension>()!.QueryTrackingBehavior);
     });
 
     [PostgreSqlFact]

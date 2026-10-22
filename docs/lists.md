@@ -309,7 +309,8 @@ contexts, independently of HTTP request scopes. Options containing an explicit
 `DbConnection` use unpooled contexts and preserve configured connection ownership.
 Configured EF connection settings, command timeouts, logging and interceptors
 remain active. Interceptors and custom EF services must support context reuse
-and concurrent operations. Use a non-retrying EF execution strategy. The provider rejects
+and concurrent operations. The library configures tracking on a copy of the
+supplied options. Use a non-retrying EF execution strategy. The provider rejects
 `EnableRetryOnFailure` because its explicit transactions and create receipts own
 retry behavior after uncertain outcomes.
 

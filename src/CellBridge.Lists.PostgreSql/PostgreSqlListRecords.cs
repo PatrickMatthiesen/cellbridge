@@ -133,7 +133,7 @@ public sealed partial class PostgreSqlListEngine
             if (current.Revision != expectedRevision) throw Conflict("The record revision changed.");
             try
             {
-                await PersistDeleteAsync(db, connection, transaction, workspaceId, listId, current,
+                await PersistDeleteAsync(db, workspaceId, listId, current,
                     context.RecordRow!,
                     actor.Subject, context.RecordBytes, ct);
             }
@@ -439,16 +439,29 @@ public sealed partial class PostgreSqlListEngine
     {
         var receiptBytes = Encoding.UTF8.GetByteCount(digest) + Encoding.UTF8.GetByteCount(actor) + 192L;
         var auditBytes = AuditStorageBytes(actor, "record.create", auditFields.Length);
-        var valueBytes = await CanonicalJsonBytesAsync(connection, transaction, valuesJson, ct);
+        long valueBytes;
+        bool claimed;
+        // PostgreSQL normalizes JSON sizes and atomically claims identities. An oversized
+        // value cannot claim or lock an identity; ordinary record persistence below uses EF.
+        await using (var claim = Command(connection, transaction, """
+            WITH content AS (
+              SELECT octet_length(($4::jsonb)::text)::bigint AS bytes
+            ), claimed AS (
+              INSERT INTO cellbridge_lists.record_tombstones(workspace_id,list_id,record_id)
+              SELECT $1,$2,$3 FROM content WHERE bytes <= $5
+              ON CONFLICT DO NOTHING RETURNING 1
+            )
+            SELECT content.bytes, EXISTS(SELECT 1 FROM claimed) FROM content
+            """, workspaceId, listId, request.Id, valuesJson, _limits.MaxRecordBytes))
+        await using (var reader = await claim.ExecuteReaderAsync(ct))
+        {
+            if (!await reader.ReadAsync(ct)) throw new InvalidOperationException("The identity claim returned no size result.");
+            valueBytes = reader.GetInt64(0);
+            claimed = reader.GetBoolean(1);
+        }
         if (valueBytes > _limits.MaxRecordBytes)
             throw Limit("The normalized record exceeds the configured byte limit.");
-
-        // PostgreSQL performs only the irreversible identity claim. All persistent list data below uses EF.
-        await using var claim = Command(connection, transaction, """
-            INSERT INTO cellbridge_lists.record_tombstones(workspace_id,list_id,record_id)
-            VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING 1
-            """, workspaceId, listId, request.Id);
-        if (await claim.ExecuteScalarAsync(ct) is null)
+        if (!claimed)
             return await ReplayConcurrentCreateAsync(db, workspaceId, listId, request,
                 actor, digest, ct);
 
@@ -566,13 +579,15 @@ public sealed partial class PostgreSqlListEngine
         var valueBytes = await CanonicalJsonBytesAsync(connection, transaction, valuesJson, ct);
         if (valueBytes > _limits.MaxRecordBytes)
             throw Limit("The normalized record exceeds the configured byte limit.");
-        await LockQuotaAsync(connection, transaction, workspaceId, ct);
-        var state = await db.Workspaces.Where(row => row.WorkspaceId == workspaceId)
+        // Returning the locked row lets EF track its post-lock values without a second read.
+        var state = await db.Workspaces.FromSqlInterpolated($"""
+                SELECT * FROM cellbridge_lists.workspaces WHERE workspace_id={workspaceId} FOR UPDATE
+                """)
             .Select(row => new
             {
                 Workspace = row,
                 Now = PostgreSqlListDbContext.ClockTimestamp()
-            }).SingleAsync(ct);
+            }).SingleOrDefaultAsync(ct) ?? throw NotFound();
         var workspace = state.Workspace;
         var storageDelta = checked(valueBytes - previousBytes + auditBytes);
         var nextBytes = checked(workspace.StoredBytes + storageDelta);
@@ -618,18 +633,18 @@ public sealed partial class PostgreSqlListEngine
     }
 
     private async Task PersistDeleteAsync(PostgreSqlListDbContext db,
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
         Guid workspaceId, Guid listId, ListRecord current, RecordRow record, string actor,
         long previousBytes, CancellationToken ct)
     {
         var auditBytes = AuditStorageBytes(actor, "record.delete", 0);
-        await LockQuotaAsync(connection, transaction, workspaceId, ct);
-        var state = await db.Workspaces.Where(row => row.WorkspaceId == workspaceId)
+        var state = await db.Workspaces.FromSqlInterpolated($"""
+                SELECT * FROM cellbridge_lists.workspaces WHERE workspace_id={workspaceId} FOR UPDATE
+                """)
             .Select(row => new
             {
                 Workspace = row,
                 Now = PostgreSqlListDbContext.ClockTimestamp()
-            }).SingleAsync(ct);
+            }).SingleOrDefaultAsync(ct) ?? throw NotFound();
         var workspace = state.Workspace;
         var nextBytes = Math.Max(0, checked(workspace.StoredBytes - previousBytes + auditBytes));
         if (_limits.MaxWorkspaceBytes is { } maxBytes && nextBytes > maxBytes ||

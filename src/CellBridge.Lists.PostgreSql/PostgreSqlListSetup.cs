@@ -165,6 +165,7 @@ public static class PostgreSqlListSetup
     {
         var normalized = new DbContextOptionsBuilder<PostgreSqlListDbContext>(options)
             .UseNpgsql(provider => provider.MigrationsHistoryTable(MigrationsHistoryTable, SchemaName))
+            .UseQueryTrackingBehavior(QueryTrackingBehavior.TrackAll)
             .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.MigrationsUserTransactionWarning))
             .Options;
         using var validationContext = new PostgreSqlListDbContext(normalized);

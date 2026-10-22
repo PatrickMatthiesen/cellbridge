@@ -171,7 +171,8 @@ Pass the same options instance to both stores for shared storage accounting.
 Connection settings, command timeouts, logging and interceptors remain active.
 Interceptors and custom EF services must support context reuse and concurrent
 operations. The context constructor accepts the supplied EF options unchanged;
-the stores and migrator configure the library's migration history table. Use
+the stores and migrator configure migration and tracking settings on a copy of
+those options. Use
 `PostgreSqlStorageMigrator` for initialization and existing-data upgrades.
 Configure a non-retrying EF execution strategy. The provider rejects
 `EnableRetryOnFailure` because its explicit transactions and receipt checks own
