@@ -5,7 +5,8 @@ namespace CellBridge.AspNetCore;
 /// <summary>MS-FSSHTTP 2.2.5.2/2.2.5.3 dependency decisions before a dependent operation runs.</summary>
 public static class FssHttpDependencies
 {
-    public static string? Error(FssHttpSubRequest request, IReadOnlyList<FssHttpSubResponse> prior)
+    public static string? Error(FssHttpSubRequest request, IReadOnlyList<FssHttpSubResponse> prior,
+        IReadOnlyList<FssHttpSubRequest> requests)
     {
         if (request.DependsOn is null)
             return request.DependencyType is null ? null : "InvalidRequestDependencyType";
@@ -27,8 +28,24 @@ public static class FssHttpDependencies
             "OnSuccess" => success ? null : "DependentOnlyOnSuccessRequestFailed",
             "OnFail" => success ? "DependentOnlyOnFailRequestSucceeded" : null,
             "OnNotSupported" => unsupported ? null : "DependentOnlyOnNotSupportedRequestGetSupported",
-            "OnSuccessOrNotSupported" => success || unsupported ? null : "DependentOnlyOnSuccessRequestFailed",
+            // MS-FSSHTTP 4.2.1/4.2.2 permits a save after a successful Coauth
+            // request skips its OnNotSupported schema-lock fallback. The skip
+            // alone does not prove success: a failed supported request also
+            // skips that fallback, so check its actual dependency and response.
+            "OnSuccessOrNotSupported" => success || unsupported || SuccessfulFallback(previous, prior, requests)
+                ? null : "DependentOnlyOnSuccessRequestFailed",
             _ => "InvalidRequestDependencyType",
         };
+    }
+
+    private static bool SuccessfulFallback(FssHttpSubResponse previous, IReadOnlyList<FssHttpSubResponse> prior,
+        IReadOnlyList<FssHttpSubRequest> requests)
+    {
+        if (previous.ErrorCode != "DependentOnlyOnNotSupportedRequestGetSupported") return false;
+        var matches = requests.Where(r => r.SubRequestToken == previous.SubRequestToken).Take(2).ToArray();
+        if (matches.Length != 1 || matches[0].DependencyType != "OnNotSupported" || matches[0].DependsOn is null)
+            return false;
+        var predecessors = prior.Where(r => r.SubRequestToken == matches[0].DependsOn).Take(2).ToArray();
+        return predecessors.Length == 1 && predecessors[0].ErrorCode == "Success";
     }
 }
