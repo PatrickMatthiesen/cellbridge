@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
@@ -30,6 +31,7 @@ int seed = int.Parse(Option("--seed", "42"));
 int queryEvery = int.Parse(Option("--query-every", "32"));
 ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queryEvery);
 bool allowQuota = args.Contains("--allow-quota", StringComparer.Ordinal);
+bool retryEnabled = args.Contains("--retry", StringComparer.Ordinal);
 var limits = new ConfigurationBuilder().AddEnvironmentVariables().Build().GetSection("Storage").Get<StorageLimits>() ?? new StorageLimits();
 limits.Validate();
 var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge");
@@ -71,6 +73,7 @@ try
         var elementCounts = new ConcurrentBag<int>();
         var traces = new ConcurrentBag<(int Client, int Iteration, object Sample)>();
         int rejected = 0;
+        var completedPerClient = new int[concurrency];
         var preparation = Stopwatch.StartNew();
         var actor = new CellBridgeActor(new SubjectIdentity("tests:writer", "test-writer", "Test writer"), CanCreate: true);
         var service = new CellBridgeDocumentService(provider);
@@ -102,6 +105,8 @@ try
                     ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
                 var timer = Stopwatch.StartNew();
                 var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), actor);
+                if (result.IsCancelled || result.Response.SubResponses.Count != 1)
+                    throw new InvalidOperationException("Benchmark save returned an incomplete result.");
                 if (result.Response.SubResponses.Any(r => r.Status))
                 {
                     var error = result.Response.SubResponses.First(r => r.Status).Error;
@@ -115,6 +120,7 @@ try
                     break;
                 }
                 samples.Add(timer.Elapsed.TotalMilliseconds);
+                completedPerClient[client]++;
                 state = result.State;
                 timer.Restart();
                 await using var read = await content.OpenReadAsync(state.Content);
@@ -137,7 +143,8 @@ try
                         query.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 1, Data = new QueryChangesSubRequestData
                         { IncludeStorageManifest = true, IncludeCellChanges = true, Knowledge = knowledge } });
                         var queried = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, query, new Dictionary<string, string>(), actor);
-                        if (queried.Response.SubResponses.Any(r => r.Status)) throw new InvalidOperationException("Benchmark query failed.");
+                        if (queried.IsCancelled || queried.Response.SubResponses.Count != 1 || queried.Response.SubResponses.Any(r => r.Status))
+                            throw new InvalidOperationException("Benchmark query failed or returned an incomplete result.");
                         return queried.Response.ToByteArray().LongLength;
                     }
                     emptyQueryBytes = await Query(null);
@@ -155,16 +162,41 @@ try
                     emptyQueryBytes, deltaQueryBytes, knownQueryBytes,
                     allocatedBytes = GC.GetTotalAllocatedBytes() - allocationBefore,
                     managedLiveBytes = i % queryEvery == 0 || i == iterations - 1 ? GC.GetTotalMemory(true) : (long?)null }));
-                if (args.Contains("--retry", StringComparer.Ordinal))
+                if (retryEnabled)
                 {
                     var retry = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), actor);
-                    if (retry.State.StateVersion != state.StateVersion || retry.Response.SubResponses.Any(r => r.Status))
+                    if (retry.IsCancelled || retry.Response.SubResponses.Count != 1 ||
+                        retry.State.StateVersion != state.StateVersion || retry.State.Content != state.Content ||
+                        retry.Response.SubResponses.Any(r => r.Status))
                         throw new InvalidOperationException("Identical retry changed state or failed.");
                 }
             }
             elementCounts.Add(state.Partitions.Single(p => p.Kind == 0).Elements.Length);
+            prepared[client] = state;
         }));
         total.Stop();
+        var workloadAllocatedBytes = GC.GetTotalAllocatedBytes() - allocationBefore;
+        // Read back authoritative state and materialize the final files after timing.
+        var validation = Stopwatch.StartNew();
+        var finalHashes = new List<string>();
+        for (int client = 0; client < concurrency; client++)
+        {
+            var expected = prepared[client];
+            var persisted = await stateStore.FindByResourceIdAsync(expected.ResourceId)
+                ?? throw new InvalidOperationException("Final benchmark document is missing.");
+            if (persisted.StateVersion != expected.StateVersion || persisted.Content != expected.Content ||
+                persisted.Receipts.Length != completedPerClient[client])
+                throw new InvalidOperationException("Final benchmark state or receipts disagree.");
+            var restored = await StoredDocument.RestoreAsync(persisted, content);
+            var bytes = restored.FilePartition.FileGraph.Materialize();
+            if (!bytes.AsSpan().SequenceEqual(restored.Content))
+                throw new InvalidOperationException("Final graph and downloaded document disagree.");
+            var expectedBytes = workload == "changed-full" ? Package(size, seed + completedPerClient[client]) : payload;
+            if (workload != "captured" && !bytes.AsSpan().SequenceEqual(expectedBytes))
+                throw new InvalidOperationException("Final benchmark file differs from the workload input.");
+            finalHashes.Add(Convert.ToHexStringLower(SHA256.HashData(bytes)));
+        }
+        validation.Stop();
         object usage;
         if (source is not null)
         {
@@ -174,7 +206,11 @@ try
             usage = new { storedBytes = reader.GetInt64(0), documents = reader.GetInt64(1), snapshots = reader.GetInt64(2), objects = reader.GetInt64(3) };
         }
         else usage = new { storedBytes = (content as InMemoryContentStore)?.Budget.StoredBytes };
-        var result = new { backend, workload, seed, preparationSeconds = preparation.Elapsed.TotalSeconds,
+        var result = new { backend, workload, seed, retryEnabled,
+            inputSha256 = Convert.ToHexStringLower(SHA256.HashData(payload)),
+            verification = new { measuredInterval = false, seconds = validation.Elapsed.TotalSeconds,
+                documents = finalHashes.Count, finalContentSha256 = finalHashes },
+            preparationSeconds = preparation.Elapsed.TotalSeconds,
             measurement = new { saveLatency = "ExecuteAsync only; input construction, startup, schema, initial creation and separate-document warm-up excluded.",
                 downloadLatency = "OpenReadAsync plus streaming to Stream.Null.",
                 workloadElapsed = "Repeated saves plus downloads, queries, retries, retention analysis and sampled forced collections. This is a diagnostic workload interval, not steady-state save throughput.",
@@ -183,7 +219,7 @@ try
             queryEvery, usage, growth = traces.OrderBy(t => t.Client).ThenBy(t => t.Iteration).Select(t => t.Sample).ToArray(),
             saveMs = Percentiles(samples), downloadMs = Percentiles(reads), workloadElapsedSeconds = total.Elapsed.TotalSeconds,
             completedSaves = samples.Count, diagnosticWorkloadSavesPerSecond = samples.Count / total.Elapsed.TotalSeconds,
-            allocatedBytes = GC.GetTotalAllocatedBytes() - allocationBefore,
+            allocatedBytes = workloadAllocatedBytes,
             peakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64,
             retainedGraphElementsPerDocument = elementCounts.Order().ToArray() };
         report.Add(result);
