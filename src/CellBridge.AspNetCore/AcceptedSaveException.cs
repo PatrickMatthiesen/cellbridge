@@ -5,7 +5,7 @@ namespace CellBridge.AspNetCore;
 /// <summary>
 /// A later operation failed after known successful saves. The failing operation may still
 /// have an unknown commit outcome; these receipts are not a complete transaction journal.
-/// Cancellation remains cancellation and does not use this exception.
+/// Cancellation after an established save returns a cancelled execution result instead.
 /// </summary>
 public sealed class AcceptedSaveException : IOException
 {

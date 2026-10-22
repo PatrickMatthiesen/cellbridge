@@ -93,6 +93,12 @@ The service then reads the current state and database time, rechecks Write permi
 coherency and leases, and commits the selected revision with a save receipt.
 Different documents can progress independently. Sessions use the same coordination.
 
+Cancellation after an established save stops remaining operations and returns an
+incomplete execution with `IsCancelled` and known file receipts. The SOAP
+processor preserves that result. Cancellation before acceptance can throw;
+completed saves are never rolled back. See [accepted saves](package-integration.md#accepted-saves-and-external-content)
+for uncertain commit outcomes and HTTP delivery limits.
+
 Downloads take content and headers from one snapshot. Receipts identify duplicate
 saves; shared budgets reject excessive growth before selecting a new revision.
 Prior file parts remain available for subsequent edits and detached readers.

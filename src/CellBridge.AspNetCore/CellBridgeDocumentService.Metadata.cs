@@ -124,6 +124,14 @@ public sealed partial class CellBridgeDocumentService
                     return new StateTransition<PublishResult>(next, new(next, null, null, false));
                 }, cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                var current = await CurrentAsync(initial.ResourceId, CancellationToken.None);
+                if (!current.Receipts.Any(r => r.OperationKey == key && r.PartitionKind == 1)) throw;
+                var recovered = await RepeatMetadataAsync(initial, key, digest, operation.RequestId, actor, canAppend, CancellationToken.None);
+                if (!recovered.HasAcceptedSave) throw;
+                return recovered with { IsCancelled = true };
+            }
             catch (StorageUnavailableException)
             {
                 var current = await CurrentAsync(initial.ResourceId, CancellationToken.None);
@@ -144,6 +152,18 @@ public sealed partial class CellBridgeDocumentService
     }
 
     private async ValueTask<CellExecution> RepeatMetadataAsync(DocumentState initial, string key, string digest,
+        ulong requestId, CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
+    {
+        try { return await ReadMetadataReceiptAsync(initial, key, digest, requestId, actor, canAppend, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var recovered = await ReadMetadataReceiptAsync(initial, key, digest, requestId, actor, canAppend, CancellationToken.None);
+            if (!recovered.HasAcceptedSave) throw;
+            return recovered with { IsCancelled = true };
+        }
+    }
+
+    private async ValueTask<CellExecution> ReadMetadataReceiptAsync(DocumentState initial, string key, string digest,
         ulong requestId, CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
     {
         var current = await provider.State.TransitionAsync(initial.ResourceId,

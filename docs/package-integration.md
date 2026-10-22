@@ -348,10 +348,11 @@ It does not replace the coordinated policy-update contract.
 
 ## Accepted saves and external content
 
-Both binary `CellExecution` and SOAP `CellStorageExecution` expose `AcceptedSaves`.
-Each `AcceptedSave` identifies the resource, content version, immutable content
-handle, receipt operation key and whether this was a receipt replay. Accepted
-no-ops are included; queries and rejected saves are not. `IsReplay` means the
+Both binary `CellExecution` and SOAP `CellStorageExecution` expose `AcceptedSaves`
+and `IsCancelled`. Each `AcceptedSave` identifies the resource, content version,
+immutable content handle, receipt operation key and whether this was a receipt
+replay. Accepted file-content no-ops are included; queries, rejected saves and
+metadata-only saves do not produce these file receipts. `IsReplay` means the
 operation was accepted earlier and did not publish again. Durability depends on
 the provider: in-memory receipts disappear at restart.
 
@@ -362,11 +363,31 @@ return those receipts alongside a mapped `CellRequestFail` for a failed Cell
 subrequest. An exception's receipts are not a complete journal: the failing
 operation may still have an unknown commit outcome.
 
-Cancellation stays cancellation and may prevent returning receipts. Recover by
-replaying the same stable save request and inspecting its accepted receipt.
-Current-version retries require the original writer, current Write access and
-identical operation content. Superseded retries return a coherency error.
-Do not assume an interrupted call rolled back every earlier operation.
+When cancellation is observed after an established save, execution stops and
+returns `IsCancelled = true` with the known `AcceptedSaves`. This is an incomplete
+request, not a successful execution of every operation. Earlier saves remain
+committed. The binary response reports Win32 `ERROR_OPERATION_ABORTED` (`995`);
+the SOAP processor preserves the partial result and marks the current file
+`SubRequestFail`. A cancelled Cell subrequest reports `CellRequestFail`. The
+processor does not continue later subrequests or files. Metadata-only
+saves retain their state and stored replies without producing file receipts.
+Inspect `IsCancelled` even when the last completed operation succeeded.
+
+Before any save is established, cancellation can still throw
+`OperationCanceledException`. If cancellation interrupts a commit await, the
+service uses uncancelled reads only to verify the matching stored receipt and
+its current authorization before reporting acceptance. It does not start another
+save. A missing receipt or an exception does not establish that the interrupted
+operation rolled back. Recover an uncertain outcome by replaying the same stable
+save request. Current-version retries require the original writer, current Write
+access and identical operation content. Superseded retries return a coherency
+error.
+
+The reusable APIs return their completed-save information even when cancellation
+stops later work. A disconnected HTTP client may still receive no response, and
+an endpoint timeout can prevent response delivery. Neither case undoes completed
+saves. Consumers own optional external file writes and decide when to await them
+or respond.
 
 Read the exact content handle from a receipt through the provider, rather than
 rereading the document's current revision after another save. The handle is

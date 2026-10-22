@@ -17,6 +17,10 @@ public sealed record AcceptedSave(Guid ResourceId, uint ContentVersion, ContentH
 public sealed record CellExecution(FsshttpbResponse Response, DocumentState State, string? LockError = null)
 {
     public ImmutableArray<AcceptedSave> AcceptedSaves { get; init; } = [];
+    /// <summary>Cancellation stopped the request after an established save. The response is incomplete.</summary>
+    public bool IsCancelled { get; init; }
+    internal bool HasAcceptedSave => !AcceptedSaves.IsEmpty ||
+        Response.SubResponses.Any(operation => operation.RequestType == RequestTypes.PutChanges && !operation.Status);
     internal CellBridgeActor? ResponseActor { get; init; }
 }
 
@@ -135,6 +139,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         ArgumentNullException.ThrowIfNull(actor);
         var response = new FsshttpbResponse();
         var accepted = ImmutableArray.CreateBuilder<AcceptedSave>();
+        bool hasAcceptedSave = false;
         var state = await CurrentAsync(id, cancellationToken);
         var operationActor = actor;
         if (request.TryGetValidationError(out var validationCode, out var validationMessage))
@@ -187,9 +192,12 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         }); // ERROR_DISK_FULL.
                         saved = new(rejected, await CurrentAsync(id, cancellationToken));
                     }
-                    queries.AppendSave(saved.Response);
                     accepted.AddRange(saved.AcceptedSaves);
+                    hasAcceptedSave |= saved.HasAcceptedSave;
                     state = saved.State;
+                    queries.AppendSave(saved.Response);
+                    if (saved.IsCancelled) return Cancelled();
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (saved.LockError is not null) return new(response, state, saved.LockError)
                         { AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor };
                     continue;
@@ -244,13 +252,28 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         break;
                 }
             }
+            cancellationToken.ThrowIfCancellationRequested();
             // MS-FSSHTTP GetFileProps describes the updated version after the Cell
             // operations. Capture its metadata here; the SOAP adapter never rereads it.
             return new(response, state) { AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor };
         }
+        catch (OperationCanceledException) when (hasAcceptedSave && cancellationToken.IsCancellationRequested)
+        {
+            return Cancelled();
+        }
         catch (Exception ex) when (accepted.Count != 0 && AcceptedSaveException.CanWrap(ex))
         {
             throw AcceptedSaveException.Wrap(accepted.ToImmutable(), ex);
+        }
+
+        CellExecution Cancelled()
+        {
+            response.Status = true;
+            response.Error = new ResponseError(ErrorType.Win32, 995, "The request was cancelled before completion.");
+            return new(response, state)
+            {
+                AcceptedSaves = accepted.ToImmutable(), ResponseActor = operationActor, IsCancelled = true
+            };
         }
     }
 
@@ -475,6 +498,17 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
                 }, cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Cancellation of the commit await does not establish whether it committed.
+                // Only a matching, authorized receipt can establish acceptance.
+                var current = await CurrentAsync(id, CancellationToken.None);
+                if (current.LifecycleGeneration != initial.LifecycleGeneration ||
+                    current.Receipts.FirstOrDefault(r => r.PartitionKind == 0 && r.OperationKey == key) is not { } accepted) throw;
+                var recovered = await RepeatAsync(current, accepted, digest, operation.RequestId, actor, canAppend, CancellationToken.None);
+                if (!recovered.HasAcceptedSave) throw;
+                return recovered with { IsCancelled = true };
+            }
             catch (StorageUnavailableException)
             {
                 // A lost commit response is not a rollback. Resolve the durable
@@ -499,6 +533,19 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
     }
 
     private async ValueTask<CellExecution> RepeatAsync(DocumentState state, SaveReceipt receipt, string digest,
+        ulong requestId, CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
+    {
+        try { return await ReadSaveReceiptAsync(state, receipt, digest, requestId, actor, canAppend, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Finish only receipt verification after cancellation, never another save.
+            var recovered = await ReadSaveReceiptAsync(state, receipt, digest, requestId, actor, canAppend, CancellationToken.None);
+            if (!recovered.HasAcceptedSave) throw;
+            return recovered with { IsCancelled = true };
+        }
+    }
+
+    private async ValueTask<CellExecution> ReadSaveReceiptAsync(DocumentState state, SaveReceipt receipt, string digest,
         ulong requestId, CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
     {
         var generation = state.LifecycleGeneration;

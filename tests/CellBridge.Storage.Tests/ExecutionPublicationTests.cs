@@ -72,7 +72,18 @@ public sealed class ExecutionPublicationTests
         });
         var execution = new CellBridgeDocumentService(new(interrupted, provider.Content)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value, cancellation.Token).AsTask();
-        if (cancel) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => execution);
+        if (cancel)
+        {
+            var cancelled = await execution;
+            Assert.True(cancelled.IsCancelled);
+            Assert.True(cancelled.Response.Status);
+            Assert.Equal(ErrorType.Win32, cancelled.Response.Error!.Type);
+            Assert.Equal(995UL, cancelled.Response.Error.ErrorCode);
+            Assert.Single(cancelled.Response.SubResponses);
+            var accepted = Assert.Single(cancelled.AcceptedSaves);
+            Assert.False(accepted.IsReplay);
+            Assert.Equal(state.ContentVersion + 1, accepted.ContentVersion);
+        }
         else
         {
             var error = await Assert.ThrowsAsync<AcceptedSaveException>(() => execution);
