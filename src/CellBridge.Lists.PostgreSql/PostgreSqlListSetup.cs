@@ -332,12 +332,11 @@ public static class PostgreSqlListSetup
     private static async Task<bool> HasExactCurrentHistoryAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, CancellationToken cancellationToken)
     {
+        // Migration IDs identify this schema. ProductVersion records the EF tool version.
         await using var command = new NpgsqlCommand($"""
-            SELECT count(*)=2 AND count(*) FILTER (WHERE
-              ("MigrationId"='{PostgreSqlListMigrationSql.CurrentMigrationId}' AND
-               "ProductVersion"='{PostgreSqlListMigrationSql.ProductVersion}') OR
-              ("MigrationId"='{PostgreSqlListMigrationSql.QueryFunctionsMigrationId}' AND
-               "ProductVersion"='{PostgreSqlListMigrationSql.ProductVersion}'))=2
+            SELECT count(*)=2 AND count(DISTINCT "MigrationId")=2 AND count(*) FILTER (WHERE "MigrationId" IN
+              ('{PostgreSqlListMigrationSql.CurrentMigrationId}',
+               '{PostgreSqlListMigrationSql.QueryFunctionsMigrationId}'))=2
             FROM {SchemaName}."{MigrationsHistoryTable}"
             """, connection, transaction);
         return (bool)(await command.ExecuteScalarAsync(cancellationToken)

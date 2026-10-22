@@ -169,6 +169,29 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
             await AssertVersionThreeRowsAsync(ownerSource, fixture);
             await AssertVersionAndHistoryAsync(ownerSource, 4, expectHistory: true);
 
+            // ProductVersion records the EF tool version, not the library schema.
+            // Patch upgrades accept the same migrations without rewriting their metadata.
+            foreach (var productVersion in new[] { "10.0.4", "10.0.13" })
+            {
+                await using (var metadata = ownerSource.CreateCommand("""
+                    UPDATE cellbridge_lists."__CellBridgeListsMigrationsHistory"
+                    SET "ProductVersion"=$1
+                    """))
+                {
+                    metadata.Parameters.AddWithValue(productVersion);
+                    Assert.Equal(2, await metadata.ExecuteNonQueryAsync());
+                }
+                await PostgreSqlListSetup.InitializeAsync(ownerSource, runtimeRole);
+                await AssertVersionThreeRowsAsync(ownerSource, fixture);
+                await using var preserved = ownerSource.CreateCommand("""
+                    SELECT count(*) FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
+                    WHERE "ProductVersion"=$1
+                    """);
+                preserved.Parameters.AddWithValue(productVersion);
+                Assert.Equal(2L, await preserved.ExecuteScalarAsync());
+                await AssertVersionAndHistoryAsync(ownerSource, 4, expectHistory: true);
+            }
+
             await using (var removeHistory = ownerSource.CreateCommand("""
                 DELETE FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
                 WHERE "MigrationId"='20261022040000_EfQueryFunctions'

@@ -4,7 +4,8 @@
     <ProjectReference Include="../CellBridge.Storage.Abstractions/CellBridge.Storage.Abstractions.csproj" />
     <ProjectReference Include="../CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
