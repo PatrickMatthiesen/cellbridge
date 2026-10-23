@@ -2,11 +2,21 @@ using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Data.SqlClient;
+using System.Text;
 
 namespace CellBridge.Storage.SqlServer;
 
 internal static class SqlServerDocumentDatabase
 {
+    internal const string PublicationGate = "CellBridge.Documents.Publication";
+    private static readonly UTF8Encoding Utf8 = new(false, true);
+
+    internal static DocumentState DecodeSnapshot(byte[] data, bool strict, StorageLimits? limits)
+    {
+        try { return DocumentStateJson.Deserialize(Utf8.GetString(data), strict, limits); }
+        catch (DecoderFallbackException ex) { throw new StorageCorruptionException("Snapshot JSON is not UTF-8.", ex); }
+    }
+
     public static DbContextOptions<SqlServerDocumentDbContext> Normalize(
         DbContextOptions<SqlServerDocumentDbContext> options)
     {

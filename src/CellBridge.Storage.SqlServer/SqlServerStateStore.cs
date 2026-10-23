@@ -13,7 +13,6 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
     private readonly DbContextOptions<SqlServerDocumentDbContext> options;
     private readonly StorageLimits limits;
     private static readonly UTF8Encoding Utf8 = new(false, true);
-    private const string PublicationGate = "CellBridge.Documents.Publication";
     private const string NamespaceGate = "CellBridge.Documents.Namespace";
     public bool Durable => true;
     public bool Shared => true;
@@ -40,7 +39,7 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
             await using var transaction = await db.Database.BeginTransactionAsync(ct);
             await SqlServerDocumentDatabase.ConfigureTransactionAsync(db, ct);
             await SqlServerDocumentDatabase.CheckConfigurationAsync(db, ct);
-            await SqlServerDocumentDatabase.LockAsync(db, PublicationGate, ct, exclusive ? "Exclusive" : "Shared");
+            await SqlServerDocumentDatabase.LockAsync(db, SqlServerDocumentDatabase.PublicationGate, ct, exclusive ? "Exclusive" : "Shared");
             var result = await action(db);
             // All writes and derived records are accepted together. Never rerun a
             // callback or replace a known commit with caller cancellation.
@@ -70,7 +69,12 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
                     equals new { snapshot.ResourceId, snapshot.StateVersion } into snapshots
                 from snapshot in snapshots.DefaultIfEmpty()
                 select new { Pointer = pointer, Data = snapshot == null ? null : snapshot.Data }).SingleOrDefaultAsync(ct);
-            return row is null ? null : Decode(row.Data ?? throw new StorageCorruptionException("The current snapshot is missing."), row.Pointer);
+            if (row is null)
+            {
+                if (key is not null) await VerifyNamespaceRowsAsync(db, ct);
+                return null;
+            }
+            return Decode(row.Data ?? throw new StorageCorruptionException("The current snapshot is missing."), row.Pointer);
         }, ct);
     }
 
@@ -81,9 +85,9 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
         {
             await SqlServerDocumentDatabase.LockAsync(db, NamespaceGate, cancellationToken);
             await LockDocumentAsync(db, state.ResourceId, cancellationToken);
-            await CheckNamespaceAsync(db, cancellationToken);
+            await VerifyNamespaceRowsAsync(db, cancellationToken);
             if (await db.Documents.AnyAsync(row => row.ResourceId == state.ResourceId, cancellationToken) ||
-                await IsPathReservedAsync(db, state.PathKey, null, true, cancellationToken)) return false;
+                await IsPathReservedAsync(db, state.PathKey, [], true, cancellationToken)) return false;
             var initial = state with { StateVersion = 0 };
             limits.CheckDocument(initial);
             db.Documents.Add(Pointer(initial));
@@ -92,7 +96,7 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
             await WriteIndexesAsync(db, initial, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
             return true;
-        }, cancellationToken);
+        }, cancellationToken, exclusive: true);
     }
 
     public ValueTask<T> TransitionAsync<T>(Guid resourceId, Func<DocumentState, DateTime, StateTransition<T>> transition,
@@ -119,8 +123,8 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
             limits.CheckDocument(next);
             if (rename)
             {
-                await CheckNamespaceAsync(db, ct);
-                if (next.PathKey != current.PathKey && await IsPathReservedAsync(db, next.PathKey, id, true, ct))
+                await VerifyNamespaceRowsAsync(db, ct);
+                if (next.PathKey != current.PathKey && await IsPathReservedAsync(db, next.PathKey, [id], true, ct))
                     throw new InvalidOperationException("The destination filename is reserved.");
             }
             await WriteSnapshotAsync(db, next, true, ct);
@@ -129,7 +133,7 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
             await db.SaveChangesAsync(ct);
         }
         return change.Result;
-    }, ct);
+    }, ct, exclusive: rename);
 
     public async ValueTask<bool> TryDeleteAsync(Guid resourceId, long expectedGeneration, long expectedStateVersion,
         CancellationToken cancellationToken = default)
@@ -151,15 +155,16 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
         await SqlServerDocumentDatabase.LockAsync(db, NamespaceGate, cancellationToken);
         await LockDocumentAsync(db, retiredResourceId, cancellationToken);
         await LockDocumentAsync(db, replacement.ResourceId, cancellationToken);
-        await CheckNamespaceAsync(db, cancellationToken);
+        var namespaceStates = await VerifyNamespaceRowsAsync(db, cancellationToken);
         var pointer = await db.Documents.SingleOrDefaultAsync(row => row.ResourceId == retiredResourceId, cancellationToken);
         if (pointer is null) return false;
         var retired = await LoadCurrentAsync(db, pointer, cancellationToken);
         if (retired.ReplacedBy == replacement.ResourceId && retired.LifecycleGeneration == expectedGeneration &&
             retired.StateVersion == expectedStateVersion + 1) return true;
+        var ancestors = VerifiedLifecycleAncestors(retired, namespaceStates);
         if (!DocumentLifecycle.CanRecreate(retired, expectedGeneration, expectedStateVersion, replacement) ||
             await db.Documents.AnyAsync(row => row.ResourceId == replacement.ResourceId, cancellationToken) ||
-            await IsPathReservedAsync(db, replacement.PathKey, retiredResourceId, false, cancellationToken)) return false;
+            await IsPathReservedAsync(db, replacement.PathKey, ancestors, false, cancellationToken)) return false;
         replacement = replacement with { StateVersion = 0 };
         var next = retired with { ReplacedBy = replacement.ResourceId, StateVersion = checked(retired.StateVersion + 1) };
         limits.CheckDocument(replacement);
@@ -173,17 +178,16 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
         UpdatePointer(pointer, next);
         await db.SaveChangesAsync(cancellationToken);
         return true;
-    }, cancellationToken);
+    }, cancellationToken, exclusive: true);
 
     public async ValueTask CheckHealthAsync(CancellationToken cancellationToken = default)
     {
-        try
+        await ReadAsync(async db =>
         {
-            await using var db = new SqlServerDocumentDbContext(options);
             await SqlServerDocumentDatabase.CheckConfigurationAsync(db, cancellationToken);
-        }
-        catch (Exception ex) when (SqlServerDocumentDatabase.IsDatabaseException(ex))
-        { throw new StorageUnavailableException("The document store is unavailable.", ex); }
+            await VerifyNamespaceRowsAsync(db, cancellationToken);
+            return true;
+        }, cancellationToken);
     }
 
     private static Task<DateTime> ReadClockAsync(SqlServerDocumentDbContext db, CancellationToken ct) =>
@@ -193,14 +197,12 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
 
     private DocumentState Decode(byte[] data, DocumentPointer? pointer = null, bool strict = false, StorageLimits? decodeLimits = null)
     {
-        DocumentState state;
-        try { state = DocumentStateJson.Deserialize(Utf8.GetString(data), strict, decodeLimits ?? limits); }
-        catch (DecoderFallbackException ex) { throw new StorageCorruptionException("Snapshot JSON is not UTF-8.", ex); }
+        var state = SqlServerDocumentDatabase.DecodeSnapshot(data, strict, decodeLimits ?? limits);
         if (pointer is not null) ValidatePointer(state, pointer);
         return state;
     }
 
-    private static void ValidatePointer(DocumentState state, DocumentPointer pointer)
+    internal static void ValidatePointer(DocumentState state, DocumentPointer pointer)
     {
         if (state.ResourceId != pointer.ResourceId || state.StateVersion != pointer.StateVersion ||
             state.PathKey != pointer.PathKey || state.IsDeleted != pointer.IsDeleted || state.RetiredPathKeys.Length != pointer.RetiredPathCount)
@@ -236,19 +238,59 @@ public sealed partial class SqlServerStateStore : IDocumentStateStore, IDocument
         row.IsDeleted = state.IsDeleted; row.RetiredPathCount = state.RetiredPathKeys.Length;
     }
 
-    private static async Task CheckNamespaceAsync(SqlServerDocumentDbContext db, CancellationToken ct)
+    private async Task<Dictionary<Guid, DocumentState>> VerifyNamespaceRowsAsync(SqlServerDocumentDbContext db, CancellationToken ct)
     {
-        if (await db.Documents.AnyAsync(pointer => pointer.RetiredPathCount !=
-            db.Reservations.Count(row => row.ResourceId == pointer.ResourceId), ct))
+        // Admission holds the exclusive publication lock. Health uses a serializable
+        // read transaction. Both see coherent current pointers and authoritative
+        // namespace fields without reading any content objects or chunks.
+        var heads = await (from pointer in db.Documents.AsNoTracking()
+            join snapshot in db.Snapshots.AsNoTracking() on new { pointer.ResourceId, pointer.StateVersion }
+                equals new { snapshot.ResourceId, snapshot.StateVersion } into snapshots
+            from snapshot in snapshots.DefaultIfEmpty()
+            select new { Pointer = pointer, Data = snapshot == null ? null : snapshot.Data }).ToListAsync(ct);
+        var states = new Dictionary<Guid, DocumentState>();
+        foreach (var row in heads)
+        {
+            var state = Decode(row.Data ?? throw new StorageCorruptionException("The current snapshot is missing."), row.Pointer);
+            if (!row.Pointer.PathHash.AsSpan().SequenceEqual(PathHash(state.PathKey)))
+                throw new StorageCorruptionException("The current path hash disagrees with its snapshot.");
+            states.Add(state.ResourceId, state);
+        }
+        var reservations = await db.Reservations.AsNoTracking().ToListAsync(ct);
+        foreach (var row in reservations)
+        {
+            if (!states.TryGetValue(row.ResourceId, out var state) || row.Ordinal < 0 || row.Ordinal >= state.RetiredPathKeys.Length ||
+                row.PathKey != state.RetiredPathKeys[row.Ordinal] || !row.PathHash.AsSpan().SequenceEqual(PathHash(state.RetiredPathKeys[row.Ordinal])))
+                throw new StorageCorruptionException("A retired path reservation disagrees with its authoritative snapshot.");
+        }
+        var counts = reservations.GroupBy(row => row.ResourceId).ToDictionary(group => group.Key, group => group.Count());
+        if (states.Values.Any(state => state.RetiredPathKeys.Length != counts.GetValueOrDefault(state.ResourceId)))
             throw new StorageCorruptionException("The retired path reservation index is incomplete.");
+        return states;
     }
 
-    private static async Task<bool> IsPathReservedAsync(SqlServerDocumentDbContext db, string key, Guid? exclude,
+    private static Guid[] VerifiedLifecycleAncestors(DocumentState retired, IReadOnlyDictionary<Guid, DocumentState> states)
+    {
+        var ancestors = new List<Guid> { retired.ResourceId };
+        var child = retired;
+        while (true)
+        {
+            var parents = states.Values.Where(state => state.ReplacedBy == child.ResourceId).ToArray();
+            if (parents.Length == 0) return ancestors.ToArray();
+            if (parents.Length != 1 || !parents[0].IsDeleted || child.LifecycleGeneration <= 1 ||
+                parents[0].LifecycleGeneration != child.LifecycleGeneration - 1 || ancestors.Contains(parents[0].ResourceId))
+                throw new StorageCorruptionException("The document lifecycle ancestry is inconsistent.");
+            child = parents[0];
+            ancestors.Add(child.ResourceId);
+        }
+    }
+
+    private static async Task<bool> IsPathReservedAsync(SqlServerDocumentDbContext db, string key, Guid[] excluded,
         bool includeDeleted, CancellationToken ct)
     {
         var hash = PathHash(key);
-        return await db.Documents.AnyAsync(row => row.ResourceId != exclude && (includeDeleted || !row.IsDeleted) &&
+        return await db.Documents.AnyAsync(row => !excluded.Contains(row.ResourceId) && (includeDeleted || !row.IsDeleted) &&
                 row.PathHash == hash && row.PathKey == key, ct) ||
-            await db.Reservations.AnyAsync(row => row.ResourceId != exclude && row.PathHash == hash && row.PathKey == key, ct);
+            await db.Reservations.AnyAsync(row => !excluded.Contains(row.ResourceId) && row.PathHash == hash && row.PathKey == key, ct);
     }
 }

@@ -46,7 +46,12 @@ public sealed partial class SqlServerStateStore
         await ReadAsync(async db =>
         {
             var row = await ReadRows(db, id, key).SingleOrDefaultAsync(ct);
-            return row is null ? null : ValidateMetadata(row);
+            if (row is null)
+            {
+                if (key is not null) await VerifyNamespaceRowsAsync(db, ct);
+                return null;
+            }
+            return ValidateMetadata(row);
         }, ct);
 
     public async ValueTask<DocumentRevisionReadPage?> ReadRevisionSummariesAsync(Guid resourceId, int offset, int limit,
