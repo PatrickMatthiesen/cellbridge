@@ -2,6 +2,11 @@ using BenchmarkDotNet.Running;
 
 // The caller serializes collection and reserves the machine. No separate runtime driver.
 Settings.Validate();
+if (args.Length == 2 && args[0] == "--analyze-profile")
+{
+    ProfileAnalysis.Run(args[1]);
+    return;
+}
 if (args.SequenceEqual(["--profile-mutations"]))
 {
     await CommandDiagnostics.ProfileMutationsAsync();
