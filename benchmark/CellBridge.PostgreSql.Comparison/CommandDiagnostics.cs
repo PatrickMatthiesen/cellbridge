@@ -4,7 +4,7 @@ using Npgsql;
 
 // Explicitly excluded from latency/allocation results. Uses Npgsql 10's ActivitySource
 // and tracing filters, the same supported hooks as frozen SqlMeasurements.
-internal sealed class CommandDiagnostics : IObserver<DiagnosticListener>, IObserver<KeyValuePair<string, object?>>, IDisposable
+internal sealed partial class CommandDiagnostics : IObserver<DiagnosticListener>, IObserver<KeyValuePair<string, object?>>, IDisposable
 {
     public static bool Enabled { get; private set; }
     private static readonly Dictionary<string, int> commands = new();
@@ -13,9 +13,9 @@ internal sealed class CommandDiagnostics : IObserver<DiagnosticListener>, IObser
     private readonly List<IDisposable> subscriptions = [];
     public CommandDiagnostics() => subscriptions.Add(DiagnosticListener.AllListeners.Subscribe(this));
     public static bool Command(NpgsqlCommand command)
-    { if (capture) { lock (commands) commands[command.CommandText] = commands.GetValueOrDefault(command.CommandText) + 1; } return true; }
+    { profileSql = command.CommandText; if (capture) { lock (commands) commands[command.CommandText] = commands.GetValueOrDefault(command.CommandText) + 1; } return true; }
     public static bool Batch(NpgsqlBatch batch)
-    { if (capture) { var sql = string.Join(";\n", batch.BatchCommands.Cast<NpgsqlBatchCommand>().Select(c => c.CommandText)); lock (commands) commands[sql] = commands.GetValueOrDefault(sql) + 1; } return true; }
+    { profileSql = string.Join(";\n", batch.BatchCommands.Cast<NpgsqlBatchCommand>().Select(c => c.CommandText)); if (capture) { var sql = string.Join(";\n", batch.BatchCommands.Cast<NpgsqlBatchCommand>().Select(c => c.CommandText)); lock (commands) commands[sql] = commands.GetValueOrDefault(sql) + 1; } return true; }
     public void OnNext(DiagnosticListener listener)
     {
         if (listener.Name == "Microsoft.EntityFrameworkCore") subscriptions.Add(listener.Subscribe(this,

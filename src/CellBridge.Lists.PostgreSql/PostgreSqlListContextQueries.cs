@@ -97,4 +97,23 @@ public sealed partial class PostgreSqlListEngine
                 Record = record
             }
         ).SingleOrDefault());
+    private sealed class CreateStateProjection
+    {
+        public WorkspaceRow Workspace { get; init; } = null!;
+        public ListCounterRow Counter { get; init; } = null!;
+        public DateTimeOffset Now { get; init; }
+    }
+
+    private readonly Func<PostgreSqlListDbContext, Guid, Guid, CancellationToken, Task<CreateStateProjection>> _compiledCreateState =
+        EF.CompileAsyncQuery((PostgreSqlListDbContext db, Guid workspaceId, Guid listId, CancellationToken ct) => (
+            from workspace in db.Workspaces
+            join counter in db.ListCounters on workspace.WorkspaceId equals counter.WorkspaceId
+            where workspace.WorkspaceId == workspaceId && counter.ListId == listId
+            select new CreateStateProjection
+            {
+                Workspace = workspace,
+                Counter = counter,
+                Now = PostgreSqlListDbContext.ClockTimestamp()
+            }).Single());
+
 }

@@ -137,3 +137,22 @@ EF-only default selection, the untimed smoke entry point and trimmed analysis.
 The analysis omits the investigation's archive inventories, frozen-run comparison,
 cgroup snapshots and study-report assembly. Timed bodies and the corrected warm
 mutation lifecycle are unchanged. Retain new results separately from old evidence.
+
+## Profile Lists mutations
+
+Use a fresh output directory with the same environment variables as above:
+
+```sh
+dotnet run -c Release --no-build --project "$CB_MEASUREMENT_ROOT" -- --profile-mutations
+dotnet run -c Release --no-build --project "$CB_MEASUREMENT_ROOT" -- --analyze-profile "$CB_MEASUREMENT_OUTPUT/ef-create.nettrace"
+dotnet run -c Release --no-build --project "$CB_MEASUREMENT_ROOT" -- --analyze-profile "$CB_MEASUREMENT_OUTPUT/ef-patch.nettrace"
+```
+
+This mode uses the existing fixture and mutation workload. After eight validated
+warm batches, it records 48 batches per operation with Npgsql command durations,
+EF compilation counts and EventPipe allocation/thread samples. Schema resets,
+preparation and validation remain outside the marked batch regions. Analysis
+selects only those regions. Allocation ticks estimate allocated bytes, not retained
+heap. Sampled stacks include blocked threads and profiler work; their counts are
+not CPU utilization. Command durations include driver and server work. Keep these
+instrumented results separate from BDN timings and allocations.
