@@ -8,7 +8,7 @@ public sealed partial class SqlServerListEngine
     public Task SetMembershipAsync(ListActor actor, Guid workspaceId, string subject, bool member,
         bool canCreateLists, bool canManageGrants, CancellationToken ct = default)
     {
-        if (authorizationProvider is not null) return Task.FromException(Unsupported());
+        if (authorizationProvider is not null) return Task.FromException(HostAuthorityUnsupported());
         ListAuthorizationValidation.ValidateActor(new ListActor(subject));
         return OperateAsync(actor, workspaceId, true, async (db, workspace, administrator, authorization) =>
         {
@@ -51,7 +51,7 @@ public sealed partial class SqlServerListEngine
     public Task SetListGrantAsync(ListActor actor, Guid workspaceId, Guid listId, string subject,
         ListAccess access, CancellationToken ct = default)
     {
-        if (authorizationProvider is not null) return Task.FromException(Unsupported());
+        if (authorizationProvider is not null) return Task.FromException(HostAuthorityUnsupported());
         ListAuthorizationValidation.ValidateActor(new ListActor(subject));
         if ((access & ~(ListAccess.Read | ListAccess.Write | ListAccess.Design)) != 0) throw Validation("The list access value is invalid.");
         return OperateAsync(actor, workspaceId, true, async (db, workspace, member, authorization) =>

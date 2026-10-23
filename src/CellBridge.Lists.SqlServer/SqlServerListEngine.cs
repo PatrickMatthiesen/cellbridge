@@ -6,15 +6,16 @@ using Microsoft.EntityFrameworkCore;
 namespace CellBridge.Lists.SqlServer;
 
 /// <summary>
-/// SQL Server Lists authority, schema and record mutations. Mutations serialize
-/// per workspace. Queries, views, audit retrieval and host list paging are pending.
+/// SQL Server Lists runtime with typed SQL queries, bounded list discovery,
+/// built-in and host authorization, schema/record operations, views and audit.
+/// Mutations serialize per workspace.
 /// </summary>
 /// <remarks>
 /// This non-packable provider does not establish SQL Server performance support.
 /// Run SqlServerListMigrator and SqlServerListSetup with administrator options;
 /// construct this engine with a separate restricted runtime principal. Health
 /// requires SELECT on migration history, VIEW DEFINITION on the Lists schema,
-/// and the minimum table permissions declared in SqlServerListHealth.
+/// and the minimum object permissions declared in SqlServerListHealth.
 /// A supplied external connection must be reserved for one operation at a time.
 /// Cancellation before commit rolls back; commit itself does not accept caller
 /// cancellation. A store failure during commit may leave an uncertain outcome.
@@ -22,20 +23,27 @@ namespace CellBridge.Lists.SqlServer;
 /// Logical storage counts compact System.Text.Json output in UTF-8, with its
 /// default escaping and persisted scalar spellings, plus fixed row charges.
 /// It does not count SQL Server nvarchar allocation or PostgreSQL normalization.
-/// Expired receipts are retained in this phase; lifetime identity claims never
-/// expire. Receipt pruning and its corresponding quota reclamation are pending.
+/// An authorized create attempt prunes its expired receipt and reclaims only
+/// that receipt charge. Permanent identity claims never expire. Queries use
+/// exact SQL scalar keys and bounded result pages; unindexed field scans remain
+/// subject to the configured statement timeout.
 /// </remarks>
-public sealed partial class SqlServerListEngine : IListEngine
+public sealed partial class SqlServerListEngine : IListEngine, IPagedListEngine
 {
     private readonly DbContextOptions<SqlServerListDbContext> options;
     private readonly ListLimits limits;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public SqlServerListEngine(DbContextOptions<SqlServerListDbContext> options, ListLimits? limits = null)
+    public SqlServerListEngine(DbContextOptions<SqlServerListDbContext> options, ListLimits? limits = null, byte[]? continuationKey = null)
     {
         this.options = SqlServerListDatabase.Normalize(options);
         this.limits = limits ?? new ListLimits();
         this.limits.Validate();
+        if (continuationKey is not null)
+        {
+            if (continuationKey.Length != 32) throw new ArgumentException("The continuation key must contain 32 bytes.", nameof(continuationKey));
+            this.continuationKey = continuationKey.ToArray();
+        }
     }
 
     /// <summary>Checks explicit migration, durability, RLS and restricted runtime permissions. Does not run DDL.</summary>
@@ -125,26 +133,6 @@ public sealed partial class SqlServerListEngine : IListEngine
         return definition;
     }
 
-    public Task<IReadOnlyList<ListDefinition>> GetListsAsync(ListActor actor, Guid workspaceId,
-        CancellationToken ct = default) => authorizationProvider is not null
-        ? Task.FromException<IReadOnlyList<ListDefinition>>(Unsupported())
-        : OperateAsync<IReadOnlyList<ListDefinition>>(actor, workspaceId, false,
-        async (db, workspace, member, authorization) =>
-        {
-            var key = SqlServerListSetup.SubjectKey(actor.Subject);
-            var rows = await (from list in db.Lists.AsNoTracking()
-                join schema in db.ListSchemas.AsNoTracking()
-                    on new { list.WorkspaceId, list.ListId, list.SchemaVersion }
-                    equals new { schema.WorkspaceId, schema.ListId, schema.SchemaVersion }
-                join grant in db.ListGrants.AsNoTracking()
-                    on new { list.WorkspaceId, list.ListId } equals new { grant.WorkspaceId, grant.ListId }
-                where list.WorkspaceId == workspaceId && EF.Property<byte[]>(grant, "SubjectKey") == key && grant.Access != 0
-                select new { grant.Subject, schema.Definition }).ToListAsync(ct);
-            return rows.Where(row => StringComparer.Ordinal.Equals(row.Subject, actor.Subject))
-                .Select(row => ReadDefinition(row.Definition)).OrderBy(row => row.Name, StringComparer.Ordinal)
-                .ThenBy(row => row.Id).ToArray();
-        }, ct);
-
     public Task<ListDefinition> GetListAsync(ListActor actor, Guid workspaceId, Guid listId,
         CancellationToken ct = default) => OperateAsync(actor, workspaceId, false, async (db, workspace, member, authorization) =>
         {
@@ -164,7 +152,7 @@ public sealed partial class SqlServerListEngine : IListEngine
             return ToRecord(row, values);
         }, ct, [(listId, ListAuthorizationAction.Read)]);
 
-    public Task<CreateRecordResult> CreateRecordAsync(ListActor actor, Guid workspaceId, Guid listId,
+    public async Task<CreateRecordResult> CreateRecordAsync(ListActor actor, Guid workspaceId, Guid listId,
         CreateRecordRequest request, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -173,7 +161,7 @@ public sealed partial class SqlServerListEngine : IListEngine
         // but receipts always identify the original validated request.
         var snapshot = request with { Values = (JsonObject)request.Values.DeepClone() };
         var digest = ListValidation.CreateDigest(snapshot);
-        return OperateAsync(actor, workspaceId, true, async (db, workspace, member, authorization) =>
+        var result = await OperateAsync(actor, workspaceId, true, async (db, workspace, member, authorization) =>
         {
             // Current membership and Write permission precede all receipt inspection.
             await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Write, ct, authorization);
@@ -185,9 +173,20 @@ public sealed partial class SqlServerListEngine : IListEngine
                 row.WorkspaceId == workspaceId && row.ListId == listId && row.RecordId == snapshot.Id, ct);
             if (receipt is not null)
             {
-                if (receipt.ExpiresUtc <= now || !StringComparer.Ordinal.Equals(receipt.Actor, actor.Subject) ||
-                    receipt.SchemaVersion != snapshot.SchemaVersion || !StringComparer.Ordinal.Equals(receipt.RequestDigest, digest))
-                    throw Conflict("That record ID has a different or expired create receipt.");
+                if (receipt.ExpiresUtc <= now)
+                {
+                    var bytes = 192L + Encoding.UTF8.GetByteCount(receipt.Actor) + Encoding.UTF8.GetByteCount(receipt.RequestDigest);
+                    if (workspace.StoredBytes < bytes) throw InvalidStored();
+                    workspace.StoredBytes = checked(workspace.StoredBytes - bytes);
+                    db.CreateReceipts.Remove(receipt);
+                    await SqlServerListDatabase.SaveRequiredAsync(db, ct);
+                    // Commit receipt maintenance before returning Conflict. The
+                    // permanent claim and original record/counter stay intact.
+                    return new CreateRecordResult(snapshot.Id, 0, 0);
+                }
+                if (!StringComparer.Ordinal.Equals(receipt.Actor, actor.Subject) || receipt.SchemaVersion != snapshot.SchemaVersion ||
+                    !StringComparer.Ordinal.Equals(receipt.RequestDigest, digest))
+                    throw Conflict("That record ID has a different create receipt.");
                 var originalSchema = await db.ListSchemas.AsNoTracking().SingleOrDefaultAsync(row =>
                     row.WorkspaceId == workspaceId && row.ListId == listId && row.SchemaVersion == receipt.SchemaVersion, ct)
                     ?? throw InvalidStored();
@@ -251,20 +250,32 @@ public sealed partial class SqlServerListEngine : IListEngine
                     !StringComparer.Ordinal.Equals(createdReceipt.RequestDigest, digest) || createdReceipt.CreatedUtc != now ||
                     createdReceipt.ExpiresUtc != now.Add(limits.ReceiptLifetime)) throw InvalidStored();
             }
-        }, ct, [(listId, ListAuthorizationAction.Write)], db => ReferenceTargetsAsync(db, workspaceId, listId,
-            snapshot.Values.Where(value => value.Value is not null).Select(value => Guid.Parse(value.Key)).ToHashSet(), ct));
+        }, ct, [(listId, ListAuthorizationAction.Write)], async db =>
+        {
+            // Source authority and reserve have already been checked in this
+            // preflight. Established retries need no new target assignment.
+            var receipt = await db.CreateReceipts.AsNoTracking().SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
+                row.ListId == listId && row.RecordId == snapshot.Id, ct);
+            if (receipt is not null) return []; // Final transaction decides exact replay, expiry or conflict.
+
+            return await ReferenceTargetsAsync(db, workspaceId, listId,
+                snapshot.Values.Where(value => value.Value is not null).Select(value => Guid.Parse(value.Key)).ToHashSet(), ct);
+        });
+        if (result.Revision == 0) throw Conflict("That record ID was used by an expired create receipt.");
+        return result;
     }
 
     private Task<T> OperateAsync<T>(ListActor actor, Guid workspaceId, bool mutation,
         Func<SqlServerListDbContext, WorkspaceRow, MembershipRow, OperationAuthorization?, Task<T>> operation,
         CancellationToken ct, IReadOnlyList<(Guid? ListId, ListAuthorizationAction Action)>? requirements = null,
-        Func<SqlServerListDbContext, Task<Guid[]>>? referenceTargets = null)
+        Func<SqlServerListDbContext, Task<Guid[]>>? referenceTargets = null,
+        OperationAuthorization? admittedAuthorization = null)
     {
         ListAuthorizationValidation.ValidateActor(actor);
         if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
         return SqlServerListDatabase.MapFailuresAsync(async () =>
         {
-            var authorization = await AuthorizeOperationAsync(actor, workspaceId, requirements ?? [], referenceTargets, ct);
+            var authorization = admittedAuthorization ?? await AuthorizeOperationAsync(actor, workspaceId, requirements ?? [], referenceTargets, ct);
             await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(options, workspaceId, ct, limits.StatementTimeout);
             var db = scope.Context;
             await CheckConfigurationAsync(db, ct);
@@ -365,5 +376,6 @@ public sealed partial class SqlServerListEngine : IListEngine
     private static ListException Conflict(string message) => new(ListFailure.Conflict, message);
     private static ListException Limit(string message) => new(ListFailure.Limit, message);
     private static ListException InvalidStored() => new(ListFailure.Unavailable, "Persisted list state is invalid or changed during publication.");
-    private static ListException Unsupported() => new(ListFailure.NotSupported, "This operation is not yet supported by the SQL Server Lists runtime.");
+    private static ListException HostAuthorityUnsupported() => new(ListFailure.NotSupported,
+        "Host-authorized workspaces manage membership and grants in the host authority store.");
 }

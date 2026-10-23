@@ -32,7 +32,7 @@ public sealed partial class SqlServerListEngineTests
         await Failure(ListFailure.NotFound, () => engine.GetListAsync(actor, env.Workspace, list.Id));
         await Failure(ListFailure.NotFound, () => env.Engine.GetListAsync(Admin, workspace, list.Id));
         await Failure(ListFailure.NotSupported, () => engine.SetMembershipAsync(actor, workspace, "new", true, true, true));
-        await Failure(ListFailure.NotSupported, () => engine.GetListsAsync(actor, workspace));
+        Assert.Single(await engine.GetListsAsync(actor, workspace));
         policy.Allow = request => request.Action != ListAuthorizationAction.Write;
         await Failure(ListFailure.NotFound, () => engine.CreateRecordAsync(actor, workspace, list.Id, request));
         await Failure(ListFailure.NotFound, () => engine.UpdateRecordAsync(actor, workspace, list.Id, request.Id, new(2, 2, [])));

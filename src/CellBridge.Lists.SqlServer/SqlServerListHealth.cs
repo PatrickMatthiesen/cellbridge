@@ -55,7 +55,7 @@ public sealed partial class SqlServerListEngine
         if (policies != 12 || trigger != 1) throw InvalidStored();
 
         var expected = System.Text.Json.JsonSerializer.Serialize(RuntimePermissions.SelectMany(entry =>
-            entry.Permissions.Select(permission => new { tableName = "cellbridge_lists." + entry.Table, permission })));
+            entry.Permissions.Select(permission => new { tableName = "cellbridge_lists." + entry.Object, permission })));
         var missing = await db.Database.SqlQuery<int>($"""
             SELECT COUNT(*) AS Value FROM OPENJSON({expected})
                 WITH (tableName nvarchar(256), permission nvarchar(32)) required
@@ -77,9 +77,9 @@ public sealed partial class SqlServerListEngine
             throw new ListException(ListFailure.Unavailable, "The SQL Server Lists runtime has excess table privileges.");
     }
 
-    // First-slice minimum permissions. Setup/migrations must use another principal.
+    // Runtime minimum permissions, including exact-query functions. Setup/migrations must use another principal.
     // No database/schema owner, DDL or security-policy authority is permitted.
-    internal static readonly (string Table, string[] Permissions)[] RuntimePermissions =
+    internal static readonly (string Object, string[] Permissions)[] RuntimePermissions =
     [
         ("schema_version", ["SELECT"]),
         ("templates", ["SELECT"]),
@@ -92,8 +92,12 @@ public sealed partial class SqlServerListEngine
         ("list_counters", ["SELECT", "INSERT", "UPDATE"]),
         ("list_grants", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
         ("records", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
+        ("saved_views", ["SELECT", "INSERT", "UPDATE"]),
+        ("scalar_key", ["EXECUTE"]),
+        ("uuid_key", ["EXECUTE"]),
+        ("key_compare", ["EXECUTE"]),
         ("record_tombstones", ["SELECT", "INSERT"]),
-        ("create_receipts", ["SELECT", "INSERT"]),
+        ("create_receipts", ["SELECT", "INSERT", "DELETE"]),
         ("audit_events", ["SELECT", "INSERT"])
     ];
 }

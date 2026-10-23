@@ -29,7 +29,7 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
         await migrator.MigrateAsync();
         await using (var db = new SqlServerListDbContext(options))
         {
-            Assert.Equal(3, (await db.Database.GetAppliedMigrationsAsync()).Count());
+            Assert.Equal(4, (await db.Database.GetAppliedMigrationsAsync()).Count());
             Assert.False(db.Database.HasPendingModelChanges());
             await db.Database.ExecuteSqlRawAsync("""
                 INSERT INTO cellbridge_lists.__CellBridgeListsMigrationsHistory VALUES ('20990101000000_Unknown','10.0.13')

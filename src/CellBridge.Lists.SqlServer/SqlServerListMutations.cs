@@ -49,8 +49,11 @@ public sealed partial class SqlServerListEngine
         }, ct, [(listId, ListAuthorizationAction.Design)], async db =>
         {
             var old = await GetDefinitionAsync(db, workspaceId, listId, ct);
+            if (old.SchemaVersion != request.ExpectedVersion) throw Conflict("The list schema changed.");
+            var proposed = old with { Name = request.Name, SchemaVersion = checked(old.SchemaVersion + 1), Fields = request.Fields };
+            ListValidation.ValidateEvolution(old, proposed, limits);
             var existing = old.Fields.Select(field => field.Id).ToHashSet();
-            return request.Fields.Where(field => field.Type == ListFieldType.Reference && !existing.Contains(field.Id))
+            return proposed.Fields.Where(field => field.Type == ListFieldType.Reference && !existing.Contains(field.Id))
                 .Select(field => field.ReferenceListId!.Value).Distinct().ToArray();
         });
     }

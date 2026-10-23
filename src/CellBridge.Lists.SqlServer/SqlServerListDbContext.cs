@@ -30,6 +30,10 @@ public sealed class SqlServerListDbContext(DbContextOptions<SqlServerListDbConte
     internal DbSet<SavedViewRow> SavedViews => Set<SavedViewRow>();
     internal DbSet<AuditEventRow> AuditEvents => Set<AuditEventRow>();
 
+    internal static string? ScalarKey(string json, string field, int type) => throw new NotSupportedException("SQL mapping only.");
+    internal static string UuidKey(Guid value) => throw new NotSupportedException("SQL mapping only.");
+    internal static int? KeyCompare(string? left, string? right) => throw new NotSupportedException("SQL mapping only.");
+
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
         base.ConfigureConventions(configurationBuilder);
@@ -39,6 +43,11 @@ public sealed class SqlServerListDbContext(DbContextOptions<SqlServerListDbConte
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDefaultSchema(Schema);
+        foreach (var (method, name) in new[] { (nameof(ScalarKey), "scalar_key"), (nameof(UuidKey), "uuid_key"), (nameof(KeyCompare), "key_compare") })
+            modelBuilder.HasDbFunction(typeof(SqlServerListDbContext).GetMethod(method,
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!)
+                .HasName(name).HasSchema(Schema);
+
         Configure(modelBuilder.Entity<SchemaVersionRow>(), "schema_version", [nameof(SchemaVersionRow.Singleton)]);
         Configure(modelBuilder.Entity<TemplateRow>(), "templates", [nameof(TemplateRow.TemplateId), nameof(TemplateRow.Version)]);
         Configure(modelBuilder.Entity<WorkspaceRow>(), "workspaces", [nameof(WorkspaceRow.WorkspaceId)]);

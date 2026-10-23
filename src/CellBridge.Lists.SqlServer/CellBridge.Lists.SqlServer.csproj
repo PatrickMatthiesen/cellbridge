@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>false</IsPackable><DefineConstants>$(DefineConstants);CELLBRIDGE_SQLSERVER</DefineConstants></PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Migrations/20261024000001_ExactQueries.sql" />
     <ProjectReference Include="../CellBridge.Lists/CellBridge.Lists.csproj" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.13" />
@@ -8,5 +9,5 @@
     <Compile Include="../SharedLists/ListRows.cs" Link="Persistence/ListRows.cs" />
     <InternalsVisibleTo Include="CellBridge.SqlServer.Tests" />
   </ItemGroup>
-  <PropertyGroup><Description>Partial SQL Server Lists runtime with built-in/host authority, templates, schema publication, record mutations and references. Query, view and audit retrieval contracts remain unsupported.</Description></PropertyGroup>
+  <PropertyGroup><Description>SQL Server runtime for native workspace Lists with built-in/host authority, exact typed queries, candidate paging, views, audit and atomic schema/record operations.</Description></PropertyGroup>
 </Project>

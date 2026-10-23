@@ -8,7 +8,7 @@ public sealed partial class SqlServerListEngine
     private readonly string? authorizationDomain;
 
     public SqlServerListEngine(DbContextOptions<SqlServerListDbContext> options, ListLimits? limits,
-        IListAuthorizationProvider authorizationProvider) : this(options, limits)
+        IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null) : this(options, limits, continuationKey)
     {
         this.authorizationProvider = authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider));
         authorizationDomain = ListAuthorizationValidation.ValidateDomain(authorizationProvider.PolicyDomain, nameof(authorizationProvider));

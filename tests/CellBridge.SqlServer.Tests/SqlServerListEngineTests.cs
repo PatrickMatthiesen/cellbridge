@@ -132,8 +132,9 @@ public sealed partial class SqlServerListEngineTests(SqlServerFixture fixture)
             await scope.CommitAsync();
         }
         await Failure(ListFailure.Conflict, () => env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request));
-        Assert.Equal(baseline, await env.SnapshotAsync(list.Id));
-        // Simulate later receipt maintenance and record deletion. The lifetime claim survives both.
+        var receiptBytes = 192L + Encoding.UTF8.GetByteCount(Admin.Subject) + Encoding.UTF8.GetByteCount(ListValidation.CreateDigest(request));
+        Assert.Equal(baseline with { Bytes = baseline.Bytes - receiptBytes, Receipts = 0 }, await env.SnapshotAsync(list.Id));
+        // Simulate later record deletion. The lifetime claim survives both.
         await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(env.AdminOptions, env.Workspace))
         {
             scope.Context.CreateReceipts.RemoveRange(await scope.Context.CreateReceipts.ToListAsync());
@@ -349,7 +350,7 @@ public sealed partial class SqlServerListEngineTests(SqlServerFixture fixture)
     }
 
     [Fact]
-    public async Task ExactSubjectsAndUnsupportedFeaturesNeverWrite()
+    public async Task ExactSubjectsAndReadOnlyOperationsNeverWrite()
     {
         var env = await SetupAsync();
         var list = await env.CreateListAsync();
@@ -362,15 +363,9 @@ public sealed partial class SqlServerListEngineTests(SqlServerFixture fixture)
         await Failure(ListFailure.NotFound, () => env.Engine.GetListAsync(new("actor"), env.Workspace, list.Id));
         await Failure(ListFailure.NotFound, () => env.Engine.GetListAsync(new("ACTOR"), env.Workspace, list.Id));
         var before = await env.SnapshotAsync(list.Id);
-        var id = Guid.NewGuid();
-        var calls = new Func<Task>[]
-        {
-            () => env.Engine.QueryAsync(Admin, env.Workspace, list.Id, new()),
-            () => env.Engine.GetViewsAsync(Admin, env.Workspace, list.Id),
-            () => env.Engine.SaveViewAsync(Admin, env.Workspace, list.Id, new(id, "View", new(), [])),
-            () => env.Engine.GetAuditAsync(Admin, env.Workspace)
-        };
-        foreach (var call in calls) await Failure(ListFailure.NotSupported, call);
+        await env.Engine.QueryAsync(Admin, env.Workspace, list.Id, new());
+        await env.Engine.GetViewsAsync(Admin, env.Workspace, list.Id);
+        await env.Engine.GetAuditAsync(Admin, env.Workspace);
         Assert.Equal(before, await env.SnapshotAsync(list.Id));
         var hostWorkspace = Guid.NewGuid();
         await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(env.AdminOptions, hostWorkspace))
