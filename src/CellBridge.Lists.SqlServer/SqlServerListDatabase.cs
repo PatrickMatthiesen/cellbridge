@@ -49,7 +49,7 @@ internal static class SqlServerListDatabase
             // A failed commit can have an unknown outcome. Do not retry here. The
             // caller can resolve a create by repeating its original identity/payload.
             throw new ListException(ListFailure.Unavailable,
-                "The SQL Server list operation could not be confirmed. Retry creates with the same identity and payload.");
+                $"The SQL Server list operation could not be confirmed: {ex.GetBaseException().Message} Retry creates with the same identity and payload.");
         }
     }
 

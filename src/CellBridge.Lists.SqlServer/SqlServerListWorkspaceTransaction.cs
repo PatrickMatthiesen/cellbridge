@@ -41,12 +41,15 @@ internal sealed class SqlServerListWorkspaceTransaction : IAsyncDisposable
                 context.Database.SetCommandTimeout(seconds);
             await context.Database.OpenConnectionAsync(ct);
             transaction = await context.Database.BeginTransactionAsync(ct);
-            await context.Database.ExecuteSqlInterpolatedAsync($"""
+            // SET LOCK_TIMEOUT requires an integer literal. Only the validated
+            // numeric timeout enters this SQL text; workspace identity stays bound.
+            var configureSql = FormattableString.Invariant($"""
                 SET XACT_ABORT ON;
                 SET LOCK_TIMEOUT {(int)Math.Ceiling(timeout.TotalMilliseconds)};
-                DECLARE @workspace varbinary(16) = CONVERT(binary(16), {workspaceId});
+                DECLARE @workspace varbinary(16) = CONVERT(binary(16), @workspaceId);
                 SET CONTEXT_INFO @workspace;
-                """, ct);
+                """);
+            await context.Database.ExecuteSqlRawAsync(configureSql, [new SqlParameter("@workspaceId", workspaceId)], ct);
             return new(context, transaction);
         }
         catch

@@ -168,7 +168,7 @@ public sealed class SqlServerListEngineTests(SqlServerFixture fixture)
         var countLimited = new SqlServerListEngine(env.RuntimeOptions, new ListLimits { MaxRecordsPerList = 1 });
         var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ =>
             countLimited.CreateRecordAsync(Admin, env.Workspace, list.Id, request)));
-        Assert.Single(results.Where(result => !result.Replayed));
+        Assert.Single(results, result => !result.Replayed);
         Assert.All(results, result => Assert.Equal(1, result.Number));
         var after = await env.SnapshotAsync(list.Id);
         Assert.Equal(1, after.Records);
@@ -199,6 +199,35 @@ public sealed class SqlServerListEngineTests(SqlServerFixture fixture)
         Assert.Equal(4, complete.Records);
         Assert.Equal(4, complete.Receipts);
         Assert.Equal(5, complete.NextNumber);
+    }
+
+    [Fact]
+    public async Task ListCreationQuotaFailureRollsBackSchemaCounterGrantAndAudit()
+    {
+        var env = await SetupAsync();
+        var first = await env.CreateListAsync();
+        var before = await env.SnapshotAsync(first.Id);
+        var request = NewListRequest();
+        foreach (var limits in new[]
+        {
+            new ListLimits { MaxLists = 1 },
+            new ListLimits { MaxWorkspaceBytes = before.Bytes + 1 },
+            new ListLimits { MaxAuditEvents = before.Audits }
+        })
+        {
+            await Failure(ListFailure.Limit, () => new SqlServerListEngine(env.RuntimeOptions, limits)
+                .CreateListAsync(Admin, env.Workspace, request));
+            Assert.Equal(before, await env.SnapshotAsync(first.Id));
+            await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(env.AdminOptions, env.Workspace);
+            Assert.False(await scope.Context.Lists.AnyAsync(row => row.ListId == request.Id));
+            Assert.False(await scope.Context.ListSchemas.AnyAsync(row => row.ListId == request.Id));
+            Assert.False(await scope.Context.ListCounters.AnyAsync(row => row.ListId == request.Id));
+            Assert.False(await scope.Context.ListGrants.AnyAsync(row => row.ListId == request.Id));
+            Assert.Single(await scope.Context.AuditEvents.ToListAsync());
+        }
+        var second = await env.Engine.CreateListAsync(Admin, env.Workspace, request);
+        Assert.Equal(request.Id, second.Id);
+        Assert.Equal(2, (await env.Engine.GetListsAsync(Admin, env.Workspace)).Count);
     }
 
     [Fact]
