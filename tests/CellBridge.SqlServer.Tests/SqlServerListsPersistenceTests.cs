@@ -3,6 +3,9 @@ using System.Text.Json;
 using CellBridge.Lists.SqlServer;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data;
+using System.Data.Common;
 
 namespace CellBridge.SqlServer.Tests;
 
@@ -26,7 +29,7 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
         await migrator.MigrateAsync();
         await using (var db = new SqlServerListDbContext(options))
         {
-            Assert.Equal(2, (await db.Database.GetAppliedMigrationsAsync()).Count());
+            Assert.Equal(3, (await db.Database.GetAppliedMigrationsAsync()).Count());
             Assert.False(db.Database.HasPendingModelChanges());
             await db.Database.ExecuteSqlRawAsync("""
                 INSERT INTO cellbridge_lists.__CellBridgeListsMigrationsHistory VALUES ('20990101000000_Unknown','10.0.13')
@@ -77,6 +80,17 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
         }
 
         var runtime = await CreateRuntimeAsync();
+        foreach (var sqlFailure in new[] { false, true })
+            await AssertResetFailureDiscardsExternalSessionAsync(runtime, sqlFailure);
+        foreach (var table in new[] { "memberships", "list_grants" })
+        {
+            await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(Options(runtime), first);
+            var sql = table == "memberships"
+                ? $"INSERT cellbridge_lists.memberships(workspace_id,subject) VALUES ('{first}',NULL)"
+                : $"INSERT cellbridge_lists.list_grants(workspace_id,list_id,subject,access) VALUES ('{first}','{list}',NULL,1)";
+            var error = await Assert.ThrowsAsync<SqlException>(() => scope.Context.Database.ExecuteSqlRawAsync(sql));
+            Assert.Equal(515, error.Number);
+        }
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(runtime,
             "SELECT COUNT(*) FROM cellbridge_lists.records"));
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(runtime,
@@ -175,5 +189,46 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
             "SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CONTROL')"));
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(result.ConnectionString, "SELECT IS_SRVROLEMEMBER('sysadmin')"));
         return result.ConnectionString;
+    }
+
+    private async Task AssertResetFailureDiscardsExternalSessionAsync(string runtime, bool sqlFailure)
+    {
+        await using var connection = new SqlConnection(runtime);
+        await connection.OpenAsync();
+        var interceptor = new FailReset(sqlFailure);
+        var options = new DbContextOptionsBuilder<SqlServerListDbContext>().UseSqlServer(connection).AddInterceptors(interceptor).Options;
+        var workspace = Guid.NewGuid();
+        var scope = await SqlServerListWorkspaceTransaction.OpenAsync(options, workspace);
+        scope.Context.Workspaces.Add(new() { WorkspaceId = workspace, Name = "committed before cleanup failure" });
+        await scope.Context.SaveChangesAsync();
+        await scope.CommitAsync();
+        interceptor.Enabled = true;
+        await scope.DisposeAsync();
+        Assert.True(interceptor.Triggered);
+        Assert.Equal(ConnectionState.Closed, connection.State);
+        await connection.OpenAsync();
+        await using (var unscoped = new SqlCommand("SELECT COUNT(*) FROM cellbridge_lists.workspaces", connection))
+            Assert.Equal(0, await unscoped.ExecuteScalarAsync());
+        // Rebind deliberately and prove cleanup did not turn the completed commit into a failed save.
+        await using var rebound = await SqlServerListWorkspaceTransaction.OpenAsync(
+            new DbContextOptionsBuilder<SqlServerListDbContext>().UseSqlServer(connection).Options, workspace);
+        Assert.Equal("committed before cleanup failure", (await rebound.Context.Workspaces.SingleAsync()).Name);
+    }
+
+    private sealed class FailReset(bool sqlFailure) : DbCommandInterceptor
+    {
+        public bool Enabled { get; set; }
+        public bool Triggered { get; private set; }
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (Enabled && command.CommandText == "SET CONTEXT_INFO 0x;")
+            {
+                Triggered = true;
+                if (!sqlFailure) throw new IOException("Injected non-SQL cleanup failure.");
+                command.CommandText = "THROW 51002, 'Injected SQL cleanup failure.', 1;";
+            }
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
     }
 }

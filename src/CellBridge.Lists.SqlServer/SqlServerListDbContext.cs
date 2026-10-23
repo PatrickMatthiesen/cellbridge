@@ -190,6 +190,8 @@ public sealed class SqlServerListDbContext(DbContextOptions<SqlServerListDbConte
         var key = typeof(TEntity) == typeof(MembershipRow)
             ? new[] { "WorkspaceId", "SubjectKey" } : new[] { "WorkspaceId", "ListId", "SubjectKey" };
         entity.HasKey(key);
+        // Replacing the convention key can make its former Subject member optional.
+        entity.Property<string>("Subject").IsRequired();
     }
 
     private static void Configure<TEntity>(EntityTypeBuilder<TEntity> entity, string table, string[] key)

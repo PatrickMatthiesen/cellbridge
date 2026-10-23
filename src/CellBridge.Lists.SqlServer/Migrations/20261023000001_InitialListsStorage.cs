@@ -137,7 +137,7 @@ namespace CellBridge.Lists.SqlServer.Migrations
                 {
                     workspace_id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                     subject_key = table.Column<byte[]>(type: "binary(32)", nullable: false, computedColumnSql: "ISNULL(CONVERT(binary(32), HASHBYTES('SHA2_256', [subject])), CONVERT(binary(32), 0x))", stored: true),
-                    subject = table.Column<byte[]>(type: "varbinary(max)", nullable: true),
+                    subject = table.Column<byte[]>(type: "varbinary(max)", nullable: false),
                     can_create_lists = table.Column<bool>(type: "bit", nullable: false, defaultValue: false),
                     can_manage_grants = table.Column<bool>(type: "bit", nullable: false, defaultValue: false)
                 },
@@ -276,7 +276,7 @@ namespace CellBridge.Lists.SqlServer.Migrations
                     workspace_id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                     list_id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                     subject_key = table.Column<byte[]>(type: "binary(32)", nullable: false, computedColumnSql: "ISNULL(CONVERT(binary(32), HASHBYTES('SHA2_256', [subject])), CONVERT(binary(32), 0x))", stored: true),
-                    subject = table.Column<byte[]>(type: "varbinary(max)", nullable: true),
+                    subject = table.Column<byte[]>(type: "varbinary(max)", nullable: false),
                     access = table.Column<int>(type: "int", nullable: false)
                 },
                 constraints: table =>

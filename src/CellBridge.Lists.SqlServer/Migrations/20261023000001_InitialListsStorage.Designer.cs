@@ -198,6 +198,7 @@ namespace CellBridge.Lists.SqlServer.Migrations
                         .HasColumnName("access");
 
                     b.Property<byte[]>("Subject")
+                        .IsRequired()
                         .HasColumnType("varbinary(max)")
                         .HasColumnName("subject");
 
@@ -317,6 +318,7 @@ namespace CellBridge.Lists.SqlServer.Migrations
                         .HasColumnName("can_manage_grants");
 
                     b.Property<byte[]>("Subject")
+                        .IsRequired()
                         .HasColumnType("varbinary(max)")
                         .HasColumnName("subject");
 

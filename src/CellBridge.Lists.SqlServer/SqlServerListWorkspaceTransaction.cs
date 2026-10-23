@@ -9,6 +9,7 @@ internal sealed class SqlServerListWorkspaceTransaction : IAsyncDisposable
 {
     internal SqlServerListDbContext Context { get; }
     private readonly IDbContextTransaction transaction;
+    private bool committed;
 
     private SqlServerListWorkspaceTransaction(SqlServerListDbContext context, IDbContextTransaction transaction)
     {
@@ -39,8 +40,11 @@ internal sealed class SqlServerListWorkspaceTransaction : IAsyncDisposable
         }
         catch
         {
-            if (transaction is not null) await transaction.DisposeAsync();
-            await ResetAndDisposeAsync(context);
+            try
+            {
+                if (transaction is not null) await transaction.DisposeAsync();
+            }
+            finally { await ResetAndDisposeAsync(context); }
             throw;
         }
     }
@@ -49,27 +53,59 @@ internal sealed class SqlServerListWorkspaceTransaction : IAsyncDisposable
     {
         ct.ThrowIfCancellationRequested();
         await transaction.CommitAsync(CancellationToken.None);
+        committed = true;
     }
 
     public async ValueTask DisposeAsync()
     {
         try { await transaction.DisposeAsync(); }
+        catch (Exception) when (committed)
+        {
+            await DiscardSessionAsync((SqlConnection)Context.Database.GetDbConnection());
+        }
         finally { await ResetAndDisposeAsync(Context); }
     }
 
     private static async Task ResetAndDisposeAsync(SqlServerListDbContext context)
     {
+        var connection = context.Database.IsSqlServer() ? context.Database.GetDbConnection() as SqlConnection : null;
         try
         {
-            if (context.Database.IsSqlServer() && context.Database.GetDbConnection().State == System.Data.ConnectionState.Open)
+            if (connection?.State == System.Data.ConnectionState.Open)
                 await context.Database.ExecuteSqlRawAsync("SET CONTEXT_INFO 0x;", CancellationToken.None);
         }
-        catch (SqlException)
+        catch (Exception)
         {
-            // A broken connection must never return a previous workspace to the pool.
-            // Cleanup failure does not reverse a known committed operation.
-            SqlConnection.ClearPool((SqlConnection)context.Database.GetDbConnection());
+            // ClearPool alone only marks active sessions for disposal on close.
+            // EF leaves externally owned open connections open, so close explicitly
+            // whenever reset fails, including failures raised by interceptors.
+            if (connection is not null) await DiscardSessionAsync(connection);
         }
-        finally { await context.DisposeAsync(); }
+        finally
+        {
+            try { await context.DisposeAsync(); }
+            catch (Exception)
+            {
+                if (connection is not null) await DiscardSessionAsync(connection);
+            }
+        }
+    }
+
+    private static async Task DiscardSessionAsync(SqlConnection connection)
+    {
+        // Cleanup must neither retain workspace authority nor report a known
+        // committed mutation as failed. Discard the physical session before reuse.
+        try { SqlConnection.ClearPool(connection); }
+        catch (Exception) { /* Closing still revokes this connection's session authority. */ }
+        try { await connection.CloseAsync(); }
+        catch (Exception)
+        {
+            try { await connection.DisposeAsync(); }
+            catch (Exception)
+            {
+                try { connection.Dispose(); }
+                catch (Exception) { /* All discard paths were attempted; preserve the operation outcome. */ }
+            }
+        }
     }
 }

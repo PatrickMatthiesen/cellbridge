@@ -4,9 +4,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace CellBridge.Lists.SqlServer.Migrations;
 
-[DbContext(typeof(SqlServerListDbContext))]
-[Migration("20261023000002_WorkspaceIsolation")]
-public sealed class WorkspaceIsolation : Migration
+public sealed partial class WorkspaceIsolation : Migration
 {
     private static readonly string[] WorkspaceTables = ["workspaces", "memberships", "lists", "list_schemas",
         "list_counters", "list_grants", "records", "record_tombstones", "create_receipts",

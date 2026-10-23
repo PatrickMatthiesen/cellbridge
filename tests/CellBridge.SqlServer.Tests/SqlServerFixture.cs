@@ -19,6 +19,18 @@ public sealed class SqlServerFixture : IAsyncLifetime
     {
         if (environment is not null) await environment.DisposeAsync();
     }
+
+    // Logical databases stay inside this fixture's disposable engine. Their
+    // endpoint and setup credentials come from the native Aspire reference.
+    internal async Task<string> CreateDatabaseAsync()
+    {
+        var name = "cb_test_" + Guid.NewGuid().ToString("N");
+        await using var connection = new SqlConnection(Documents);
+        await connection.OpenAsync();
+        await using var command = new SqlCommand($"CREATE DATABASE [{name}]", connection);
+        await command.ExecuteNonQueryAsync();
+        return new SqlConnectionStringBuilder(Documents) { InitialCatalog = name }.ConnectionString;
+    }
 }
 
 [Collection("SQL Server")]
