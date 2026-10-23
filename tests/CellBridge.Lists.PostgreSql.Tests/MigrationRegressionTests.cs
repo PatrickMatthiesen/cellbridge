@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using CellBridge.Lists;
 using CellBridge.Lists.PostgreSql;
 using Npgsql;
@@ -94,6 +95,307 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
                 """);
             await dropRoles.ExecuteNonQueryAsync();
         }
+    }
+
+    [PostgreSqlFact]
+    public async Task GenuineVersionThreeFixtureIsAdoptedWithoutDataLossAndInitializationIsExplicit()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var databaseName = "lists_schema3_" + suffix;
+        var ownerRole = "lists_schema3_owner_" + suffix;
+        var runtimeRole = "lists_schema3_runtime_" + suffix;
+        var ownerPassword = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+        var quotedDatabase = QuoteIdentifier(databaseName);
+        var quotedOwner = QuoteIdentifier(ownerRole);
+        var quotedRuntime = QuoteIdentifier(runtimeRole);
+        var databaseCreated = false;
+        try
+        {
+            await using (var command = database.AdminSource!.CreateCommand($"""
+                CREATE ROLE {quotedOwner} LOGIN PASSWORD '{ownerPassword}' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+                CREATE ROLE {quotedRuntime} NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+                """))
+                await command.ExecuteNonQueryAsync();
+            await using (var command = database.AdminSource!.CreateCommand(
+                             $"CREATE DATABASE {quotedDatabase} OWNER {quotedOwner}"))
+                await command.ExecuteNonQueryAsync();
+            databaseCreated = true;
+
+            var baseConnectionString = Environment.GetEnvironmentVariable("CELLBRIDGE_LISTS_TEST_CONNECTION_STRING")
+                ?? Environment.GetEnvironmentVariable("ConnectionStrings__lists")
+                ?? throw new InvalidOperationException("The PostgreSQL test connection is missing.");
+            var ownerConnectionString = new NpgsqlConnectionStringBuilder(baseConnectionString)
+            {
+                Database = databaseName,
+                Username = ownerRole,
+                Password = ownerPassword,
+                ApplicationName = "CellBridge.Lists.Schema3Owner"
+            }.ConnectionString;
+            await using var ownerSource = NpgsqlDataSource.Create(ownerConnectionString);
+            var schema = await ReadVersionThreeSchemaAsync();
+            Assert.Equal("58f0bf90e50d742258f2eecc33141ca24be842c73f583655d1dcc1e3b956bad0",
+                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(schema))).ToLowerInvariant());
+            await using (var create = ownerSource.CreateCommand(schema))
+                await create.ExecuteNonQueryAsync();
+            var fixture = await SeedVersionThreeAsync(ownerSource);
+            await AssertVersionThreeRowsAsync(ownerSource, fixture);
+            await AssertVersionAndHistoryAsync(ownerSource, 3, expectHistory: false);
+
+            var uninitializedEngine = new PostgreSqlListEngine(ownerSource);
+            await Assert.ThrowsAnyAsync<Exception>(() => uninitializedEngine.CheckHealthAsync());
+            await AssertVersionAndHistoryAsync(ownerSource, 3, expectHistory: false);
+
+            await using (var inconsistentHistory = ownerSource.CreateCommand("""
+                CREATE TABLE cellbridge_lists."__CellBridgeListsMigrationsHistory" (
+                  "MigrationId" character varying(150) PRIMARY KEY,
+                  "ProductVersion" character varying(32) NOT NULL);
+                INSERT INTO cellbridge_lists."__CellBridgeListsMigrationsHistory" ("MigrationId","ProductVersion")
+                VALUES ('99999999999999_FutureListsSchema','99.0.0');
+                """))
+                await inconsistentHistory.ExecuteNonQueryAsync();
+            var legacyHistoryError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                PostgreSqlListSetup.InitializeAsync(ownerSource, runtimeRole));
+            Assert.Contains("legacy Lists schema", legacyHistoryError.Message, StringComparison.Ordinal);
+            await AssertVersionAndHistoryRowsAsync(ownerSource, 3,
+                ["99999999999999_FutureListsSchema"]);
+            await using (var restoreLegacyFixture = ownerSource.CreateCommand(
+                             "DROP TABLE cellbridge_lists.\"__CellBridgeListsMigrationsHistory\""))
+                await restoreLegacyFixture.ExecuteNonQueryAsync();
+
+            await PostgreSqlListSetup.InitializeAsync(ownerSource, runtimeRole);
+            await AssertVersionThreeRowsAsync(ownerSource, fixture);
+            await AssertVersionAndHistoryAsync(ownerSource, 4, expectHistory: true);
+            await PostgreSqlListSetup.InitializeAsync(ownerSource, runtimeRole);
+            await AssertVersionThreeRowsAsync(ownerSource, fixture);
+            await AssertVersionAndHistoryAsync(ownerSource, 4, expectHistory: true);
+
+            // ProductVersion records the EF tool version, not the library schema.
+            // Patch upgrades accept the same migrations without rewriting their metadata.
+            foreach (var productVersion in new[] { "10.0.4", "10.0.13" })
+            {
+                await using (var metadata = ownerSource.CreateCommand("""
+                    UPDATE cellbridge_lists."__CellBridgeListsMigrationsHistory"
+                    SET "ProductVersion"=$1
+                    """))
+                {
+                    metadata.Parameters.AddWithValue(productVersion);
+                    Assert.Equal(2, await metadata.ExecuteNonQueryAsync());
+                }
+                await PostgreSqlListSetup.InitializeAsync(ownerSource, runtimeRole);
+                await AssertVersionThreeRowsAsync(ownerSource, fixture);
+                await using var preserved = ownerSource.CreateCommand("""
+                    SELECT count(*) FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
+                    WHERE "ProductVersion"=$1
+                    """);
+                preserved.Parameters.AddWithValue(productVersion);
+                Assert.Equal(2L, await preserved.ExecuteScalarAsync());
+                await AssertVersionAndHistoryAsync(ownerSource, 4, expectHistory: true);
+            }
+
+            await using (var removeHistory = ownerSource.CreateCommand("""
+                DELETE FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
+                WHERE "MigrationId"='20261022040000_EfQueryFunctions'
+                """))
+                Assert.Equal(1, await removeHistory.ExecuteNonQueryAsync());
+            var currentHistoryError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                PostgreSqlListSetup.InitializeAsync(ownerSource, runtimeRole));
+            Assert.Contains("does not match schema version 4", currentHistoryError.Message,
+                StringComparison.Ordinal);
+            await AssertVersionAndHistoryRowsAsync(ownerSource, 4,
+                ["20261022033144_ListsSchemaV3"]);
+        }
+        finally
+        {
+            if (databaseCreated)
+            {
+                await using var dropDatabase = database.AdminSource!.CreateCommand(
+                    $"DROP DATABASE IF EXISTS {quotedDatabase} WITH (FORCE)");
+                await dropDatabase.ExecuteNonQueryAsync();
+            }
+            await using var dropRoles = database.AdminSource!.CreateCommand($"""
+                DROP ROLE IF EXISTS {quotedRuntime};
+                DROP ROLE IF EXISTS {quotedOwner};
+                """);
+            await dropRoles.ExecuteNonQueryAsync();
+        }
+    }
+
+    private static async Task<VersionThreeFixture> SeedVersionThreeAsync(NpgsqlDataSource ownerSource)
+    {
+        var workspace = Guid.Parse("61000000-0000-0000-0000-000000000001");
+        var list = Guid.Parse("62000000-0000-0000-0000-000000000001");
+        var field = Guid.Parse("63000000-0000-0000-0000-000000000001");
+        var record = Guid.Parse("64000000-0000-0000-0000-000000000001");
+        var view = Guid.Parse("65000000-0000-0000-0000-000000000001");
+        const string subject = "schema3:administrator:blåbær:😀";
+        const string receiptActor = "schema3:receipt:æ";
+        const string digest = "schema3:digest:ø";
+        const string value = "Preserved blåbær 😀";
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var definition = JsonSerializer.Serialize(new ListDefinition(list, workspace, "Schema 3", 1,
+            [new ListField(field, "Title", ListFieldType.Text)]), options);
+        var values = JsonSerializer.Serialize(new Dictionary<string, string>
+            { [field.ToString("D")] = value }, options);
+
+        await using var connection = await ownerSource.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT set_config('cellbridge.workspace_id',@workspace_text,true);
+            INSERT INTO cellbridge_lists.workspaces(
+              workspace_id,name,stored_bytes,audit_count,security_audit_count)
+            VALUES (@workspace,'Schema 3 workspace',9876,1,0);
+            INSERT INTO cellbridge_lists.memberships(
+              workspace_id,subject,can_create_lists,can_manage_grants)
+            VALUES (@workspace,@subject,true,true);
+            INSERT INTO cellbridge_lists.lists(
+              workspace_id,list_id,name,schema_version,next_number)
+            VALUES (@workspace,@list,'Schema 3 list',1,8);
+            INSERT INTO cellbridge_lists.list_schemas(
+              workspace_id,list_id,schema_version,definition)
+            VALUES (@workspace,@list,1,@definition::jsonb);
+            INSERT INTO cellbridge_lists.list_counters(
+              workspace_id,list_id,identity_count,next_number)
+            VALUES (@workspace,@list,1,8);
+            INSERT INTO cellbridge_lists.list_grants(workspace_id,list_id,subject,access)
+            VALUES (@workspace,@list,@subject,7);
+            INSERT INTO cellbridge_lists.records(
+              workspace_id,list_id,record_id,schema_version,revision,number,values_json,
+              created_utc,modified_utc,created_by,modified_by)
+            VALUES (@workspace,@list,@record,1,3,7,@values::jsonb,
+              '2026-01-02T03:04:05Z','2026-02-03T04:05:06Z',@subject,@subject);
+            INSERT INTO cellbridge_lists.record_tombstones(workspace_id,list_id,record_id)
+            VALUES (@workspace,@list,@record);
+            INSERT INTO cellbridge_lists.create_receipts(
+              workspace_id,list_id,record_id,actor,schema_version,request_digest,revision,number,
+              created_utc,expires_utc)
+            VALUES (@workspace,@list,@record,@receipt_actor,1,@digest,3,7,
+              '2026-02-03T04:05:06Z','2099-02-03T04:05:06Z');
+            INSERT INTO cellbridge_lists.saved_views(workspace_id,list_id,view_id,definition)
+            VALUES (@workspace,@list,@view,'{"name":"Blå view","columns":[]}'::jsonb);
+            INSERT INTO cellbridge_lists.audit_events(
+              workspace_id,utc,actor,action,list_id,record_id,revision,field_ids,target_subject,security)
+            VALUES (@workspace,'2026-02-03T04:05:07Z',@subject,'record.update',@list,@record,3,
+              ARRAY[@field]::uuid[],NULL,false);
+            """, connection, transaction);
+        command.Parameters.AddWithValue("workspace_text", workspace.ToString("D"));
+        command.Parameters.AddWithValue("workspace", workspace);
+        command.Parameters.AddWithValue("list", list);
+        command.Parameters.AddWithValue("field", field);
+        command.Parameters.AddWithValue("record", record);
+        command.Parameters.AddWithValue("view", view);
+        command.Parameters.AddWithValue("subject", subject);
+        command.Parameters.AddWithValue("receipt_actor", receiptActor);
+        command.Parameters.AddWithValue("digest", digest);
+        command.Parameters.AddWithValue("definition", definition);
+        command.Parameters.AddWithValue("values", values);
+        await command.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+        return new VersionThreeFixture(workspace, list, field, record, view, subject, receiptActor, digest, value);
+    }
+
+    private static async Task AssertVersionThreeRowsAsync(NpgsqlDataSource ownerSource, VersionThreeFixture fixture)
+    {
+        await using var connection = await ownerSource.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using (var context = new NpgsqlCommand(
+                         "SELECT set_config('cellbridge.workspace_id',$1,true)", connection, transaction))
+        {
+            context.Parameters.AddWithValue(fixture.Workspace.ToString("D"));
+            await context.ExecuteNonQueryAsync();
+        }
+        await using (var workspace = new NpgsqlCommand("""
+            SELECT name,stored_bytes,audit_count,security_audit_count
+            FROM cellbridge_lists.workspaces WHERE workspace_id=$1
+            """, connection, transaction))
+        {
+            workspace.Parameters.AddWithValue(fixture.Workspace);
+            await using var reader = await workspace.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("Schema 3 workspace", reader.GetString(0));
+            Assert.Equal(9876L, reader.GetInt64(1));
+            Assert.Equal(1L, reader.GetInt64(2));
+            Assert.Equal(0, reader.GetInt32(3));
+        }
+        await using (var rows = new NpgsqlCommand("""
+            SELECT l.name,l.schema_version,c.identity_count,c.next_number,r.revision,r.number,
+              r.values_json->>$2,cr.actor,cr.request_digest,v.definition->>'name',a.action,a.field_ids
+            FROM cellbridge_lists.lists l
+            JOIN cellbridge_lists.list_counters c USING(workspace_id,list_id)
+            JOIN cellbridge_lists.records r USING(workspace_id,list_id)
+            JOIN cellbridge_lists.create_receipts cr USING(workspace_id,list_id,record_id)
+            JOIN cellbridge_lists.saved_views v USING(workspace_id,list_id)
+            JOIN cellbridge_lists.audit_events a USING(workspace_id,list_id,record_id)
+            WHERE l.workspace_id=$1 AND l.list_id=$3 AND r.record_id=$4 AND v.view_id=$5
+            """, connection, transaction))
+        {
+            rows.Parameters.AddWithValue(fixture.Workspace);
+            rows.Parameters.AddWithValue(fixture.Field.ToString("D"));
+            rows.Parameters.AddWithValue(fixture.List);
+            rows.Parameters.AddWithValue(fixture.Record);
+            rows.Parameters.AddWithValue(fixture.View);
+            await using var reader = await rows.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("Schema 3 list", reader.GetString(0));
+            Assert.Equal(1L, reader.GetInt64(1));
+            Assert.Equal(1L, reader.GetInt64(2));
+            Assert.Equal(8L, reader.GetInt64(3));
+            Assert.Equal(3L, reader.GetInt64(4));
+            Assert.Equal(7L, reader.GetInt64(5));
+            Assert.Equal(fixture.Value, reader.GetString(6));
+            Assert.Equal(fixture.ReceiptActor, reader.GetString(7));
+            Assert.Equal(fixture.Digest, reader.GetString(8));
+            Assert.Equal("Blå view", reader.GetString(9));
+            Assert.Equal("record.update", reader.GetString(10));
+            Assert.Equal([fixture.Field], reader.GetFieldValue<Guid[]>(11));
+            Assert.False(await reader.ReadAsync());
+        }
+        await using var tombstone = new NpgsqlCommand("""
+            SELECT count(*) FROM cellbridge_lists.record_tombstones
+            WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3
+            """, connection, transaction);
+        tombstone.Parameters.AddWithValue(fixture.Workspace);
+        tombstone.Parameters.AddWithValue(fixture.List);
+        tombstone.Parameters.AddWithValue(fixture.Record);
+        Assert.Equal(1L, await tombstone.ExecuteScalarAsync());
+        await transaction.CommitAsync();
+    }
+
+    private static async Task AssertVersionAndHistoryAsync(NpgsqlDataSource source, int expectedVersion,
+        bool expectHistory)
+    {
+        await using var version = source.CreateCommand("SELECT version FROM cellbridge_lists.schema_version");
+        Assert.Equal(expectedVersion, await version.ExecuteScalarAsync());
+        await using var historyExists = source.CreateCommand(
+            "SELECT to_regclass('cellbridge_lists.\"__CellBridgeListsMigrationsHistory\"') IS NOT NULL");
+        Assert.Equal(expectHistory, await historyExists.ExecuteScalarAsync());
+        if (!expectHistory) return;
+        await using var history = source.CreateCommand("""
+            SELECT array_agg("MigrationId" ORDER BY "MigrationId")
+            FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
+            """);
+        Assert.Equal(new[] { "20261022033144_ListsSchemaV3", "20261022040000_EfQueryFunctions" },
+            (string[])(await history.ExecuteScalarAsync())!);
+    }
+
+    private static async Task AssertVersionAndHistoryRowsAsync(NpgsqlDataSource source, int expectedVersion,
+        string[] expectedHistory)
+    {
+        await using var version = source.CreateCommand("SELECT version FROM cellbridge_lists.schema_version");
+        Assert.Equal(expectedVersion, await version.ExecuteScalarAsync());
+        await using var history = source.CreateCommand("""
+            SELECT array_agg("MigrationId" ORDER BY "MigrationId")
+            FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
+            """);
+        Assert.Equal(expectedHistory, (string[])(await history.ExecuteScalarAsync())!);
+    }
+
+    private static async Task<string> ReadVersionThreeSchemaAsync()
+    {
+        await using var stream = typeof(MigrationRegressionTests).Assembly.GetManifestResourceStream(
+            "CellBridge.Lists.PostgreSql.Tests.Fixtures.postgresql-schema3.sql")
+            ?? throw new InvalidOperationException("The frozen Lists schema 3 fixture is missing.");
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync();
     }
 
     private static async Task<MigrationFixture> CreatePopulatedVersionOneAsync(NpgsqlDataSource ownerSource)
@@ -359,7 +661,19 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
     private static async Task AssertMigratedAsync(NpgsqlDataSource ownerSource, MigrationFixture fixture)
     {
         await using var version = ownerSource.CreateCommand("SELECT version FROM cellbridge_lists.schema_version");
-        Assert.Equal(3, await version.ExecuteScalarAsync());
+        Assert.Equal(4, await version.ExecuteScalarAsync());
+        await using var history = ownerSource.CreateCommand("""
+            SELECT "MigrationId" FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
+            ORDER BY "MigrationId"
+            """);
+        await using (var historyReader = await history.ExecuteReaderAsync())
+        {
+            Assert.True(await historyReader.ReadAsync());
+            Assert.Equal("20261022033144_ListsSchemaV3", historyReader.GetString(0));
+            Assert.True(await historyReader.ReadAsync());
+            Assert.Equal("20261022040000_EfQueryFunctions", historyReader.GetString(0));
+            Assert.False(await historyReader.ReadAsync());
+        }
         await using var connection = await ownerSource.OpenConnectionAsync();
         await using var transaction = await connection.BeginTransactionAsync();
         await using (var context = new NpgsqlCommand("SELECT set_config('cellbridge.workspace_id',$1,true)", connection, transaction))
@@ -440,6 +754,9 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
 
     private sealed record MigrationFixture(Guid LegacyWorkspace, Guid SourceList, string LegacySubject,
         long LegacyNonAuthorityBytes, long LegacyMigratedBytes, Guid CorrectedWorkspace, long CorrectedBytes);
+
+    private sealed record VersionThreeFixture(Guid Workspace, Guid List, Guid Field, Guid Record, Guid View,
+        string Subject, string ReceiptActor, string Digest, string Value);
 
     private static string QuoteIdentifier(string identifier) => '"' + identifier.Replace("\"", "\"\"") + '"';
 }

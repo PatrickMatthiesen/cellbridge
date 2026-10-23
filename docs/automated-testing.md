@@ -120,6 +120,9 @@ benchmark also creates and removes its own database role. The memory storage
 workload needs no database.
 
 Each run retains workload, setup, warm-up and measured-interval metadata.
+Storage reports retain retry mode and initial/final file hashes. After timing,
+the runner reloads final state and checks receipts, graph materialization and
+expected file bytes. These probes do not count toward workload allocations.
 Steady-state timings exclude environment startup/schema setup and warm-up;
 process peak memory remains cumulative. Preserve raw reports with runtime,
 hardware, source and backend details when comparing runs. These measurements

@@ -25,7 +25,7 @@ if (args.Contains("--collect-orphans", StringComparer.Ordinal))
 }
 else
 {
-    await new PostgreSqlStateStore(source, limits).InitializeAsync();
+    await new PostgreSqlStorageMigrator(source, limits).MigrateAsync();
     await AuthenticationDatabase.InitializeAsync(connectionString);
     Console.WriteLine("CellBridge storage schema version 6 and authentication schema version 1 are ready.");
 }

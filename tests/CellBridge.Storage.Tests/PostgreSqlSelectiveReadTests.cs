@@ -94,7 +94,7 @@ public sealed class PostgreSqlSelectiveReadTests
                 usage = (long)(await ledger.ExecuteScalarAsync())!;
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
             await store.InitializeAsync();
@@ -150,7 +150,7 @@ public sealed class PostgreSqlSelectiveReadTests
         });
 
     [PostgreSqlFact]
-    public Task RemovedCurrentRevisionDoesNotReturnFromRetainedSnapshotsMigrationOrReverseImport() =>
+    public Task RemovedCurrentRevisionDoesNotReturnFromRetainedSnapshotsMigrationOrEitherImportOrder() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
             var store = new PostgreSqlStateStore(source);
@@ -173,7 +173,7 @@ public sealed class PostgreSqlSelectiveReadTests
             var before = await SnapshotJson(source);
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await store.InitializeAsync();
             Assert.Equal(before, await SnapshotJson(source));
@@ -183,27 +183,32 @@ public sealed class PostgreSqlSelectiveReadTests
             Assert.Contains(snapshot.Snapshots, old => old.StateVersion < snapshot.Heads.Single().StateVersion &&
                 old.Revisions.Any(revision => revision.RevisionNumber == removed.RevisionNumber));
             Assert.Equal(removedBytes, await content.ReadVerifiedAsync(removed.Content));
-            await BudgetAndQueryTests.WithDatabase(new(), async destination =>
+            foreach (var reverse in new[] { false, true })
             {
-                var target = new PostgreSqlStateStore(destination);
-                var targetContent = new PostgreSqlContentStore(destination);
-                foreach (var handle in ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(StorageReferences.Handles)))
+                await BudgetAndQueryTests.WithDatabase(new(), async destination =>
                 {
-                    await using var bytes = await content.OpenReadAsync(handle);
-                    Assert.Equal(handle, await targetContent.WriteAsync(bytes));
-                }
-                var reversed = snapshot with { Snapshots = snapshot.Snapshots.Reverse().ToImmutableArray() };
-                await target.ImportRecoveryAsync(reversed, new(Guid.NewGuid(), new string('b', 64), snapshot.Heads.Length, snapshot.Snapshots.Length));
-                await AssertCurrentMembership(target);
-                Assert.Equal(JsonSerializer.Serialize(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)),
-                    JsonSerializer.Serialize(await target.FindReadMetadataByResourceIdAsync(state.ResourceId)));
-                Assert.Equal(JsonSerializer.Serialize((await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions),
-                    JsonSerializer.Serialize((await target.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions));
-                var restored = await target.CaptureRecoveryAsync();
-                Assert.Contains(restored.Snapshots, old => old.StateVersion < restored.Heads.Single().StateVersion &&
-                    old.Revisions.Any(revision => revision.RevisionNumber == removed.RevisionNumber));
-                Assert.Equal(removedBytes, await targetContent.ReadVerifiedAsync(removed.Content));
-            });
+                    var target = new PostgreSqlStateStore(destination);
+                    var targetContent = new PostgreSqlContentStore(destination);
+                    foreach (var handle in ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(StorageReferences.Handles)))
+                    {
+                        await using var bytes = await content.OpenReadAsync(handle);
+                        Assert.Equal(handle, await targetContent.WriteAsync(bytes));
+                    }
+                    var ordered = snapshot with { Snapshots = reverse
+                        ? snapshot.Snapshots.OrderByDescending(old => old.StateVersion).ToImmutableArray()
+                        : snapshot.Snapshots.OrderBy(old => old.StateVersion).ToImmutableArray() };
+                    await target.ImportRecoveryAsync(ordered, new(Guid.NewGuid(), new string('b', 64), snapshot.Heads.Length, snapshot.Snapshots.Length));
+                    await AssertCurrentMembership(target);
+                    Assert.Equal(JsonSerializer.Serialize(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)),
+                        JsonSerializer.Serialize(await target.FindReadMetadataByResourceIdAsync(state.ResourceId)));
+                    Assert.Equal(JsonSerializer.Serialize((await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions),
+                        JsonSerializer.Serialize((await target.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions));
+                    var restored = await target.CaptureRecoveryAsync();
+                    Assert.Contains(restored.Snapshots, old => old.StateVersion < restored.Heads.Single().StateVersion &&
+                        old.Revisions.Any(revision => revision.RevisionNumber == removed.RevisionNumber));
+                    Assert.Equal(removedBytes, await targetContent.ReadVerifiedAsync(removed.Content));
+                });
+            }
 
             async Task AssertCurrentMembership(PostgreSqlStateStore currentStore)
             {
@@ -227,7 +232,7 @@ public sealed class PostgreSqlSelectiveReadTests
                 .CreateAsync("/projection-rollback.docx", MinimalDocx.Create(), TestActor.Value))!;
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await using (var corrupt = source.CreateCommand("UPDATE cellbridge_states SET state_json='not JSON'"))
                 await corrupt.ExecuteNonQueryAsync();

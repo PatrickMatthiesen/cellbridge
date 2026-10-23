@@ -1,6 +1,9 @@
+using System.Data.Common;
 using System.Text.Json.Nodes;
 using CellBridge.Lists;
 using CellBridge.Lists.PostgreSql;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
 
 namespace CellBridge.Lists.PostgreSql.Tests;
@@ -11,6 +14,40 @@ public sealed class ListsPostgreSqlCollection : ICollectionFixture<ListDatabaseF
 [Collection("lists-postgresql")]
 public sealed class PostgreSqlListEngineTests(ListDatabaseFixture database)
 {
+    [PostgreSqlFact]
+    public async Task ConsumerEfInterceptorsObserveEngineQueries()
+    {
+        var interceptor = new CountingCommandInterceptor();
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(database.RuntimeSource!)
+            .AddInterceptors(interceptor)
+            .Options;
+        var engine = new PostgreSqlListEngine(options);
+        var workspace = await database.NewWorkspaceAsync("configured EF options");
+        await engine.CheckHealthAsync();
+        interceptor.Reset();
+
+        Assert.Empty(await engine.GetListsAsync(database.AdminActor, workspace));
+        Assert.True(interceptor.Created > 0);
+    }
+
+    [PostgreSqlFact]
+    public async Task RetryingConsumerExecutionStrategiesAreRejectedBeforeDatabaseWork()
+    {
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(database.AdminSource!, provider => provider.EnableRetryOnFailure())
+            .Options;
+
+        var engineError = Assert.Throws<ArgumentException>(() => new PostgreSqlListEngine(options));
+        Assert.Equal("options", engineError.ParamName);
+        Assert.Contains("Retrying EF Core execution strategies are not supported", engineError.Message,
+            StringComparison.Ordinal);
+
+        var setupError = await Assert.ThrowsAsync<ArgumentException>(() =>
+            PostgreSqlListSetup.InitializeAsync(options, "unused_runtime_role"));
+        Assert.Equal("options", setupError.ParamName);
+    }
+
     [PostgreSqlFact]
     public async Task RuntimeRoleHasNoDdlOrRlsBypassAndMissingContextReturnsNoRows()
     {
@@ -139,6 +176,40 @@ public sealed class PostgreSqlListEngineTests(ListDatabaseFixture database)
                 new PublishSchemaRequest(1, list.Name, changed)))).Failure);
         var restarted = new PostgreSqlListEngine(database.RuntimeSource!);
         Assert.Equal(list.Id, (await restarted.GetListAsync(database.AdminActor, workspace, list.Id)).Id);
+    }
+
+    [PostgreSqlFact]
+    public async Task ConcurrentTemplateRegistrationIsIdempotentAndRejectsDifferentDefinitions()
+    {
+        var template = new ListTemplate(Guid.NewGuid(), "Concurrent template", 1, [TextField()]);
+        await Task.WhenAll(Enumerable.Range(0, 8)
+            .Select(_ => PostgreSqlListSetup.RegisterTemplateAsync(database.AdminSource!, template)));
+
+        var templateId = Guid.NewGuid();
+        var field = TextField();
+        var candidates = new[]
+        {
+            new ListTemplate(templateId, "First definition", 1, [field]),
+            new ListTemplate(templateId, "Second definition", 1, [field])
+        };
+        var outcomes = await Task.WhenAll(candidates.Select(async candidate =>
+        {
+            try
+            {
+                await PostgreSqlListSetup.RegisterTemplateAsync(database.AdminSource!, candidate);
+                return (Exception?)null;
+            }
+            catch (Exception error)
+            {
+                return error;
+            }
+        }));
+
+        Assert.Single(outcomes, outcome => outcome is null);
+        var conflict = Assert.IsType<ListException>(Assert.Single(outcomes, outcome => outcome is not null));
+        Assert.Equal(ListFailure.Conflict, conflict.Failure);
+        var winner = candidates[Array.IndexOf(outcomes, null)];
+        await PostgreSqlListSetup.RegisterTemplateAsync(database.AdminSource!, winner);
     }
 
     [PostgreSqlFact]
@@ -539,6 +610,19 @@ public sealed class PostgreSqlListEngineTests(ListDatabaseFixture database)
 
     private static ListField TextField() => new(Guid.NewGuid(), "Name", ListFieldType.Text, MaxLength: 200);
     private static JsonObject Values(ListField field, string value) => new() { [field.Id.ToString("D")] = value };
+
+    private sealed class CountingCommandInterceptor : DbCommandInterceptor
+    {
+        public int Created { get; private set; }
+
+        public void Reset() => Created = 0;
+
+        public override DbCommand CommandCreated(CommandEndEventData eventData, DbCommand result)
+        {
+            Created++;
+            return result;
+        }
+    }
 }
 
 public sealed class PostgreSqlFactAttribute : FactAttribute;

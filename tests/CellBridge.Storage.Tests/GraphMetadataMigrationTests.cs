@@ -29,7 +29,7 @@ public sealed class GraphMetadataMigrationTests
                 expand.Parameters.AddWithValue(JsonSerializer.Serialize(old));
                 await expand.ExecuteNonQueryAsync();
             }
-            await using (var oldVersion = source.CreateCommand("UPDATE cellbridge_schema SET version=4"))
+            await using (var oldVersion = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=4"))
                 await oldVersion.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.TransitionAsync(state.ResourceId,
                 (current, _) => new StateTransition<bool>(current, true)).AsTask());
@@ -56,7 +56,7 @@ public sealed class GraphMetadataMigrationTests
             var state = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
                 .CreateAsync("/migration-rollback.docx", MinimalDocx.Create(), TestActor.Value))!;
             var original = JsonSerializer.Serialize(state);
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=4"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=4"))
                 await version.ExecuteNonQueryAsync();
             await using (var setup = source.CreateCommand("UPDATE cellbridge_states SET state_json=$1"))
             {

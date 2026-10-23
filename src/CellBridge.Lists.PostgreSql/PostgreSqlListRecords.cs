@@ -1,8 +1,7 @@
-using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
-using NpgsqlTypes;
 
 namespace CellBridge.Lists.PostgreSql;
 
@@ -16,11 +15,10 @@ public sealed partial class PostgreSqlListEngine
         var assignedFieldIds = ParseAssignedFieldIds(request.Values);
         var authorization = await AuthorizeForListWithReferencesAsync(actor, workspaceId, listId,
             [ListAuthorizationAction.Write], assignedFieldIds, ct);
-        var result = await InRecordTransactionAsync(workspaceId, authorization, async (connection, transaction) =>
+        var result = await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
+            var context = await ReadCreateContextAsync(db, connection, transaction, workspaceId, listId,
                 request.Id, actor.Subject, ListAccess.Write, deleteLock: false, ct, authorization);
-            RequireWriteContext(context, ListAccess.Write);
             if (context.Receipt is { Live: true } receipt)
             {
                 if (receipt.Actor != actor.Subject || receipt.Digest != digest || receipt.SchemaVersion != request.SchemaVersion)
@@ -32,11 +30,11 @@ public sealed partial class PostgreSqlListEngine
             }
             if (context.Receipt is { } expired)
             {
-                await DeleteExpiredReceiptAsync(connection, transaction, workspaceId, listId, request.Id, expired, ct);
+                await DeleteExpiredReceiptAsync(db, workspaceId, listId, request.Id, expired, ct);
                 return new CreateRecordResult(request.Id, 0, 0);
             }
 
-            var definition = context.Definition!;
+            var definition = context.Definition;
             if (request.SchemaVersion != definition.SchemaVersion) throw Conflict("The current schema version is required.");
             ListValidation.ValidateValues(definition, request.Values, _limits);
             var references = ReferenceAssignments(definition, request.Values);
@@ -44,11 +42,11 @@ public sealed partial class PostgreSqlListEngine
             {
                 try
                 {
-                    await ValidateReferenceAssignmentsAsync(connection, transaction, workspaceId, actor.Subject, references, ct, authorization);
+                    await ValidateReferenceAssignmentsAsync(db, connection, transaction, workspaceId, actor.Subject, references, ct, authorization);
                 }
                 catch (ListException ex) when (ex.Failure is ListFailure.Validation or ListFailure.NotFound)
                 {
-                    var replay = await TryReplayConcurrentCreateAsync(connection, transaction, workspaceId,
+                    var replay = await TryReplayConcurrentCreateAsync(db, workspaceId,
                         listId, request, actor.Subject, digest, ct);
                     if (replay is not null) return replay;
                     throw;
@@ -56,12 +54,15 @@ public sealed partial class PostgreSqlListEngine
             }
             try
             {
-                return await InsertRecordAsync(connection, transaction, workspaceId, listId, request, actor.Subject,
+                return await InsertRecordAsync(db, connection, transaction, workspaceId, listId, request, actor.Subject,
                     digest, PostgreSqlListJson.RecordValues(request.Values), references,
                     request.Values.Select(x => Guid.Parse(x.Key)).ToArray(), ct);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation &&
                                                ex.ConstraintName == "record_references_target_fk")
+            { throw Validation("The reference target does not exist."); }
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException
+                       { SqlState: PostgresErrorCodes.ForeignKeyViolation, ConstraintName: "record_references_target_fk" })
             { throw Validation("The reference target does not exist."); }
         }, ct);
         if (result.Revision == 0) throw Conflict("That record ID was used by an expired create receipt.");
@@ -69,10 +70,10 @@ public sealed partial class PostgreSqlListEngine
     }
 
     public Task<ListRecord> GetRecordAsync(ListActor actor, Guid workspaceId, Guid listId, Guid recordId,
-        CancellationToken ct = default) => ReadAsync(actor, workspaceId, async (connection, transaction, member, authorization) =>
+        CancellationToken ct = default) => ReadAsync(actor, workspaceId, async (db, connection, transaction, member, authorization) =>
     {
-        await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Read, ct, authorization);
-        return await ReadRecordAsync(connection, transaction, workspaceId, listId, recordId, false, ct) ?? throw NotFound();
+        await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Read, ct, authorization);
+        return await ReadRecordAsync(db, connection, transaction, workspaceId, listId, recordId, false, ct) ?? throw NotFound();
     }, [(listId, ListAuthorizationAction.Read)], ct);
 
     public async Task<ListRecord> UpdateRecordAsync(ListActor actor, Guid workspaceId, Guid listId, Guid recordId,
@@ -84,12 +85,11 @@ public sealed partial class PostgreSqlListEngine
             .Select(x => x.FieldId).ToHashSet();
         var authorization = await AuthorizeForListWithReferencesAsync(actor, workspaceId, listId,
             [ListAuthorizationAction.Read, ListAuthorizationAction.Write], assignedReferenceFields, ct);
-        return await InRecordTransactionAsync(workspaceId, authorization, async (connection, transaction) =>
+        return await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
+            var context = await ReadMutationContextAsync(db, connection, transaction, workspaceId, listId,
                 recordId, actor.Subject, ListAccess.Read | ListAccess.Write, deleteLock: false, ct, authorization);
-            RequireWriteContext(context, ListAccess.Read | ListAccess.Write);
-            var definition = context.Definition!;
+            var definition = context.Definition;
             if (request.SchemaVersion != definition.SchemaVersion) throw Conflict("The current schema version is required.");
             var current = context.Record ?? throw NotFound();
             if (current.Revision != request.ExpectedRevision) throw Conflict("The record revision changed.");
@@ -102,15 +102,20 @@ public sealed partial class PostgreSqlListEngine
             assignedReferenceIds.IntersectWith(changedReferenceIds);
             var references = ReferenceAssignments(definition, values, assignedReferenceIds);
             if (references.Count != 0)
-                await ValidateReferenceAssignmentsAsync(connection, transaction, workspaceId, actor.Subject, references, ct, authorization);
+                await ValidateReferenceAssignmentsAsync(db, connection, transaction, workspaceId, actor.Subject, references, ct, authorization);
+            var normalizedValues = PostgreSqlListJson.NormalizeOwnedRecordValues(values);
             try
             {
-                return await PersistUpdateAsync(connection, transaction, workspaceId, listId, current,
-                    definition.SchemaVersion, PostgreSqlListJson.RecordValues(values), actor.Subject, request.Changes,
+                return await PersistUpdateAsync(db, connection, transaction, workspaceId, listId, current,
+                    context.RecordRow!,
+                    definition.SchemaVersion, normalizedValues.ToJsonString(), normalizedValues, actor.Subject, request.Changes,
                     changedReferenceIds, references, context.RecordBytes, ct);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation &&
                                                ex.ConstraintName == "record_references_target_fk")
+            { throw Validation("The reference target does not exist."); }
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException
+                       { SqlState: PostgresErrorCodes.ForeignKeyViolation, ConstraintName: "record_references_target_fk" })
             { throw Validation("The reference target does not exist."); }
         }, ct);
     }
@@ -121,32 +126,35 @@ public sealed partial class PostgreSqlListEngine
         ValidateActor(actor);
         var authorization = await AuthorizeOperationAsync(actor, workspaceId,
             [(listId, ListAuthorizationAction.Write)], ct);
-        await InRecordTransactionAsync(workspaceId, authorization, async (connection, transaction) =>
+        await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            var context = await ReadWriteContextAsync(connection, transaction, workspaceId, listId,
+            var context = await ReadMutationContextAsync(db, connection, transaction, workspaceId, listId,
                 recordId, actor.Subject, ListAccess.Write, deleteLock: true, ct, authorization);
-            RequireWriteContext(context, ListAccess.Write);
             var current = context.Record ?? throw NotFound();
             if (current.Revision != expectedRevision) throw Conflict("The record revision changed.");
             try
             {
-                await PersistDeleteAsync(connection, transaction, workspaceId, listId, current,
+                await PersistDeleteAsync(db, workspaceId, listId, current,
+                    context.RecordRow!,
                     actor.Subject, context.RecordBytes, ct);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation &&
                                                ex.ConstraintName == "record_references_target_fk")
+            { throw Conflict("The record is referenced by another record."); }
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException
+                       { SqlState: PostgresErrorCodes.ForeignKeyViolation, ConstraintName: "record_references_target_fk" })
             { throw Conflict("The record is referenced by another record."); }
             return true;
         }, ct);
     }
 
     public Task<MergePreview> PreviewMergeAsync(ListActor actor, Guid workspaceId, Guid listId, Guid recordId,
-        MergeRequest request, CancellationToken ct = default) => ReadAsync(actor, workspaceId, async (connection, transaction, member, authorization) =>
+        MergeRequest request, CancellationToken ct = default) => ReadAsync(actor, workspaceId, async (db, connection, transaction, member, authorization) =>
     {
-        await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Read | ListAccess.Write, ct, authorization);
+        await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Read | ListAccess.Write, ct, authorization);
         await LockListSchemaSharedAsync(connection, transaction, workspaceId, listId, ct);
-        var definition = await GetDefinitionAsync(connection, transaction, workspaceId, listId, false, ct);
-        var current = await ReadRecordAsync(connection, transaction, workspaceId, listId, recordId, false, ct) ?? throw NotFound();
+        var definition = await GetDefinitionAsync(db, connection, transaction, workspaceId, listId, false, ct);
+        var current = await ReadRecordAsync(db, connection, transaction, workspaceId, listId, recordId, false, ct) ?? throw NotFound();
         return ListMerge.Preview(definition, current, request, _limits);
     }, [(listId, ListAuthorizationAction.Read), (listId, ListAuthorizationAction.Write)], ct);
 
@@ -156,19 +164,19 @@ public sealed partial class PostgreSqlListEngine
         ValidateActor(actor);
         var authorization = await AuthorizeForListWithReferencesAsync(actor, workspaceId, listId,
             [ListAuthorizationAction.Read], new HashSet<Guid> { fieldId }, ct);
-        return await InTransactionAsync(workspaceId, false, authorization, async (connection, transaction) =>
+        return await InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            await AuthorizeMemberAsync(connection, transaction, workspaceId, actor.Subject, ct, authorization);
-            await RequireAccessAsync(connection, transaction, workspaceId, listId, actor.Subject, ListAccess.Read, ct, authorization);
-            var source = await GetDefinitionAsync(connection, transaction, workspaceId, listId, false, ct);
+            await AuthorizeMemberAsync(db, workspaceId, actor.Subject, ct, authorization);
+            await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Read, ct, authorization);
+            var source = await GetDefinitionAsync(db, connection, transaction, workspaceId, listId, false, ct);
             var field = source.Fields.SingleOrDefault(x => x.Id == fieldId && x.Type == ListFieldType.Reference)
                 ?? throw Validation("The reference field does not exist.");
-            var sourceRecord = await ReadRecordAsync(connection, transaction, workspaceId, listId, recordId, false, ct) ?? throw NotFound();
+            var sourceRecord = await ReadRecordAsync(db, connection, transaction, workspaceId, listId, recordId, false, ct) ?? throw NotFound();
             if (sourceRecord.Values[fieldId.ToString("D")] is not JsonValue referenceValue) throw NotFound();
             var targetRecordId = Guid.Parse(referenceValue.GetValue<string>());
-            await RequireAccessAsync(connection, transaction, workspaceId, field.ReferenceListId!.Value, actor.Subject, ListAccess.Read, ct, authorization);
-            var targetDefinition = await GetDefinitionAsync(connection, transaction, workspaceId, field.ReferenceListId.Value, false, ct);
-            var target = await ReadRecordAsync(connection, transaction, workspaceId, targetDefinition.Id, targetRecordId, false, ct) ?? throw NotFound();
+            await RequireAccessAsync(db, workspaceId, field.ReferenceListId!.Value, actor.Subject, ListAccess.Read, ct, authorization);
+            var targetDefinition = await GetDefinitionAsync(db, connection, transaction, workspaceId, field.ReferenceListId.Value, false, ct);
+            var target = await ReadRecordAsync(db, connection, transaction, workspaceId, targetDefinition.Id, targetRecordId, false, ct) ?? throw NotFound();
             JsonNode? label = null;
             if (field.ReferenceDisplayFieldId is { } displayId)
             {
@@ -194,155 +202,180 @@ public sealed partial class PostgreSqlListEngine
 
     private Task<ListDefinition> ReadDefinitionPreflightAsync(string subject, Guid workspaceId, Guid listId,
         OperationAuthorization authorization, CancellationToken ct) =>
-        InTransactionAsync(workspaceId, false, authorization, async (connection, transaction) =>
+        InTransactionAsync(workspaceId, false, authorization, async (db, connection, transaction) =>
         {
-            await AuthorizeMemberAsync(connection, transaction, workspaceId, subject, ct, authorization);
-            return await GetDefinitionAsync(connection, transaction, workspaceId, listId, false, ct);
+            await AuthorizeMemberAsync(db, workspaceId, subject, ct, authorization);
+            return await GetDefinitionAsync(db, connection, transaction, workspaceId, listId, false, ct);
         }, ct);
 
-    private async Task<T> InRecordTransactionAsync<T>(Guid workspaceId, OperationAuthorization? authorization,
-        Func<NpgsqlConnection, NpgsqlTransaction, Task<T>> operation, CancellationToken ct)
-    {
-        if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
-        await EnsureHealthyAsync(ct);
-        try
-        {
-            await using var connection = await _source.OpenConnectionAsync(ct);
-            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, ct);
-            var result = await operation(connection, transaction);
-            await transaction.CommitAsync(CancellationToken.None);
-            return result;
-        }
-        catch (ListException) { throw; }
-        catch (OperationCanceledException) { throw; }
-        catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.QueryCanceled or PostgresErrorCodes.LockNotAvailable)
-        { throw new ListException(ListFailure.Unavailable, "The list operation timed out."); }
-        catch (NpgsqlException ex)
-        { throw new ListException(ListFailure.Unavailable, $"The list store is unavailable: {ex.Message}"); }
-    }
-
-    private async Task<RecordWriteContext> ReadWriteContextAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, Guid workspaceId, Guid listId, Guid recordId, string subject,
-        ListAccess requiredAccess, bool deleteLock, CancellationToken ct, OperationAuthorization? authorization)
+    private async Task<ListDefinition> ReadListDefinitionAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
+        string subject, ListAccess requiredAccess, CancellationToken ct, OperationAuthorization? authorization)
     {
         if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
-        var milliseconds = Math.Clamp((long)_limits.StatementTimeout.TotalMilliseconds, 1, int.MaxValue);
-        await using var batch = new NpgsqlBatch(connection, transaction);
-        var configure = new NpgsqlBatchCommand("""
-            SELECT set_config('cellbridge.workspace_id',@workspace::text,true),
-              set_config('synchronous_commit','on',true),
-              set_config('statement_timeout',@timeout::text,true),
-              set_config('lock_timeout',@timeout::text,true)
-            """);
-        configure.Parameters.AddWithValue("workspace", workspaceId);
-        configure.Parameters.AddWithValue("timeout", milliseconds);
-        batch.BatchCommands.Add(configure);
-        var authorize = new NpgsqlBatchCommand("SELECT pg_advisory_xact_lock_shared(hashtextextended(@workspace::text,391813))");
-        authorize.Parameters.AddWithValue("workspace", workspaceId);
-        batch.BatchCommands.Add(authorize);
-
-        var anchorPredicate = authorization is null
-            ? "AND w.authorization_mode='builtin'"
-            : "AND w.authorization_mode='host' AND w.authorization_domain=@domain AND w.authorization_scope=@scope";
-        var lockSource = new NpgsqlBatchCommand($$"""
-            SELECT l.list_id FROM cellbridge_lists.lists l
-            JOIN cellbridge_lists.workspaces w ON w.workspace_id=l.workspace_id
-            WHERE l.workspace_id=@workspace AND l.list_id=@list {{anchorPredicate}} FOR SHARE OF l
-            """);
-        lockSource.Parameters.AddWithValue("workspace", workspaceId);
-        lockSource.Parameters.AddWithValue("list", listId);
-        if (authorization is not null)
-        {
-            lockSource.Parameters.AddWithValue("domain", authorization.Anchor.Domain!);
-            lockSource.Parameters.AddWithValue("scope", authorization.Anchor.Scope!);
-        }
-        batch.BatchCommands.Add(lockSource);
-
-        var recordLock = deleteLock ? "FOR UPDATE" : "FOR NO KEY UPDATE";
-        var membershipJoin = authorization is null
-            ? "JOIN cellbridge_lists.memberships m ON m.workspace_id=w.workspace_id AND m.subject=@subject" : "";
-        var grantJoin = authorization is null
-            ? "LEFT JOIN cellbridge_lists.list_grants g ON g.workspace_id=w.workspace_id AND g.list_id=@list AND g.subject=@subject" : "";
-        var accessExpression = authorization is null ? "g.access" : "@required_access::integer";
-        var accessPredicate = authorization is null ? "AND (g.access & @required_access)=@required_access" : "";
-        var read = new NpgsqlBatchCommand($$"""
-            SELECT w.security_audit_count,{{accessExpression}},
-              source.definition,
-              record.record_id,record.schema_version,record.revision,record.number,record.values_json,
-              record.created_utc,record.modified_utc,record.created_by,record.modified_by,
-              receipt.actor,receipt.schema_version,receipt.request_digest,receipt.revision,receipt.number,receipt.live,
-              original.definition
-            FROM cellbridge_lists.workspaces w
-            {{membershipJoin}}
-            {{grantJoin}}
-            LEFT JOIN LATERAL (
-              SELECT s.definition::text AS definition FROM cellbridge_lists.lists l
-              JOIN cellbridge_lists.list_schemas s ON s.workspace_id=l.workspace_id AND s.list_id=l.list_id AND s.schema_version=l.schema_version
-              WHERE l.workspace_id=@workspace AND l.list_id=@list
-                {{accessPredicate}}
-            ) source ON true
-            LEFT JOIN LATERAL (
-              SELECT r.record_id,r.schema_version,r.revision,r.number,r.values_json::text AS values_json,
-                r.created_utc,r.modified_utc,r.created_by,r.modified_by
-              FROM cellbridge_lists.records r WHERE r.workspace_id=@workspace AND r.list_id=@list AND r.record_id=@record
-                AND source.definition IS NOT NULL
-              {{recordLock}}
-            ) record ON true
-            LEFT JOIN LATERAL (
-              SELECT c.actor,c.schema_version,c.request_digest,c.revision,c.number,c.expires_utc>clock_timestamp() AS live
-              FROM cellbridge_lists.create_receipts c WHERE c.workspace_id=@workspace AND c.list_id=@list AND c.record_id=@record
-                AND source.definition IS NOT NULL
-            ) receipt ON true
-            LEFT JOIN LATERAL (
-              SELECT s.definition::text AS definition FROM cellbridge_lists.list_schemas s
-              WHERE s.workspace_id=@workspace AND s.list_id=@list AND s.schema_version=receipt.schema_version
-            ) original ON receipt.schema_version IS NOT NULL
-            WHERE w.workspace_id=@workspace {{anchorPredicate}}
-            """);
-        read.Parameters.AddWithValue("workspace", workspaceId);
-        read.Parameters.AddWithValue("list", listId);
-        read.Parameters.AddWithValue("record", recordId);
-        read.Parameters.AddWithValue("subject", subject);
-        read.Parameters.AddWithValue("required_access", (int)requiredAccess);
-        if (authorization is not null)
-        {
-            read.Parameters.AddWithValue("domain", authorization.Anchor.Domain!);
-            read.Parameters.AddWithValue("scope", authorization.Anchor.Scope!);
-        }
-        batch.BatchCommands.Add(read);
-        await using var reader = await batch.ExecuteReaderAsync(ct);
-        await reader.NextResultAsync(ct);
-        await reader.NextResultAsync(ct);
-        await reader.NextResultAsync(ct);
-        if (!await reader.ReadAsync(ct)) throw Forbidden();
-        if (Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture) >= _limits.MaxSecurityAuditEvents)
-            throw new ListException(ListFailure.Unavailable, "The workspace security audit reserve is exhausted.");
-        var access = reader.IsDBNull(1) ? ListAccess.None : (ListAccess)reader.GetInt32(1);
-        var definition = reader.IsDBNull(2) ? null : PostgreSqlListJson.Deserialize<ListDefinition>(reader.GetString(2));
-        ListRecord? record = null;
-        long recordBytes = 0;
-        if (!reader.IsDBNull(3))
-        {
-            var json = reader.GetString(7);
-            recordBytes = Encoding.UTF8.GetByteCount(json);
-            record = new ListRecord(reader.GetGuid(3), workspaceId, listId, reader.GetInt64(4), reader.GetInt64(5),
-                reader.GetInt64(6), PostgreSqlListJson.Object(json),
-                new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero), new DateTimeOffset(reader.GetDateTime(9), TimeSpan.Zero),
-                reader.GetString(10), reader.GetString(11));
-        }
-        var receipt = reader.IsDBNull(12) ? null : new Receipt(reader.GetString(12), reader.GetInt64(13),
-            reader.GetString(14), reader.GetInt64(15), reader.GetInt64(16), reader.GetBoolean(17));
-        var receiptDefinition = reader.IsDBNull(18) ? null : PostgreSqlListJson.Deserialize<ListDefinition>(reader.GetString(18));
-        return new RecordWriteContext(access, definition, record, recordBytes, receipt, receiptDefinition);
+        await LockRecordContextAsync(connection, transaction, workspaceId, listId, Guid.Empty, false, ct);
+        var projection = (CanUseCompiledContextQueries(db)
+            ? await _compiledDefinitionContext(db, workspaceId, listId, subject, (int)requiredAccess,
+                authorization is not null, ct)
+            : await (
+            from workspace in db.Workspaces.AsNoTracking()
+            from list in db.Lists.AsNoTracking().Where(row =>
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
+            from schema in db.ListSchemas.AsNoTracking().Where(row =>
+                row.WorkspaceId == list.WorkspaceId && row.ListId == list.ListId &&
+                row.SchemaVersion == list.SchemaVersion)
+            where workspace.WorkspaceId == workspaceId
+            select new ListDefinitionProjection
+            {
+                SecurityAuditCount = workspace.SecurityAuditCount,
+                IsMember = authorization != null || db.Memberships.Any(row =>
+                    row.WorkspaceId == workspaceId && row.Subject == subject),
+                Access = authorization != null
+                    ? (int)requiredAccess
+                    : db.ListGrants.Where(row => row.WorkspaceId == workspaceId &&
+                            row.ListId == listId && row.Subject == subject)
+                        .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
+                DefinitionJson = schema.Definition
+            }).SingleOrDefaultAsync(ct)) ?? throw Forbidden();
+        RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
+            requiredAccess);
+        return PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson);
     }
 
-    private static void RequireWriteContext(RecordWriteContext context, ListAccess required)
+    private async Task<CreateRecordContext> ReadCreateContextAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
+        Guid recordId, string subject, ListAccess requiredAccess, bool deleteLock,
+        CancellationToken ct, OperationAuthorization? authorization)
     {
-        if (context.Definition is null || (context.Access & required) != required) throw NotFound();
+        if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
+        await LockRecordContextAsync(connection, transaction, workspaceId, listId, recordId, deleteLock, ct);
+        var projection = (CanUseCompiledContextQueries(db)
+            ? await _compiledCreateContext(db, workspaceId, listId, recordId, subject,
+                (int)requiredAccess, authorization is not null, ct)
+            : await (
+            from workspace in db.Workspaces.AsNoTracking()
+            from list in db.Lists.AsNoTracking().Where(row =>
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
+            from schema in db.ListSchemas.AsNoTracking().Where(row =>
+                row.WorkspaceId == list.WorkspaceId && row.ListId == list.ListId &&
+                row.SchemaVersion == list.SchemaVersion)
+            from receipt in db.CreateReceipts.AsNoTracking().Where(row => recordId != Guid.Empty &&
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId &&
+                row.RecordId == recordId).DefaultIfEmpty()
+            from receiptSchema in db.ListSchemas.AsNoTracking().Where(row => receipt != null &&
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId &&
+                row.SchemaVersion == receipt.SchemaVersion).DefaultIfEmpty()
+            where workspace.WorkspaceId == workspaceId
+            select new CreateContextProjection
+            {
+                SecurityAuditCount = workspace.SecurityAuditCount,
+                IsMember = authorization != null || db.Memberships.Any(row =>
+                    row.WorkspaceId == workspaceId && row.Subject == subject),
+                Access = authorization != null
+                    ? (int)requiredAccess
+                    : db.ListGrants.Where(row => row.WorkspaceId == workspaceId &&
+                            row.ListId == listId && row.Subject == subject)
+                        .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
+                DefinitionJson = schema.Definition,
+                Receipt = receipt,
+                ReceiptLive = receipt != null && receipt.ExpiresUtc > PostgreSqlListDbContext.ClockTimestamp(),
+                ReceiptDefinitionJson = receiptSchema == null ? null : receiptSchema.Definition
+            }).SingleOrDefaultAsync(ct)) ?? throw Forbidden();
+        RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
+            requiredAccess);
+        var definition = PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson);
+        var receiptRow = projection.Receipt;
+        var currentReceipt = receiptRow is null ? null : new Receipt(receiptRow.Actor, receiptRow.SchemaVersion,
+            receiptRow.RequestDigest, receiptRow.Revision, receiptRow.Number, projection.ReceiptLive);
+        var receiptDefinition = projection.ReceiptDefinitionJson is null
+            ? null : PostgreSqlListJson.Deserialize<ListDefinition>(projection.ReceiptDefinitionJson);
+        return new CreateRecordContext(definition, currentReceipt, receiptDefinition);
     }
 
-    private async Task ValidateReferenceAssignmentsAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, string subject, IReadOnlyList<ReferenceAssignment> references, CancellationToken ct,
+    private async Task<RecordMutationContext> ReadMutationContextAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
+        Guid recordId, string subject, ListAccess requiredAccess, bool deleteLock,
+        CancellationToken ct, OperationAuthorization? authorization)
+    {
+        if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
+        await LockRecordContextAsync(connection, transaction, workspaceId, listId, recordId, deleteLock, ct);
+        var projection = (CanUseCompiledContextQueries(db)
+            ? await _compiledMutationContext(db, workspaceId, listId, recordId, subject,
+                (int)requiredAccess, authorization is not null, ct)
+            : await (
+            from workspace in db.Workspaces.AsNoTracking()
+            from list in db.Lists.AsNoTracking().Where(row =>
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
+            from schema in db.ListSchemas.AsNoTracking().Where(row =>
+                row.WorkspaceId == list.WorkspaceId && row.ListId == list.ListId &&
+                row.SchemaVersion == list.SchemaVersion)
+            from record in db.Records.AsNoTracking().Where(row => recordId != Guid.Empty &&
+                row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId &&
+                row.RecordId == recordId).DefaultIfEmpty()
+            where workspace.WorkspaceId == workspaceId
+            select new MutationContextProjection
+            {
+                SecurityAuditCount = workspace.SecurityAuditCount,
+                IsMember = authorization != null || db.Memberships.Any(row =>
+                    row.WorkspaceId == workspaceId && row.Subject == subject),
+                Access = authorization != null
+                    ? (int)requiredAccess
+                    : db.ListGrants.Where(row => row.WorkspaceId == workspaceId &&
+                            row.ListId == listId && row.Subject == subject)
+                        .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
+                DefinitionJson = schema.Definition,
+                Record = record
+            }).SingleOrDefaultAsync(ct)) ?? throw Forbidden();
+        RequireProjectionAccess(projection.SecurityAuditCount, projection.IsMember, projection.Access,
+            requiredAccess);
+        var recordRow = projection.Record;
+        return new RecordMutationContext(
+            PostgreSqlListJson.Deserialize<ListDefinition>(projection.DefinitionJson),
+            recordRow is null ? null : ToListRecord(recordRow), recordRow,
+            recordRow is null ? 0 : Encoding.UTF8.GetByteCount(recordRow.ValuesJson));
+    }
+
+    private void RequireProjectionAccess(int securityAuditCount, bool isMember, int access,
+        ListAccess requiredAccess)
+    {
+        if (securityAuditCount >= _limits.MaxSecurityAuditEvents)
+            throw new ListException(ListFailure.Unavailable, "The workspace security audit reserve is exhausted.");
+        if (!isMember) throw Forbidden();
+        if (((ListAccess)access & requiredAccess) != requiredAccess) throw NotFound();
+    }
+
+    private static async Task LockRecordContextAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, Guid workspaceId, Guid listId, Guid recordId,
+        bool deleteLock, CancellationToken ct)
+    {
+        await using var batch = new NpgsqlBatch(connection, transaction);
+        var list = new NpgsqlBatchCommand("""
+            SELECT list_id FROM cellbridge_lists.lists
+            WHERE workspace_id=$1 AND list_id=$2 FOR SHARE
+            """);
+        list.Parameters.AddWithValue(workspaceId);
+        list.Parameters.AddWithValue(listId);
+        batch.BatchCommands.Add(list);
+        if (recordId != Guid.Empty)
+        {
+            var record = new NpgsqlBatchCommand($$"""
+                SELECT record_id FROM cellbridge_lists.records
+                WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3
+                {{(deleteLock ? "FOR UPDATE" : "FOR NO KEY UPDATE")}}
+                """);
+            record.Parameters.AddWithValue(workspaceId);
+            record.Parameters.AddWithValue(listId);
+            record.Parameters.AddWithValue(recordId);
+            batch.BatchCommands.Add(record);
+        }
+        await using var reader = await batch.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) throw NotFound();
+        if (recordId != Guid.Empty) await reader.NextResultAsync(ct);
+    }
+
+    private async Task ValidateReferenceAssignmentsAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, string subject,
+        IReadOnlyList<ReferenceAssignment> references, CancellationToken ct,
         OperationAuthorization? authorization)
     {
         if (authorization is not null && references
@@ -350,289 +383,306 @@ public sealed partial class PostgreSqlListEngine
             .Distinct()
             .Any(target => !authorization.Allows(target, ListAuthorizationAction.Read)))
             throw NotFound();
-        var accessExpression = authorization is null
-            ? "(SELECT g.access FROM cellbridge_lists.list_grants g WHERE g.workspace_id=@workspace AND g.list_id=requested.list_id AND g.subject=@subject)"
-            : "1";
-        var targetAccessPredicate = authorization is null
-            ? $"AND (({accessExpression}) & 1)=1"
-            : "AND requested.list_id=ANY(@authorized_list_ids::uuid[])";
-        await using var command = new NpgsqlCommand($$"""
-            WITH requested AS (
-              SELECT * FROM unnest(@field_ids::uuid[],@list_ids::uuid[],@record_ids::uuid[],@display_ids::uuid[])
-                AS value(field_id,list_id,record_id,display_id)
-            )
-            SELECT requested.field_id,
-              {{accessExpression}},
-              target_list.definition,target.record_id
-            FROM requested
+        var targetIds = references.Select(reference => reference.TargetListId).Distinct().ToArray();
+        var definitions = authorization is null
+            ? await (from list in db.Lists.AsNoTracking()
+                join schema in db.ListSchemas.AsNoTracking()
+                    on new { list.WorkspaceId, list.ListId, list.SchemaVersion }
+                    equals new { schema.WorkspaceId, schema.ListId, schema.SchemaVersion }
+                join grant in db.ListGrants.AsNoTracking()
+                    on new { list.WorkspaceId, list.ListId } equals new { grant.WorkspaceId, grant.ListId }
+                where list.WorkspaceId == workspaceId && targetIds.Contains(list.ListId) &&
+                      grant.Subject == subject && (grant.Access & (int)ListAccess.Read) != 0
+                select new { list.ListId, schema.Definition }).ToDictionaryAsync(row => row.ListId,
+                row => row.Definition, ct)
+            : await (from list in db.Lists.AsNoTracking()
+                join schema in db.ListSchemas.AsNoTracking()
+                    on new { list.WorkspaceId, list.ListId, list.SchemaVersion }
+                    equals new { schema.WorkspaceId, schema.ListId, schema.SchemaVersion }
+                where list.WorkspaceId == workspaceId && targetIds.Contains(list.ListId)
+                select new { list.ListId, schema.Definition }).ToDictionaryAsync(row => row.ListId,
+                row => row.Definition, ct);
+        var targetDefinitions = definitions.ToDictionary(pair => pair.Key,
+            pair => PostgreSqlListJson.Deserialize<ListDefinition>(pair.Value));
+        var ordered = references.OrderBy(reference => reference.FieldId).ToArray();
+        // Filter locks without throwing so validation below retains field-ID error order.
+        var lockableFieldIds = ordered.Where(assignment =>
+                targetDefinitions.TryGetValue(assignment.TargetListId, out var targetDefinition) &&
+                (assignment.DisplayFieldId is not { } displayId || targetDefinition.Fields.Any(x => x.Id == displayId)))
+            .Select(assignment => assignment.FieldId).ToArray();
+        await using var command = new NpgsqlCommand("""
+            SELECT requested.field_id, target.record_id
+            FROM unnest($1::uuid[],$2::uuid[],$3::uuid[]) AS requested(field_id,list_id,record_id)
             LEFT JOIN LATERAL (
-              SELECT s.definition::text AS definition FROM cellbridge_lists.lists l
-              JOIN cellbridge_lists.list_schemas s ON s.workspace_id=l.workspace_id AND s.list_id=l.list_id AND s.schema_version=l.schema_version
-              WHERE l.workspace_id=@workspace AND l.list_id=requested.list_id {{targetAccessPredicate}}
-            ) target_list ON true
-            LEFT JOIN LATERAL (
-              SELECT r.record_id FROM cellbridge_lists.records r
-              WHERE r.workspace_id=@workspace AND r.list_id=requested.list_id AND r.record_id=requested.record_id
-                AND target_list.definition IS NOT NULL {{targetAccessPredicate}}
+              SELECT record_id FROM cellbridge_lists.records
+              WHERE workspace_id=$4 AND list_id=requested.list_id AND record_id=requested.record_id
+                AND requested.field_id=ANY($5::uuid[])
               FOR KEY SHARE
-            ) target ON true ORDER BY requested.field_id
+            ) target ON true
+            ORDER BY requested.field_id
             """, connection, transaction);
-        command.Parameters.AddWithValue("workspace", workspaceId);
-        command.Parameters.AddWithValue("subject", subject);
-        command.Parameters.AddWithValue("field_ids", references.Select(x => x.FieldId).ToArray());
-        command.Parameters.AddWithValue("list_ids", references.Select(x => x.TargetListId).ToArray());
-        command.Parameters.AddWithValue("record_ids", references.Select(x => x.TargetRecordId).ToArray());
-        command.Parameters.AddWithValue("display_ids", references.Select(x => x.DisplayFieldId ?? Guid.Empty).ToArray());
-        if (authorization is not null)
-            command.Parameters.AddWithValue("authorized_list_ids", references
-                .Select(reference => reference.TargetListId).Distinct().ToArray());
+        command.Parameters.AddWithValue(ordered.Select(reference => reference.FieldId).ToArray());
+        command.Parameters.AddWithValue(ordered.Select(reference => reference.TargetListId).ToArray());
+        command.Parameters.AddWithValue(ordered.Select(reference => reference.TargetRecordId).ToArray());
+        command.Parameters.AddWithValue(workspaceId);
+        command.Parameters.AddWithValue(lockableFieldIds);
         await using var reader = await command.ExecuteReaderAsync(ct);
-        var checkedCount = 0;
+        var existingTargets = new HashSet<Guid>();
         while (await reader.ReadAsync(ct))
         {
-            var assignment = references.Single(x => x.FieldId == reader.GetGuid(0));
-            if (reader.IsDBNull(1) || (((ListAccess)reader.GetInt32(1)) & ListAccess.Read) == 0) throw NotFound();
-            if (reader.IsDBNull(2)) throw NotFound();
-            var targetDefinition = PostgreSqlListJson.Deserialize<ListDefinition>(reader.GetString(2));
+            if (!reader.IsDBNull(1)) existingTargets.Add(reader.GetGuid(0));
+        }
+        foreach (var assignment in ordered)
+        {
+            if (!targetDefinitions.TryGetValue(assignment.TargetListId, out var targetDefinition)) throw NotFound();
             if (assignment.DisplayFieldId is { } displayId && targetDefinition.Fields.All(x => x.Id != displayId))
                 throw Validation("The reference display field does not exist.");
-            if (reader.IsDBNull(3)) throw Validation("The reference target does not exist.");
-            checkedCount++;
+            if (!existingTargets.Contains(assignment.FieldId))
+                throw Validation("The reference target does not exist.");
         }
-        if (checkedCount != references.Count)
-            throw new ListException(ListFailure.Unavailable, "Reference validation returned incomplete results.");
     }
 
-    private async Task<CreateRecordResult> InsertRecordAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, Guid listId, CreateRecordRequest request, string actor, string digest, string valuesJson,
+    private async Task<CreateRecordResult> InsertRecordAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
+        CreateRecordRequest request, string actor, string digest, string valuesJson,
         IReadOnlyList<ReferenceAssignment> references, Guid[] auditFields, CancellationToken ct)
     {
         var receiptBytes = Encoding.UTF8.GetByteCount(digest) + Encoding.UTF8.GetByteCount(actor) + 192L;
         var auditBytes = AuditStorageBytes(actor, "record.create", auditFields.Length);
-        await using var command = new NpgsqlCommand("""
-            WITH input AS (
-              SELECT @values::jsonb AS values_json,octet_length((@values::jsonb)::text)::bigint AS value_bytes
+        long valueBytes;
+        bool claimed;
+        // PostgreSQL normalizes JSON sizes and atomically claims identities. An oversized
+        // value cannot claim or lock an identity; ordinary record persistence below uses EF.
+        await using (var claim = Command(connection, transaction, """
+            WITH content AS (
+              SELECT octet_length(($4::jsonb)::text)::bigint AS bytes
             ), claimed AS (
               INSERT INTO cellbridge_lists.record_tombstones(workspace_id,list_id,record_id)
-              VALUES (@workspace,@list,@record) ON CONFLICT DO NOTHING RETURNING 1
-            ), allocated AS (
-              UPDATE cellbridge_lists.list_counters SET identity_count=identity_count+1,next_number=next_number+1
-              WHERE workspace_id=@workspace AND list_id=@list AND EXISTS (SELECT 1 FROM claimed)
-                AND (@max_records::bigint IS NULL OR identity_count<@max_records)
-              RETURNING next_number-1 AS number
-            ), quota AS (
-              UPDATE cellbridge_lists.workspaces w
-              SET stored_bytes=w.stored_bytes+input.value_bytes+@receipt_bytes+128+@audit_bytes,audit_count=w.audit_count+1
-              FROM input,allocated WHERE w.workspace_id=@workspace
-                AND (@max_bytes::bigint IS NULL OR w.stored_bytes+input.value_bytes+@receipt_bytes+128+@audit_bytes<=@max_bytes)
-                AND (@max_audits::bigint IS NULL OR w.audit_count<@max_audits) RETURNING 1
-            ), created AS (
-              INSERT INTO cellbridge_lists.records(workspace_id,list_id,record_id,schema_version,revision,number,
-                values_json,created_utc,modified_utc,created_by,modified_by)
-              SELECT @workspace,@list,@record,@schema,1,allocated.number,input.values_json,
-                clock_timestamp(),clock_timestamp(),@actor,@actor FROM input,allocated,quota RETURNING record_id
-            ), inserted_references AS (
-              INSERT INTO cellbridge_lists.record_references(workspace_id,source_list_id,source_record_id,field_id,target_list_id,target_record_id)
-              SELECT @workspace,@list,@record,refs.field_id,refs.list_id,refs.record_id
-              FROM created CROSS JOIN unnest(@field_ids::uuid[],@list_ids::uuid[],@record_ids::uuid[])
-                AS refs(field_id,list_id,record_id) RETURNING 1
-            ), receipt AS (
-              INSERT INTO cellbridge_lists.create_receipts(workspace_id,list_id,record_id,actor,schema_version,
-                request_digest,revision,number,created_utc,expires_utc)
-              SELECT @workspace,@list,@record,@actor,@schema,@digest,1,allocated.number,
-                clock_timestamp(),clock_timestamp()+@lifetime::interval FROM allocated,quota,created RETURNING 1
-            ), audit AS (
-              INSERT INTO cellbridge_lists.audit_events(workspace_id,utc,actor,action,list_id,record_id,revision,field_ids,security)
-              SELECT @workspace,clock_timestamp(),@actor,'record.create',@list,@record,1,@audit_fields,false
-              FROM quota,created RETURNING 1
+              SELECT $1,$2,$3 FROM content WHERE bytes <= $5
+              ON CONFLICT DO NOTHING RETURNING 1
             )
-            SELECT EXISTS(SELECT 1 FROM claimed),EXISTS(SELECT 1 FROM allocated),EXISTS(SELECT 1 FROM quota),
-              (SELECT number FROM allocated),input.value_bytes FROM input
-            """, connection, transaction);
-        command.Parameters.AddWithValue("workspace", workspaceId);
-        command.Parameters.AddWithValue("list", listId);
-        command.Parameters.AddWithValue("record", request.Id);
-        command.Parameters.AddWithValue("schema", request.SchemaVersion);
-        command.Parameters.AddWithValue("values", valuesJson);
-        command.Parameters.AddWithValue("actor", actor);
-        command.Parameters.AddWithValue("digest", digest);
-        command.Parameters.AddWithValue("lifetime", _limits.ReceiptLifetime);
-        command.Parameters.AddWithValue("receipt_bytes", receiptBytes);
-        command.Parameters.AddWithValue("audit_bytes", auditBytes);
-        command.Parameters.AddWithValue("field_ids", references.Select(x => x.FieldId).ToArray());
-        command.Parameters.AddWithValue("list_ids", references.Select(x => x.TargetListId).ToArray());
-        command.Parameters.AddWithValue("record_ids", references.Select(x => x.TargetRecordId).ToArray());
-        command.Parameters.AddWithValue("audit_fields", auditFields);
-        AddNullableBigint(command, "max_records", _limits.MaxRecordsPerList);
-        AddNullableBigint(command, "max_bytes", _limits.MaxWorkspaceBytes);
-        AddNullableBigint(command, "max_audits", _limits.MaxAuditEvents);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        await reader.ReadAsync(ct);
-        if (reader.GetInt64(4) > _limits.MaxRecordBytes) throw Limit("The normalized record exceeds the configured byte limit.");
-        if (!reader.GetBoolean(0))
+            SELECT content.bytes, EXISTS(SELECT 1 FROM claimed) FROM content
+            """, workspaceId, listId, request.Id, valuesJson, _limits.MaxRecordBytes))
+        await using (var reader = await claim.ExecuteReaderAsync(ct))
         {
-            await reader.DisposeAsync();
-            return await ReplayConcurrentCreateAsync(connection, transaction, workspaceId, listId, request,
-                actor, digest, ct);
+            if (!await reader.ReadAsync(ct)) throw new InvalidOperationException("The identity claim returned no size result.");
+            valueBytes = reader.GetInt64(0);
+            claimed = reader.GetBoolean(1);
         }
-        if (!reader.GetBoolean(1)) throw Limit("The record identity limit has been reached.");
-        if (!reader.GetBoolean(2)) throw Limit("The workspace storage or audit limit has been reached.");
-        return new CreateRecordResult(request.Id, 1, reader.GetInt64(3));
+        if (valueBytes > _limits.MaxRecordBytes)
+            throw Limit("The normalized record exceeds the configured byte limit.");
+        if (!claimed)
+            return await ReplayConcurrentCreateAsync(db, workspaceId, listId, request,
+                actor, digest, ct);
+
+        await LockCreateStateAsync(connection, transaction, workspaceId, listId, ct);
+        var state = await (from workspaceRow in db.Workspaces
+            join counterRow in db.ListCounters
+                on workspaceRow.WorkspaceId equals counterRow.WorkspaceId
+            where workspaceRow.WorkspaceId == workspaceId && counterRow.ListId == listId
+            select new
+            {
+                Workspace = workspaceRow,
+                Counter = counterRow,
+                Now = PostgreSqlListDbContext.ClockTimestamp()
+            }).SingleAsync(ct);
+        var counter = state.Counter;
+        if (_limits.MaxRecordsPerList is { } maxRecords && counter.IdentityCount >= maxRecords)
+            throw Limit("The record identity limit has been reached.");
+        var number = counter.NextNumber;
+        counter.IdentityCount = checked(counter.IdentityCount + 1);
+        counter.NextNumber = checked(counter.NextNumber + 1);
+
+        var workspace = state.Workspace;
+        var storageDelta = checked(valueBytes + receiptBytes + 128 + auditBytes);
+        if (_limits.MaxWorkspaceBytes is { } maxBytes && workspace.StoredBytes + storageDelta > maxBytes ||
+            _limits.MaxAuditEvents is { } maxAudits && workspace.AuditCount >= maxAudits)
+            throw Limit("The workspace storage or audit limit has been reached.");
+        workspace.StoredBytes = checked(workspace.StoredBytes + storageDelta);
+        workspace.AuditCount = checked(workspace.AuditCount + 1);
+        var now = state.Now;
+        db.Records.Add(new RecordRow { WorkspaceId = workspaceId, ListId = listId, RecordId = request.Id,
+            SchemaVersion = request.SchemaVersion, Revision = 1, Number = number, ValuesJson = valuesJson,
+            CreatedUtc = now, ModifiedUtc = now, CreatedBy = actor, ModifiedBy = actor });
+        db.RecordReferences.AddRange(references.Select(reference => new RecordReferenceRow {
+            WorkspaceId = workspaceId, SourceListId = listId, SourceRecordId = request.Id,
+            FieldId = reference.FieldId, TargetListId = reference.TargetListId,
+            TargetRecordId = reference.TargetRecordId }));
+        db.CreateReceipts.Add(new CreateReceiptRow { WorkspaceId = workspaceId, ListId = listId,
+            RecordId = request.Id, Actor = actor, SchemaVersion = request.SchemaVersion,
+            RequestDigest = digest, Revision = 1, Number = number, CreatedUtc = now,
+            ExpiresUtc = now.Add(_limits.ReceiptLifetime) });
+        db.AuditEvents.Add(new AuditEventRow { WorkspaceId = workspaceId, Utc = now, Actor = actor,
+            Action = "record.create", ListId = listId, RecordId = request.Id, Revision = 1,
+            FieldIds = auditFields });
+        await db.SaveChangesAsync(ct);
+        return new CreateRecordResult(request.Id, 1, number);
     }
 
-    private async Task<CreateRecordResult> ReplayConcurrentCreateAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, Guid workspaceId, Guid listId, CreateRecordRequest request,
-        string actor, string digest, CancellationToken ct)
-        => await TryReplayConcurrentCreateAsync(connection, transaction, workspaceId, listId, request,
+    private static async Task LockCreateStateAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, Guid workspaceId, Guid listId, CancellationToken ct)
+    {
+        await using var batch = new NpgsqlBatch(connection, transaction);
+        var workspace = new NpgsqlBatchCommand("""
+            SELECT workspace_id FROM cellbridge_lists.workspaces
+            WHERE workspace_id=$1 FOR UPDATE
+            """);
+        workspace.Parameters.AddWithValue(workspaceId);
+        batch.BatchCommands.Add(workspace);
+        var counter = new NpgsqlBatchCommand("""
+            SELECT list_id FROM cellbridge_lists.list_counters
+            WHERE workspace_id=$1 AND list_id=$2 FOR UPDATE
+            """);
+        counter.Parameters.AddWithValue(workspaceId);
+        counter.Parameters.AddWithValue(listId);
+        batch.BatchCommands.Add(counter);
+        await batch.ExecuteNonQueryAsync(ct);
+    }
+
+    private async Task<CreateRecordResult> ReplayConcurrentCreateAsync(PostgreSqlListDbContext db,
+        Guid workspaceId, Guid listId, CreateRecordRequest request, string actor, string digest,
+        CancellationToken ct)
+        => await TryReplayConcurrentCreateAsync(db, workspaceId, listId, request,
                actor, digest, ct)
            ?? throw Conflict("That record ID was already used.");
 
-    private async Task<CreateRecordResult?> TryReplayConcurrentCreateAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, Guid workspaceId, Guid listId, CreateRecordRequest request,
-        string actor, string digest, CancellationToken ct)
+    private async Task<CreateRecordResult?> TryReplayConcurrentCreateAsync(PostgreSqlListDbContext db,
+        Guid workspaceId, Guid listId, CreateRecordRequest request, string actor, string digest,
+        CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand("""
-            SELECT c.actor,c.schema_version,c.request_digest,c.revision,c.number,
-              c.expires_utc>clock_timestamp(),s.definition::text
-            FROM cellbridge_lists.create_receipts c
-            LEFT JOIN cellbridge_lists.list_schemas s ON s.workspace_id=c.workspace_id
-              AND s.list_id=c.list_id AND s.schema_version=c.schema_version
-            WHERE c.workspace_id=@workspace AND c.list_id=@list AND c.record_id=@record
-            """, connection, transaction);
-        command.Parameters.AddWithValue("workspace", workspaceId);
-        command.Parameters.AddWithValue("list", listId);
-        command.Parameters.AddWithValue("record", request.Id);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct) || !reader.GetBoolean(5)) return null;
-        if (reader.GetString(0) != actor || reader.GetInt64(1) != request.SchemaVersion ||
-            reader.GetString(2) != digest) return null;
-        if (reader.IsDBNull(6))
+        var replay = await (from receipt in db.CreateReceipts.AsNoTracking()
+            from schema in db.ListSchemas.AsNoTracking().Where(row =>
+                row.WorkspaceId == receipt.WorkspaceId && row.ListId == receipt.ListId &&
+                row.SchemaVersion == receipt.SchemaVersion).DefaultIfEmpty()
+            where receipt.WorkspaceId == workspaceId && receipt.ListId == listId &&
+                  receipt.RecordId == request.Id
+            select new ReceiptReplayProjection
+            {
+                Actor = receipt.Actor,
+                SchemaVersion = receipt.SchemaVersion,
+                Digest = receipt.RequestDigest,
+                Revision = receipt.Revision,
+                Number = receipt.Number,
+                Live = receipt.ExpiresUtc > PostgreSqlListDbContext.ClockTimestamp(),
+                DefinitionJson = schema == null ? null : schema.Definition
+            }).SingleOrDefaultAsync(ct);
+        if (replay is null || !replay.Live) return null;
+        if (replay.Actor != actor || replay.SchemaVersion != request.SchemaVersion ||
+            replay.Digest != digest) return null;
+        if (replay.DefinitionJson is null)
             throw new ListException(ListFailure.Unavailable, "The receipt schema version is missing.");
-        var definition = PostgreSqlListJson.Deserialize<ListDefinition>(reader.GetString(6));
+        var definition = PostgreSqlListJson.Deserialize<ListDefinition>(replay.DefinitionJson);
         ListValidation.ValidateValues(definition, request.Values, _limits);
-        return new CreateRecordResult(request.Id, reader.GetInt64(3), reader.GetInt64(4), true);
+        return new CreateRecordResult(request.Id, replay.Revision, replay.Number, true);
     }
 
-    private async Task<ListRecord> PersistUpdateAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, Guid listId, ListRecord current, long schemaVersion, string valuesJson, string actor,
+    private async Task<ListRecord> PersistUpdateAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        Guid workspaceId, Guid listId, ListRecord current, RecordRow record, long schemaVersion,
+        string valuesJson, JsonObject responseValues, string actor,
         IReadOnlyList<FieldChange> changes, IReadOnlySet<Guid> changedReferenceIds,
         IReadOnlyList<ReferenceAssignment> references, long previousBytes, CancellationToken ct)
     {
         var auditFields = changes.Select(x => x.FieldId).ToArray();
         var auditBytes = AuditStorageBytes(actor, "record.update", auditFields.Length);
         var revision = checked(current.Revision + 1);
-        await using var command = new NpgsqlCommand("""
-            WITH input AS (
-              SELECT @values::jsonb AS values_json,octet_length((@values::jsonb)::text)::bigint AS value_bytes
-            ), quota AS (
-              UPDATE cellbridge_lists.workspaces w
-              SET stored_bytes=w.stored_bytes+input.value_bytes-@previous_bytes+@audit_bytes,audit_count=w.audit_count+1
-              FROM input WHERE w.workspace_id=@workspace
-                AND (@max_bytes::bigint IS NULL OR w.stored_bytes+input.value_bytes-@previous_bytes+@audit_bytes<=@max_bytes)
-                AND (@max_audits::bigint IS NULL OR w.audit_count<@max_audits) RETURNING 1
-            ), updated AS (
-              UPDATE cellbridge_lists.records r SET schema_version=@schema,revision=@revision,
-                values_json=input.values_json,modified_utc=clock_timestamp(),modified_by=@actor
-              FROM input,quota WHERE r.workspace_id=@workspace AND r.list_id=@list AND r.record_id=@record
-                AND r.revision=@expected_revision
-              RETURNING r.record_id,r.schema_version,r.revision,r.number,r.values_json::text,
-                r.created_utc,r.modified_utc,r.created_by,r.modified_by
-            ), removed AS (
-              DELETE FROM cellbridge_lists.record_references refs USING updated
-              WHERE refs.workspace_id=@workspace AND refs.source_list_id=@list AND refs.source_record_id=@record
-                AND refs.field_id=ANY(@removed_fields::uuid[]) RETURNING 1
-            ), inserted AS (
-              INSERT INTO cellbridge_lists.record_references(workspace_id,source_list_id,source_record_id,field_id,target_list_id,target_record_id)
-              SELECT @workspace,@list,@record,refs.field_id,refs.list_id,refs.record_id
-              FROM updated CROSS JOIN unnest(@field_ids::uuid[],@list_ids::uuid[],@record_ids::uuid[])
-                AS refs(field_id,list_id,record_id)
-              ON CONFLICT (workspace_id,source_list_id,source_record_id,field_id) DO UPDATE SET
-                target_list_id=EXCLUDED.target_list_id,target_record_id=EXCLUDED.target_record_id
-              RETURNING 1
-            ), audit AS (
-              INSERT INTO cellbridge_lists.audit_events(workspace_id,utc,actor,action,list_id,record_id,revision,field_ids,security)
-              SELECT @workspace,clock_timestamp(),@actor,'record.update',@list,@record,@revision,@audit_fields,false
-              FROM quota,updated RETURNING 1
-            )
-            SELECT updated.*,input.value_bytes,EXISTS(SELECT 1 FROM quota) FROM input LEFT JOIN updated ON true
-            """, connection, transaction);
-        command.Parameters.AddWithValue("workspace", workspaceId);
-        command.Parameters.AddWithValue("list", listId);
-        command.Parameters.AddWithValue("record", current.Id);
-        command.Parameters.AddWithValue("schema", schemaVersion);
-        command.Parameters.AddWithValue("revision", revision);
-        command.Parameters.AddWithValue("expected_revision", current.Revision);
-        command.Parameters.AddWithValue("values", valuesJson);
-        command.Parameters.AddWithValue("actor", actor);
-        command.Parameters.AddWithValue("previous_bytes", previousBytes);
-        command.Parameters.AddWithValue("audit_bytes", auditBytes);
-        command.Parameters.AddWithValue("removed_fields", changedReferenceIds
-            .Except(references.Select(x => x.FieldId)).ToArray());
-        command.Parameters.AddWithValue("field_ids", references.Select(x => x.FieldId).ToArray());
-        command.Parameters.AddWithValue("list_ids", references.Select(x => x.TargetListId).ToArray());
-        command.Parameters.AddWithValue("record_ids", references.Select(x => x.TargetRecordId).ToArray());
-        command.Parameters.AddWithValue("audit_fields", auditFields);
-        AddNullableBigint(command, "max_bytes", _limits.MaxWorkspaceBytes);
-        AddNullableBigint(command, "max_audits", _limits.MaxAuditEvents);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        await reader.ReadAsync(ct);
-        if (reader.GetInt64(9) > _limits.MaxRecordBytes) throw Limit("The normalized record exceeds the configured byte limit.");
-        if (!reader.GetBoolean(10)) throw Limit("The workspace storage or audit limit has been reached.");
-        if (reader.IsDBNull(0)) throw Conflict("The record revision changed.");
-        return ReadRecord(reader, workspaceId, listId);
+        var valueBytes = await CanonicalJsonBytesAsync(connection, transaction, valuesJson, ct);
+        if (valueBytes > _limits.MaxRecordBytes)
+            throw Limit("The normalized record exceeds the configured byte limit.");
+        // Returning the locked row lets EF track its post-lock values without a second read.
+        var state = await db.Workspaces.FromSqlInterpolated($"""
+                SELECT * FROM cellbridge_lists.workspaces WHERE workspace_id={workspaceId} FOR UPDATE
+                """)
+            .Select(row => new
+            {
+                Workspace = row,
+                Now = PostgreSqlListDbContext.ClockTimestamp()
+            }).SingleOrDefaultAsync(ct) ?? throw NotFound();
+        var workspace = state.Workspace;
+        var storageDelta = checked(valueBytes - previousBytes + auditBytes);
+        var nextBytes = checked(workspace.StoredBytes + storageDelta);
+        if (_limits.MaxWorkspaceBytes is { } maxBytes && nextBytes > maxBytes ||
+            _limits.MaxAuditEvents is { } maxAudits && workspace.AuditCount >= maxAudits)
+            throw Limit("The workspace storage or audit limit has been reached.");
+        db.Records.Attach(record);
+        workspace.StoredBytes = nextBytes;
+        workspace.AuditCount = checked(workspace.AuditCount + 1);
+        record.SchemaVersion = schemaVersion;
+        record.Revision = revision;
+        record.ValuesJson = valuesJson;
+        record.ModifiedUtc = state.Now;
+        record.ModifiedBy = actor;
+
+        var changed = changedReferenceIds.ToArray();
+        List<RecordReferenceRow> existingReferences = changed.Length == 0
+            ? []
+            : await db.RecordReferences.Where(row => row.WorkspaceId == workspaceId &&
+                row.SourceListId == listId && row.SourceRecordId == current.Id && changed.Contains(row.FieldId))
+                .ToListAsync(ct);
+        var replacements = references.ToDictionary(reference => reference.FieldId);
+        foreach (var existing in existingReferences)
+        {
+            if (!replacements.Remove(existing.FieldId))
+                db.RecordReferences.Remove(existing);
+            else
+            {
+                var replacement = references.Single(reference => reference.FieldId == existing.FieldId);
+                existing.TargetListId = replacement.TargetListId;
+                existing.TargetRecordId = replacement.TargetRecordId;
+            }
+        }
+        db.RecordReferences.AddRange(replacements.Values.Select(reference => new RecordReferenceRow {
+            WorkspaceId = workspaceId, SourceListId = listId, SourceRecordId = current.Id,
+            FieldId = reference.FieldId, TargetListId = reference.TargetListId,
+            TargetRecordId = reference.TargetRecordId }));
+        db.AuditEvents.Add(new AuditEventRow { WorkspaceId = workspaceId, Utc = record.ModifiedUtc,
+            Actor = actor, Action = "record.update", ListId = listId, RecordId = current.Id,
+            Revision = revision, FieldIds = auditFields });
+        await db.SaveChangesAsync(ct);
+        // Save interceptors may replace the tracked JSON before persistence.
+        return StringComparer.Ordinal.Equals(record.ValuesJson, valuesJson)
+            ? ToListRecord(record, responseValues)
+            : ToListRecord(record);
     }
 
-    private async Task PersistDeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, Guid listId, ListRecord current, string actor, long previousBytes, CancellationToken ct)
+    private async Task PersistDeleteAsync(PostgreSqlListDbContext db,
+        Guid workspaceId, Guid listId, ListRecord current, RecordRow record, string actor,
+        long previousBytes, CancellationToken ct)
     {
         var auditBytes = AuditStorageBytes(actor, "record.delete", 0);
-        await using var command = new NpgsqlCommand("""
-            WITH quota AS (
-              UPDATE cellbridge_lists.workspaces w
-              SET stored_bytes=GREATEST(0,w.stored_bytes-@previous_bytes+@audit_bytes),audit_count=w.audit_count+1
-              WHERE w.workspace_id=@workspace
-                AND (@max_bytes::bigint IS NULL OR GREATEST(0,w.stored_bytes-@previous_bytes+@audit_bytes)<=@max_bytes)
-                AND (@max_audits::bigint IS NULL OR w.audit_count<@max_audits) RETURNING 1
-            ), deleted AS (
-              DELETE FROM cellbridge_lists.records r USING quota
-              WHERE r.workspace_id=@workspace AND r.list_id=@list AND r.record_id=@record AND r.revision=@expected_revision
-              RETURNING r.revision
-            ), audit AS (
-              INSERT INTO cellbridge_lists.audit_events(workspace_id,utc,actor,action,list_id,record_id,revision,field_ids,security)
-              SELECT @workspace,clock_timestamp(),@actor,'record.delete',@list,@record,deleted.revision,'{}'::uuid[],false
-              FROM quota,deleted RETURNING 1
-            ) SELECT EXISTS(SELECT 1 FROM quota),EXISTS(SELECT 1 FROM deleted)
-            """, connection, transaction);
-        command.Parameters.AddWithValue("workspace", workspaceId);
-        command.Parameters.AddWithValue("list", listId);
-        command.Parameters.AddWithValue("record", current.Id);
-        command.Parameters.AddWithValue("expected_revision", current.Revision);
-        command.Parameters.AddWithValue("actor", actor);
-        command.Parameters.AddWithValue("previous_bytes", previousBytes);
-        command.Parameters.AddWithValue("audit_bytes", auditBytes);
-        AddNullableBigint(command, "max_bytes", _limits.MaxWorkspaceBytes);
-        AddNullableBigint(command, "max_audits", _limits.MaxAuditEvents);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        await reader.ReadAsync(ct);
-        if (!reader.GetBoolean(0)) throw Limit("The workspace storage or audit limit has been reached.");
-        if (!reader.GetBoolean(1)) throw Conflict("The record revision changed.");
+        var state = await db.Workspaces.FromSqlInterpolated($"""
+                SELECT * FROM cellbridge_lists.workspaces WHERE workspace_id={workspaceId} FOR UPDATE
+                """)
+            .Select(row => new
+            {
+                Workspace = row,
+                Now = PostgreSqlListDbContext.ClockTimestamp()
+            }).SingleOrDefaultAsync(ct) ?? throw NotFound();
+        var workspace = state.Workspace;
+        var nextBytes = Math.Max(0, checked(workspace.StoredBytes - previousBytes + auditBytes));
+        if (_limits.MaxWorkspaceBytes is { } maxBytes && nextBytes > maxBytes ||
+            _limits.MaxAuditEvents is { } maxAudits && workspace.AuditCount >= maxAudits)
+            throw Limit("The workspace storage or audit limit has been reached.");
+        db.Records.Attach(record);
+        workspace.StoredBytes = nextBytes;
+        workspace.AuditCount = checked(workspace.AuditCount + 1);
+        db.Records.Remove(record);
+        db.AuditEvents.Add(new AuditEventRow { WorkspaceId = workspaceId,
+            Utc = state.Now, Actor = actor, Action = "record.delete",
+            ListId = listId, RecordId = current.Id, Revision = current.Revision, FieldIds = [] });
+        await db.SaveChangesAsync(ct);
     }
 
-    private static async Task DeleteExpiredReceiptAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, Guid listId, Guid recordId, Receipt receipt, CancellationToken ct)
+    private async Task DeleteExpiredReceiptAsync(PostgreSqlListDbContext db, Guid workspaceId,
+        Guid listId, Guid recordId, Receipt receipt, CancellationToken ct)
     {
         var bytes = Encoding.UTF8.GetByteCount(receipt.Digest) + Encoding.UTF8.GetByteCount(receipt.Actor) + 192L;
-        await using var command = new NpgsqlCommand("""
-            WITH removed AS (
-              DELETE FROM cellbridge_lists.create_receipts WHERE workspace_id=@workspace AND list_id=@list AND record_id=@record RETURNING 1
-            ) UPDATE cellbridge_lists.workspaces SET stored_bytes=GREATEST(0,stored_bytes-@bytes)
-            WHERE workspace_id=@workspace AND EXISTS(SELECT 1 FROM removed)
-            """, connection, transaction);
-        command.Parameters.AddWithValue("workspace", workspaceId);
-        command.Parameters.AddWithValue("list", listId);
-        command.Parameters.AddWithValue("record", recordId);
-        command.Parameters.AddWithValue("bytes", bytes);
-        await command.ExecuteNonQueryAsync(ct);
+        var removed = await db.CreateReceipts.Where(row => row.WorkspaceId == workspaceId &&
+            row.ListId == listId && row.RecordId == recordId).ExecuteDeleteAsync(ct);
+        if (removed != 0)
+            await db.Workspaces.Where(row => row.WorkspaceId == workspaceId)
+                .ExecuteUpdateAsync(update => update.SetProperty(row => row.StoredBytes,
+                    row => row.StoredBytes > bytes ? row.StoredBytes - bytes : 0), ct);
     }
 
     private static List<ReferenceAssignment> ReferenceAssignments(ListDefinition definition, JsonObject values,
@@ -665,10 +715,16 @@ public sealed partial class PostgreSqlListEngine
     private static long AuditStorageBytes(string actor, string action, int fieldCount) =>
         96L + Encoding.UTF8.GetByteCount(actor) + Encoding.UTF8.GetByteCount(action) + fieldCount * 16L;
 
-    private static void AddNullableBigint(NpgsqlCommand command, string name, long? value)
+    private static async Task<DateTimeOffset> ClockAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, CancellationToken ct)
     {
-        var parameter = command.Parameters.Add(name, NpgsqlDbType.Bigint);
-        parameter.Value = value is { } actual ? actual : DBNull.Value;
+        await using var command = Command(connection, transaction, "SELECT clock_timestamp()");
+        return await command.ExecuteScalarAsync(ct) switch
+        {
+            DateTimeOffset value => value,
+            DateTime value => new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc)),
+            _ => throw new InvalidOperationException("PostgreSQL did not return its current timestamp.")
+        };
     }
 
     private static async Task LockWorkspaceMutationAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
@@ -687,25 +743,70 @@ public sealed partial class PostgreSqlListEngine
             workspaceId, listId) is null) throw NotFound();
     }
 
-    private static async Task<ListRecord?> ReadRecordAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, Guid listId, Guid recordId, bool forUpdate, CancellationToken ct)
+    private async Task<ListRecord?> ReadRecordAsync(PostgreSqlListDbContext db,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, Guid workspaceId, Guid listId,
+        Guid recordId, bool forUpdate, CancellationToken ct)
     {
-        await using var command = Command(connection, transaction, """
-            SELECT record_id,schema_version,revision,number,values_json::text,created_utc,modified_utc,created_by,modified_by
-            FROM cellbridge_lists.records WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3
-            """ + (forUpdate ? " FOR UPDATE" : ""), workspaceId, listId, recordId);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        return await reader.ReadAsync(ct) ? ReadRecord(reader, workspaceId, listId) : null;
+        if (forUpdate)
+        {
+            await using var command = Command(connection, transaction,
+                "SELECT record_id FROM cellbridge_lists.records WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3 FOR UPDATE",
+                workspaceId, listId, recordId);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        var row = await db.Records.AsNoTracking().SingleOrDefaultAsync(value => value.WorkspaceId == workspaceId &&
+            value.ListId == listId && value.RecordId == recordId, ct);
+        return row is null ? null : ToListRecord(row);
     }
 
-    private static ListRecord ReadRecord(NpgsqlDataReader reader, Guid workspaceId, Guid listId) => new(
-        reader.GetGuid(0), workspaceId, listId, reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3),
-        PostgreSqlListJson.Object(reader.GetString(4)),
-        new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero), new DateTimeOffset(reader.GetDateTime(6), TimeSpan.Zero),
-        reader.GetString(7), reader.GetString(8));
+    private static ListRecord ToListRecord(RecordRow row) => ToListRecord(row, PostgreSqlListJson.Object(row.ValuesJson));
 
-    private sealed record RecordWriteContext(ListAccess Access, ListDefinition? Definition, ListRecord? Record,
-        long RecordBytes, Receipt? Receipt, ListDefinition? ReceiptDefinition);
+    private static ListRecord ToListRecord(RecordRow row, JsonObject values) => new(row.RecordId, row.WorkspaceId, row.ListId,
+        row.SchemaVersion, row.Revision, row.Number, values,
+        row.CreatedUtc, row.ModifiedUtc, row.CreatedBy, row.ModifiedBy);
+
+    private sealed record CreateRecordContext(ListDefinition Definition, Receipt? Receipt,
+        ListDefinition? ReceiptDefinition);
+    private sealed record RecordMutationContext(ListDefinition Definition, ListRecord? Record,
+        RecordRow? RecordRow, long RecordBytes);
     private sealed record ReferenceAssignment(Guid FieldId, Guid TargetListId, Guid TargetRecordId, Guid? DisplayFieldId);
     private sealed record Receipt(string Actor, long SchemaVersion, string Digest, long Revision, long Number, bool Live);
+    private sealed class ListDefinitionProjection
+    {
+        public int SecurityAuditCount { get; init; }
+        public bool IsMember { get; init; }
+        public int Access { get; init; }
+        public required string DefinitionJson { get; init; }
+    }
+
+    private sealed class CreateContextProjection
+    {
+        public int SecurityAuditCount { get; init; }
+        public bool IsMember { get; init; }
+        public int Access { get; init; }
+        public required string DefinitionJson { get; init; }
+        public CreateReceiptRow? Receipt { get; init; }
+        public bool ReceiptLive { get; init; }
+        public string? ReceiptDefinitionJson { get; init; }
+    }
+
+    private sealed class MutationContextProjection
+    {
+        public int SecurityAuditCount { get; init; }
+        public bool IsMember { get; init; }
+        public int Access { get; init; }
+        public required string DefinitionJson { get; init; }
+        public RecordRow? Record { get; init; }
+    }
+
+    private sealed class ReceiptReplayProjection
+    {
+        public required string Actor { get; init; }
+        public long SchemaVersion { get; init; }
+        public required string Digest { get; init; }
+        public long Revision { get; init; }
+        public long Number { get; init; }
+        public bool Live { get; init; }
+        public string? DefinitionJson { get; init; }
+    }
 }

@@ -179,6 +179,92 @@ public sealed class RecordReviewRegressionTests(ListDatabaseFixture database)
     }
 
     [PostgreSqlFact]
+    public async Task UnreadableReferenceTargetReturnsNotFoundWhileTargetRowIsLocked()
+    {
+        var workspace = await database.NewWorkspaceAsync("reference-assignment-authorization-lock");
+        var label = new ListField(Guid.NewGuid(), "Label", ListFieldType.Text);
+        var target = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Targets", [label]));
+        var targetRecordId = Guid.NewGuid();
+        await database.Engine.CreateRecordAsync(database.AdminActor, workspace, target.Id,
+            new CreateRecordRequest(targetRecordId, 1, Values(label, "target")));
+        var reference = new ListField(Guid.NewGuid(), "Target", ListFieldType.Reference,
+            ReferenceListId: target.Id, ReferenceDisplayFieldId: label.Id);
+        var source = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Sources", [reference]));
+        var writer = new ListActor("test:reference-writer:" + Guid.NewGuid().ToString("N"));
+        await database.Engine.SetMembershipAsync(database.AdminActor, workspace, writer.Subject, true, false, false);
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, source.Id, writer.Subject, ListAccess.Write);
+        var engine = new PostgreSqlListEngine(database.RuntimeSource!,
+            new ListLimits { StatementTimeout = TimeSpan.FromMilliseconds(100) });
+
+        await using var blocker = await database.AdminSource!.OpenConnectionAsync();
+        await using var transaction = await blocker.BeginTransactionAsync();
+        await using (var context = new NpgsqlCommand("SELECT set_config('cellbridge.workspace_id',$1,true)", blocker, transaction))
+        {
+            context.Parameters.AddWithValue(workspace.ToString("D"));
+            await context.ExecuteNonQueryAsync();
+        }
+        await using (var command = new NpgsqlCommand("""
+            SELECT record_id FROM cellbridge_lists.records
+            WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3 FOR UPDATE
+            """, blocker, transaction))
+        {
+            command.Parameters.AddWithValue(workspace);
+            command.Parameters.AddWithValue(target.Id);
+            command.Parameters.AddWithValue(targetRecordId);
+            Assert.Equal(targetRecordId, await command.ExecuteScalarAsync());
+        }
+
+        // The authorized control must encounter the held row lock and hit the database timeout.
+        var blocked = await Assert.ThrowsAsync<ListException>(() => engine.CreateRecordAsync(database.AdminActor,
+            workspace, source.Id, new CreateRecordRequest(Guid.NewGuid(), 1,
+                Values(reference, targetRecordId.ToString("D")))));
+        Assert.Equal(ListFailure.Unavailable, blocked.Failure);
+
+        var denied = await Assert.ThrowsAsync<ListException>(() => engine.CreateRecordAsync(writer,
+            workspace, source.Id, new CreateRecordRequest(Guid.NewGuid(), 1,
+                Values(reference, targetRecordId.ToString("D")))));
+        Assert.Equal(ListFailure.NotFound, denied.Failure);
+        await transaction.RollbackAsync();
+    }
+
+    [PostgreSqlFact]
+    public async Task EarlierMissingReferenceTargetPrecedesLaterUnreadableList()
+    {
+        var workspace = await database.NewWorkspaceAsync("reference-assignment-error-order");
+        var label = new ListField(Guid.NewGuid(), "Label", ListFieldType.Text);
+        var readableTarget = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Readable targets", [label]));
+        var unreadableTarget = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Unreadable targets", [label]));
+        var targetRecordId = Guid.NewGuid();
+        await database.Engine.CreateRecordAsync(database.AdminActor, workspace, unreadableTarget.Id,
+            new CreateRecordRequest(targetRecordId, 1, Values(label, "target")));
+        var earlier = new ListField(Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            "Missing target", ListFieldType.Reference,
+            ReferenceListId: readableTarget.Id, ReferenceDisplayFieldId: label.Id);
+        var later = new ListField(Guid.Parse("00000000-0000-0000-0000-000000000002"),
+            "Unreadable target", ListFieldType.Reference,
+            ReferenceListId: unreadableTarget.Id, ReferenceDisplayFieldId: label.Id);
+        var source = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new CreateListRequest(Guid.NewGuid(), "Sources", [later, earlier]));
+        var writer = new ListActor("test:reference-order-writer:" + Guid.NewGuid().ToString("N"));
+        await database.Engine.SetMembershipAsync(database.AdminActor, workspace, writer.Subject, true, false, false);
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, source.Id, writer.Subject, ListAccess.Write);
+        await database.Engine.SetListGrantAsync(database.AdminActor, workspace, readableTarget.Id, writer.Subject, ListAccess.Read);
+
+        var failure = await Assert.ThrowsAsync<ListException>(() => database.Engine.CreateRecordAsync(writer,
+            workspace, source.Id, new CreateRecordRequest(Guid.NewGuid(), 1, new JsonObject
+            {
+                [later.Id.ToString("D")] = targetRecordId.ToString("D"),
+                [earlier.Id.ToString("D")] = Guid.NewGuid().ToString("D")
+            })));
+        Assert.Equal(ListFailure.Validation, failure.Failure);
+        Assert.Equal("The reference target does not exist.", failure.Message);
+    }
+
+    [PostgreSqlFact]
     public async Task ReceiptReplayUsesDatabaseExpiryAndOriginalSchemaValidation()
     {
         var workspace = await database.NewWorkspaceAsync("receipt-review-regressions");

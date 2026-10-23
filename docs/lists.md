@@ -295,19 +295,40 @@ have forced RLS with matching read/write checks. The provider sets verified
 workspace context transaction-locally and checks schema version/runtime privileges
 before use. Runtime credentials cannot register operator templates.
 
-The current provider requires list schema version 3. Before upgrading a version 1
-installation, stop every old list host and integration worker, back up the list
-schema, and run `InitializeAsync` with operator credentials. Setup creates
+The PostgreSQL package owns the sealed `PostgreSqlListDbContext`, its EF Core
+model and versioned migrations. `InitializeAsync` is an explicit migration call
+for a consumer's initializer or deployment application. Registration and ordinary
+requests never apply migrations. The document provider has a separate context and
+migration history; Lists does not depend on document storage or the application's
+DbContext. Existing SQL-created list data remains in its current tables.
+EF generates ordinary table and index migrations. PostgreSQL migration SQL installs
+forced row security, the immutable authorization trigger and typed query functions.
+Each operation leases one context from the engine's private EF context pool and
+shares it across its transaction and helpers. Concurrent operations use separate
+contexts, independently of HTTP request scopes. Options containing an explicit
+`DbConnection` use unpooled contexts and preserve configured connection ownership.
+Configured EF connection settings, command timeouts, logging and interceptors
+remain active. The engine's fixed compiled queries use its configured EF model.
+A context that selects a different model uses an ordinary EF query. Interceptors
+and custom EF services must support context reuse and concurrent operations. The library configures tracking on a copy of the
+supplied options. Use a non-retrying EF execution strategy. The provider rejects
+`EnableRetryOnFailure` because its explicit transactions and create receipts own
+retry behavior after uncertain outcomes.
+
+The current provider requires list schema version 4. Before upgrading an
+installation at version 1, 2 or 3, stop every old list host and integration
+worker, back up the list schema, and run `InitializeAsync` with operator credentials. Setup creates
 per-list counters and normalized reference links, then recalculates each
 workspace's logical byte usage from its retained version 1 rows. This one-time
 recalculation charges memberships and creator grants that early version 1 code
 did not charge, without charging rows again if a later version 1 build already
 corrected them. Setup then adds the immutable authorization mode, domain, and
-tenant-scope columns used by host-authorized workspaces and records version 3 in
-the same transaction. Repeated setup on version 3 does not scan retained rows
-again. A workspace whose recalculated
-usage exceeds its configured quota cannot add storage until its usage falls
-below the limit. Start only version 3 providers afterward. Running old providers
+tenant-scope columns used by host-authorized workspaces. The EF query migration
+adds PostgreSQL scalar functions for typed filtering and exact text and timestamp
+ordering, then records version 4 in the same transaction. Repeated setup does not
+scan retained rows again. A workspace whose recalculated usage exceeds its
+configured quota cannot add storage until its usage falls below the limit.
+Start only version 4 providers afterward. Running old providers
 during this migration can leave the new counters or links incomplete.
 
 Record mutations use shared schema locks, record row locks and foreign keys.

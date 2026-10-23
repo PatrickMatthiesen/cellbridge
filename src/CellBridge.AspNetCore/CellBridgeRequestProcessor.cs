@@ -121,7 +121,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         var operationActor = subRequest.Type == SubRequestType.Cell ? fileActor :
                             await service.AuthorizeResourceActorAsync(actor, doc.TransitionId,
                                 CellBridgeAuthorization.RequiredAccess(subRequest), cancellationToken, fresh: true);
-                        if (FssHttpDependencies.Error(subRequest, fileResponse.SubResponses) is { } dependencyError)
+                        if (FssHttpDependencies.Error(subRequest, fileResponse.SubResponses, fileRequest.SubRequests) is { } dependencyError)
                         {
                             subResponse.ErrorCode = dependencyError;
                             subResponse.HResult = "2147500037";

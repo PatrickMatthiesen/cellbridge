@@ -13,6 +13,9 @@ operations retain authorization, forced workspace RLS, validation, conditional
 revisions, receipts, auditing, foreign keys and synchronous commits. Connection
 strings and credentials are excluded from the report.
 
+For the corrected warm BenchmarkDotNet SQL/EF comparison, see
+[Warm PostgreSQL provider comparisons](postgresql-comparison.md).
+
 ## Run a local measurement
 
 Run the Release executable directly:
@@ -51,8 +54,9 @@ filters or text sorts.
 Startup, schema and role setup, list/record creation, connection/HTTP warm-up
 and final persistence probes are outside the measured write intervals. Each
 operation still checks successful creation or revision advancement, result page
-size and SQL instrumentation. Detailed revision, payload, ordering and persistence
-assertions run in `tests/CellBridge.Benchmarks.Tests`. Workload tests use disposable
+size and SQL instrumentation. Untimed final probes check persisted revisions,
+counters and payloads, and the final query page's values, order and identities.
+Detailed assertions also run in `tests/CellBridge.Benchmarks.Tests`. Workload tests use disposable
 PostgreSQL through `CellBridge.TestInfrastructure` and cover provider and HTTP paths.
 
 Records have a title, integer counter and deterministic ASCII payload generated

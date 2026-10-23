@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 
 namespace CellBridge.Lists.PostgreSql;
@@ -17,6 +19,14 @@ public sealed partial class PostgreSqlListEngine
     public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits,
         IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null)
         : this(runtimeSource, limits, continuationKey)
+    {
+        _authorizationProvider = authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider));
+        _authorizationDomain = ValidateDomain(authorizationProvider.PolicyDomain);
+    }
+
+    public PostgreSqlListEngine(DbContextOptions<PostgreSqlListDbContext> options, ListLimits? limits,
+        IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null)
+        : this(options, limits, continuationKey)
     {
         _authorizationProvider = authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider));
         _authorizationDomain = ValidateDomain(authorizationProvider.PolicyDomain);
@@ -98,49 +108,28 @@ public sealed partial class PostgreSqlListEngine
         MapStoreFailuresAsync<WorkspaceAnchor?>(async () =>
         {
             await EnsureHealthyAsync(ct);
-            await using var connection = await _source.OpenConnectionAsync(ct);
-            await using var transaction = await connection.BeginTransactionAsync(ct);
-            await using var batch = new NpgsqlBatch(connection, transaction);
-            var configure = new NpgsqlBatchCommand("""
-                SELECT set_config('cellbridge.workspace_id',@workspace::text,true),
-                  set_config('statement_timeout',@timeout::text,true),
-                  set_config('lock_timeout',@timeout::text,true)
-                """);
-            configure.Parameters.AddWithValue("workspace", workspaceId);
-            configure.Parameters.AddWithValue("timeout",
-                Math.Clamp((long)_limits.StatementTimeout.TotalMilliseconds, 1, int.MaxValue));
-            batch.BatchCommands.Add(configure);
-            var read = new NpgsqlBatchCommand("""
-                SELECT workspace_id,authorization_mode,authorization_domain,authorization_scope
-                FROM cellbridge_lists.workspaces WHERE workspace_id=@workspace
-                """);
-            read.Parameters.AddWithValue("workspace", workspaceId);
-            batch.BatchCommands.Add(read);
-            await using var reader = await batch.ExecuteReaderAsync(ct);
-            await reader.NextResultAsync(ct);
-            WorkspaceAnchor? result = await reader.ReadAsync(ct)
-                ? new WorkspaceAnchor(reader.GetGuid(0), reader.GetString(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3))
-                : null;
-            await reader.DisposeAsync();
-            await transaction.CommitAsync(ct);
+            await using var db = CreateContext();
+            await db.Database.OpenConnectionAsync(ct);
+            await using var efTransaction = await db.Database.BeginTransactionAsync(ct);
+            var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+            var transaction = (NpgsqlTransaction)efTransaction.GetDbTransaction();
+            await ConfigureWorkspaceAsync(connection, transaction, workspaceId, ct);
+            var result = await db.Workspaces.AsNoTracking()
+                .Where(row => row.WorkspaceId == workspaceId)
+                .Select(row => new WorkspaceAnchor(row.WorkspaceId, row.AuthorizationMode,
+                    row.AuthorizationDomain, row.AuthorizationScope)).SingleOrDefaultAsync(ct);
+            await efTransaction.CommitAsync(ct);
             return result;
         });
 
-    private static async Task RequireAnchorAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        Guid workspaceId, OperationAuthorization? authorization, bool hostExpected, CancellationToken ct)
+    private async Task RequireAnchorAsync(PostgreSqlListDbContext db, Guid workspaceId,
+        OperationAuthorization? authorization, bool hostExpected, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand("""
-            SELECT authorization_mode,authorization_domain,authorization_scope
-            FROM cellbridge_lists.workspaces WHERE workspace_id=$1
-            """, connection, transaction);
-        command.Parameters.AddWithValue(workspaceId);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct)) throw NotFound();
-        var current = new WorkspaceAnchor(workspaceId, reader.GetString(0),
-            reader.IsDBNull(1) ? null : reader.GetString(1),
-            reader.IsDBNull(2) ? null : reader.GetString(2));
+        var current = await db.Workspaces.AsNoTracking()
+            .Where(row => row.WorkspaceId == workspaceId)
+            .Select(row => new WorkspaceAnchor(row.WorkspaceId, row.AuthorizationMode,
+                row.AuthorizationDomain, row.AuthorizationScope)).SingleOrDefaultAsync(ct);
+        if (current is null) throw NotFound();
         if (hostExpected)
         {
             if (authorization is null || current != authorization.Anchor) throw NotFound();

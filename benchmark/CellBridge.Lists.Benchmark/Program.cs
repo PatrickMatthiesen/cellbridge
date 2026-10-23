@@ -163,7 +163,10 @@ internal static class Benchmark
                     {
                         var list = lists[workspace];
                         var actual = await engine.GetRecordAsync(Actor, list.WorkspaceId, list.Id, expected.Id);
-                        Require(actual.Id == expected.Id,
+                        Require(actual.Id == expected.Id && actual.WorkspaceId == list.WorkspaceId && actual.ListId == list.Id &&
+                            actual.Revision == expected.Revision &&
+                            actual.Values[Counter.ToString("D")]!.GetValue<long>() == expected.Counter &&
+                            actual.Values[Payload.ToString("D")]!.GetValue<string>() == payloadValue,
                             "Persisted record verification failed.");
                     }
                     catch { verificationErrors++; }
@@ -215,6 +218,7 @@ internal static class Benchmark
             Require(nextId is not null, "Preparation must contain a second query page.");
         }
         var samples = new Sample[iterations];
+        IReadOnlyList<ListRecord>? lastRecords = null;
         var before = Resources.Take();
         var clock = Stopwatch.StartNew();
         for (var i = 0; i < iterations; i++)
@@ -230,16 +234,28 @@ internal static class Benchmark
                 else records = (await ProviderAsync(() => engine.QueryAsync(Actor, list.WorkspaceId, list.Id,
                     query with { AfterRecordId = page == "second-page" ? nextId : null }), metrics)).Records;
                 Require(records.Count == query.Limit, "Query must return exactly one bounded page.");
-
+                lastRecords = records;
             }
             catch (Exception failure) { error = ErrorKind(failure); }
             timer.Stop(); samples[i] = new(timer.Elapsed.TotalMilliseconds, error, metrics);
         }
         clock.Stop();
+        var after = Resources.Take();
+        var verificationErrors = 0;
+        try
+        {
+            Require(lastRecords is not null && lastRecords.Select(r => r.Id).Distinct().Count() == query.Limit &&
+                lastRecords.Select(r => r.Values[Counter.ToString("D")]!.GetValue<long>()).SequenceEqual(
+                    Enumerable.Range(firstCounter + (page == "second-page" ? query.Limit : 0), query.Limit).Select(i => (long)i)) &&
+                lastRecords.All(r => r.WorkspaceId == list.WorkspaceId && r.ListId == list.Id && r.Revision == 1 &&
+                    r.Values[Payload.ToString("D")]!.GetValue<string>() == payloadValue),
+                "Query page values, order or identities disagree with preparation.");
+        }
+        catch { verificationErrors++; }
         var report = Summarize(mode, $"query-{page}", 1, 1, iterations, samples, clock.Elapsed, before,
-            Resources.Take(), 0, 0);
+            after, 0, verificationErrors);
         Console.WriteLine($"{mode} query {page}: {samples.Count(s => s.Error is null)}/{iterations} succeeded.");
-        return new(report, samples.Any(s => s.Error is not null));
+        return new(report, verificationErrors != 0 || samples.Any(s => s.Error is not null));
     }
 
     private static async Task<T> ProviderAsync<T>(Func<Task<T>> operation, OperationMetrics metrics)

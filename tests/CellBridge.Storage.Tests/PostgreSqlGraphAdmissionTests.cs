@@ -30,7 +30,7 @@ public sealed class PostgreSqlGraphAdmissionTests
 
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
 
             var restricted = new PostgreSqlStateStore(source, new() { MaxDecodedGraphMembershipBytes = exactBytes - 1 });
