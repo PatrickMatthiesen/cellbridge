@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.Shared;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -57,6 +58,7 @@ public sealed class SqlServerContentStore : IContentStore, IStorageBudgetPartici
         await using var db = new SqlServerDocumentDbContext(options);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SqlServerDocumentDatabase.ConfigureTransactionAsync(db, ct);
+        await SqlServerDocumentDatabase.CheckConfigurationAsync(db, ct);
         // The transaction-owned lock serializes duplicate admission across hosts without
         // catching a unique violation in an XACT_ABORT transaction or replaying callbacks.
         await SqlServerDocumentDatabase.LockAsync(db, "CellBridge.Content." + digest, ct);
@@ -96,7 +98,7 @@ public sealed class SqlServerContentStore : IContentStore, IStorageBudgetPartici
             if (batch.Count != 0) await SaveBatchAsync(db, batch, ct);
         }
         // Once committing an immutable object begins, caller cancellation cannot turn
-        // a known durable write into an invented cancellation outcome.
+        // a completed write into an invented cancellation outcome.
         ct.ThrowIfCancellationRequested();
         await transaction.CommitAsync(CancellationToken.None);
         return handle;

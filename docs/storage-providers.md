@@ -11,20 +11,42 @@ objects. In-memory stores are available for disposable development.
 The PostgreSQL package owns its EF Core model and versioned migrations. It does
 not add entities to the application's DbContext. Document storage and native
 Lists use independent contexts, migration histories and package dependencies.
-PostgreSQL is the implemented document-state and Lists provider.
+PostgreSQL is the packaged document-state and Lists provider.
 EF generates the table and index migrations from the owned model. Legacy schema
 upgrades retain their data transforms. PostgreSQL locks remain explicit where EF
 does not express the required locking operation.
 
 SQL Server work is in progress in the non-packable `CellBridge.Storage.SqlServer`
-and `CellBridge.Lists.SqlServer` projects. The first increment has immutable chunked
-content storage and an independent Lists schema with workspace security policies.
+and `CellBridge.Lists.SqlServer` projects. Document storage implements the existing
+state, content, lifecycle, selective-read and recovery contracts. Engine tests
+exercise the canonical document service with graph-aware saves, replay and
+partial cancellation. Lists has an independent schema with workspace security policies.
 Each project owns its EF Core 10 context and explicit migration entry point.
 Neither project depends on PostgreSQL or on the other SQL Server project.
-Document-state persistence and the Lists engine are not implemented for SQL Server.
-The demo still accepts `PostgreSql` and `InMemory`; SQL Server cannot host an Office
-editing session yet. See [SQL Server engine checks](automated-testing.md#sql-server-engine-checks)
-for the tested scope.
+The full Lists engine and SQL Server content garbage collection remain unimplemented.
+The demo still accepts `PostgreSql` and `InMemory`. Live Office editing against
+SQL Server has not been validated. See [SQL Server engine checks](automated-testing.md#sql-server-engine-checks)
+for coverage and prerequisites.
+
+SQL Server consumers configure `DbContextOptions<SqlServerDocumentDbContext>`
+with `UseSqlServer`, explicitly run `SqlServerStorageMigrator.MigrateAsync` in
+their initializer with setup credentials, then construct `SqlServerStateStore`
+and `SqlServerContentStore` with runtime options. Use the same options instance
+for both stores to identify their shared byte budget. Constructors and requests
+never migrate the schema. The application keeps ownership of its own DbContext.
+Do not enable EF automatic execution-strategy retries. Retry protocol operations
+with the same operation identity so accepted receipts can be replayed.
+
+SQL Server requires delayed durability to be `DISABLED`. Runtime credentials need
+ordinary data permissions on the owned document tables, read access to
+`schema_version` and `usage`, and update access to `usage.StoredBytes` and
+`usage.DocumentCount`. They do not need schema, migration-history or quota-limit
+write permissions. Host authorization still controls document operations.
+Transactions use transaction-owned application locks and database UTC time after
+document coordination. Selective reads use serializable transactions to keep
+pointer and index views consistent without changing database snapshot settings.
+Exact path comparisons use complete binary UTF-16 keys, with hash indexes only
+for lookup. Authoritative snapshots and receipts use UTF-8 bytes for accounting.
 
 ## Run the durable sample
 

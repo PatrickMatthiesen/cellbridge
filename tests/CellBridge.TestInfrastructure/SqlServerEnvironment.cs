@@ -31,6 +31,7 @@ public sealed class SqlServerEnvironment : IAsyncDisposable
         builder.Resources.Clear();
         var sql = builder.AddSqlServer("sqlserver")
             .WithImageTag("2022-latest")
+            .WithEnvironment("MSSQL_MEMORY_LIMIT_MB", "2048")
             .WithEnvironment("MSSQL_PID", "Developer");
         sql.AddDatabase("documents");
         sql.AddDatabase("lists");

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.Shared;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;

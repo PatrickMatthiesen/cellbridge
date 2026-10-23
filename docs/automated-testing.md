@@ -63,8 +63,9 @@ dotnet test tests/CellBridge.SqlServer.Tests --logger trx --results-directory ar
 
 The fixture reuses the main AppHost through Hosting.Testing, removes its default
 resources before startup and adds native Aspire SQL Server database resources.
-It starts SQL Server 2022 Developer with disposable storage, random credentials
-and allocated endpoints, then disposes only its own application. The default
+It starts SQL Server 2022 Developer with a 2048 MiB engine memory limit,
+disposable storage, random credentials and allocated endpoints, then disposes
+only its own application. Leave additional memory for Aspire, .NET and Docker. The default
 development AppHost and PostgreSQL volume remain unchanged. Running this fixture
 uses the native integration's `ACCEPT_EULA=Y` setting for the nonproduction
 Developer edition. Review Microsoft's [container license and platform requirements](https://learn.microsoft.com/en-us/sql/linux/sql-server-linux-docker-container-deployment?view=sql-server-ver17)
@@ -76,11 +77,31 @@ admission, cancellation during chunk insertion, rollback, streamed integrity
 verification and early disposal. Lists checks exercise its separate migrations,
 workspace filter/block policies, immutable authorization anchors, exact persisted
 subject identities, JSON/Unicode round trips and context cleanup across a
-single-connection pool. These are persistence checks. SQL Server document-state,
-protocol saves and Lists engine operations are not yet implemented or qualified.
+single-connection pool. Cleanup-failure checks also use an externally owned open
+connection and inject SQL and non-SQL failures after commit. Both must discard
+the old workspace session without turning the committed mutation into a failure.
+Restricted-runtime inserts must reject null subjects in both identity tables.
+An upgrade check repairs the earlier nullable schema while preserving valid rows.
 
-The Lists transaction helper owns a dedicated connection and binds the workspace
-in `CONTEXT_INFO`, then clears it before returning the connection. This avoids
+Document checks run the public provider conformance contract and the canonical
+document service. They cover inherited file graphs, competing saves, receipts,
+replay after a lost commit reply, cancellation after acceptance, restoration,
+post-lock database time, selective reads without snapshot/content loads,
+rename/delete/recreate, path reservations, snapshot/history limits, exact byte
+accounting, persisted quota admission and atomic recovery import with retry.
+Outer-request checks cover coauthoring with skipped schema-lock fallback, saves
+and replay, read-only authorization and resource-ID lookup without URL fallback.
+Independent providers also exercise host-lock refresh/replacement/fencing and
+coauthor membership transitions.
+Runtime logins cannot create tables or change persisted quota limits.
+These checks do not establish live Office interoperability or full provider
+parity. The full Lists engine and SQL Server content garbage collection are not
+implemented. Fixture startup/health failures are setup failures and do not count
+as product test results.
+
+The Lists transaction helper binds the workspace in `CONTEXT_INFO`, then clears
+it before returning the connection. A failed reset clears its pool and closes the
+session even when the consumer owns the open connection. This avoids
 the documented [`SESSION_CONTEXT` parallel-plan issue](https://learn.microsoft.com/en-us/sql/t-sql/functions/session-context-transact-sql?view=sql-server-ver17).
 Workspace context selects a database scope; host authorization must still approve
 each Lists operation. The runtime user must not own the schema or have permission

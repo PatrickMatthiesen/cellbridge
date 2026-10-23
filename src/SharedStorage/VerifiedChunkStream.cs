@@ -1,7 +1,9 @@
 using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 
-namespace CellBridge.Storage.Abstractions;
+using CellBridge.Storage.Abstractions;
+
+namespace CellBridge.Storage.Shared;
 
 internal sealed class VerifiedChunkStream(IAsyncDisposable context, IAsyncEnumerator<byte[]> chunks,
     CancellationTokenSource readCancellation, ContentHandle handle) : Stream

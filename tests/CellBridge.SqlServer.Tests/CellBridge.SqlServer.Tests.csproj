@@ -8,6 +8,10 @@
     <ProjectReference Include="../CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.SqlServer/CellBridge.Storage.SqlServer.csproj" />
     <ProjectReference Include="../../src/CellBridge.Lists.SqlServer/CellBridge.Lists.SqlServer.csproj" />
+    <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.Conformance/CellBridge.Storage.Conformance.csproj" />
+    <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
+    <Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>

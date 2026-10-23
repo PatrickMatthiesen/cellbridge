@@ -36,7 +36,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         await migrator.MigrateAsync();
         await using (var db = new SqlServerDocumentDbContext(options))
         {
-            Assert.Single(await db.Database.GetAppliedMigrationsAsync());
+            Assert.Equal(2, (await db.Database.GetAppliedMigrationsAsync()).Count());
             Assert.False(db.Database.HasPendingModelChanges());
             await db.Database.ExecuteSqlRawAsync("""
                 INSERT INTO cellbridge_documents.__CellBridgeDocumentMigrationsHistory VALUES ('20990101000000_Unknown','10.0.13')
@@ -151,6 +151,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
             GRANT SELECT,INSERT ON cellbridge_documents.objects TO cb_content_runtime;
             GRANT SELECT,INSERT ON cellbridge_documents.chunks TO cb_content_runtime;
             GRANT SELECT ON cellbridge_documents.usage TO cb_content_runtime;
+            GRANT SELECT ON cellbridge_documents.schema_version TO cb_content_runtime;
             GRANT UPDATE (StoredBytes) ON cellbridge_documents.usage TO cb_content_runtime;
             """, connection);
         await command.ExecuteNonQueryAsync();
