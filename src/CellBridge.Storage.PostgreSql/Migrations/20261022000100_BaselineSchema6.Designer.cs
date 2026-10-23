@@ -278,4 +278,3 @@ namespace CellBridge.Storage.PostgreSql.Migrations
         }
     }
 }
-
