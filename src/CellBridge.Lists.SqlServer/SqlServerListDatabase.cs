@@ -53,6 +53,18 @@ internal static class SqlServerListDatabase
         }
     }
 
+    internal static async Task SaveRequiredAsync(SqlServerListDbContext db, CancellationToken ct)
+    {
+        db.ChangeTracker.DetectChanges();
+        await db.SaveChangesAsync(ct);
+        // Suppression bypasses the EF state manager and acceptance of changes,
+        // including when an interceptor returns a fake positive row count.
+        // No database reads are needed to distinguish it from a completed save.
+        db.ChangeTracker.DetectChanges();
+        if (db.ChangeTracker.HasChanges())
+            throw new ListException(ListFailure.Unavailable, "Required Lists publication was suppressed or left pending changes.");
+    }
+
     private static bool IsStoreFailure(Exception ex) => ex is SqlException or DbUpdateException ||
         ex.InnerException is not null && IsStoreFailure(ex.InnerException);
 }

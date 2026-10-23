@@ -6,14 +6,11 @@ using Microsoft.EntityFrameworkCore;
 namespace CellBridge.Lists.SqlServer;
 
 /// <summary>
-/// Initial SQL Server Lists runtime: built-in authorization, list creation/read,
-/// record creation/read and authorized identical create retries. Other operations
-/// fail with NotSupported. Mutations currently serialize per workspace.
+/// SQL Server Lists authority, schema and record mutations. Mutations serialize
+/// per workspace. Queries, views, audit retrieval and host list paging are pending.
 /// </summary>
 /// <remarks>
 /// This non-packable provider does not establish SQL Server performance support.
-/// Templates, references, host authorization, queries, schema publication, record
-/// mutation, views, grant management and audit retrieval remain unsupported.
 /// Run SqlServerListMigrator and SqlServerListSetup with administrator options;
 /// construct this engine with a separate restricted runtime principal. Health
 /// requires SELECT on migration history, VIEW DEFINITION on the Lists schema,
@@ -55,55 +52,84 @@ public sealed partial class SqlServerListEngine : IListEngine
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.TemplateId is not null || request.TemplateVersion is not null) throw Unsupported();
-        var definition = new ListDefinition(request.Id, workspaceId, request.Name, 1,
-            request.Fields, NumberPrefix: request.NumberPrefix);
-        ListValidation.ValidateDefinition(definition, limits);
-        RejectReferences(definition);
-        definition = definition with { Fields = definition.Fields.Select(field => field with { Protected = false }).ToArray() };
-        return OperateAsync(actor, workspaceId, true, async (db, workspace, member) =>
+        return OperateAsync(actor, workspaceId, true, async (db, workspace, member, authorization) =>
         {
             if (!member.CanCreateLists) throw Forbidden();
+            var definition = await InstantiateAsync(db, workspaceId, request, ct);
+            await ValidateReferenceDefinitionsAsync(db, workspaceId, actor.Subject, definition, authorization, ct);
             if (await db.Lists.AnyAsync(row => row.WorkspaceId == workspaceId && row.ListId == request.Id, ct))
                 throw Conflict("That list ID already exists.");
             if (await db.Lists.LongCountAsync(row => row.WorkspaceId == workspaceId, ct) >= limits.MaxLists)
                 throw Limit("The workspace list limit has been reached.");
             var list = new ListRow { WorkspaceId = workspaceId, ListId = request.Id, Name = definition.Name,
-                SchemaVersion = 1, NumberPrefix = definition.NumberPrefix };
+                SchemaVersion = 1, NumberPrefix = definition.NumberPrefix, TemplateId = definition.TemplateId,
+                TemplateVersion = definition.TemplateVersion };
             var schema = new ListSchemaRow { WorkspaceId = workspaceId, ListId = request.Id,
                 SchemaVersion = 1, Definition = JsonSerializer.Serialize(definition, JsonOptions) };
             db.Lists.Add(list);
             db.ListSchemas.Add(schema);
             db.ListCounters.Add(new ListCounterRow { WorkspaceId = workspaceId, ListId = request.Id });
-            db.ListGrants.Add(new ListGrantRow { WorkspaceId = workspaceId, ListId = request.Id,
-                Subject = actor.Subject, Access = (int)(ListAccess.Read | ListAccess.Write | ListAccess.Design) });
-            await db.SaveChangesAsync(ct);
-            // Consume the persisted schema, including changes made by save interceptors.
+            if (authorization is null)
+                db.ListGrants.Add(new ListGrantRow { WorkspaceId = workspaceId, ListId = request.Id,
+                    Subject = actor.Subject, Access = (int)(ListAccess.Read | ListAccess.Write | ListAccess.Design) });
+            await SqlServerListDatabase.SaveRequiredAsync(db, ct);
             await db.Entry(schema).ReloadAsync(ct);
+            await db.Entry(list).ReloadAsync(ct);
             var persisted = ReadDefinition(schema.Definition);
             ListValidation.ValidateDefinition(persisted, limits);
             if (persisted.Id != definition.Id || persisted.WorkspaceId != workspaceId || persisted.SchemaVersion != 1 ||
-                !StringComparer.Ordinal.Equals(persisted.Name, list.Name) || persisted.TemplateId is not null ||
-                persisted.TemplateVersion is not null || persisted.NumberPrefix != list.NumberPrefix ||
-                persisted.Fields.Any(field => field.Protected))
+                !StringComparer.Ordinal.Equals(persisted.Name, list.Name) || persisted.TemplateId != definition.TemplateId ||
+                persisted.TemplateVersion != definition.TemplateVersion || persisted.TemplateId != list.TemplateId ||
+                persisted.TemplateVersion != list.TemplateVersion || persisted.NumberPrefix != list.NumberPrefix)
                 throw InvalidStored();
-            RejectReferences(persisted);
+            // Interceptors may change display/ordinary fields, but cannot invent
+            // template provenance or replace pinned protected field definitions.
+            var protectedFields = definition.Fields.Where(field => field.Protected).ToArray();
+            if (!JsonNode.DeepEquals(JsonSerializer.SerializeToNode(protectedFields, JsonOptions),
+                JsonSerializer.SerializeToNode(persisted.Fields.Where(field => field.Protected).ToArray(), JsonOptions))) throw InvalidStored();
+            await ValidateReferenceDefinitionsAsync(db, workspaceId, actor.Subject, persisted, authorization, ct);
             var json = schema.Definition;
             var fields = persisted.Fields.Select(field => field.Id).ToArray();
-            Reserve(workspace, checked(JsonBytes(json) + 256 + 80 + Encoding.UTF8.GetByteCount(actor.Subject)),
+            Reserve(workspace, checked(JsonBytes(json) + 256 + (authorization is null ? 80 + Encoding.UTF8.GetByteCount(actor.Subject) : 0)),
                 actor.Subject, "list.create", fields.Length);
             db.AuditEvents.Add(Audit(workspaceId, await SqlServerListDatabase.ClockAsync(db, ct), actor.Subject,
                 "list.create", request.Id, null, 1, fields));
-            await db.SaveChangesAsync(ct);
+            await SqlServerListDatabase.SaveRequiredAsync(db, ct);
             await db.Entry(schema).ReloadAsync(ct);
             if (!StringComparer.Ordinal.Equals(schema.Definition, json)) throw InvalidStored();
             return persisted;
-        }, ct);
+        }, ct, [(null, ListAuthorizationAction.CreateList)], async db =>
+            (await InstantiateAsync(db, workspaceId, request, ct)).Fields.Where(field => field.Type == ListFieldType.Reference)
+                .Select(field => field.ReferenceListId!.Value).Distinct().ToArray());
+    }
+
+    private async Task<ListDefinition> InstantiateAsync(SqlServerListDbContext db, Guid workspaceId,
+        CreateListRequest request, CancellationToken ct)
+    {
+        ListDefinition definition;
+        if (request.TemplateId is { } templateId && request.TemplateVersion is { } version)
+        {
+            var row = await db.Templates.AsNoTracking().SingleOrDefaultAsync(row => row.TemplateId == templateId && row.Version == version, ct)
+                ?? throw NotFound();
+            var template = JsonSerializer.Deserialize<ListTemplate>(row.Definition, JsonOptions) ?? throw InvalidStored();
+            if (template.Id != templateId || template.Version != version) throw InvalidStored();
+            definition = ListTemplates.Instantiate(template, workspaceId, request.Id, request.Name, request.Fields, request.NumberPrefix, limits);
+        }
+        else
+        {
+            if (request.TemplateId is not null || request.TemplateVersion is not null) throw Validation("Template ID and version must be supplied together.");
+            definition = new ListDefinition(request.Id, workspaceId, request.Name, 1, request.Fields, NumberPrefix: request.NumberPrefix);
+            ListValidation.ValidateDefinition(definition, limits);
+            definition = definition with { Fields = definition.Fields.Select(field => field with { Protected = false }).ToArray() };
+        }
+        return definition;
     }
 
     public Task<IReadOnlyList<ListDefinition>> GetListsAsync(ListActor actor, Guid workspaceId,
-        CancellationToken ct = default) => OperateAsync<IReadOnlyList<ListDefinition>>(actor, workspaceId, false,
-        async (db, workspace, member) =>
+        CancellationToken ct = default) => authorizationProvider is not null
+        ? Task.FromException<IReadOnlyList<ListDefinition>>(Unsupported())
+        : OperateAsync<IReadOnlyList<ListDefinition>>(actor, workspaceId, false,
+        async (db, workspace, member, authorization) =>
         {
             var key = SqlServerListSetup.SubjectKey(actor.Subject);
             var rows = await (from list in db.Lists.AsNoTracking()
@@ -120,23 +146,23 @@ public sealed partial class SqlServerListEngine : IListEngine
         }, ct);
 
     public Task<ListDefinition> GetListAsync(ListActor actor, Guid workspaceId, Guid listId,
-        CancellationToken ct = default) => OperateAsync(actor, workspaceId, false, async (db, workspace, member) =>
+        CancellationToken ct = default) => OperateAsync(actor, workspaceId, false, async (db, workspace, member, authorization) =>
         {
-            await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Read, ct);
+            await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Read, ct, authorization);
             return await GetDefinitionAsync(db, workspaceId, listId, ct);
-        }, ct);
+        }, ct, [(listId, ListAuthorizationAction.Read)]);
 
     public Task<ListRecord> GetRecordAsync(ListActor actor, Guid workspaceId, Guid listId, Guid recordId,
-        CancellationToken ct = default) => OperateAsync(actor, workspaceId, false, async (db, workspace, member) =>
+        CancellationToken ct = default) => OperateAsync(actor, workspaceId, false, async (db, workspace, member, authorization) =>
         {
-            await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Read, ct);
+            await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Read, ct, authorization);
             var definition = await GetDefinitionAsync(db, workspaceId, listId, ct);
             var row = await db.Records.AsNoTracking().SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
                 row.ListId == listId && row.RecordId == recordId, ct) ?? throw NotFound();
             var values = ReadValues(row.ValuesJson);
             ListValidation.ValidateValues(definition, values, limits);
             return ToRecord(row, values);
-        }, ct);
+        }, ct, [(listId, ListAuthorizationAction.Read)]);
 
     public Task<CreateRecordResult> CreateRecordAsync(ListActor actor, Guid workspaceId, Guid listId,
         CreateRecordRequest request, CancellationToken ct = default)
@@ -147,12 +173,11 @@ public sealed partial class SqlServerListEngine : IListEngine
         // but receipts always identify the original validated request.
         var snapshot = request with { Values = (JsonObject)request.Values.DeepClone() };
         var digest = ListValidation.CreateDigest(snapshot);
-        return OperateAsync(actor, workspaceId, true, async (db, workspace, member) =>
+        return OperateAsync(actor, workspaceId, true, async (db, workspace, member, authorization) =>
         {
             // Current membership and Write permission precede all receipt inspection.
-            await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Write, ct);
+            await RequireAccessAsync(db, workspaceId, listId, actor.Subject, ListAccess.Write, ct, authorization);
             var definition = await GetDefinitionAsync(db, workspaceId, listId, ct);
-            RejectReferences(definition);
             await SqlServerListDatabase.LockAsync(db,
                 $"CellBridge.Lists.Record:{workspaceId:N}:{listId:N}:{snapshot.Id:N}", true, limits, ct);
             var now = await SqlServerListDatabase.ClockAsync(db, ct);
@@ -176,6 +201,7 @@ public sealed partial class SqlServerListEngine : IListEngine
                 throw Conflict("That record ID was already used.");
             if (snapshot.SchemaVersion != definition.SchemaVersion) throw Conflict("The current schema version is required.");
             ListValidation.ValidateValues(definition, snapshot.Values, limits);
+            await ValidateReferenceValuesAsync(db, workspaceId, actor.Subject, definition, snapshot.Values, authorization, ct);
             var counter = await db.ListCounters.SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
                 row.ListId == listId, ct) ?? throw InvalidStored();
             if (limits.MaxRecordsPerList is { } maximum && counter.IdentityCount >= maximum)
@@ -192,18 +218,20 @@ public sealed partial class SqlServerListEngine : IListEngine
             db.RecordTombstones.Add(new RecordTombstoneRow { WorkspaceId = workspaceId, ListId = listId, RecordId = snapshot.Id });
             db.Records.Add(record);
             db.CreateReceipts.Add(createdReceipt);
-            await db.SaveChangesAsync(ct);
+            await SqlServerListDatabase.SaveRequiredAsync(db, ct);
             await db.Entry(record).ReloadAsync(ct);
             await db.Entry(createdReceipt).ReloadAsync(ct);
             ValidatePublication();
             var values = ReadValues(record.ValuesJson);
             ListValidation.ValidateValues(definition, values, limits);
+            await ValidateReferenceValuesAsync(db, workspaceId, actor.Subject, definition, values, authorization, ct);
+            await ReconcileReferencesAsync(db, workspaceId, listId, snapshot.Id, definition, values, ct);
             var persistedJson = record.ValuesJson;
             var fields = values.Select(value => Guid.Parse(value.Key)).ToArray();
             var receiptBytes = checked(192L + Encoding.UTF8.GetByteCount(digest) + Encoding.UTF8.GetByteCount(actor.Subject));
             Reserve(workspace, checked(JsonBytes(persistedJson) + receiptBytes + 128), actor.Subject, "record.create", fields.Length);
             db.AuditEvents.Add(Audit(workspaceId, now, actor.Subject, "record.create", listId, snapshot.Id, 1, fields));
-            await db.SaveChangesAsync(ct);
+            await SqlServerListDatabase.SaveRequiredAsync(db, ct);
             await db.Entry(record).ReloadAsync(ct);
             await db.Entry(createdReceipt).ReloadAsync(ct);
             ValidatePublication();
@@ -223,43 +251,76 @@ public sealed partial class SqlServerListEngine : IListEngine
                     !StringComparer.Ordinal.Equals(createdReceipt.RequestDigest, digest) || createdReceipt.CreatedUtc != now ||
                     createdReceipt.ExpiresUtc != now.Add(limits.ReceiptLifetime)) throw InvalidStored();
             }
-        }, ct);
+        }, ct, [(listId, ListAuthorizationAction.Write)], db => ReferenceTargetsAsync(db, workspaceId, listId,
+            snapshot.Values.Where(value => value.Value is not null).Select(value => Guid.Parse(value.Key)).ToHashSet(), ct));
     }
 
     private Task<T> OperateAsync<T>(ListActor actor, Guid workspaceId, bool mutation,
-        Func<SqlServerListDbContext, WorkspaceRow, MembershipRow, Task<T>> operation, CancellationToken ct)
+        Func<SqlServerListDbContext, WorkspaceRow, MembershipRow, OperationAuthorization?, Task<T>> operation,
+        CancellationToken ct, IReadOnlyList<(Guid? ListId, ListAuthorizationAction Action)>? requirements = null,
+        Func<SqlServerListDbContext, Task<Guid[]>>? referenceTargets = null)
     {
         ListAuthorizationValidation.ValidateActor(actor);
-        if (workspaceId == Guid.Empty) throw new ListException(ListFailure.Validation, "A workspace ID is required.");
+        if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
         return SqlServerListDatabase.MapFailuresAsync(async () =>
         {
-            await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(options, workspaceId, ct,
-                limits.StatementTimeout);
+            var authorization = await AuthorizeOperationAsync(actor, workspaceId, requirements ?? [], referenceTargets, ct);
+            await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(options, workspaceId, ct, limits.StatementTimeout);
             var db = scope.Context;
             await CheckConfigurationAsync(db, ct);
             await SqlServerListDatabase.LockAsync(db, SqlServerListDatabase.WorkspaceLock(workspaceId), mutation, limits, ct);
             var workspace = await db.Workspaces.SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId, ct) ?? throw Forbidden();
-            if (!StringComparer.Ordinal.Equals(workspace.AuthorizationMode, "builtin")) throw Unsupported();
-            var key = SqlServerListSetup.SubjectKey(actor.Subject);
-            var member = await db.Memberships.AsNoTracking().SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
-                EF.Property<byte[]>(row, "SubjectKey") == key, ct);
-            if (member is null || !StringComparer.Ordinal.Equals(member.Subject, actor.Subject)) throw Forbidden();
-            if (workspace.SecurityAuditCount >= limits.MaxSecurityAuditEvents)
-                throw new ListException(ListFailure.Unavailable, "The workspace security audit reserve is exhausted.");
-            var result = await operation(db, workspace, member);
+            MembershipRow member;
+            if (authorization is null)
+            {
+                if (!StringComparer.Ordinal.Equals(workspace.AuthorizationMode, "builtin")) throw NotFound();
+                member = await FindMemberAsync(db, workspaceId, actor.Subject, ct) ?? throw Forbidden();
+            }
+            else
+            {
+                RequireAnchor(workspace, authorization, actor);
+                member = new MembershipRow { Subject = actor.Subject,
+                    CanCreateLists = authorization.Allows(null, ListAuthorizationAction.CreateList) };
+                authorization.ValidateFreshness();
+            }
+            RequireReserve(workspace);
+            var result = await operation(db, workspace, member, authorization);
+            authorization?.ValidateFreshness();
             await scope.CommitAsync(ct);
             return result;
         }, ct);
     }
 
-    private static async Task RequireAccessAsync(SqlServerListDbContext db, Guid workspaceId, Guid listId,
-        string subject, ListAccess required, CancellationToken ct)
+    private static async Task<MembershipRow?> FindMemberAsync(SqlServerListDbContext db, Guid workspaceId,
+        string subject, CancellationToken ct, bool tracked = false)
     {
+        var key = SqlServerListSetup.SubjectKey(subject);
+        var query = tracked ? db.Memberships.AsTracking() : db.Memberships.AsNoTracking();
+        var member = await query.SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
+            EF.Property<byte[]>(row, "SubjectKey") == key, ct);
+        if (member is not null && !StringComparer.Ordinal.Equals(member.Subject, subject)) throw Forbidden();
+        return member;
+    }
+
+    private static async Task RequireAccessAsync(SqlServerListDbContext db, Guid workspaceId, Guid listId,
+        string subject, ListAccess required, CancellationToken ct, OperationAuthorization? authorization = null)
+    {
+        if (authorization is not null)
+        {
+            if (!authorization.Allows(listId, required)) throw NotFound();
+            return;
+        }
         var key = SqlServerListSetup.SubjectKey(subject);
         var grant = await db.ListGrants.AsNoTracking().SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
             row.ListId == listId && EF.Property<byte[]>(row, "SubjectKey") == key, ct);
         if (grant is null || !StringComparer.Ordinal.Equals(grant.Subject, subject) ||
             ((ListAccess)grant.Access & required) != required) throw NotFound();
+    }
+
+    private void RequireReserve(WorkspaceRow workspace)
+    {
+        if (workspace.SecurityAuditCount >= limits.MaxSecurityAuditEvents)
+            throw new ListException(ListFailure.Unavailable, "The workspace security audit reserve is exhausted.");
     }
 
     private static async Task<ListDefinition> GetDefinitionAsync(SqlServerListDbContext db, Guid workspaceId,
@@ -288,7 +349,7 @@ public sealed partial class SqlServerListEngine : IListEngine
     }
 
     private static AuditEventRow Audit(Guid workspaceId, DateTimeOffset now, string actor, string action,
-        Guid listId, Guid? recordId, long revision, Guid[] fields) => new() { WorkspaceId = workspaceId,
+        Guid? listId, Guid? recordId, long? revision, Guid[] fields) => new() { WorkspaceId = workspaceId,
             Utc = now, Actor = actor, Action = action, ListId = listId, RecordId = recordId, Revision = revision, FieldIds = fields };
 
     // Logical JSON bytes are UTF-8 bytes of compact System.Text.Json output after
@@ -298,14 +359,11 @@ public sealed partial class SqlServerListEngine : IListEngine
     private static JsonObject ReadValues(string json) => JsonNode.Parse(json) as JsonObject ?? throw InvalidStored();
     private static ListRecord ToRecord(RecordRow row, JsonObject values) => new(row.RecordId, row.WorkspaceId, row.ListId,
         row.SchemaVersion, row.Revision, row.Number, values, row.CreatedUtc, row.ModifiedUtc, row.CreatedBy, row.ModifiedBy);
-    private static void RejectReferences(ListDefinition definition)
-    {
-        if (definition.Fields.Any(field => field.Type == ListFieldType.Reference)) throw Unsupported();
-    }
+    private static ListException Validation(string message) => new(ListFailure.Validation, message);
     private static ListException Forbidden() => new(ListFailure.Forbidden, "Workspace membership and permission are required.");
     private static ListException NotFound() => new(ListFailure.NotFound, "The list or record was not found.");
     private static ListException Conflict(string message) => new(ListFailure.Conflict, message);
     private static ListException Limit(string message) => new(ListFailure.Limit, message);
     private static ListException InvalidStored() => new(ListFailure.Unavailable, "Persisted list state is invalid or changed during publication.");
-    private static ListException Unsupported() => new(ListFailure.NotSupported, "This operation is not supported by the initial SQL Server Lists runtime.");
+    private static ListException Unsupported() => new(ListFailure.NotSupported, "This operation is not yet supported by the SQL Server Lists runtime.");
 }

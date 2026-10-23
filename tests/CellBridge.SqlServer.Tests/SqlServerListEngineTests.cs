@@ -14,7 +14,7 @@ namespace CellBridge.SqlServer.Tests;
 // Each test uses a separate logical database in the existing native Aspire fixture.
 // No extra engine/container, shared fixture edits or document-provider dependencies.
 [Collection("SQL Server")]
-public sealed class SqlServerListEngineTests(SqlServerFixture fixture)
+public sealed partial class SqlServerListEngineTests(SqlServerFixture fixture)
 {
     private static readonly ListActor Admin = new("administrator");
 
@@ -84,7 +84,7 @@ public sealed class SqlServerListEngineTests(SqlServerFixture fixture)
             NewListRequest()));
         var created = await env.Engine.CreateListAsync(new("creator"), env.Workspace, NewListRequest());
         Assert.Equal("Rows", created.Name);
-        await Failure(ListFailure.NotSupported, () => env.Engine.SetListGrantAsync(new("creator"), env.Workspace,
+        await Failure(ListFailure.Forbidden, () => env.Engine.SetListGrantAsync(new("creator"), env.Workspace,
             list.Id, "reader", ListAccess.Write));
         await Failure(ListFailure.NotFound, () => env.Engine.GetRecordAsync(new("writer"), env.Workspace, list.Id, request.Id));
         Assert.Equal(request.Id, (await env.Engine.GetRecordAsync(new("reader"), env.Workspace, list.Id, request.Id)).Id);
@@ -365,20 +365,10 @@ public sealed class SqlServerListEngineTests(SqlServerFixture fixture)
         var id = Guid.NewGuid();
         var calls = new Func<Task>[]
         {
-            () => env.Engine.PublishSchemaAsync(Admin, env.Workspace, list.Id, new(1, "Rows", list.Fields)),
-            () => env.Engine.UpdateRecordAsync(Admin, env.Workspace, list.Id, id, new(1, 1, [])),
-            () => env.Engine.DeleteRecordAsync(Admin, env.Workspace, list.Id, id, 1),
             () => env.Engine.QueryAsync(Admin, env.Workspace, list.Id, new()),
-            () => env.Engine.PreviewMergeAsync(Admin, env.Workspace, list.Id, id, new(1, new JsonObject(), [])),
             () => env.Engine.GetViewsAsync(Admin, env.Workspace, list.Id),
             () => env.Engine.SaveViewAsync(Admin, env.Workspace, list.Id, new(id, "View", new(), [])),
-            () => env.Engine.ResolveReferenceAsync(Admin, env.Workspace, list.Id, id, id),
-            () => env.Engine.SetMembershipAsync(Admin, env.Workspace, "new", true, true, true),
-            () => env.Engine.SetListGrantAsync(Admin, env.Workspace, list.Id, "actor", ListAccess.Write),
-            () => env.Engine.GetAuditAsync(Admin, env.Workspace),
-            () => env.Engine.CreateListAsync(Admin, env.Workspace, NewListRequest() with { TemplateId = id, TemplateVersion = 1 }),
-            () => env.Engine.CreateListAsync(Admin, env.Workspace, NewListRequest() with
-                { Fields = [new(id, "Ref", ListFieldType.Reference, ReferenceListId: list.Id)] })
+            () => env.Engine.GetAuditAsync(Admin, env.Workspace)
         };
         foreach (var call in calls) await Failure(ListFailure.NotSupported, call);
         Assert.Equal(before, await env.SnapshotAsync(list.Id));
@@ -390,7 +380,7 @@ public sealed class SqlServerListEngineTests(SqlServerFixture fixture)
             await scope.Context.SaveChangesAsync();
             await scope.CommitAsync();
         }
-        await Failure(ListFailure.NotSupported, () => env.Engine.CreateListAsync(Admin, hostWorkspace, NewListRequest()));
+        await Failure(ListFailure.NotFound, () => env.Engine.CreateListAsync(Admin, hostWorkspace, NewListRequest()));
         using var canceled = new CancellationTokenSource();
         canceled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => env.Engine.CreateRecordAsync(Admin, env.Workspace,

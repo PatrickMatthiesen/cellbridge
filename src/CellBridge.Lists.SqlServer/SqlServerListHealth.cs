@@ -82,14 +82,16 @@ public sealed partial class SqlServerListEngine
     internal static readonly (string Table, string[] Permissions)[] RuntimePermissions =
     [
         ("schema_version", ["SELECT"]),
+        ("templates", ["SELECT"]),
+        ("record_references", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
         (SqlServerListDbContext.MigrationsHistoryTable, ["SELECT"]),
         ("workspaces", ["SELECT", "UPDATE"]),
-        ("memberships", ["SELECT"]),
-        ("lists", ["SELECT", "INSERT"]),
+        ("memberships", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
+        ("lists", ["SELECT", "INSERT", "UPDATE"]),
         ("list_schemas", ["SELECT", "INSERT"]),
         ("list_counters", ["SELECT", "INSERT", "UPDATE"]),
-        ("list_grants", ["SELECT", "INSERT"]),
-        ("records", ["SELECT", "INSERT"]),
+        ("list_grants", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
+        ("records", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
         ("record_tombstones", ["SELECT", "INSERT"]),
         ("create_receipts", ["SELECT", "INSERT"]),
         ("audit_events", ["SELECT", "INSERT"])
