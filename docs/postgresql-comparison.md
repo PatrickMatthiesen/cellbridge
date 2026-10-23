@@ -156,31 +156,3 @@ selects only those regions. Allocation ticks estimate allocated bytes, not retai
 heap. Sampled stacks include blocked threads and profiler work; their counts are
 not CPU utilization. Command durations include driver and server work. Keep these
 instrumented results separate from BDN timings and allocations.
-
-## October 2026 EF allocation follow-up
-
-On .NET 10.0.12 with SDK 10.0.401, EF Core 10.0.13 and Npgsql/provider 10.0.3,
-the remaining ordinary create-state query allocated about 14 kB per operation
-along query-execution stacks after warmup. An engine-owned compiled query removes
-that work. It retains the existing model guard and ordinary-query fallback,
-tracked entities, post-lock reads and database clock. SQL, lock order, validation,
-authorization, accounting, receipts and saves are unchanged.
-
-Two alternating merged-EF/changed-EF runs used the corrected long-lived engine,
-unchanged seed-42 inputs and 16-operation batches. Merged EF allocated
-153.8 to 153.9 kB per create; changed EF allocated 141.7 kB, a 7.9% reduction.
-Create means were 4.758 to 4.947 ms before and 4.592 to 4.616 ms after. The 99.9%
-confidence intervals overlap, so these runs do not establish a latency benefit.
-The unchanged patch control also varied. Create still executes seven
-commands/batches and patch six. These counts exclude transaction protocol messages
-and are not SQL statement or packet counts.
-
-The 109 real-PostgreSQL Lists tests passed. Coverage includes fresh creates after
-a consumer-model change and warm creates that wait for committed quota/counter
-changes, reject exhausted quotas, roll back their identity claims, then save and
-replay the same ID. No document or paging change was justified by this investigation.
-The raw runs, profiles, confidence intervals, validation and resource observations
-are retained locally under `artifacts/ef-performance-followup-2026-10-23/`, with a
-hashed completed copy under the same directory name in the main checkout's
-`artifacts/`. This is an allocation result for this workload, not evidence about
-retained memory, production capacity or live Office editing.
