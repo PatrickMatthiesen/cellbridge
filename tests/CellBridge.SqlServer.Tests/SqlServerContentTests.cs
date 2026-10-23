@@ -137,6 +137,8 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
             .UseSqlServer("Server=unreachable;Database=test;Integrated Security=true", sql => sql.EnableRetryOnFailure()).Options;
         Assert.Throws<ArgumentException>(() => new SqlServerContentStore(options));
         Assert.Throws<ArgumentException>(() => new SqlServerStorageMigrator(options));
+        Assert.Throws<ArgumentException>(() => new SqlServerStateStore(options));
+        Assert.Throws<ArgumentException>(() => new StorageMaintenance(options));
     }
 
     private async Task<string> CreateRuntimeAsync()

@@ -93,11 +93,25 @@ Outer-request checks cover coauthoring with skipped schema-lock fallback, saves
 and replay, read-only authorization and resource-ID lookup without URL fallback.
 Independent providers also exercise host-lock refresh/replacement/fencing and
 coauthor membership transitions.
+Namespace checks cover repeated recreation through renamed lifecycle ancestors,
+unrelated retired reservations, and hash/key/missing-row corruption. Health,
+path misses and admission reject damaged namespace indexes without reading
+content objects or chunks.
 Runtime logins cannot create tables or change persisted quota limits.
 These checks do not establish live Office interoperability or full provider
-parity. The full Lists engine and SQL Server content garbage collection are not
-implemented. Fixture startup/health failures are setup failures and do not count
+parity. The full Lists engine is not implemented in this branch.
+Fixture startup/health failures are setup failures and do not count
 as product test results.
+
+Quiescent collection checks cover dry-run/apply reports, retained-only save
+receipts, history/graph roots, deleted and recreated documents, pending external
+deliveries, imported recovery snapshots and receipt replay. Corrupt inventories
+abort before deletion. Faults and cancellation during a sweep roll back chunks
+and accounting; cancellation after commit preserves the completed report.
+The engine also checks that collection blocks content quota admission, document
+publication and recovery while holding its transaction lock. Such tests exercise
+transaction ordering at the maintenance boundary, not live collection during
+multi-step Office saves. An explicit quiescent apply is still required.
 
 The Lists transaction helper binds the workspace in `CONTEXT_INFO`, then clears
 it before returning the connection. A failed reset clears its pool and closes the

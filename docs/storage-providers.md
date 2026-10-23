@@ -23,7 +23,7 @@ exercise the canonical document service with graph-aware saves, replay and
 partial cancellation. Lists has an independent schema with workspace security policies.
 Each project owns its EF Core 10 context and explicit migration entry point.
 Neither project depends on PostgreSQL or on the other SQL Server project.
-The full Lists engine and SQL Server content garbage collection remain unimplemented.
+The full Lists engine remains unimplemented in this branch.
 The demo still accepts `PostgreSql` and `InMemory`. Live Office editing against
 SQL Server has not been validated. See [SQL Server engine checks](automated-testing.md#sql-server-engine-checks)
 for coverage and prerequisites.
@@ -47,6 +47,37 @@ document coordination. Selective reads use serializable transactions to keep
 pointer and index views consistent without changing database snapshot settings.
 Exact path comparisons use complete binary UTF-16 keys, with hash indexes only
 for lookup. Authoritative snapshots and receipts use UTF-8 bytes for accounting.
+Health checks and namespace admission compare path indexes with current snapshots.
+Successful selective reads use derived metadata rows. Path misses validate current
+state JSON before returning an unknown path; they never read content objects or chunks.
+Create, rename and recreate take the exclusive publication lock for this check;
+ordinary document and content writes take its shared form. Recreation recognizes
+verified deleted lifecycle ancestors while preserving unrelated reservations.
+
+SQL Server provides explicit quiescent collection through
+`CellBridge.Storage.SqlServer.StorageMaintenance`. Stop every host, reader, writer
+and publisher before applying it. Use maintenance credentials with delete access
+to the owned content objects and chunks, read access to the document inventory and
+usage ledger, and update access to `usage.StoredBytes`. The normal runtime login
+used by the engine tests cannot delete content.
+
+```csharp
+var maintenance = new CellBridge.Storage.SqlServer.StorageMaintenance(options, limits);
+var preview = await maintenance.CollectOrphansAsync();
+var applied = await maintenance.CollectOrphansAsync(apply: true, quiescent: true);
+```
+
+The report has the same counts as PostgreSQL maintenance. A dry run preserves
+every row. Apply removes only unreferenced objects and their chunks and updates
+the byte ledger atomically. The scan includes every retained snapshot, deleted
+lifecycles, immutable history, graph payload handles, save-response receipts and
+pending deliveries. Imported recovery snapshots remain roots; recovery receipts,
+document identities and read indexes remain unchanged. Invalid roots, missing
+current snapshots, conflicting object metadata or an inconsistent ledger abort
+collection before deletion. Collection, recovery and initialization take the
+exclusive publication lock to keep their inventory and accounting consistent
+with writers. This transaction barrier does not replace caller-owned quiescence
+across operations that publish content and state in separate transactions.
 
 ## Run the durable sample
 

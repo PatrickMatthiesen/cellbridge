@@ -22,6 +22,7 @@ public sealed class SqlServerStorageMigrator
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         await SqlServerDocumentDatabase.ConfigureTransactionAsync(db, cancellationToken);
         await SqlServerDocumentDatabase.CheckDurabilityAsync(db, cancellationToken);
+        await SqlServerDocumentDatabase.LockAsync(db, SqlServerDocumentDatabase.PublicationGate, cancellationToken);
         await SqlServerDocumentDatabase.LockAsync(db, "CellBridge.Documents.Migrations", cancellationToken);
         var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
         if ((await db.Database.GetAppliedMigrationsAsync(cancellationToken)).Any(id => !known.Contains(id)))

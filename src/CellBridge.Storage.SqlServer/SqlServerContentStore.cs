@@ -59,6 +59,7 @@ public sealed class SqlServerContentStore : IContentStore, IStorageBudgetPartici
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SqlServerDocumentDatabase.ConfigureTransactionAsync(db, ct);
         await SqlServerDocumentDatabase.CheckConfigurationAsync(db, ct);
+        await SqlServerDocumentDatabase.LockAsync(db, SqlServerDocumentDatabase.PublicationGate, ct, "Shared");
         // The transaction-owned lock serializes duplicate admission across hosts without
         // catching a unique violation in an XACT_ABORT transaction or replaying callbacks.
         await SqlServerDocumentDatabase.LockAsync(db, "CellBridge.Content." + digest, ct);
