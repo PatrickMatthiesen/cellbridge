@@ -8,5 +8,5 @@
     <Compile Include="../SharedLists/ListRows.cs" Link="Persistence/ListRows.cs" />
     <InternalsVisibleTo Include="CellBridge.SqlServer.Tests" />
   </ItemGroup>
-  <PropertyGroup><Description>SQL Server persistence foundation for native CellBridge workspace lists.</Description></PropertyGroup>
+  <PropertyGroup><Description>Partial SQL Server runtime for native workspace lists: built-in list and record creation/read with create receipts. Other operations remain unsupported.</Description></PropertyGroup>
 </Project>
