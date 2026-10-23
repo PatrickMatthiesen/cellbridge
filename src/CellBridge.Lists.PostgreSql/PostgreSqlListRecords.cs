@@ -476,11 +476,13 @@ public sealed partial class PostgreSqlListEngine
                 actor, digest, ct);
 
         await LockCreateStateAsync(connection, transaction, workspaceId, listId, ct);
-        var state = await (from workspaceRow in db.Workspaces
+        var state = CanUseCompiledContextQueries(db)
+            ? await _compiledCreateState(db, workspaceId, listId, ct)
+            : await (from workspaceRow in db.Workspaces
             join counterRow in db.ListCounters
                 on workspaceRow.WorkspaceId equals counterRow.WorkspaceId
             where workspaceRow.WorkspaceId == workspaceId && counterRow.ListId == listId
-            select new
+            select new CreateStateProjection
             {
                 Workspace = workspaceRow,
                 Counter = counterRow,
