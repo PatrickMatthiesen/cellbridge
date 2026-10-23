@@ -13,6 +13,9 @@ operations retain authorization, forced workspace RLS, validation, conditional
 revisions, receipts, auditing, foreign keys and synchronous commits. Connection
 strings and credentials are excluded from the report.
 
+For the corrected warm BenchmarkDotNet SQL/EF comparison, see
+[Warm PostgreSQL provider comparisons](postgresql-comparison.md).
+
 ## Run a local measurement
 
 Run the Release executable directly:
