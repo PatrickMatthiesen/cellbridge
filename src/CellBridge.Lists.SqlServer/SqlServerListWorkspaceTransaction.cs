@@ -18,7 +18,8 @@ internal sealed class SqlServerListWorkspaceTransaction : IAsyncDisposable
     }
 
     internal static async Task<SqlServerListWorkspaceTransaction> OpenAsync(
-        DbContextOptions<SqlServerListDbContext> options, Guid workspaceId, CancellationToken ct = default)
+        DbContextOptions<SqlServerListDbContext> options, Guid workspaceId, CancellationToken ct = default,
+        TimeSpan? statementTimeout = null)
     {
         if (workspaceId == Guid.Empty) throw new ArgumentException("A workspace ID is required.", nameof(workspaceId));
         var context = new SqlServerListDbContext(options);
@@ -29,13 +30,26 @@ internal sealed class SqlServerListWorkspaceTransaction : IAsyncDisposable
                 throw new ArgumentException("A non-retrying SQL Server EF provider is required.", nameof(options));
             if (new SqlConnectionStringBuilder(context.Database.GetDbConnection().ConnectionString).MultipleActiveResultSets)
                 throw new ArgumentException("Workspace operations require MultipleActiveResultSets=false.", nameof(options));
+            context.Database.AutoSavepointsEnabled = false;
+            var timeout = statementTimeout ?? TimeSpan.FromSeconds(10);
+            if (timeout <= TimeSpan.Zero || timeout.TotalMilliseconds > int.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(statementTimeout));
+            // A consumer's shorter command timeout remains an upper bound.
+            var seconds = Math.Max(1, (int)Math.Ceiling(timeout.TotalSeconds));
+            var configured = context.Database.GetCommandTimeout();
+            if (configured is null or 0 || configured > seconds)
+                context.Database.SetCommandTimeout(seconds);
             await context.Database.OpenConnectionAsync(ct);
             transaction = await context.Database.BeginTransactionAsync(ct);
-            await context.Database.ExecuteSqlInterpolatedAsync($"""
-                SET XACT_ABORT ON; SET LOCK_TIMEOUT 10000;
-                DECLARE @workspace varbinary(16) = CONVERT(binary(16), {workspaceId});
+            // SET LOCK_TIMEOUT requires an integer literal. Only the validated
+            // numeric timeout enters this SQL text; workspace identity stays bound.
+            var configureSql = FormattableString.Invariant($"""
+                SET XACT_ABORT ON;
+                SET LOCK_TIMEOUT {(int)Math.Ceiling(timeout.TotalMilliseconds)};
+                DECLARE @workspace varbinary(16) = CONVERT(binary(16), @workspaceId);
                 SET CONTEXT_INFO @workspace;
-                """, ct);
+                """);
+            await context.Database.ExecuteSqlRawAsync(configureSql, [new SqlParameter("@workspaceId", workspaceId)], ct);
             return new(context, transaction);
         }
         catch
