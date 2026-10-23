@@ -207,6 +207,18 @@ public sealed class CompiledContextAndResponseRegressionTests(ListDatabaseFixtur
             new(1, 1, [new(field.Id, JsonValue.Create("after"))]));
         Assert.Equal("after", Assert.Single((await engine.QueryAsync(database.AdminActor,
             workspace, list.Id, new())).Records).Values[field.Id.ToString("D")]!.GetValue<string>());
+        var bytesBeforeFreshCreate = await database.GetWorkspaceBytesAsync(workspace);
+        var modelBeforeFreshCreate = observer.Commands.Last().Model;
+        var freshId = Guid.NewGuid();
+        var fresh = await engine.CreateRecordAsync(database.AdminActor, workspace, list.Id,
+            request with { Id = freshId });
+        Assert.False(fresh.Replayed);
+        Assert.Equal((1L, 2L), (fresh.Revision, fresh.Number));
+        Assert.NotSame(modelBeforeFreshCreate, observer.Commands.Last().Model);
+        Assert.True(await database.GetWorkspaceBytesAsync(workspace) > bytesBeforeFreshCreate);
+        var freshRead = await database.Engine.GetRecordAsync(database.AdminActor, workspace, list.Id, freshId);
+        Assert.Equal((fresh.Revision, fresh.Number), (freshRead.Revision, freshRead.Number));
+        Assert.Equal("before", freshRead.Values[field.Id.ToString("D")]!.GetValue<string>());
         Assert.True(observer.Commands.Select(command => command.Model).Distinct().Count() >= 3);
         Assert.All(observer.Commands, command => Assert.Equal(29, command.Timeout));
         Assert.Equal(System.Data.ConnectionState.Open, connection.State);
@@ -381,7 +393,8 @@ public sealed class CompiledContextAndResponseRegressionTests(ListDatabaseFixtur
         public Expression QueryCompilationStarting(Expression queryExpression, QueryExpressionEventData eventData)
         {
             if (queryExpression.ToString().Contains("ContextProjection", StringComparison.Ordinal) ||
-                queryExpression.ToString().Contains("ListDefinitionProjection", StringComparison.Ordinal))
+                queryExpression.ToString().Contains("ListDefinitionProjection", StringComparison.Ordinal) ||
+                queryExpression.ToString().Contains("CreateStateProjection", StringComparison.Ordinal))
                 Interlocked.Increment(ref _contextCompilations);
             return queryExpression;
         }

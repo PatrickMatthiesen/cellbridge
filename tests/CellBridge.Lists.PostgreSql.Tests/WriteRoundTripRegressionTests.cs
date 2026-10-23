@@ -175,6 +175,94 @@ public sealed class WriteRoundTripRegressionTests(ListDatabaseFixture database)
         }
     }
 
+    [PostgreSqlTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WarmFreshCreateReadsCommittedQuotaAndCounterAfterWaiting(bool auditQuota)
+    {
+        var workspace = await database.NewWorkspaceAsync("waiting-fresh-create");
+        var title = new ListField(Guid.NewGuid(), "Title", ListFieldType.Text);
+        var list = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new(Guid.NewGuid(), "Create quota wait", [title]));
+        var request = new CreateRecordRequest(Guid.NewGuid(), 1, Values(title, "same size"));
+        var empty = await ReadStateAsync(workspace, list.Id);
+        await database.Engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, request);
+        var initial = await ReadStateAsync(workspace, list.Id);
+        var createBytes = initial.Bytes - empty.Bytes;
+        var engine = new PostgreSqlListEngine(database.RuntimeSource!, new ListLimits
+        {
+            MaxWorkspaceBytes = auditQuota ? null : initial.Bytes + 2 * createBytes,
+            MaxAuditEvents = auditQuota ? initial.Audits + 2 : null
+        });
+        // Execute the fresh-create state delegate before testing its warm path.
+        await engine.CreateRecordAsync(database.AdminActor, workspace, list.Id,
+            request with { Id = Guid.NewGuid() });
+        var before = await ReadStateAsync(workspace, list.Id);
+        var pendingRequest = request with { Id = Guid.NewGuid() };
+
+        await using var connection = await database.RuntimeSource!.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await SetContextAsync(connection, transaction, workspace);
+        await using (var consume = new NpgsqlCommand("""
+            UPDATE cellbridge_lists.workspaces
+            SET stored_bytes=stored_bytes+$2,audit_count=audit_count+$3 WHERE workspace_id=$1
+            """, connection, transaction))
+        {
+            consume.Parameters.AddWithValue(workspace);
+            consume.Parameters.AddWithValue(auditQuota ? 0L : 1L);
+            consume.Parameters.AddWithValue(auditQuota ? 1L : 0L);
+            Assert.Equal(1, await consume.ExecuteNonQueryAsync());
+        }
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var create = engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, pendingRequest, cancellation.Token);
+        var committed = false;
+        try
+        {
+            await WaitForBlockerAsync(connection.ProcessID, create, cancellation.Token);
+            await using var counter = new NpgsqlCommand("""
+                UPDATE cellbridge_lists.list_counters SET next_number=41
+                WHERE workspace_id=$1 AND list_id=$2
+                """, connection, transaction);
+            counter.Parameters.AddWithValue(workspace);
+            counter.Parameters.AddWithValue(list.Id);
+            Assert.Equal(1, await counter.ExecuteNonQueryAsync());
+            await transaction.CommitAsync();
+            committed = true;
+            var failure = await Assert.ThrowsAsync<ListException>(() => create.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(ListFailure.Limit, failure.Failure);
+        }
+        finally
+        {
+            if (!committed) await transaction.RollbackAsync();
+            await CancelAndDrainAsync(cancellation, create);
+        }
+        Assert.Equal(before with { Bytes = before.Bytes + (auditQuota ? 0 : 1),
+            Audits = before.Audits + (auditQuota ? 1 : 0), NextNumber = 41 }, await ReadStateAsync(workspace, list.Id));
+
+        // Restore only the consumed quota. The failed claim must allow the same ID again.
+        await database.SetWorkspaceContextAsync(workspace, async (resetConnection, resetTransaction) =>
+        {
+            await using var reset = new NpgsqlCommand("""
+                UPDATE cellbridge_lists.workspaces SET stored_bytes=$2,audit_count=$3 WHERE workspace_id=$1
+                """, resetConnection, resetTransaction);
+            reset.Parameters.AddWithValue(workspace);
+            reset.Parameters.AddWithValue(before.Bytes);
+            reset.Parameters.AddWithValue(before.Audits);
+            Assert.Equal(1, await reset.ExecuteNonQueryAsync());
+        });
+        var saved = await engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, pendingRequest);
+        Assert.False(saved.Replayed);
+        Assert.Equal((1L, 41L), (saved.Revision, saved.Number));
+        var readback = await engine.GetRecordAsync(database.AdminActor, workspace, list.Id, pendingRequest.Id);
+        Assert.Equal((saved.Revision, saved.Number), (readback.Revision, readback.Number));
+        Assert.Equal("same size", readback.Values[title.Id.ToString("D")]!.GetValue<string>());
+        Assert.Equal(before with { Bytes = before.Bytes + createBytes, Audits = before.Audits + 1,
+            Identities = before.Identities + 1, NextNumber = 42, Records = before.Records + 1,
+            Receipts = before.Receipts + 1, Tombstones = before.Tombstones + 1, AuditRows = before.AuditRows + 1 },
+            await ReadStateAsync(workspace, list.Id));
+        Assert.True((await engine.CreateRecordAsync(database.AdminActor, workspace, list.Id, pendingRequest)).Replayed);
+    }
+
     [PostgreSqlFact]
     public async Task CallerNoTrackingOptionsPreserveWritesCountersAccountingAndReceipts()
     {
