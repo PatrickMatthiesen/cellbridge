@@ -11,10 +11,20 @@ objects. In-memory stores are available for disposable development.
 The PostgreSQL package owns its EF Core model and versioned migrations. It does
 not add entities to the application's DbContext. Document storage and native
 Lists use independent contexts, migration histories and package dependencies.
-Only PostgreSQL is implemented and tested by these providers.
+PostgreSQL is the implemented document-state and Lists provider.
 EF generates the table and index migrations from the owned model. Legacy schema
 upgrades retain their data transforms. PostgreSQL locks remain explicit where EF
 does not express the required locking operation.
+
+SQL Server work is in progress in the non-packable `CellBridge.Storage.SqlServer`
+and `CellBridge.Lists.SqlServer` projects. The first increment has immutable chunked
+content storage and an independent Lists schema with workspace security policies.
+Each project owns its EF Core 10 context and explicit migration entry point.
+Neither project depends on PostgreSQL or on the other SQL Server project.
+Document-state persistence and the Lists engine are not implemented for SQL Server.
+The demo still accepts `PostgreSql` and `InMemory`; SQL Server cannot host an Office
+editing session yet. See [SQL Server engine checks](automated-testing.md#sql-server-engine-checks)
+for the tested scope.
 
 ## Run the durable sample
 

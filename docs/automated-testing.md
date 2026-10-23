@@ -52,6 +52,40 @@ tools/capture/.venv/bin/python -m pytest tools/capture tools/testing -q
 node tools/testing/test-list-example-ui.cjs
 ```
 
+## SQL Server engine checks
+
+Run the independent SQL Server tests with .NET 10, Docker on Linux x86-64 and an
+Aspire CLI compatible with the pinned hosting packages:
+
+```sh
+dotnet test tests/CellBridge.SqlServer.Tests --logger trx --results-directory artifacts/sqlserver
+```
+
+The fixture reuses the main AppHost through Hosting.Testing, removes its default
+resources before startup and adds native Aspire SQL Server database resources.
+It starts SQL Server 2022 Developer with disposable storage, random credentials
+and allocated endpoints, then disposes only its own application. The default
+development AppHost and PostgreSQL volume remain unchanged. Running this fixture
+uses the native integration's `ACCEPT_EULA=Y` setting for the nonproduction
+Developer edition. Review Microsoft's [container license and platform requirements](https://learn.microsoft.com/en-us/sql/linux/sql-server-linux-docker-container-deployment?view=sql-server-ver17)
+before running it in another environment.
+
+Content checks cover explicit and concurrent migrations, restricted runtime
+credentials, deduplicated writes from separate store instances, shared quota
+admission, cancellation during chunk insertion, rollback, streamed integrity
+verification and early disposal. Lists checks exercise its separate migrations,
+workspace filter/block policies, immutable authorization anchors, exact persisted
+subject identities, JSON/Unicode round trips and context cleanup across a
+single-connection pool. These are persistence checks. SQL Server document-state,
+protocol saves and Lists engine operations are not yet implemented or qualified.
+
+The Lists transaction helper owns a dedicated connection and binds the workspace
+in `CONTEXT_INFO`, then clears it before returning the connection. This avoids
+the documented [`SESSION_CONTEXT` parallel-plan issue](https://learn.microsoft.com/en-us/sql/t-sql/functions/session-context-transact-sql?view=sql-server-ver17).
+Workspace context selects a database scope; host authorization must still approve
+each Lists operation. The runtime user must not own the schema or have permission
+to alter security policies. Tests use separate setup and runtime logins.
+
 ## Package checks
 
 ```sh

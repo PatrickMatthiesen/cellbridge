@@ -14,6 +14,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <EmbeddedResource Include="Migrations/*.sql" />
+    <Compile Include="../SharedLists/ListRows.cs" Link="Persistence/ListRows.cs" />
   </ItemGroup>
   <PropertyGroup><Description>Experimental typed customer workspace lists with validation, authorized persistence and optional HTTP adapters.</Description></PropertyGroup>
   <ItemGroup>

@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>false</IsPackable></PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="Aspire.Hosting.Testing" Version="17.0.0-preview.1.26520.1" />
+    <PackageReference Include="Aspire.Hosting.SqlServer" Version="17.0.0-preview.1.26520.1" />
     <ProjectReference Include="../../src/CellBridge.AppHost/CellBridge.AppHost.csproj" />
   </ItemGroup>
 </Project>
