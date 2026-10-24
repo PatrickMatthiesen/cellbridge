@@ -330,6 +330,12 @@ internal sealed partial class EfListEngine
     private static PooledDbContextFactory<PostgreSqlListDbContext>? CreateContextFactory(DbContextOptions<PostgreSqlListDbContext> options) =>
         RelationalOptionsExtension.Extract(options).Connection is null ? new(options) : null;
 
+    private async Task<PostgreSqlListWorkspaceTransaction> OpenOperationSessionAsync(Guid workspaceId, CancellationToken ct)
+    {
+        await EnsureHealthyAsync(ct);
+        return await OpenSessionAsync(workspaceId, ct);
+    }
+
     private async Task<PostgreSqlListWorkspaceTransaction> OpenSessionAsync(Guid workspaceId, CancellationToken ct)
     {
         var db = CreateContext();

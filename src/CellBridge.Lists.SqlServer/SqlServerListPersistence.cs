@@ -19,9 +19,23 @@ internal sealed partial class EfListEngine
 
     private async Task EnsureHealthyAsync(CancellationToken ct)
     {
-        await using var session = await OpenSessionAsync(Guid.NewGuid(), ct);
-        await CheckConfigurationAsync(session.Context, ct);
+        await using var session = await OpenOperationSessionAsync(Guid.NewGuid(), ct);
         await session.CommitAsync(ct);
+    }
+
+    private async Task<SqlServerListWorkspaceTransaction> OpenOperationSessionAsync(Guid workspaceId, CancellationToken ct)
+    {
+        var session = await OpenSessionAsync(workspaceId, ct);
+        try
+        {
+            await CheckConfigurationAsync(session.Context, ct);
+            return session;
+        }
+        catch
+        {
+            await session.DisposeAsync();
+            throw;
+        }
     }
 
     private async Task LockAuthorizationAsync(SqlServerListDbContext db, Guid workspaceId, bool exclusive, bool mutation,

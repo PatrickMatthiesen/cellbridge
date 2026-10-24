@@ -170,7 +170,7 @@ internal sealed partial class EfListEngine : IListEngine, IPagedListEngine
         OperationAuthorization authorization, CancellationToken ct) =>
         MapStoreFailuresAsync<IReadOnlyList<Guid>>(async () =>
         {
-            await using var session = await OpenSessionAsync(workspaceId, ct);
+            await using var session = await OpenOperationSessionAsync(workspaceId, ct);
             var db = session.Context;
             var connection = db.Database.GetDbConnection();
             var transaction = db.Database.CurrentTransaction!.GetDbTransaction();
@@ -467,8 +467,7 @@ internal sealed partial class EfListEngine : IListEngine, IPagedListEngine
         MapStoreFailuresAsync(async () =>
         {
             if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
-            await EnsureHealthyAsync(ct);
-            await using var session = await OpenSessionAsync(workspaceId, ct);
+            await using var session = await OpenOperationSessionAsync(workspaceId, ct);
             var db = session.Context;
             var connection = db.Database.GetDbConnection();
             var transaction = db.Database.CurrentTransaction!.GetDbTransaction();

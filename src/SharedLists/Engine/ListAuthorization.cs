@@ -95,8 +95,7 @@ internal sealed partial class EfListEngine
     private Task<WorkspaceAnchor?> ReadAnchorAsync(Guid workspaceId, CancellationToken ct) =>
         MapStoreFailuresAsync<WorkspaceAnchor?>(async () =>
         {
-            await EnsureHealthyAsync(ct);
-            await using var session = await OpenSessionAsync(workspaceId, ct);
+            await using var session = await OpenOperationSessionAsync(workspaceId, ct);
             var db = session.Context;
             var connection = db.Database.GetDbConnection();
             var transaction = db.Database.CurrentTransaction!.GetDbTransaction();
