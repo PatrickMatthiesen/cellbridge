@@ -11,7 +11,7 @@ namespace CellBridge.Lists.PostgreSql;
 internal sealed partial class EfListEngine
 {
     // The operation selects the lock and its order. Providers implement only the
-    // database primitive, including their existing workspace protection.
+    // database lock, including their existing workspace protection.
     private interface IListDatabaseLocks
     {
         Task AuthorizationAsync(ListDbContext db, Guid workspaceId, bool exclusive, bool mutation,

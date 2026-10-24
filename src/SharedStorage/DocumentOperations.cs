@@ -3,7 +3,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CellBridge.Storage.Shared;
 
-/// <summary>Detached document snapshots with explicit cross-host coordination.</summary>
+/// <summary>Persists document snapshots and coordinates changes across hosts.</summary>
 internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore, IDocumentLifecycleStore,
     IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant where TContext : DbContext
 {

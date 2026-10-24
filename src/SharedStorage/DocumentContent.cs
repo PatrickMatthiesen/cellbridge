@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace CellBridge.Storage.Shared;
 
-/// <summary>Immutable, deduplicated content in bounded database chunks; reclamation is quiescent.</summary>
+/// <summary>Stores immutable content in bounded database chunks and reuses matching objects.</summary>
 internal sealed class DocumentContent<TContext> : IContentStore, IStorageBudgetParticipant where TContext : DbContext
 {
     private const int ChunkSize = 65536;
