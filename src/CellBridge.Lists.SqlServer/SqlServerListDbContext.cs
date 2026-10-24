@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore.Metadata.Conventions;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Microsoft.EntityFrameworkCore.Metadata;
 using System.Text;
+using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CellBridge.Lists.SqlServer;
 
@@ -30,6 +32,8 @@ public sealed class SqlServerListDbContext(DbContextOptions<SqlServerListDbConte
     internal DbSet<SavedViewRow> SavedViews => Set<SavedViewRow>();
     internal DbSet<AuditEventRow> AuditEvents => Set<AuditEventRow>();
 
+    internal static DateTimeOffset ClockTimestamp() => throw new NotSupportedException("SQL mapping only.");
+
     internal static string? ScalarKey(string json, string field, int type) => throw new NotSupportedException("SQL mapping only.");
     internal static string UuidKey(Guid value) => throw new NotSupportedException("SQL mapping only.");
     internal static int? KeyCompare(string? left, string? right) => throw new NotSupportedException("SQL mapping only.");
@@ -43,6 +47,14 @@ public sealed class SqlServerListDbContext(DbContextOptions<SqlServerListDbConte
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.HasDefaultSchema(Schema);
+
+        modelBuilder.HasDbFunction(typeof(SqlServerListDbContext).GetMethod(nameof(ClockTimestamp),
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!)
+            .HasTranslation(_ => new SqlFunctionExpression("TODATETIMEOFFSET",
+                [new SqlFunctionExpression("SYSUTCDATETIME", [], false, [], typeof(DateTime),
+                    new DateTimeTypeMapping("datetime2", System.Data.DbType.DateTime2)),
+                 new SqlConstantExpression("+00:00", typeof(string), new StringTypeMapping("varchar(6)", System.Data.DbType.AnsiString))],
+                false, [false, false], typeof(DateTimeOffset), new DateTimeOffsetTypeMapping("datetimeoffset", System.Data.DbType.DateTimeOffset)));
         foreach (var (method, name) in new[] { (nameof(ScalarKey), "scalar_key"), (nameof(UuidKey), "uuid_key"), (nameof(KeyCompare), "key_compare") })
             modelBuilder.HasDbFunction(typeof(SqlServerListDbContext).GetMethod(method,
                 System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!)

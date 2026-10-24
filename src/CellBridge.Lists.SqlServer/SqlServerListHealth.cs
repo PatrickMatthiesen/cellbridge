@@ -2,7 +2,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CellBridge.Lists.SqlServer;
 
-public sealed partial class SqlServerListEngine
+internal sealed partial class EfListEngine
 {
     private static async Task CheckConfigurationAsync(SqlServerListDbContext db, CancellationToken ct)
     {

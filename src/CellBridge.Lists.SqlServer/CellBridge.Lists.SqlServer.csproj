@@ -13,7 +13,7 @@
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13" PrivateAssets="all" />
-    <Compile Include="../SharedLists/ListRows.cs" Link="Persistence/ListRows.cs" />
+    <Compile Include="../SharedLists/**/*.cs" Link="Persistence/%(RecursiveDir)%(Filename)%(Extension)" />
     <InternalsVisibleTo Include="CellBridge.SqlServer.Tests" />
   </ItemGroup>
   <ItemGroup>

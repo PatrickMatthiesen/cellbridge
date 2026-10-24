@@ -184,49 +184,9 @@ public static class PostgreSqlListSetup
         await RegisterWorkspaceAsync(options, workspaceId, name, administratorSubject, cancellationToken);
     }
 
-    public static async Task RegisterWorkspaceAsync(DbContextOptions<PostgreSqlListDbContext> options, Guid workspaceId,
-        string name, string administratorSubject, CancellationToken cancellationToken = default)
-    {
-        if (workspaceId == Guid.Empty) throw new ArgumentException("A workspace ID is required.", nameof(workspaceId));
-        if (string.IsNullOrWhiteSpace(name) || name.Length > 200 || !ListValidation.IsWellFormedText(name))
-            throw new ArgumentException("A valid workspace name is required.", nameof(name));
-        if (string.IsNullOrWhiteSpace(administratorSubject) || administratorSubject.Length > 1024 || !ListValidation.IsWellFormedText(administratorSubject))
-            throw new ArgumentException("A valid administrator subject is required.", nameof(administratorSubject));
-
-        await using var db = new PostgreSqlListDbContext(NormalizeOptions(options));
-        await db.Database.OpenConnectionAsync(cancellationToken);
-        await using var efTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var connection = (NpgsqlConnection)db.Database.GetDbConnection();
-        var transaction = (NpgsqlTransaction)efTransaction.GetDbTransaction();
-        await AcquireWorkspaceAuthorizationLockAsync(connection, transaction, workspaceId, cancellationToken);
-        await SetContextAsync(connection, transaction, workspaceId, cancellationToken);
-        var workspace = await db.Workspaces.SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId,
-            cancellationToken);
-        if (workspace is null)
-        {
-            workspace = new WorkspaceRow { WorkspaceId = workspaceId, Name = name };
-            db.Workspaces.Add(workspace);
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        else if (workspace.AuthorizationMode != "builtin")
-            throw new ListException(ListFailure.Conflict,
-                "A host-authorized workspace cannot be registered as built-in.");
-        else
-            workspace.Name = name;
-        var membership = await db.Memberships.SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId &&
-            row.Subject == administratorSubject, cancellationToken);
-        if (membership is null)
-        {
-            membership = new MembershipRow { WorkspaceId = workspaceId, Subject = administratorSubject };
-            db.Memberships.Add(membership);
-            workspace.StoredBytes = checked(workspace.StoredBytes + 128 +
-                System.Text.Encoding.UTF8.GetByteCount(administratorSubject));
-        }
-        membership.CanCreateLists = true;
-        membership.CanManageGrants = true;
-        await db.SaveChangesAsync(cancellationToken);
-        await efTransaction.CommitAsync(cancellationToken);
-    }
+    public static Task RegisterWorkspaceAsync(DbContextOptions<PostgreSqlListDbContext> options, Guid workspaceId,
+        string name, string administratorSubject, CancellationToken cancellationToken = default) =>
+        EfListEngine.RegisterWorkspaceAsync(options, workspaceId, name, administratorSubject, cancellationToken);
 
     public static async Task RegisterHostWorkspaceAsync(NpgsqlDataSource adminSource, Guid workspaceId,
         string name, string policyDomain, string authorizationScope, CancellationToken cancellationToken = default)
@@ -237,44 +197,9 @@ public static class PostgreSqlListSetup
             cancellationToken);
     }
 
-    public static async Task RegisterHostWorkspaceAsync(DbContextOptions<PostgreSqlListDbContext> options,
-        Guid workspaceId, string name, string policyDomain, string authorizationScope,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        if (workspaceId == Guid.Empty) throw new ArgumentException("A workspace ID is required.", nameof(workspaceId));
-        if (string.IsNullOrWhiteSpace(name) || name.Length > 200 || !ListValidation.IsWellFormedText(name))
-            throw new ArgumentException("A valid workspace name is required.", nameof(name));
-        if (string.IsNullOrWhiteSpace(policyDomain) || policyDomain.Length > 200 ||
-            !ListValidation.IsWellFormedText(policyDomain) || policyDomain.Any(char.IsControl))
-            throw new ArgumentException("A valid policy domain is required.", nameof(policyDomain));
-        if (string.IsNullOrWhiteSpace(authorizationScope) || authorizationScope.Length > 1024 ||
-            !ListValidation.IsWellFormedText(authorizationScope) || authorizationScope.Any(char.IsControl))
-            throw new ArgumentException("A valid authorization scope is required.", nameof(authorizationScope));
-
-        await using var db = new PostgreSqlListDbContext(NormalizeOptions(options));
-        await db.Database.OpenConnectionAsync(cancellationToken);
-        await using var efTransaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var connection = (NpgsqlConnection)db.Database.GetDbConnection();
-        var transaction = (NpgsqlTransaction)efTransaction.GetDbTransaction();
-        await AcquireWorkspaceAuthorizationLockAsync(connection, transaction, workspaceId, cancellationToken);
-        await SetContextAsync(connection, transaction, workspaceId, cancellationToken);
-        var workspace = await db.Workspaces.SingleOrDefaultAsync(row => row.WorkspaceId == workspaceId,
-            cancellationToken);
-        if (workspace is null)
-        {
-            db.Workspaces.Add(new WorkspaceRow { WorkspaceId = workspaceId, Name = name,
-                AuthorizationMode = "host", AuthorizationDomain = policyDomain,
-                AuthorizationScope = authorizationScope });
-        }
-        else if (workspace.AuthorizationMode != "host" || workspace.AuthorizationDomain != policyDomain ||
-                 workspace.AuthorizationScope != authorizationScope)
-            throw new ListException(ListFailure.Conflict, "The workspace is already bound to a different authorization anchor.");
-        else
-            workspace.Name = name;
-        await db.SaveChangesAsync(cancellationToken);
-        await efTransaction.CommitAsync(cancellationToken);
-    }
+    public static Task RegisterHostWorkspaceAsync(DbContextOptions<PostgreSqlListDbContext> options, Guid workspaceId,
+        string name, string policyDomain, string authorizationScope, CancellationToken cancellationToken = default) =>
+        EfListEngine.RegisterHostWorkspaceAsync(options, workspaceId, name, policyDomain, authorizationScope, cancellationToken);
 
     public static async Task RegisterTemplateAsync(NpgsqlDataSource adminSource, ListTemplate template,
         CancellationToken cancellationToken = default)
@@ -284,24 +209,8 @@ public static class PostgreSqlListSetup
         await RegisterTemplateAsync(options, template, cancellationToken);
     }
 
-    public static async Task RegisterTemplateAsync(DbContextOptions<PostgreSqlListDbContext> options,
-        ListTemplate template, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(template);
-        ListTemplates.Validate(template, new ListLimits());
-        await using var db = new PostgreSqlListDbContext(NormalizeOptions(options));
-        var json = PostgreSqlListJson.Serialize(template);
-        var affected = await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            INSERT INTO cellbridge_lists.templates AS existing(template_id,version,definition)
-            VALUES ({{template.Id}},{{template.Version}},{{json}}::jsonb)
-            ON CONFLICT (template_id,version) DO UPDATE SET definition=existing.definition
-            WHERE existing.definition=EXCLUDED.definition
-            """, cancellationToken);
-        if (affected == 0)
-            throw new ListException(ListFailure.Conflict,
-                "That template version already has a different definition.");
-    }
+    public static Task RegisterTemplateAsync(DbContextOptions<PostgreSqlListDbContext> options, ListTemplate template, CancellationToken cancellationToken = default) =>
+        EfListEngine.RegisterTemplateAsync(options, template, cancellationToken);
 
     internal static string QuoteIdentifier(string identifier) => '"' + identifier.Replace("\"", "\"\"") + '"';
 
@@ -309,15 +218,6 @@ public static class PostgreSqlListSetup
         Guid workspaceId, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("SELECT set_config('cellbridge.workspace_id',$1,true)", connection, transaction);
-        command.Parameters.AddWithValue(workspaceId.ToString("D"));
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    private static async Task AcquireWorkspaceAuthorizationLockAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, Guid workspaceId, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1,391813))", connection, transaction);
         command.Parameters.AddWithValue(workspaceId.ToString("D"));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }

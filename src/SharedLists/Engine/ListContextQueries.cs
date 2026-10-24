@@ -1,23 +1,27 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
 
+#if CELLBRIDGE_SQLSERVER
+namespace CellBridge.Lists.SqlServer;
+#else
 namespace CellBridge.Lists.PostgreSql;
+#endif
 
-public sealed partial class PostgreSqlListEngine
+internal sealed partial class EfListEngine
 {
     // Each engine owns its delegates, so their first execution uses this engine's
     // consumer options, services and model. A consumer model-cache key may still
     // select another model on a later lease; use ordinary queries for that model.
     private IModel? _compiledContextModel;
 
-    private bool CanUseCompiledContextQueries(PostgreSqlListDbContext db)
+    private bool CanUseCompiledContextQueries(ListDbContext db)
     {
         var model = db.Model;
         return ReferenceEquals(Interlocked.CompareExchange(ref _compiledContextModel, model, null) ?? model, model);
     }
 
-    private readonly Func<PostgreSqlListDbContext, Guid, Guid, string, int, bool, CancellationToken, Task<ListDefinitionProjection?>> _compiledDefinitionContext =
-        EF.CompileAsyncQuery((PostgreSqlListDbContext db, Guid workspaceId, Guid listId, string subject, int requiredAccess, bool hostAuthorized, CancellationToken ct) => (
+    private readonly Func<ListDbContext, Guid, Guid, string, int, bool, CancellationToken, Task<ListDefinitionProjection?>> _compiledDefinitionContext =
+        EF.CompileAsyncQuery((ListDbContext db, Guid workspaceId, Guid listId, string subject, int requiredAccess, bool hostAuthorized, CancellationToken ct) => (
             from workspace in db.Workspaces.AsNoTracking()
             from list in db.Lists.AsNoTracking().Where(row =>
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
@@ -39,8 +43,8 @@ public sealed partial class PostgreSqlListEngine
             }
         ).SingleOrDefault());
 
-    private readonly Func<PostgreSqlListDbContext, Guid, Guid, Guid, string, int, bool, CancellationToken, Task<CreateContextProjection?>> _compiledCreateContext =
-        EF.CompileAsyncQuery((PostgreSqlListDbContext db, Guid workspaceId, Guid listId, Guid recordId, string subject, int requiredAccess, bool hostAuthorized, CancellationToken ct) => (
+    private readonly Func<ListDbContext, Guid, Guid, Guid, string, int, bool, CancellationToken, Task<CreateContextProjection?>> _compiledCreateContext =
+        EF.CompileAsyncQuery((ListDbContext db, Guid workspaceId, Guid listId, Guid recordId, string subject, int requiredAccess, bool hostAuthorized, CancellationToken ct) => (
             from workspace in db.Workspaces.AsNoTracking()
             from list in db.Lists.AsNoTracking().Where(row =>
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
@@ -66,13 +70,13 @@ public sealed partial class PostgreSqlListEngine
                         .Select(row => (int?)row.Access).SingleOrDefault() ?? 0,
                 DefinitionJson = schema.Definition,
                 Receipt = receipt,
-                ReceiptLive = receipt != null && receipt.ExpiresUtc > PostgreSqlListDbContext.ClockTimestamp(),
+                ReceiptLive = receipt != null && receipt.ExpiresUtc > ListDbContext.ClockTimestamp(),
                 ReceiptDefinitionJson = receiptSchema == null ? null : receiptSchema.Definition
             }
         ).SingleOrDefault());
 
-    private readonly Func<PostgreSqlListDbContext, Guid, Guid, Guid, string, int, bool, CancellationToken, Task<MutationContextProjection?>> _compiledMutationContext =
-        EF.CompileAsyncQuery((PostgreSqlListDbContext db, Guid workspaceId, Guid listId, Guid recordId, string subject, int requiredAccess, bool hostAuthorized, CancellationToken ct) => (
+    private readonly Func<ListDbContext, Guid, Guid, Guid, string, int, bool, CancellationToken, Task<MutationContextProjection?>> _compiledMutationContext =
+        EF.CompileAsyncQuery((ListDbContext db, Guid workspaceId, Guid listId, Guid recordId, string subject, int requiredAccess, bool hostAuthorized, CancellationToken ct) => (
             from workspace in db.Workspaces.AsNoTracking()
             from list in db.Lists.AsNoTracking().Where(row =>
                 row.WorkspaceId == workspace.WorkspaceId && row.ListId == listId)
@@ -104,8 +108,8 @@ public sealed partial class PostgreSqlListEngine
         public DateTimeOffset Now { get; init; }
     }
 
-    private readonly Func<PostgreSqlListDbContext, Guid, Guid, CancellationToken, Task<CreateStateProjection>> _compiledCreateState =
-        EF.CompileAsyncQuery((PostgreSqlListDbContext db, Guid workspaceId, Guid listId, CancellationToken ct) => (
+    private readonly Func<ListDbContext, Guid, Guid, CancellationToken, Task<CreateStateProjection>> _compiledCreateState =
+        EF.CompileAsyncQuery((ListDbContext db, Guid workspaceId, Guid listId, CancellationToken ct) => (
             from workspace in db.Workspaces
             join counter in db.ListCounters on workspace.WorkspaceId equals counter.WorkspaceId
             where workspace.WorkspaceId == workspaceId && counter.ListId == listId
@@ -113,7 +117,7 @@ public sealed partial class PostgreSqlListEngine
             {
                 Workspace = workspace,
                 Counter = counter,
-                Now = PostgreSqlListDbContext.ClockTimestamp()
+                Now = ListDbContext.ClockTimestamp()
             }).Single());
 
 }

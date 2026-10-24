@@ -10,6 +10,8 @@ namespace CellBridge.Lists.PostgreSql;
 /// </summary>
 public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbContext> options) : DbContext(options)
 {
+    internal static Guid UuidKey(Guid value) => throw new NotSupportedException();
+
     internal static string? JsonText(string json, string path) => throw new NotSupportedException();
     internal static byte[]? Utf16Key(string? value) => throw new NotSupportedException();
     internal static string? TimestampKey(string? value) => throw new NotSupportedException();
@@ -154,6 +156,9 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
         modelBuilder.Entity<AuditEventRow>().HasOne<WorkspaceRow>().WithMany()
             .HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade)
             .HasConstraintName("audit_events_workspace_id_fkey");
+        modelBuilder.HasDbFunction(typeof(PostgreSqlListDbContext).GetMethod(nameof(UuidKey), BindingFlags.Static | BindingFlags.NonPublic)!)
+            .HasTranslation(arguments => arguments[0]);
+
         MapFunction(modelBuilder, nameof(JsonText), "jsonb_extract_path_text", schema: null, builtIn: true);
         MapFunction(modelBuilder, nameof(Utf16Key), "utf16_key");
         MapFunction(modelBuilder, nameof(TimestampKey), "timestamp_key");

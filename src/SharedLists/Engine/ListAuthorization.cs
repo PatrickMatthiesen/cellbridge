@@ -3,11 +3,15 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
-using Npgsql;
+using System.Data.Common;
 
+#if CELLBRIDGE_SQLSERVER
+namespace CellBridge.Lists.SqlServer;
+#else
 namespace CellBridge.Lists.PostgreSql;
+#endif
 
-public sealed partial class PostgreSqlListEngine
+internal sealed partial class EfListEngine
 {
     private readonly IListAuthorizationProvider? _authorizationProvider;
     private readonly string? _authorizationDomain;
@@ -15,22 +19,6 @@ public sealed partial class PostgreSqlListEngine
     private const int MaximumContinuationLength = 512;
     // Private encoding may change across releases; default keys are ephemeral per engine.
     private const string ContinuationPurpose = "CellBridge.Lists.Page.v3";
-
-    public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits,
-        IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null)
-        : this(runtimeSource, limits, continuationKey)
-    {
-        _authorizationProvider = authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider));
-        _authorizationDomain = ValidateDomain(authorizationProvider.PolicyDomain);
-    }
-
-    public PostgreSqlListEngine(DbContextOptions<PostgreSqlListDbContext> options, ListLimits? limits,
-        IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null)
-        : this(options, limits, continuationKey)
-    {
-        _authorizationProvider = authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider));
-        _authorizationDomain = ValidateDomain(authorizationProvider.PolicyDomain);
-    }
 
     private async Task<OperationAuthorization?> AuthorizeOperationAsync(ListActor actor, Guid workspaceId,
         IReadOnlyList<(Guid? ListId, ListAuthorizationAction Action)> requirements, CancellationToken ct)
@@ -84,7 +72,7 @@ public sealed partial class PostgreSqlListEngine
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (ListException) { throw; }
         catch { throw AuthorizationUnavailable(); }
-        if (decisions.Count != requests.Count) throw AuthorizationUnavailable();
+        if (decisions is null || decisions.Count != requests.Count) throw AuthorizationUnavailable();
 
         var now = DateTimeOffset.UtcNow;
         for (var index = 0; index < decisions.Count; index++)
@@ -108,28 +96,27 @@ public sealed partial class PostgreSqlListEngine
         MapStoreFailuresAsync<WorkspaceAnchor?>(async () =>
         {
             await EnsureHealthyAsync(ct);
-            await using var db = CreateContext();
-            await db.Database.OpenConnectionAsync(ct);
-            await using var efTransaction = await db.Database.BeginTransactionAsync(ct);
-            var connection = (NpgsqlConnection)db.Database.GetDbConnection();
-            var transaction = (NpgsqlTransaction)efTransaction.GetDbTransaction();
+            await using var session = await OpenSessionAsync(workspaceId, ct);
+            var db = session.Context;
+            var connection = db.Database.GetDbConnection();
+            var transaction = db.Database.CurrentTransaction!.GetDbTransaction();
             await ConfigureWorkspaceAsync(connection, transaction, workspaceId, ct);
             var result = await db.Workspaces.AsNoTracking()
                 .Where(row => row.WorkspaceId == workspaceId)
                 .Select(row => new WorkspaceAnchor(row.WorkspaceId, row.AuthorizationMode,
                     row.AuthorizationDomain, row.AuthorizationScope)).SingleOrDefaultAsync(ct);
-            await efTransaction.CommitAsync(ct);
+            await session.CommitAsync(ct);
             return result;
-        });
+        }, ct);
 
-    private async Task RequireAnchorAsync(PostgreSqlListDbContext db, Guid workspaceId,
+    private async Task RequireAnchorAsync(ListDbContext db, Guid workspaceId,
         OperationAuthorization? authorization, bool hostExpected, CancellationToken ct)
     {
         var current = await db.Workspaces.AsNoTracking()
             .Where(row => row.WorkspaceId == workspaceId)
             .Select(row => new WorkspaceAnchor(row.WorkspaceId, row.AuthorizationMode,
                 row.AuthorizationDomain, row.AuthorizationScope)).SingleOrDefaultAsync(ct);
-        if (current is null) throw NotFound();
+        if (current is null) throw MissingWorkspace(authorization);
         if (hostExpected)
         {
             if (authorization is null || current != authorization.Anchor) throw NotFound();
@@ -198,6 +185,14 @@ public sealed partial class PostgreSqlListEngine
     private sealed record OperationAuthorization(WorkspaceAnchor Anchor,
         IReadOnlyList<(ListAuthorizationRequest First, ListAuthorizationDecision Second)> Decisions)
     {
+        private readonly DateTimeOffset _admittedAtUtc = DateTimeOffset.UtcNow;
+        internal void ValidateFreshness()
+        {
+            foreach (var pair in Decisions)
+                ListAuthorizationValidation.ValidateDecision(pair.Second,
+                    pair.Second.EvaluatedAtUtc ?? _admittedAtUtc, DateTimeOffset.UtcNow);
+        }
+
         internal bool Allows(Guid? listId, ListAuthorizationAction action) =>
             Decisions.Any(pair => pair.Second.Allowed && pair.First.ListId == listId && pair.First.Action == action);
 
