@@ -105,19 +105,22 @@ jobs:
           dotnet-version: '10.0.x'
       - run: dotnet build tools/CellBridge.Storage.Setup --nologo
       - run: dotnet tools/CellBridge.Storage.Setup/bin/Debug/net10.0/CellBridge.Storage.Setup.dll
-      - run: dotnet test CellBridge.slnx -m:1 --nologo --verbosity minimal
+      - run: dotnet test CellBridge.slnx -m:1 --nologo --verbosity minimal --logger trx --results-directory artifacts/test-results
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - run: python tools/verify_packages.py
+      - run: python tools/verify_packages.py --sqlserver
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: storage-and-package-consumer-evidence
           path: |
             artifacts/recovery/environment.json
+            artifacts/test-results/*.trx
             artifacts/packages/test-results/*.trx
             artifacts/packages/document-library-tests/*.trx
+            artifacts/packages/sqlserver-orchestration/*.trx
+            artifacts/packages/sqlserver-tests/**/*.trx
   capture-linux:
     runs-on: ubuntu-latest
     steps:
