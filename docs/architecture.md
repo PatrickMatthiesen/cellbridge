@@ -70,6 +70,13 @@ are independent of the protocols. The sample owns file creation and Aspire setup
 The optional [list engine](lists.md) uses separate database tables, setup and
 runtime credentials. Hosts supply validated identities and customer workspaces.
 Its APIs and state are independent of Office document synchronization.
+PostgreSQL and SQL Server compile the same document operations from
+`src/SharedStorage/Document*.cs` and the same Lists operations from
+`src/SharedLists/Engine`. The operation code owns transaction boundaries and
+requests the required locks through internal provider contracts. Database
+mappings, migrations, security settings and SQL expressions remain with each
+provider. Document and Lists code share no persistence dependencies.
+
 Both SQL Server providers are packaged at `0.1.0-beta.4` with the other libraries.
 Neither depends on PostgreSQL or on the other SQL Server provider. Each owns its
 context, schema and migration history. Consumers explicitly call

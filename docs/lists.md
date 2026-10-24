@@ -10,6 +10,12 @@ scope and qualification criteria; this guide describes the current libraries.
 All shipping packages use version `0.1.0-beta.4`. Each database provider can be
 used without the other provider or the document-storage packages.
 
+Both database providers compile the EF operations in `src/SharedLists/Engine`.
+The shared implementation owns authorization order, validation, receipts,
+accounting and transaction boundaries. Provider helpers supply database locks,
+security settings, JSON expressions and mappings. Filtering, sorting and paging
+execute in the database. Required locking cannot be disabled.
+
 ## Library and host responsibilities
 
 `CellBridge.Lists` defines schemas, templates, validation, bounded queries and

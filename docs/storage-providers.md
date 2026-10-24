@@ -13,8 +13,14 @@ not add entities to the application's DbContext. Document storage and native
 Lists use independent contexts, migration histories and package dependencies.
 PostgreSQL and SQL Server have separate document-storage and Lists packages.
 EF generates the table and index migrations from the owned model. Legacy schema
-upgrades retain their data transforms. PostgreSQL locks remain explicit where EF
-does not express the required locking operation.
+upgrades retain their data transforms.
+
+Both database providers compile the document operations in
+`src/SharedStorage/Document*.cs`. That code owns state changes, transaction order,
+chunk storage, recovery and cleanup. Each provider supplies its mappings,
+database expressions and required locks through internal contracts. Ordinary
+PostgreSQL reads use a single statement; SQL Server reads use serializable
+transactions. Locking cannot be disabled.
 
 `CellBridge.Storage.SqlServer` and `CellBridge.Lists.SqlServer` are .NET 10
 packages that share the current `0.1.0-beta.4` version with the other CellBridge packages.

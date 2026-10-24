@@ -52,9 +52,7 @@ internal sealed partial class EfListEngine
     private static Task LockListSchemaSharedAsync(DbConnection connection, DbTransaction transaction, Guid workspaceId, Guid listId, CancellationToken ct) => Task.CompletedTask;
     private static Task LockListExclusiveAsync(DbConnection connection, DbTransaction transaction, Guid workspaceId, Guid listId, CancellationToken ct) => Task.CompletedTask;
     private static Task LockCreateStateAsync(DbConnection connection, DbTransaction transaction, Guid workspaceId, Guid listId, CancellationToken ct) => Task.CompletedTask;
-    private Task LockRecordAsync(SqlServerListDbContext db, Guid workspaceId, Guid listId, Guid recordId, bool deleteLock, CancellationToken ct) =>
-        recordId == Guid.Empty ? Task.CompletedTask : SqlServerListDatabase.LockAsync(db,
-            "CellBridge.Lists.Record:" + workspaceId.ToString("N") + ":" + listId.ToString("N") + ":" + recordId.ToString("N"), true, _limits, ct);
+    private Task LockRecordAsync(SqlServerListDbContext db, Guid workspaceId, Guid listId, Guid recordId, bool deleteLock, CancellationToken ct) => Task.CompletedTask;
 
     private static Task ConfigureWorkspaceAsync(DbConnection connection, DbTransaction transaction, Guid workspaceId, CancellationToken ct) => Task.CompletedTask;
     private static Task<long> CanonicalJsonBytesAsync(SqlServerListDbContext db, string json, CancellationToken ct) =>

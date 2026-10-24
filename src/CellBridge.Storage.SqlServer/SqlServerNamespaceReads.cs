@@ -10,12 +10,13 @@ internal sealed partial class SqlServerDocumentDatabase
     {
         // OPENJSON projects only namespace properties. Reconstructing these fields
         // preserves JSON types, long paths and duplicate keys for common validation.
-        var rows = db.Database.SqlQueryRaw<NamespaceRow>("""
+        var rows = db.Database.SqlQuery<NamespaceRow>($$"""
             SELECT d.ResourceId, d.PathKey, d.PathHash, d.RetiredPathCount, d.StateVersion, d.IsDeleted,
-                (SELECT N'{' + STRING_AGG(CONVERT(nvarchar(max),N'"') + STRING_ESCAPE(field.[key],'json') + N'":' +
+                (SELECT N'{' + STRING_AGG((CONVERT(nvarchar(max),N'"') + STRING_ESCAPE(field.[key],'json') + N'":' +
                     CASE field.[type] WHEN 0 THEN N'null'
                         WHEN 1 THEN N'"' + STRING_ESCAPE(field.[value],'json') + N'"'
-                        ELSE field.[value] END, N',') + N'}'
+                        ELSE field.[value] END) COLLATE Latin1_General_100_BIN2,
+                    N',' COLLATE Latin1_General_100_BIN2) + N'}'
                     FROM OPENJSON(CASE WHEN ISJSON(snapshot.Json)=1 THEN snapshot.Json ELSE N'{}' END) field
                     WHERE field.[key] COLLATE Latin1_General_100_BIN2 IN
                         ('FormatVersion','ResourceId','StateVersion','PathKey',
