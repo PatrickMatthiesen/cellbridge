@@ -1,4 +1,3 @@
-using System.Data;
 using System.Text;
 using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
@@ -20,7 +19,8 @@ internal interface IDocumentDatabase<TContext> where TContext : DbContext
 {
     TContext CreateContext();
     IDocumentLocking<TContext> Locks { get; }
-    IsolationLevel ReadIsolation { get; }
+    Task<T> ReadAsync<T>(TContext db, Func<Task<T>> action, bool coherent, CancellationToken ct);
+    IAsyncEnumerable<(DocumentRow Pointer, string? Json)> ReadNamespaceRowsAsync(TContext db, CancellationToken ct);
     Task ConfigureAsync(TContext db, CancellationToken ct);
     Task CheckConfigurationAsync(TContext db, CancellationToken ct);
     Task CheckRecoveryAsync(TContext db, CancellationToken ct);
@@ -29,7 +29,7 @@ internal interface IDocumentDatabase<TContext> where TContext : DbContext
     bool IsUniqueViolation(Exception exception);
     IQueryable<DocumentRow> AtPath(IQueryable<DocumentRow> rows, string key);
     void SetNamespaceFields(DocumentRow row, DocumentState state);
-    void ValidateNamespaceFields(DocumentRow row, DocumentState state);
+    void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state);
     Task VerifyReservationsAsync(TContext db, IReadOnlyDictionary<Guid, DocumentNamespaceState> states, CancellationToken ct);
     Task WriteReservationsAsync(TContext db, DocumentState state, CancellationToken ct);
     Task<bool> InsertObjectAsync(TContext db, ContentHandle handle, CancellationToken ct);

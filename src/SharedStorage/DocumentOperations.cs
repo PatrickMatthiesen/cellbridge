@@ -181,7 +181,7 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
             await database.CheckConfigurationAsync(db, cancellationToken);
             await VerifyNamespaceRowsAsync(db, cancellationToken);
             return true;
-        }, cancellationToken);
+        }, cancellationToken, coherent: true);
     }
 
     private Task<DateTime> ReadClockAsync(TContext db, CancellationToken ct) => database.ClockAsync(db, ct);
@@ -198,7 +198,7 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
         if (state.ResourceId != pointer.ResourceId || state.StateVersion != pointer.StateVersion ||
             state.PathKey != pointer.PathKey || state.IsDeleted != pointer.IsDeleted)
             throw new StorageCorruptionException("Snapshot identity disagrees with its current pointer.");
-        database.ValidateNamespaceFields(pointer, state);
+        database.ValidateNamespaceFields(pointer, DocumentNamespaceState.From(state));
     }
 
     private Microsoft.EntityFrameworkCore.Metadata.IModel? queryModel;
@@ -249,19 +249,18 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
 
     private async Task<Dictionary<Guid, DocumentNamespaceState>> VerifyNamespaceRowsAsync(TContext db, CancellationToken ct)
     {
-        // Admission holds the exclusive publication lock. Health uses a serializable
-        // read transaction. Both see coherent current pointers and authoritative
-        // namespace fields without reading any content objects or chunks.
-        var heads = from pointer in db.Set<DocumentRow>().AsNoTracking()
-            join snapshot in db.Set<StateRow>().AsNoTracking() on new { pointer.ResourceId, pointer.StateVersion }
-                equals new { snapshot.ResourceId, snapshot.StateVersion } into snapshots
-            from snapshot in snapshots.DefaultIfEmpty()
-            select new { Pointer = pointer, Data = snapshot == null ? null : snapshot.StateJson };
+        // Writers hold the publication gate. The provider read scope protects
+        // the health inventory across configuration, pointer and reservation reads.
         var states = new Dictionary<Guid, DocumentNamespaceState>();
-        await foreach (var row in heads.AsAsyncEnumerable().WithCancellation(ct))
+        await foreach (var row in database.ReadNamespaceRowsAsync(db, ct).WithCancellation(ct))
         {
-            var state = Decode(row.Data ?? throw new StorageCorruptionException("The current snapshot is missing."), row.Pointer);
-            states.Add(state.ResourceId, DocumentNamespaceState.From(state));
+            var state = DocumentNamespaceState.Parse(row.Json ??
+                throw new StorageCorruptionException("The current snapshot is missing."), limits);
+            if (state.ResourceId != row.Pointer.ResourceId || state.StateVersion != row.Pointer.StateVersion ||
+                state.PathKey != row.Pointer.PathKey || state.IsDeleted != row.Pointer.IsDeleted)
+                throw new StorageCorruptionException("Namespace identity disagrees with its current pointer.");
+            database.ValidateNamespaceFields(row.Pointer, state);
+            states.Add(state.ResourceId, state);
         }
         await database.VerifyReservationsAsync(db, states, ct);
         return states;

@@ -57,11 +57,3 @@ internal sealed class RecoveryReceiptRow
     public Guid OperationId { get; set; }
     public required string ReceiptJson { get; set; }
 }
-
-// Retain namespace fields, not decoded content graphs, while checking admission.
-internal sealed record DocumentNamespaceState(Guid ResourceId, string PathKey, bool IsDeleted,
-    long LifecycleGeneration, Guid? ReplacedBy, System.Collections.Immutable.ImmutableArray<string> RetiredPathKeys)
-{
-    public static DocumentNamespaceState From(CellBridge.Storage.Abstractions.DocumentState state) =>
-        new(state.ResourceId, state.PathKey, state.IsDeleted, state.LifecycleGeneration, state.ReplacedBy, state.RetiredPathKeys);
-}

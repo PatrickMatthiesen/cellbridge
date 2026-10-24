@@ -38,7 +38,7 @@ internal sealed class DocumentMaintenance<TContext>(IDocumentDatabase<TContext> 
                 {
                     if (state.ResourceId != pointer.ResourceId || state.StateVersion != pointer.StateVersion || state.PathKey != pointer.PathKey || state.IsDeleted != pointer.IsDeleted)
                         throw new StorageCorruptionException("Snapshot identity disagrees with its current pointer.");
-                    database.ValidateNamespaceFields(pointer, state);
+                    database.ValidateNamespaceFields(pointer, DocumentNamespaceState.From(state));
                     current.Add(row.ResourceId);
                 }
                 snapshots = checked(snapshots + 1);

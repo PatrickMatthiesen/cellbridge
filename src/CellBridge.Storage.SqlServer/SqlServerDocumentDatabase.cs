@@ -6,7 +6,7 @@ using System.Text;
 
 namespace CellBridge.Storage.SqlServer;
 
-internal sealed class SqlServerDocumentDatabase : IDocumentDatabase<SqlServerDocumentDbContext>, IDocumentLocking<SqlServerDocumentDbContext>
+internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlServerDocumentDbContext>, IDocumentLocking<SqlServerDocumentDbContext>
 {
     internal const string PublicationGate = "CellBridge.Documents.Publication";
     public static DbContextOptions<SqlServerDocumentDbContext> Normalize(
@@ -65,7 +65,16 @@ internal sealed class SqlServerDocumentDatabase : IDocumentDatabase<SqlServerDoc
     internal SqlServerDocumentDatabase(DbContextOptions<SqlServerDocumentDbContext> options) => this.options = options;
     public SqlServerDocumentDbContext CreateContext() => new(options);
     public IDocumentLocking<SqlServerDocumentDbContext> Locks => this;
-    public System.Data.IsolationLevel ReadIsolation => System.Data.IsolationLevel.Serializable;
+    public async Task<T> ReadAsync<T>(SqlServerDocumentDbContext db, Func<Task<T>> action, bool coherent, CancellationToken ct)
+    {
+        // Lock-based READ COMMITTED does not give a coherent statement snapshot.
+        // All SQL Server reads keep serializable protection, including path misses.
+        await using var transaction = await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
+        await ConfigureTransactionAsync(db, ct);
+        var result = await action();
+        await transaction.CommitAsync(ct);
+        return result;
+    }
     public Task ConfigureAsync(SqlServerDocumentDbContext db, CancellationToken ct) => ConfigureTransactionAsync(db, ct);
     Task IDocumentDatabase<SqlServerDocumentDbContext>.CheckConfigurationAsync(SqlServerDocumentDbContext db, CancellationToken ct) => CheckConfigurationAsync(db, ct);
     public Task CheckRecoveryAsync(SqlServerDocumentDbContext db, CancellationToken ct) => CheckConfigurationAsync(db, ct);
@@ -84,7 +93,7 @@ internal sealed class SqlServerDocumentDatabase : IDocumentDatabase<SqlServerDoc
         row.PathHash = PathHash(state.PathKey);
         row.RetiredPathCount = state.RetiredPathKeys.Length;
     }
-    public void ValidateNamespaceFields(DocumentRow row, DocumentState state)
+    public void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state)
     {
         if (row.RetiredPathCount != state.RetiredPathKeys.Length || !row.PathHash.AsSpan().SequenceEqual(PathHash(state.PathKey)))
             throw new StorageCorruptionException("The current namespace index disagrees with its snapshot.");

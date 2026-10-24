@@ -97,6 +97,34 @@ public sealed class SqlServerNamespaceTests(SqlServerFixture fixture)
         await database.AssertAccountingAsync();
     }
 
+    [Theory]
+    [InlineData("GraphMetadata")]
+    [InlineData("Revisions")]
+    public async Task NamespaceChecksDoNotDecodeUnrelatedCurrentOrHistoricalGraphs(string property)
+    {
+        var database = await SqlServerDocuments.CreateAsync(fixture);
+        var provider = database.Provider();
+        var state = (await new CellBridgeDocumentService(provider)
+            .CreateAsync("/namespace-graphs.docx", MinimalDocx.Create(), SqlServerDocuments.Actor))!;
+        await using var admin = new SqlServerDocumentDbContext(database.Options(admin: true));
+        var path = "$." + property;
+        var malformed = "{\"malformed\":true}";
+        await admin.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE cellbridge_documents.snapshots
+            SET Data=CONVERT(varbinary(max),JSON_MODIFY(CONVERT(varchar(max),Data),{path},JSON_QUERY({malformed})))
+            WHERE ResourceId={state.ResourceId}
+            """);
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => provider.State.FindByResourceIdAsync(state.ResourceId).AsTask());
+        var guarded = new SqlServerStateStore(database.Options(false, new RejectContentReads()));
+        await guarded.CheckHealthAsync();
+        Assert.Null(await guarded.FindByPathKeyAsync("/MISSING.DOCX"));
+        var candidate = await new DocumentStore().Put("/admitted.docx", MinimalDocx.Create()).CaptureAsync(provider.Content);
+        Assert.True(await guarded.TryCreateAsync(candidate));
+        await admin.Documents.Where(row => row.ResourceId == state.ResourceId)
+            .ExecuteUpdateAsync(set => set.SetProperty(row => row.PathHash, new byte[32]));
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => guarded.CheckHealthAsync().AsTask());
+    }
+
     private static async Task Rename(SqlServerStateStore store, Guid id, string path) =>
         await store.RenameAsync(id, (row, _) => new StateTransition<bool>(row with { Path = path, PathKey = path.ToUpperInvariant() }, true));
 

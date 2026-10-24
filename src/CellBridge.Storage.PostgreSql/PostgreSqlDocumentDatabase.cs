@@ -6,7 +6,7 @@ using Npgsql;
 
 namespace CellBridge.Storage.PostgreSql;
 
-internal sealed class PostgreSqlDocumentDatabase : IDocumentDatabase<CellBridgeDbContext>, IDocumentLocking<CellBridgeDbContext>
+internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<CellBridgeDbContext>, IDocumentLocking<CellBridgeDbContext>
 {
     private readonly DbContextOptions<CellBridgeDbContext> options;
     private readonly PooledDbContextFactory<CellBridgeDbContext>? factory;
@@ -17,7 +17,19 @@ internal sealed class PostgreSqlDocumentDatabase : IDocumentDatabase<CellBridgeD
     }
     public CellBridgeDbContext CreateContext() => factory?.CreateDbContext() ?? new(options);
     public IDocumentLocking<CellBridgeDbContext> Locks => this;
-    public IsolationLevel ReadIsolation => IsolationLevel.ReadCommitted;
+    public Task<T> ReadAsync<T>(CellBridgeDbContext db, Func<Task<T>> action, bool coherent, CancellationToken ct) =>
+        coherent ? ReadSnapshotAsync(db, action, ct) : action();
+
+    private static async Task<T> ReadSnapshotAsync<T>(CellBridgeDbContext db, Func<Task<T>> action, CancellationToken ct)
+    {
+        // Only multi-statement health checks need a transaction. Ordinary reads
+        // already have PostgreSQL's statement snapshot and issue no setup commands.
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
+        await ConfigureSettingsAsync(db, ct);
+        var result = await action();
+        await transaction.CommitAsync(ct);
+        return result;
+    }
     public Task ConfigureAsync(CellBridgeDbContext db, CancellationToken ct) => ConfigureSettingsAsync(db, ct);
     public async Task CheckConfigurationAsync(CellBridgeDbContext db, CancellationToken ct)
     {
@@ -31,7 +43,7 @@ internal sealed class PostgreSqlDocumentDatabase : IDocumentDatabase<CellBridgeD
     public bool IsUniqueViolation(Exception ex) => PostgreSqlDatabase.FindPostgresException(ex)?.SqlState == PostgresErrorCodes.UniqueViolation;
     public IQueryable<DocumentRow> AtPath(IQueryable<DocumentRow> rows, string key) => rows.Where(row => row.PathKey == key);
     public void SetNamespaceFields(DocumentRow row, DocumentState state) { }
-    public void ValidateNamespaceFields(DocumentRow row, DocumentState state) { }
+    public void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state) { }
     public Task VerifyReservationsAsync(CellBridgeDbContext db, IReadOnlyDictionary<Guid, DocumentNamespaceState> states, CancellationToken ct) => Task.CompletedTask;
     public Task WriteReservationsAsync(CellBridgeDbContext db, DocumentState state, CancellationToken ct) => Task.CompletedTask;
     public Task<bool> HasReservationsAsync(CellBridgeDbContext db, CancellationToken ct) => Task.FromResult(false);
