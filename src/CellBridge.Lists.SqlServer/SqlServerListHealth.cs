@@ -65,16 +65,16 @@ public sealed partial class SqlServerListEngine
             throw new ListException(ListFailure.Unavailable, "Required SQL Server Lists runtime permissions are missing.");
         var excessive = await db.Database.SqlQuery<int>($"""
             SELECT COUNT(*) AS Value
-            FROM sys.tables target JOIN sys.schemas ns ON ns.schema_id=target.schema_id
-            CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('ALTER'),('CONTROL'),('TAKE OWNERSHIP')) permission(name)
-            WHERE ns.name='cellbridge_lists'
+            FROM sys.objects target JOIN sys.schemas ns ON ns.schema_id=target.schema_id
+            CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('EXECUTE'),('REFERENCES'),('ALTER'),('CONTROL'),('TAKE OWNERSHIP')) permission(name)
+            WHERE ns.name='cellbridge_lists' AND target.type IN ('U','FN','IF','TF','FS','FT')
                 AND HAS_PERMS_BY_NAME(ns.name+'.'+target.name, 'OBJECT', permission.name)=1
                 AND NOT EXISTS (SELECT 1 FROM OPENJSON({expected})
                     WITH (tableName nvarchar(256), permission nvarchar(32)) required
                     WHERE required.tableName=ns.name+'.'+target.name AND required.permission=permission.name)
             """).SingleAsync(ct);
         if (excessive != 0)
-            throw new ListException(ListFailure.Unavailable, "The SQL Server Lists runtime has excess table privileges.");
+            throw new ListException(ListFailure.Unavailable, "The SQL Server Lists runtime has excess permissions on tables or functions.");
     }
 
     // Runtime minimum permissions, including exact-query functions. Setup/migrations must use another principal.
