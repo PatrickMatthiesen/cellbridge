@@ -13,11 +13,6 @@ internal static class PostgreSqlStorageBudget
             ?? await context.Usage.FromSqlRaw("SELECT * FROM cellbridge_usage WHERE singleton=true FOR UPDATE")
                 .SingleOrDefaultAsync(cancellationToken)
             ?? throw new StorageCorruptionException("Missing storage usage ledger.");
-        var storedBytes = checked(usage.StoredBytes + bytes);
-        var documentCount = checked(usage.DocumentCount + documents);
-        StorageLimits.Check("total stored bytes", storedBytes, bytes > 0 ? usage.MaxStoredBytes : long.MaxValue);
-        StorageLimits.Check("document count", documentCount, documents > 0 ? usage.MaxDocuments : long.MaxValue);
-        usage.StoredBytes = storedBytes;
-        usage.DocumentCount = documentCount;
+        DocumentBudget.Adjust(usage, bytes, documents);
     }
 }

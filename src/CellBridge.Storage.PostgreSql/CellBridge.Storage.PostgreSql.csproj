@@ -10,6 +10,6 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <EmbeddedResource Include="Schema.sql" />
-    <Compile Include="../SharedStorage/VerifiedChunkStream.cs" Link="Content/VerifiedChunkStream.cs" />
+    <Compile Include="../SharedStorage/*.cs" Link="Shared/%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

@@ -169,7 +169,7 @@ public sealed class SqlServerDocumentTests(SqlServerFixture fixture)
         public Action? AfterCommit { get; set; }
         public override Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
         {
-            if (eventData.Context!.ChangeTracker.Entries<DocumentSnapshot>().Any())
+            if (eventData.Context!.ChangeTracker.Entries().Any(entry => entry.Metadata.GetTableName() == "snapshots"))
             { var action = AfterCommit; AfterCommit = null; action?.Invoke(); }
             return Task.CompletedTask;
         }

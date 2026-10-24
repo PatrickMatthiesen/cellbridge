@@ -54,8 +54,8 @@ internal sealed record SqlServerDocuments(string Admin, string Runtime, StorageL
     {
         await using var db = new SqlServerDocumentDbContext(Options(admin: true));
         var bytes = await db.Objects.SumAsync(row => (long?)row.Length) ?? 0;
-        bytes += await db.Snapshots.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.Data)) ?? 0;
-        bytes += await db.RecoveryReceipts.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.Data)) ?? 0;
+        bytes += await db.Snapshots.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.StateJson)) ?? 0;
+        bytes += await db.RecoveryReceipts.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.ReceiptJson)) ?? 0;
         var usage = await db.Usage.SingleAsync();
         Assert.Equal(bytes, usage.StoredBytes);
         Assert.Equal(await db.Documents.LongCountAsync(), usage.DocumentCount);

@@ -4,9 +4,9 @@ using System.Text.Json;
 using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
 
-namespace CellBridge.Storage.PostgreSql;
+namespace CellBridge.Storage.Shared;
 
-public sealed partial class PostgreSqlStateStore
+internal sealed partial class DocumentOperations<TContext> where TContext : DbContext
 {
     public ValueTask<DocumentReadMetadata?> FindReadMetadataByResourceIdAsync(Guid resourceId,
         CancellationToken cancellationToken = default) => FindReadMetadataAsync(resourceId, null, cancellationToken);
@@ -17,26 +17,23 @@ public sealed partial class PostgreSqlStateStore
     private async ValueTask<DocumentReadMetadata?> FindReadMetadataAsync(Guid? resourceId, string? pathKey,
         CancellationToken cancellationToken)
     {
-        try
+        return await ReadAsync(async context =>
         {
-            await using var context = CreateContext();
             var row = await CurrentReadRows(context, resourceId, pathKey, false)
                 .SingleOrDefaultAsync(cancellationToken);
+            if (row is null && pathKey is not null) await VerifyNamespaceRowsAsync(context, cancellationToken);
             return row is null ? null : DecodeReadMetadata(row);
-        }
-        catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
-        { throw new StorageUnavailableException("Document metadata could not be read.", ex); }
+        }, cancellationToken);
     }
 
     public async ValueTask<DocumentRevisionReadPage?> ReadRevisionSummariesAsync(Guid resourceId, int offset, int limit,
         CancellationToken cancellationToken = default)
     {
         DocumentReadModels.ValidatePage(offset, limit);
-        try
+        return await ReadAsync<DocumentRevisionReadPage?>(async context =>
         {
-            await using var context = CreateContext();
             var rows = await (from current in CurrentReadRows(context, resourceId, null, false)
-                              from revision in context.RevisionSummaries.AsNoTracking()
+                              from revision in context.Set<RevisionSummaryRow>().AsNoTracking()
                                   .Where(candidate => candidate.ResourceId == current.ResourceId &&
                                       candidate.LifecycleGeneration == current.LifecycleGeneration)
                                   .OrderByDescending(candidate => candidate.RevisionNumber).Skip(offset).Take(limit)
@@ -52,19 +49,16 @@ public sealed partial class PostgreSqlStateStore
                 throw new StorageCorruptionException("Revision projection page is incomplete.");
             var next = (long)offset + revisions.Length;
             return new(metadata, revisions, next < metadata.RevisionCount ? checked((int)next) : null);
-        }
-        catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
-        { throw new StorageUnavailableException("Revision summaries could not be read.", ex); }
+        }, cancellationToken);
     }
 
     public async ValueTask<DocumentRevisionRead?> ReadRevisionSummaryAsync(Guid resourceId, ulong revisionNumber,
         CancellationToken cancellationToken = default)
     {
-        try
+        return await ReadAsync<DocumentRevisionRead?>(async context =>
         {
-            await using var context = CreateContext();
             var row = await (from current in CurrentReadRows(context, resourceId, null, false)
-                             from revision in context.RevisionSummaries.AsNoTracking()
+                             from revision in context.Set<RevisionSummaryRow>().AsNoTracking()
                                  .Where(candidate => candidate.ResourceId == current.ResourceId &&
                                      candidate.LifecycleGeneration == current.LifecycleGeneration &&
                                      candidate.RevisionNumber == (decimal)revisionNumber).DefaultIfEmpty()
@@ -73,21 +67,20 @@ public sealed partial class PostgreSqlStateStore
             if (row is null) return null;
             var metadata = DecodeReadMetadata(row.Current);
             return new(metadata, row.Revision is null ? null : DecodeRevisionSummary(row.Revision, metadata));
-        }
-        catch (Exception ex) when (PostgreSqlDatabase.IsDatabaseException(ex))
-        { throw new StorageUnavailableException("Revision summary could not be read.", ex); }
+        }, cancellationToken);
     }
 
-    private static IQueryable<ReadProjection> CurrentReadRows(CellBridgeDbContext context, Guid? resourceId,
+    private IQueryable<ReadProjection> CurrentReadRows(TContext context, Guid? resourceId,
         string? pathKey, bool includeDeleted)
     {
-        return from document in context.Documents.AsNoTracking()
-               join matchingHead in context.ReadHeads.AsNoTracking()
+        var documents = context.Set<DocumentRow>().AsNoTracking();
+        if (pathKey is not null) documents = database.AtPath(documents, pathKey);
+        return from document in documents
+               join matchingHead in context.Set<ReadHeadRow>().AsNoTracking()
                    on new { document.ResourceId, document.StateVersion }
                    equals new { matchingHead.ResourceId, matchingHead.StateVersion } into heads
                from head in heads.DefaultIfEmpty()
                where (resourceId == null || document.ResourceId == resourceId) &&
-                     (pathKey == null || document.PathKey == pathKey) &&
                      (includeDeleted || !document.IsDeleted)
                select new ReadProjection
                {
@@ -99,16 +92,16 @@ public sealed partial class PostgreSqlStateStore
                    LifecycleGeneration = head == null ? null : head.LifecycleGeneration,
                    RevisionCount = head == null ? null : head.RevisionCount,
                    MetadataJson = head == null ? null : head.MetadataJson,
-                   TotalRevisionCount = context.RevisionSummaries.Count(revision =>
+                   TotalRevisionCount = context.Set<RevisionSummaryRow>().Count(revision =>
                        revision.ResourceId == document.ResourceId),
-                   CurrentRevisionCount = context.RevisionSummaries.Count(revision =>
+                   CurrentRevisionCount = context.Set<RevisionSummaryRow>().Count(revision =>
                        revision.ResourceId == document.ResourceId &&
                        revision.LifecycleGeneration == head!.LifecycleGeneration),
-                   LatestRevisionNumber = context.RevisionSummaries
+                   LatestRevisionNumber = context.Set<RevisionSummaryRow>()
                        .Where(revision => revision.ResourceId == document.ResourceId &&
                            revision.LifecycleGeneration == head!.LifecycleGeneration)
                        .Max(revision => (decimal?)revision.RevisionNumber),
-                   DatabaseUtc = CellBridgeDbContext.ClockTimestamp(),
+                   DatabaseUtc = DocumentSql.ClockUtc(),
                };
     }
 
@@ -154,11 +147,11 @@ public sealed partial class PostgreSqlStateStore
             throw new StorageCorruptionException("Invalid content metadata in read projection.");
     }
 
-    private static async Task WriteSelectiveReadsAsync(CellBridgeDbContext context, DocumentState state,
+    private async Task WriteSelectiveReadsAsync(TContext context, DocumentState state,
         CancellationToken cancellationToken)
     {
-        var head = context.ReadHeads.Local.SingleOrDefault(row => row.ResourceId == state.ResourceId)
-            ?? await context.ReadHeads.AsNoTracking()
+        var head = context.Set<ReadHeadRow>().Local.SingleOrDefault(row => row.ResourceId == state.ResourceId)
+            ?? await context.Set<ReadHeadRow>().AsNoTracking()
                 .SingleOrDefaultAsync(row => row.ResourceId == state.ResourceId, cancellationToken);
         if (head is not null && head.StateVersion > state.StateVersion) return;
         var metadata = DocumentReadModels.Metadata(state);
@@ -170,7 +163,7 @@ public sealed partial class PostgreSqlStateStore
             revisions.Max(revision => revision.RevisionNumber) != metadata.LatestRevisionNumber)
             throw new StorageCorruptionException("Cannot index inconsistent revision history.");
 
-        var databaseRows = await context.RevisionSummaries.AsNoTracking()
+        var databaseRows = await context.Set<RevisionSummaryRow>().AsNoTracking()
             .Where(row => row.ResourceId == state.ResourceId)
             .Select(row => new RevisionSummaryProjection
             {
@@ -197,12 +190,12 @@ public sealed partial class PostgreSqlStateStore
             {
                 if (databaseRow.SummaryJson == summaryJson) continue;
                 var row = CreateRevisionSummaryRow(state.ResourceId, databaseRow);
-                context.RevisionSummaries.Attach(row);
+                context.Set<RevisionSummaryRow>().Attach(row);
                 row.SummaryJson = summaryJson;
             }
             else
             {
-                context.RevisionSummaries.Add(new RevisionSummaryRow
+                context.Set<RevisionSummaryRow>().Add(new RevisionSummaryRow
                 {
                     ResourceId = state.ResourceId,
                     LifecycleGeneration = key.LifecycleGeneration,
@@ -220,13 +213,14 @@ public sealed partial class PostgreSqlStateStore
         foreach (var pair in databaseRows)
         {
             if (desiredKeys.Contains(pair.Key) || tracked.ContainsKey(pair.Key)) continue;
-            context.RevisionSummaries.Remove(CreateRevisionSummaryRow(state.ResourceId, pair.Value));
+            context.Set<RevisionSummaryRow>().Remove(CreateRevisionSummaryRow(state.ResourceId, pair.Value));
         }
 
+        await database.WriteReservationsAsync(context, state, cancellationToken);
         var metadataJson = JsonSerializer.Serialize(metadata);
         if (head is null)
         {
-            context.ReadHeads.Add(new ReadHeadRow
+            context.Set<ReadHeadRow>().Add(new ReadHeadRow
             {
                 ResourceId = state.ResourceId,
                 StateVersion = state.StateVersion,
@@ -237,7 +231,7 @@ public sealed partial class PostgreSqlStateStore
         }
         else
         {
-            if (context.Entry(head).State == EntityState.Detached) context.ReadHeads.Attach(head);
+            if (context.Entry(head).State == EntityState.Detached) context.Set<ReadHeadRow>().Attach(head);
             head.StateVersion = state.StateVersion;
             head.LifecycleGeneration = state.LifecycleGeneration;
             head.RevisionCount = revisions.Length;

@@ -137,22 +137,22 @@ public sealed class SqlServerMaintenanceTests(SqlServerFixture fixture)
         await using var admin = new SqlServerDocumentDbContext(database.Options(admin: true));
         switch (fault)
         {
-            case "retained-json": await admin.Snapshots.Where(row => row.StateVersion == 0).ExecuteUpdateAsync(set => set.SetProperty(row => row.Data, new byte[] { 255 })); break;
+            case "retained-json": await admin.Database.ExecuteSqlRawAsync("UPDATE cellbridge_documents.snapshots SET Data=0xFF WHERE StateVersion=0"); break;
             case "current-snapshot": await admin.Snapshots.Where(row => row.StateVersion == 1).ExecuteDeleteAsync(); break;
             case "reference":
-                await admin.Chunks.Where(row => row.Key == state.Content.Key).ExecuteDeleteAsync();
-                await admin.Objects.Where(row => row.Key == state.Content.Key).ExecuteDeleteAsync();
+                await admin.Chunks.Where(row => row.ObjectKey == state.Content.Key).ExecuteDeleteAsync();
+                await admin.Objects.Where(row => row.ObjectKey == state.Content.Key).ExecuteDeleteAsync();
                 break;
-            case "reference-metadata": await admin.Objects.Where(row => row.Key == state.Content.Key)
+            case "reference-metadata": await admin.Objects.Where(row => row.ObjectKey == state.Content.Key)
                 .ExecuteUpdateAsync(set => set.SetProperty(row => row.Length, row => row.Length + 1)); break;
             case "ledger": await admin.Usage.ExecuteUpdateAsync(set => set.SetProperty(row => row.StoredBytes, row => row.StoredBytes + 1)); break;
         }
-        var keys = await admin.Objects.OrderBy(row => row.Key).Select(row => row.Key).ToArrayAsync();
+        var keys = await admin.Objects.OrderBy(row => row.ObjectKey).Select(row => row.ObjectKey).ToArrayAsync();
         var usage = (await admin.Usage.AsNoTracking().SingleAsync()).StoredBytes;
         var maintenance = new StorageMaintenance(database.Options(admin: true));
         await Assert.ThrowsAsync<StorageCorruptionException>(() => maintenance.CollectOrphansAsync());
         await Assert.ThrowsAsync<StorageCorruptionException>(() => maintenance.CollectOrphansAsync(apply: true, quiescent: true));
-        Assert.Equal(keys, await admin.Objects.OrderBy(row => row.Key).Select(row => row.Key).ToArrayAsync());
+        Assert.Equal(keys, await admin.Objects.OrderBy(row => row.ObjectKey).Select(row => row.ObjectKey).ToArrayAsync());
         Assert.Equal(usage, (await admin.Usage.AsNoTracking().SingleAsync()).StoredBytes);
         Assert.Equal(new byte[] { 17, 18 }, await provider.Content.ReadVerifiedAsync(orphan));
     }

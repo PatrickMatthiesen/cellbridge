@@ -22,7 +22,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.ChunkRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.ChunkRow", b =>
                 {
                     b.Property<string>("ObjectKey")
                         .HasColumnType("text")
@@ -43,7 +43,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                     b.ToTable("cellbridge_chunks", (string)null);
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.DocumentRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.DocumentRow", b =>
                 {
                     b.Property<Guid>("ResourceId")
                         .HasColumnType("uuid")
@@ -76,7 +76,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                     b.ToTable("cellbridge_documents", (string)null);
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.ObjectRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.ObjectRow", b =>
                 {
                     b.Property<string>("ObjectKey")
                         .HasColumnType("text")
@@ -100,7 +100,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                         });
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.ReadHeadRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.ReadHeadRow", b =>
                 {
                     b.Property<Guid>("ResourceId")
                         .HasColumnType("uuid")
@@ -132,7 +132,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                         });
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.RecoveryReceiptRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.RecoveryReceiptRow", b =>
                 {
                     b.Property<Guid>("OperationId")
                         .HasColumnType("uuid")
@@ -149,7 +149,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                     b.ToTable("cellbridge_recovery_receipts", (string)null);
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.RecoverySchemaRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.RecoverySchemaRow", b =>
                 {
                     b.Property<int>("Version")
                         .HasColumnType("integer")
@@ -161,7 +161,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                     b.ToTable("cellbridge_recovery_schema", (string)null);
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.RevisionSummaryRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.RevisionSummaryRow", b =>
                 {
                     b.Property<Guid>("ResourceId")
                         .HasColumnType("uuid")
@@ -190,7 +190,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                         });
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.SchemaVersionRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.SchemaVersionRow", b =>
                 {
                     b.Property<int>("Version")
                         .HasColumnType("integer")
@@ -202,7 +202,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                     b.ToTable("cellbridge_schema", (string)null);
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.StateRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.StateRow", b =>
                 {
                     b.Property<Guid>("ResourceId")
                         .HasColumnType("uuid")
@@ -223,7 +223,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                     b.ToTable("cellbridge_states", (string)null);
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.UsageRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.UsageRow", b =>
                 {
                     b.Property<bool>("Singleton")
                         .HasColumnType("boolean")
@@ -262,9 +262,9 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                         });
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.PostgreSql.ChunkRow", b =>
+            modelBuilder.Entity("CellBridge.Storage.Shared.ChunkRow", b =>
                 {
-                    b.HasOne("CellBridge.Storage.PostgreSql.ObjectRow", null)
+                    b.HasOne("CellBridge.Storage.Shared.ObjectRow", null)
                         .WithMany()
                         .HasForeignKey("ObjectKey")
                         .OnDelete(DeleteBehavior.NoAction)
