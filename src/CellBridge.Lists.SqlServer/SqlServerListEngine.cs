@@ -11,7 +11,6 @@ namespace CellBridge.Lists.SqlServer;
 /// Mutations serialize per workspace.
 /// </summary>
 /// <remarks>
-/// This non-packable provider does not establish SQL Server performance support.
 /// Run SqlServerListMigrator and SqlServerListSetup with administrator options;
 /// construct this engine with a separate restricted runtime principal. Health
 /// requires SELECT on migration history, VIEW DEFINITION on the Lists schema,
