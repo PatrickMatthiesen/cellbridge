@@ -463,7 +463,7 @@ GRANT EXECUTE ON OBJECT::cellbridge_lists.key_compare TO cellbridge_lists_runtim
 
 Keep this user out of owner and DDL roles. Do not grant broad table writes or
 permission to change security policies. Runtime health checks verify these
-permissions. SQL Server delayed durability must be `DISABLED`. Row-level security
+permissions. SQL Server requires `DELAYED_DURABILITY = DISABLED`. Row-level security
 uses `CONTEXT_INFO`; host authorization still decides whether an actor may operate.
 
 Register the engine with restricted runtime options, then use the same
@@ -482,7 +482,7 @@ Migration and provisioning are explicit setup steps. Registration, health checks
 and requests never migrate schemas. Do not enable `EnableRetryOnFailure`; the
 engine manages transactions and create retries. Required database locks stay
 enabled. SQL Server performance and live reporting-client compatibility have not
-been qualified.
+been tested.
 
 ### Shared limits and operation
 
@@ -519,7 +519,9 @@ work ignores it, the adapter waits for that work to finish after aborting the
 transport, keeping request-scoped dependencies alive until that work ends.
 Deleting records frees their value bytes, not lifetime identity capacity.
 
-Logical accounting includes value bytes and defined charges for retained schemas,
+SQL Server counts UTF-8 bytes of compact JSON written by `System.Text.Json`.
+PostgreSQL counts UTF-8 bytes of its JSONB text representation.
+Logical accounting includes these value bytes and defined charges for retained schemas,
 views, receipts, tombstones and ordinary audit metadata. It is not a database
 physical-size estimate. Membership and grant removal releases their row charges,
 including grants cascaded by membership removal. Retained audits keep their charges.

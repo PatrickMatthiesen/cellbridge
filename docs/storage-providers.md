@@ -54,7 +54,7 @@ checks and requests never migrate schemas. Do not enable EF automatic execution
 strategy retries. Retry protocol operations with the same operation identity to
 replay an accepted save.
 
-SQL Server requires delayed durability to be `DISABLED`. Runtime credentials need
+SQL Server requires `DELAYED_DURABILITY = DISABLED`. Runtime credentials need
 data access to the document tables, read access to `schema_version` and `usage`,
 and update access to `usage.StoredBytes` and `usage.DocumentCount`. They do not
 need schema, migration-history or quota-limit write permissions. Host
