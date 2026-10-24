@@ -43,6 +43,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
     public bool IsUniqueViolation(Exception ex) => PostgreSqlDatabase.FindPostgresException(ex)?.SqlState == PostgresErrorCodes.UniqueViolation;
     public IQueryable<DocumentRow> AtPath(IQueryable<DocumentRow> rows, string key) => rows.Where(row => row.PathKey == key);
     public void SetNamespaceFields(DocumentRow row, DocumentState state) { }
+    public void ValidatePointer(DocumentRow row, DocumentState state) { }
     public void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state) { }
     public Task VerifyReservationsAsync(CellBridgeDbContext db, IReadOnlyDictionary<Guid, DocumentNamespaceState> states, CancellationToken ct) => Task.CompletedTask;
     public Task WriteReservationsAsync(CellBridgeDbContext db, DocumentState state, CancellationToken ct) => Task.CompletedTask;

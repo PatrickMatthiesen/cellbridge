@@ -93,6 +93,11 @@ internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlS
         row.PathHash = PathHash(state.PathKey);
         row.RetiredPathCount = state.RetiredPathKeys.Length;
     }
+    public void ValidatePointer(DocumentRow row, DocumentState state)
+    {
+        if (row.RetiredPathCount != state.RetiredPathKeys.Length)
+            throw new StorageCorruptionException("Snapshot identity disagrees with its current pointer.");
+    }
     public void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state)
     {
         if (row.RetiredPathCount != state.RetiredPathKeys.Length || !row.PathHash.AsSpan().SequenceEqual(PathHash(state.PathKey)))

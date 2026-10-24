@@ -40,7 +40,7 @@ public sealed class PostgreSqlReadScopeTests
                 commands.Sql.Clear();
                 await read();
                 Assert.Single(commands.Sql);
-                Assert.DoesNotContain("SET ", commands.Sql[0], StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotMatch(@"(?i)\bSET\s", commands.Sql[0]);
             }
             Assert.Empty(transactions.Started);
             Assert.Equal(0, transactions.Committed);

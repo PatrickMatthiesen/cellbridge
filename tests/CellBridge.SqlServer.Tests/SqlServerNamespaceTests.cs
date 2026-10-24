@@ -107,13 +107,13 @@ public sealed class SqlServerNamespaceTests(SqlServerFixture fixture)
         var state = (await new CellBridgeDocumentService(provider)
             .CreateAsync("/namespace-graphs.docx", MinimalDocx.Create(), SqlServerDocuments.Actor))!;
         await using var admin = new SqlServerDocumentDbContext(database.Options(admin: true));
-        var path = "$." + property;
-        var malformed = "{\"malformed\":true}";
-        await admin.Database.ExecuteSqlInterpolatedAsync($"""
-            UPDATE cellbridge_documents.snapshots
-            SET Data=CONVERT(varbinary(max),JSON_MODIFY(CONVERT(varchar(max),Data),{path},JSON_QUERY({malformed})))
-            WHERE ResourceId={state.ResourceId}
-            """);
+        foreach (var snapshot in await admin.Snapshots.Where(row => row.ResourceId == state.ResourceId).ToListAsync())
+        {
+            var json = System.Text.Json.Nodes.JsonNode.Parse(snapshot.StateJson)!.AsObject();
+            json[property] = new System.Text.Json.Nodes.JsonObject { ["malformed"] = true };
+            snapshot.StateJson = json.ToJsonString();
+        }
+        await admin.SaveChangesAsync();
         await Assert.ThrowsAsync<StorageCorruptionException>(() => provider.State.FindByResourceIdAsync(state.ResourceId).AsTask());
         var guarded = new SqlServerStateStore(database.Options(false, new RejectContentReads()));
         await guarded.CheckHealthAsync();

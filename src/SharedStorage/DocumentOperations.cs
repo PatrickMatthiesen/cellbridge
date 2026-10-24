@@ -198,7 +198,7 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
         if (state.ResourceId != pointer.ResourceId || state.StateVersion != pointer.StateVersion ||
             state.PathKey != pointer.PathKey || state.IsDeleted != pointer.IsDeleted)
             throw new StorageCorruptionException("Snapshot identity disagrees with its current pointer.");
-        database.ValidateNamespaceFields(pointer, DocumentNamespaceState.From(state));
+        database.ValidatePointer(pointer, state);
     }
 
     private Microsoft.EntityFrameworkCore.Metadata.IModel? queryModel;

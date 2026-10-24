@@ -29,6 +29,7 @@ internal interface IDocumentDatabase<TContext> where TContext : DbContext
     bool IsUniqueViolation(Exception exception);
     IQueryable<DocumentRow> AtPath(IQueryable<DocumentRow> rows, string key);
     void SetNamespaceFields(DocumentRow row, DocumentState state);
+    void ValidatePointer(DocumentRow row, DocumentState state);
     void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state);
     Task VerifyReservationsAsync(TContext db, IReadOnlyDictionary<Guid, DocumentNamespaceState> states, CancellationToken ct);
     Task WriteReservationsAsync(TContext db, DocumentState state, CancellationToken ct);
