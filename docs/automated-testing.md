@@ -82,6 +82,11 @@ connection and inject SQL and non-SQL failures after commit. Both must discard
 the old workspace session without turning the committed mutation into a failure.
 Restricted-runtime inserts must reject null subjects in both identity tables.
 An upgrade check repairs the earlier nullable schema while preserving valid rows.
+Lists engine checks cover built-in and host authority, exact typed SQL filtering
+and ordering, paging, create retry receipts, conditional mutations, references,
+schema changes, saved views and audit. Runtime health requires the exact
+[Lists permissions](lists.md#sql-server-setup-and-runtime), including schema
+`VIEW DEFINITION`, migration-history `SELECT` and query-function `EXECUTE`.
 
 Document checks run the public provider conformance contract and the canonical
 document service. They cover inherited file graphs, competing saves, receipts,
@@ -99,7 +104,7 @@ path misses and admission reject damaged namespace indexes without reading
 content objects or chunks.
 Runtime logins cannot create tables or change persisted quota limits.
 These checks do not establish live Office interoperability or full provider
-parity. The full Lists engine is not implemented in this branch.
+parity or qualify SQL Server performance.
 Fixture startup/health failures are setup failures and do not count
 as product test results.
 
@@ -125,16 +130,37 @@ to alter security policies. Tests use separate setup and runtime logins.
 
 ```sh
 python3 tools/verify_packages.py
+python3 tools/verify_packages.py --sqlserver
 python3 tools/check_release.py --version <version> --commit <sha>
 ```
 
 The verifier packs the libraries, builds package-only examples and runs
 [consumer checks](../tests/CellBridge.Packages.Tests/README.md) against an isolated
-local feed/cache. It validates all twelve packages and symbols, readmes, license,
+local feed/cache. It validates all fourteen packages and symbols, readmes, license,
 repository metadata and internal versions, then writes
-`artifacts/packages/manifest.json`. Database consumer checks need an explicitly
-supplied disposable migrated database; skipped database checks do not establish
-durable consumer recovery. A release requires reviewed committed source and
+`artifacts/packages/manifest.json`. The inventory includes
+`CellBridge.Storage.SqlServer` and `CellBridge.Lists.SqlServer`, at the same
+`0.1.0-beta.4` version as the other packages. Both remain independent of each
+other and PostgreSQL.
+
+The default command builds both package-only document and Lists test consumers,
+runs non-database checks and reports database skips. `--sqlserver` opts into the
+existing disposable Aspire `SqlServerEnvironment` through source test
+orchestration, with the same SQL Server prerequisites as the engine checks above.
+It launches separate package-only document and Lists test processes against
+separate empty databases. Each consumer explicitly migrates its own schema with
+setup credentials and uses restricted runtime credentials afterward. Source
+orchestration supplies the environment; the consumer processes use package
+references. Existing package and consumer checks still run.
+
+The package-only test projects stay outside `CellBridge.slnx` because their packed
+feed must exist before restore. Ignored `artifacts/packages` retains manifests,
+the isolated feed/cache, consumer assembly identities and hashes, TRX results and
+the SQL engine version for database runs. A skipped check is not a pass.
+Environment startup failures are setup failures. Package checks do not establish
+full provider parity, SQL Server performance or live Office interoperability.
+
+A release requires reviewed committed source and
 `sourceDirty: false`. The [publish workflow](../.github/workflows/publish-nuget.yml)
 validates from `main`; use a new version for changed source.
 

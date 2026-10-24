@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>false</IsPackable><DefineConstants>$(DefineConstants);CELLBRIDGE_SQLSERVER</DefineConstants></PropertyGroup>
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>true</IsPackable><DefineConstants>$(DefineConstants);CELLBRIDGE_SQLSERVER</DefineConstants></PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Migrations/20261024000001_ExactQueries.sql" />
     <ProjectReference Include="../CellBridge.Lists/CellBridge.Lists.csproj" />
@@ -10,4 +10,7 @@
     <InternalsVisibleTo Include="CellBridge.SqlServer.Tests" />
   </ItemGroup>
   <PropertyGroup><Description>SQL Server runtime for native workspace Lists with built-in/host authority, exact typed queries, candidate paging, views, audit and atomic schema/record operations.</Description></PropertyGroup>
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../docs/lists-package-readme.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
 </Project>

@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>false</IsPackable></PropertyGroup>
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>true</IsPackable></PropertyGroup>
+  <PropertyGroup><Description>SQL Server document state and content storage with explicit migrations for CellBridge.</Description></PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../CellBridge.Storage.Abstractions/CellBridge.Storage.Abstractions.csproj" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />

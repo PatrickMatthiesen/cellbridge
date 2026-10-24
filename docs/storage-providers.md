@@ -3,37 +3,65 @@
 See [tested environments and recovery limits](supported-environments.md) and the
 [upgrade procedure](#upgrading-a-durable-host) before upgrading a durable host.
 
-CellBridge stores document state separately from file content. PostgreSQL holds
-document identities, current revisions, synchronization graphs, save receipts,
-sessions and leases. Content uses PostgreSQL chunks or immutable filesystem
+CellBridge stores document state separately from file content. PostgreSQL or
+SQL Server holds document identities, current revisions, synchronization graphs, save receipts,
+sessions and leases. Content uses database chunks or immutable filesystem
 objects. In-memory stores are available for disposable development.
 
 The PostgreSQL package owns its EF Core model and versioned migrations. It does
 not add entities to the application's DbContext. Document storage and native
 Lists use independent contexts, migration histories and package dependencies.
-PostgreSQL is the packaged document-state and Lists provider.
+PostgreSQL and SQL Server have separate document-storage and Lists packages.
 EF generates the table and index migrations from the owned model. Legacy schema
 upgrades retain their data transforms. PostgreSQL locks remain explicit where EF
 does not express the required locking operation.
 
-SQL Server work is in progress in the non-packable `CellBridge.Storage.SqlServer`
-and `CellBridge.Lists.SqlServer` projects. Document storage implements the existing
-state, content, lifecycle, selective-read and recovery contracts. Engine tests
+`CellBridge.Storage.SqlServer` and `CellBridge.Lists.SqlServer` are .NET 10
+packages that share the current `0.1.0-beta.4` version with the other CellBridge packages.
+Document storage implements the existing state, content, lifecycle,
+selective-read and recovery contracts. Engine tests
 exercise the canonical document service with graph-aware saves, replay and
 partial cancellation. Lists has an independent schema with workspace security policies.
-Each project owns its EF Core 10 context and explicit migration entry point.
-Neither project depends on PostgreSQL or on the other SQL Server project.
-The full Lists engine remains unimplemented in this branch.
+Each package owns its EF Core 10 context and explicit migration entry point.
+Neither package depends on PostgreSQL or on the other SQL Server package.
+`SqlServerListEngine` implements `IListEngine` and `IPagedListEngine`, with
+built-in grants or host authority, exact typed SQL queries, paging, create
+receipts, conditional mutations, saved views and audit. See [Lists setup](lists.md#sql-server-setup-and-runtime)
+for its independent initialization and runtime permissions.
 The demo still accepts `PostgreSql` and `InMemory`. Live Office editing against
 SQL Server has not been validated. See [SQL Server engine checks](automated-testing.md#sql-server-engine-checks)
 for coverage and prerequisites.
 
-SQL Server consumers configure `DbContextOptions<SqlServerDocumentDbContext>`
-with `UseSqlServer`, explicitly run `SqlServerStorageMigrator.MigrateAsync` in
-their initializer with setup credentials, then construct `SqlServerStateStore`
-and `SqlServerContentStore` with runtime options. Use the same options instance
-for both stores to identify their shared byte budget. Constructors and requests
-never migrate the schema. The application keeps ownership of its own DbContext.
+SQL Server consumers run initialization separately with setup credentials and
+all hosts stopped:
+
+```csharp
+using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.SqlServer;
+using Microsoft.EntityFrameworkCore;
+
+var limits = new StorageLimits();
+var setupOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
+    .UseSqlServer(setupConnectionString).Options;
+await new SqlServerStorageMigrator(setupOptions, limits).MigrateAsync();
+```
+
+The host then uses restricted runtime credentials:
+
+```csharp
+var runtimeOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
+    .UseSqlServer(runtimeConnectionString).Options;
+var provider = new StorageProvider(
+    new SqlServerStateStore(runtimeOptions, limits),
+    new SqlServerContentStore(runtimeOptions, limits.MaxObjectBytes), limits);
+builder.Services.AddCellBridge(provider, multipleInstances: true);
+await provider.CheckHealthAsync();
+```
+
+Import `CellBridge.AspNetCore` for `AddCellBridge`. Use the same runtime options
+instance for both stores to identify their shared byte budget. Registration,
+constructors, health checks and requests never migrate schemas. The application
+keeps ownership of its own DbContext.
 Do not enable EF automatic execution-strategy retries. Retry protocol operations
 with the same operation identity so accepted receipts can be replayed.
 
@@ -186,7 +214,7 @@ publishes an older retained version through the regular document service.
 The reusable packages target .NET 10. Use the same version for all CellBridge
 packages. [CellBridge.AspNetCore](https://www.nuget.org/packages/CellBridge.AspNetCore)
 provides endpoint registration and save orchestration. Choose state and content
-stores from `.PostgreSql`, `.FileSystem` and `.InMemory`; filesystem storage
+stores from `.PostgreSql`, `.SqlServer`, `.FileSystem` and `.InMemory`; filesystem storage
 supplies content only.
 
 For an initialized PostgreSQL database:
@@ -268,13 +296,19 @@ and its [tests](../tests/CellBridge.Packages.Tests/README.md) with Aspire stoppe
 python3 tools/verify_packages.py
 ```
 
-Outputs and the isolated package cache stay in `artifacts/packages`.
+The default command builds both package-only document and Lists consumers, runs
+non-database checks and reports database skips. Add `--sqlserver` to run them
+against separate empty databases in the disposable Aspire SQL Server environment.
+Outputs and the isolated feed/cache stay in ignored `artifacts/packages`. See
+[package checks](automated-testing.md#package-checks) for evidence and prerequisites.
 
 ### Provider composition constraints
 
 Pass consistent `StorageLimits` to the state store, content store's object-size
 argument, `StorageProvider` and schema setup. PostgreSQL state/content stores
-must share one `NpgsqlDataSource` instance. Empty in-memory stores composed
+must share one `NpgsqlDataSource` instance, or the same EF options instance.
+SQL Server state/content stores must share the same EF options instance.
+Empty in-memory stores composed
 through `StorageProvider` share their counters.
 
 `StorageCapabilities.AtomicBudgets` reports coordinated accounting.

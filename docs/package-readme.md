@@ -17,6 +17,17 @@ challenge/completion flow. Custom HTML is optional.
 `AddCellBridgeOfficeFormsAuthentication` can connect an existing complete login flow.
 The sample account database is not packaged.
 
+`CellBridge.Storage.SqlServer` supplies document state and chunked content. It is
+independent of PostgreSQL and the optional `CellBridge.Lists.SqlServer` package.
+Use version `0.1.0-beta.4` for all CellBridge packages. Configure
+`DbContextOptions<SqlServerDocumentDbContext>` with EF Core `UseSqlServer`, then
+call `await new SqlServerStorageMigrator(setupOptions, limits).MigrateAsync()`
+from a separate initializer with setup credentials. Construct `SqlServerStateStore`
+and `SqlServerContentStore` with the same restricted runtime options instance.
+Registration, health checks and requests never migrate schemas. The hosting guide
+below has complete examples and permission requirements. SQL Server live Office
+editing and full provider parity remain unqualified.
+
 Hosts can map the HTTP endpoints or execute parsed SOAP requests through
 `CellBridgeRequestProcessor`. They can supply GUID resource identities, apply
 document-scoped request permission limits and inspect accepted-save receipts.
