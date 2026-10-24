@@ -211,7 +211,6 @@ public sealed class SqlServerMaintenanceTests(SqlServerFixture fixture)
         try
         {
             await observed.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            await Task.Delay(100);
             Assert.All(writers, task => Assert.False(task.IsCompleted));
             Assert.False(mutation.IsCompleted);
             Assert.False(capture.IsCompleted);

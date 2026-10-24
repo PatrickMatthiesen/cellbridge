@@ -31,7 +31,7 @@ internal sealed partial class EfListEngine
                 THEN 1 ELSE 0 END AS Value
             """).SingleAsync(ct);
         if (safe != 1)
-            throw new ListException(ListFailure.Unavailable, "The SQL Server Lists runtime requires restricted privileges, schema metadata visibility and immediate durability.");
+            throw new ListException(ListFailure.Unavailable, "The SQL Server Lists runtime requires restricted permissions, schema metadata access and delayed durability set to DISABLED.");
 
         // Metadata visibility is required explicitly, so missing or disabled policies
         // cannot be mistaken for metadata hidden from a restricted user.

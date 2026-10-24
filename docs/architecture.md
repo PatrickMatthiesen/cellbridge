@@ -27,8 +27,8 @@ and direct callers. It resolves document identity and sends binary Cell requests
 to `CellBridgeDocumentService.ExecuteAsync`. Direct binary integrations use that
 same service. The service validates the request, selects each operation's target
 partition and runs the operations in request order. Internal handlers prepare
-file and metadata graphs and build query responses. InMemory, PostgreSQL and SQL Server
-use this execution path.
+file and metadata graphs and build query responses. InMemory, PostgreSQL and SQL
+Server use this execution path.
 
 The endpoint serializes each operation's protocol response. HTTP 200 alone does
 not indicate save success.
@@ -50,13 +50,13 @@ See [authentication and permissions](authentication.md).
 | `CellBridge.Storage` | Detached protocol documents and persistence codecs |
 | `CellBridge.Storage.PostgreSql` | EF Core document persistence, explicit migrations, per-document coordination and chunked content |
 | `CellBridge.Storage.SqlServer` | Independent EF Core document persistence, explicit migrations, coordinated state and chunked content |
-| `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory durability operations |
+| `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory flushes |
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
 | `CellBridge.Storage.Conformance` | Provider contract checks for consumers |
 | `CellBridge.AspNetCore` | Save orchestration, discovery, download and cellstorage endpoints |
 | `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
 | `CellBridge.Lists.PostgreSql` | Independent EF Core list persistence and migrations, JSONB records, workspace isolation and grants |
-| `CellBridge.Lists.SqlServer` | Independent EF Core list persistence and migrations, exact typed SQL queries and paging, built-in or host authority, mutations, views and audit |
+| `CellBridge.Lists.SqlServer` | List persistence, migrations, SQL queries, workspace authorization, views and audit |
 | `CellBridge.Lists.AspNetCore` | Opt-in list APIs, protected paging, CSV/XLSX and read-only OData subset |
 | `CellBridge.WebDemo` | Non-packable development host, Razor Pages, package generation and catalog APIs |
 | `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |
@@ -70,19 +70,14 @@ are independent of the protocols. The sample owns file creation and Aspire setup
 The optional [list engine](lists.md) uses separate database tables, setup and
 runtime credentials. Hosts supply validated identities and customer workspaces.
 Its APIs and state are independent of Office document synchronization.
-PostgreSQL and SQL Server compile the same document operations from
-`src/SharedStorage/Document*.cs` and the same Lists operations from
-`src/SharedLists/Engine`. The operation code owns transaction boundaries and
-requests the required locks through internal provider contracts. Database
-mappings, migrations, security settings and SQL expressions remain with each
-provider. Document and Lists code share no persistence dependencies.
+PostgreSQL and SQL Server use the same document and Lists operations. Each
+provider owns its mappings, migrations, security settings and SQL. Required
+database locking stays enabled. Document and Lists packages have independent
+storage dependencies.
 
-Both SQL Server providers are packaged at `0.1.0-beta.4` with the other libraries.
-Neither depends on PostgreSQL or on the other SQL Server provider. Each owns its
-context, schema and migration history. Consumers explicitly call
-`SqlServerStorageMigrator.MigrateAsync` or `SqlServerListMigrator.MigrateAsync`
-with setup options before starting restricted runtime stores or engines.
-Registration and requests never apply migrations. See
+SQL Server consumers explicitly call the document or Lists migrator with setup
+credentials before starting stores or engines with restricted runtime
+credentials. Registration and requests never apply migrations. See
 [document setup](storage-providers.md) and [Lists setup](lists.md#sql-server-setup-and-runtime).
 
 ## Document identity and partitions
@@ -103,7 +98,7 @@ The document service reconstructs the package into an exclusive temporary file.
 It checks every ZIP member against the limit on expanded bytes before storing
 immutable content.
 The staging file is deleted on success, failure or cancellation. InMemory,
-PostgreSQL and SQL Server use this preparation before the coordinated state update.
+PostgreSQL and SQL Server use this preparation before updating state.
 
 The service then reads the current state and database time, rechecks Write permission,
 coherency and leases, and commits the selected revision with a save receipt.

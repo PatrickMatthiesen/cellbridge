@@ -54,77 +54,23 @@ node tools/testing/test-list-example-ui.cjs
 
 ## SQL Server engine checks
 
-Run the independent SQL Server tests with .NET 10, Docker on Linux x86-64 and an
-Aspire CLI compatible with the pinned hosting packages:
+Run the SQL Server tests with .NET 10, Docker on Linux x86-64 and an Aspire CLI
+compatible with the pinned hosting packages:
 
 ```sh
 dotnet test tests/CellBridge.SqlServer.Tests --logger trx --results-directory artifacts/sqlserver
 ```
 
-The fixture reuses the main AppHost through Hosting.Testing, removes its default
-resources before startup and adds native Aspire SQL Server database resources.
-It starts SQL Server 2022 Developer with a 2048 MiB engine memory limit,
-disposable storage, random credentials and allocated endpoints, then disposes
-only its own application. Leave additional memory for Aspire, .NET and Docker. The default
-development AppHost and PostgreSQL volume remain unchanged. Running this fixture
-uses the native integration's `ACCEPT_EULA=Y` setting for the nonproduction
-Developer edition. Review Microsoft's [container license and platform requirements](https://learn.microsoft.com/en-us/sql/linux/sql-server-linux-docker-container-deployment?view=sql-server-ver17)
-before running it in another environment.
+The fixture starts a disposable SQL Server 2022 Developer database. Allow at
+least 2 GiB for SQL Server plus memory for Aspire, .NET and Docker. The
+integration accepts Microsoft's license for the nonproduction Developer
+edition. Review the [container license and platform requirements](https://learn.microsoft.com/en-us/sql/linux/sql-server-linux-docker-container-deployment?view=sql-server-ver17)
+before running it elsewhere.
 
-Content checks cover explicit and concurrent migrations, restricted runtime
-credentials, deduplicated writes from separate store instances, shared quota
-admission, cancellation during chunk insertion, rollback, streamed integrity
-verification and early disposal. Lists checks exercise its separate migrations,
-workspace filter/block policies, immutable authorization anchors, exact persisted
-subject identities, JSON/Unicode round trips and context cleanup across a
-single-connection pool. Cleanup-failure checks also use an externally owned open
-connection and inject SQL and non-SQL failures after commit. Both must discard
-the old workspace session without turning the committed mutation into a failure.
-Restricted-runtime inserts must reject null subjects in both identity tables.
-An upgrade check repairs the earlier nullable schema while preserving valid rows.
-Lists engine checks cover built-in and host authority, exact typed SQL filtering
-and ordering, paging, create retry receipts, conditional mutations, references,
-schema changes, saved views and audit. Runtime health requires the exact
-[Lists permissions](lists.md#sql-server-setup-and-runtime), including schema
-`VIEW DEFINITION`, migration-history `SELECT` and query-function `EXECUTE`.
-
-Document checks run the public provider conformance contract and the canonical
-document service. They cover inherited file graphs, competing saves, receipts,
-replay after a lost commit reply, cancellation after acceptance, restoration,
-post-lock database time, selective reads without snapshot/content loads,
-rename/delete/recreate, path reservations, snapshot/history limits, exact byte
-accounting, persisted quota admission and atomic recovery import with retry.
-Outer-request checks cover coauthoring with skipped schema-lock fallback, saves
-and replay, read-only authorization and resource-ID lookup without URL fallback.
-Independent providers also exercise host-lock refresh/replacement/fencing and
-coauthor membership transitions.
-Namespace checks cover repeated recreation through renamed lifecycle ancestors,
-unrelated retired reservations, and hash/key/missing-row corruption. Health,
-path misses and admission reject damaged namespace indexes without reading
-content objects or chunks.
-Runtime logins cannot create tables or change persisted quota limits.
-These checks do not establish live Office interoperability or full provider
-parity or qualify SQL Server performance.
-Fixture startup/health failures are setup failures and do not count
-as product test results.
-
-Quiescent collection checks cover dry-run/apply reports, retained-only save
-receipts, history/graph roots, deleted and recreated documents, pending external
-deliveries, imported recovery snapshots and receipt replay. Corrupt inventories
-abort before deletion. Faults and cancellation during a sweep roll back chunks
-and accounting; cancellation after commit preserves the completed report.
-The engine also checks that collection blocks content quota admission, document
-publication and recovery while holding its transaction lock. Such tests exercise
-transaction ordering at the maintenance boundary, not live collection during
-multi-step Office saves. An explicit quiescent apply is still required.
-
-The Lists transaction helper binds the workspace in `CONTEXT_INFO`, then clears
-it before returning the connection. A failed reset clears its pool and closes the
-session even when the consumer owns the open connection. This avoids
-the documented [`SESSION_CONTEXT` parallel-plan issue](https://learn.microsoft.com/en-us/sql/t-sql/functions/session-context-transact-sql?view=sql-server-ver17).
-Workspace context selects a database scope; host authorization must still approve
-each Lists operation. The runtime user must not own the schema or have permission
-to alter security policies. Tests use separate setup and runtime logins.
+The suite checks the document and Lists migrations, runtime permissions, document
+storage and recovery, and Lists authorization and operations. It does not test
+live Office editing or establish SQL Server performance or full provider parity.
+Fixture startup and health failures are setup failures, not test results.
 
 ## Package checks
 
@@ -136,29 +82,19 @@ python3 tools/check_release.py --version <version> --commit <sha>
 
 The verifier packs the libraries, builds package-only examples and runs
 [consumer checks](../tests/CellBridge.Packages.Tests/README.md) against an isolated
-local feed/cache. It validates all fourteen packages and symbols, readmes, license,
-repository metadata and internal versions, then writes
-`artifacts/packages/manifest.json`. The inventory includes
-`CellBridge.Storage.SqlServer` and `CellBridge.Lists.SqlServer`, at the same
-`0.1.0-beta.4` version as the other packages. Both remain independent of each
-other and PostgreSQL.
+local feed and cache. It validates the fourteen packages and symbols, readmes,
+license, repository metadata and package versions, then writes
+`artifacts/packages/manifest.json`.
 
-The default command builds both package-only document and Lists test consumers,
-runs non-database checks and reports database skips. `--sqlserver` opts into the
-existing disposable Aspire `SqlServerEnvironment` through source test
-orchestration, with the same SQL Server prerequisites as the engine checks above.
-It launches separate package-only document and Lists test processes against
-separate empty databases. Each consumer explicitly migrates its own schema with
-setup credentials and uses restricted runtime credentials afterward. Source
-orchestration supplies the environment; the consumer processes use package
-references. Existing package and consumer checks still run.
+The default command builds document and Lists package consumers and reports
+database checks as skipped. `--sqlserver` runs them against separate disposable
+databases using the SQL Server fixture above. Each consumer runs its package's
+migrator with setup credentials, then tests with restricted runtime credentials.
 
-The package-only test projects stay outside `CellBridge.slnx` because their packed
-feed must exist before restore. Ignored `artifacts/packages` retains manifests,
-the isolated feed/cache, consumer assembly identities and hashes, TRX results and
-the SQL engine version for database runs. A skipped check is not a pass.
-Environment startup failures are setup failures. Package checks do not establish
-full provider parity, SQL Server performance or live Office interoperability.
+The package-only test projects stay outside `CellBridge.slnx` because restore
+requires the packed feed. Outputs go under ignored `artifacts/packages`. A skipped
+check is not a pass. Package checks do not test live Office editing or SQL Server
+performance.
 
 A release requires reviewed committed source and
 `sourceDirty: false`. The [publish workflow](../.github/workflows/publish-nuget.yml)
@@ -259,7 +195,7 @@ python3 tools/testing/tailscale.py --https-port 8444
 tailscale serve status
 ```
 
-The development AppHost uses an application-scoped durable volume. Integration
+The development AppHost uses a volume that retains data between runs. Integration
 fixtures own separate disposable databases.
 
 The helper waits for WebDemo, discovers the current HTTP port and verifies the

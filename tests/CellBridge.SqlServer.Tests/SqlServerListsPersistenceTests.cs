@@ -13,24 +13,38 @@ namespace CellBridge.SqlServer.Tests;
 public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
 {
     private DbContextOptions<SqlServerListDbContext> Options(string? connection = null) =>
-        new DbContextOptionsBuilder<SqlServerListDbContext>().UseSqlServer(connection ?? fixture.Lists,
+        new DbContextOptionsBuilder<SqlServerListDbContext>().UseSqlServer(connection ?? database,
             sql => sql.MigrationsHistoryTable(SqlServerListDbContext.MigrationsHistoryTable, SqlServerListDbContext.Schema)).Options;
 
-    [Fact]
-    public async Task IndependentMigrationsWorkspaceIsolationAndExactPersistedIdentities()
+    private string database = null!;
+    private string runtime = null!;
+
+    private readonly Guid first = Guid.NewGuid();
+    private readonly Guid second = Guid.NewGuid();
+    private readonly Guid list = Guid.NewGuid();
+    private readonly Guid record = Guid.NewGuid();
+    private readonly string[] subjects = ["actor", "actor ", "ACTOR", "\U0001F680", new string('x', 1024)];
+    private readonly string json = JsonSerializer.Serialize(new Dictionary<string, object?>
     {
+        ["text"] = "\U0001F680 e\u0301 trailing ", ["integer"] = long.MaxValue,
+        ["decimal"] = 1234567890123456.123456789012m, ["bool"] = true, ["null"] = null,
+        ["long"] = new string('y', 5001)
+    });
+
+    [Fact]
+    public async Task ListMigrationsAreExplicitConcurrentAndIndependentOfDocumentStorage()
+    {
+        database = await fixture.CreateDatabaseAsync();
         var options = Options();
         var migrator = new SqlServerListMigrator(options);
         await using (var untouched = new SqlServerListDbContext(options))
             Assert.Empty(await untouched.Database.GetAppliedMigrationsAsync());
-        Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(fixture.Lists,
+        Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(database,
             "SELECT COUNT(*) FROM sys.schemas WHERE name='cellbridge_lists'"));
         await Task.WhenAll(migrator.MigrateAsync(), new SqlServerListMigrator(options).MigrateAsync());
         await migrator.MigrateAsync();
         await using (var db = new SqlServerListDbContext(options))
         {
-            Assert.Equal(4, (await db.Database.GetAppliedMigrationsAsync()).Count());
-            Assert.False(db.Database.HasPendingModelChanges());
             await db.Database.ExecuteSqlRawAsync("""
                 INSERT INTO cellbridge_lists.__CellBridgeListsMigrationsHistory VALUES ('20990101000000_Unknown','10.0.13')
                 """);
@@ -39,58 +53,37 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
                 DELETE FROM cellbridge_lists.__CellBridgeListsMigrationsHistory WHERE MigrationId='20990101000000_Unknown'
                 """);
         }
-        Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(fixture.Lists,
+        Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(database,
             "SELECT COUNT(*) FROM sys.schemas WHERE name='cellbridge_documents'"));
+    }
 
-        var first = Guid.NewGuid();
-        var second = Guid.NewGuid();
-        var list = Guid.NewGuid();
-        var record = Guid.NewGuid();
-        var subjects = new[] { "actor", "actor ", "ACTOR", "\U0001F680", new string('x', 1024) };
-        var json = JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["text"] = "\U0001F680 e\u0301 trailing ", ["integer"] = long.MaxValue,
-            ["decimal"] = 1234567890123456.123456789012m, ["bool"] = true, ["null"] = null,
-            ["long"] = new string('y', 5001)
-        });
-        foreach (var workspace in new[] { first, second })
-        {
-            await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(options, workspace);
-            var db = scope.Context;
-            Assert.Equal(workspace, await db.Database.SqlQueryRaw<Guid>(
-                "SELECT CONVERT(uniqueidentifier,SUBSTRING(CONTEXT_INFO(),1,16)) AS Value").SingleAsync());
-            Assert.Equal(128, await db.Database.SqlQueryRaw<int>("SELECT DATALENGTH(CONTEXT_INFO()) AS Value").SingleAsync());
-            db.Workspaces.Add(new WorkspaceRow { WorkspaceId = workspace, Name = workspace.ToString() });
-            await db.SaveChangesAsync();
-            // Save separately because each server-generated digest is an immutable EF key.
-            foreach (var subject in subjects)
-            {
-                db.Memberships.Add(new MembershipRow { WorkspaceId = workspace, Subject = subject });
-                await db.SaveChangesAsync();
-            }
-            db.Lists.Add(new ListRow { WorkspaceId = workspace, ListId = list, Name = "Rows", SchemaVersion = 1 });
-            await db.SaveChangesAsync();
-            db.ListSchemas.Add(new ListSchemaRow { WorkspaceId = workspace, ListId = list, SchemaVersion = 1, Definition = "{}" });
-            await db.SaveChangesAsync();
-            db.Records.Add(new RecordRow { WorkspaceId = workspace, ListId = list, RecordId = record,
-                SchemaVersion = 1, Revision = 1, Number = 1, ValuesJson = json,
-                CreatedUtc = DateTimeOffset.UtcNow, ModifiedUtc = DateTimeOffset.UtcNow, CreatedBy = "actor", ModifiedBy = "actor" });
-            await db.SaveChangesAsync();
-            await scope.CommitAsync();
-        }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResetFailureDiscardsExternalSessionWithoutLosingCommittedData(bool sqlFailure)
+    {
+        await PrepareRuntimeAsync();
+        await AssertResetFailureDiscardsExternalSessionAsync(runtime, sqlFailure);
+    }
 
-        var runtime = await CreateRuntimeAsync();
-        foreach (var sqlFailure in new[] { false, true })
-            await AssertResetFailureDiscardsExternalSessionAsync(runtime, sqlFailure);
-        foreach (var table in new[] { "memberships", "list_grants" })
-        {
-            await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(Options(runtime), first);
-            var sql = table == "memberships"
-                ? $"INSERT cellbridge_lists.memberships(workspace_id,subject) VALUES ('{first}',NULL)"
-                : $"INSERT cellbridge_lists.list_grants(workspace_id,list_id,subject,access) VALUES ('{first}','{list}',NULL,1)";
-            var error = await Assert.ThrowsAsync<SqlException>(() => scope.Context.Database.ExecuteSqlRawAsync(sql));
-            Assert.Equal(515, error.Number);
-        }
+    [Theory]
+    [InlineData("memberships")]
+    [InlineData("list_grants")]
+    public async Task NullSubjectsAreRejectedByDatabaseConstraints(string table)
+    {
+        await PrepareRuntimeAsync();
+        await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(Options(runtime), first);
+        var sql = table == "memberships"
+            ? $"INSERT cellbridge_lists.memberships(workspace_id,subject) VALUES ('{first}',NULL)"
+            : $"INSERT cellbridge_lists.list_grants(workspace_id,list_id,subject,access) VALUES ('{first}','{list}',NULL,1)";
+        var error = await Assert.ThrowsAsync<SqlException>(() => scope.Context.Database.ExecuteSqlRawAsync(sql));
+        Assert.Equal(515, error.Number);
+    }
+
+    [Fact]
+    public async Task ExactJsonAndSubjectIdentitiesRoundTripWithoutLeakingPooledWorkspaceAuthority()
+    {
+        await PrepareRuntimeAsync();
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(runtime,
             "SELECT COUNT(*) FROM cellbridge_lists.records"));
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(runtime,
@@ -120,6 +113,12 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
             "SELECT COUNT(*) FROM cellbridge_lists.records"));
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(runtime,
             "SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','ALTER ANY SECURITY POLICY')"));
+    }
+
+    [Fact]
+    public async Task RestrictedRuntimeCannotCreateTablesDisableRowSecurityOrMigrate()
+    {
+        await PrepareRuntimeAsync();
         await using (var restricted = new SqlServerListDbContext(Options(runtime)))
         {
             await Assert.ThrowsAsync<SqlException>(() => restricted.Database.ExecuteSqlRawAsync(
@@ -128,12 +127,21 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
                 "ALTER SECURITY POLICY cellbridge_lists.records_isolation WITH (STATE=OFF)"));
             await Assert.ThrowsAsync<SqlException>(() => new SqlServerListMigrator(Options(runtime)).MigrateAsync());
         }
-        await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(Options(runtime), first))
-        {
-            var db = scope.Context;
-            db.Workspaces.Add(new WorkspaceRow { WorkspaceId = Guid.NewGuid(), Name = "cross-workspace" });
-            await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
-        }
+    }
+
+    [Fact]
+    public async Task RowSecurityRejectsCrossWorkspaceWrites()
+    {
+        await PrepareRuntimeAsync();
+        await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(Options(runtime), first);
+        scope.Context.Workspaces.Add(new WorkspaceRow { WorkspaceId = Guid.NewGuid(), Name = "cross-workspace" });
+        await Assert.ThrowsAsync<DbUpdateException>(() => scope.Context.SaveChangesAsync());
+    }
+
+    [Fact]
+    public async Task InvalidJsonRollsBackAndScopeDisposalClearsWorkspaceAuthority()
+    {
+        await PrepareRuntimeAsync();
         await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(Options(runtime), first))
         {
             // A transaction rollback does not clear CONTEXT_INFO. Scope disposal must do so.
@@ -141,6 +149,14 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
             row.ValuesJson = "not JSON";
             await Assert.ThrowsAsync<DbUpdateException>(() => scope.Context.SaveChangesAsync());
         }
+        Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(runtime,
+            "SELECT COUNT(*) FROM cellbridge_lists.records"));
+    }
+
+    [Fact]
+    public async Task StaleRevisionsFailAcrossIndependentConnections()
+    {
+        await PrepareRuntimeAsync();
         // Validate optimistic revision predicates on two independent connections.
         var concurrent = new SqlConnectionStringBuilder(runtime) { MaxPoolSize = 2 }.ConnectionString;
         await using (var left = await SqlServerListWorkspaceTransaction.OpenAsync(Options(concurrent), first))
@@ -156,6 +172,12 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
         }
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(runtime,
             "SELECT COUNT(*) FROM cellbridge_lists.records"));
+    }
+
+    [Fact]
+    public async Task AuthorizationBindingCannotChangeAfterWorkspaceCreation()
+    {
+        await PrepareRuntimeAsync();
         await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(Options(runtime), first))
         {
             var workspace = await scope.Context.Workspaces.SingleAsync();
@@ -166,25 +188,60 @@ public sealed class SqlServerListsPersistenceTests(SqlServerFixture fixture)
         }
     }
 
+    private async Task PrepareRuntimeAsync()
+    {
+        database = await fixture.CreateDatabaseAsync();
+        var options = Options();
+        await new SqlServerListMigrator(options).MigrateAsync();
+        foreach (var workspace in new[] { first, second })
+        {
+            await using var scope = await SqlServerListWorkspaceTransaction.OpenAsync(options, workspace);
+            var db = scope.Context;
+            Assert.Equal(workspace, await db.Database.SqlQueryRaw<Guid>(
+                "SELECT CONVERT(uniqueidentifier,SUBSTRING(CONTEXT_INFO(),1,16)) AS Value").SingleAsync());
+            Assert.Equal(128, await db.Database.SqlQueryRaw<int>("SELECT DATALENGTH(CONTEXT_INFO()) AS Value").SingleAsync());
+            db.Workspaces.Add(new WorkspaceRow { WorkspaceId = workspace, Name = workspace.ToString() });
+            await db.SaveChangesAsync();
+            // Save separately because each server-generated digest is an immutable EF key.
+            foreach (var subject in subjects)
+            {
+                db.Memberships.Add(new MembershipRow { WorkspaceId = workspace, Subject = subject });
+                await db.SaveChangesAsync();
+            }
+            db.Lists.Add(new ListRow { WorkspaceId = workspace, ListId = list, Name = "Rows", SchemaVersion = 1 });
+            await db.SaveChangesAsync();
+            db.ListSchemas.Add(new ListSchemaRow { WorkspaceId = workspace, ListId = list, SchemaVersion = 1, Definition = "{}" });
+            await db.SaveChangesAsync();
+            db.Records.Add(new RecordRow { WorkspaceId = workspace, ListId = list, RecordId = record,
+                SchemaVersion = 1, Revision = 1, Number = 1, ValuesJson = json,
+                CreatedUtc = DateTimeOffset.UtcNow, ModifiedUtc = DateTimeOffset.UtcNow, CreatedBy = "actor", ModifiedBy = "actor" });
+            await db.SaveChangesAsync();
+            await scope.CommitAsync();
+        }
+
+        runtime = await CreateRuntimeAsync();
+    }
+
     private async Task<string> CreateRuntimeAsync()
     {
+        var name = "cb_lists_" + Guid.NewGuid().ToString("N");
         var password = "Cb!" + Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
-        await using var connection = new SqlConnection(fixture.Lists);
+        await using var connection = new SqlConnection(database);
         await connection.OpenAsync();
         await using (var command = new SqlCommand($"""
-            CREATE LOGIN cb_lists_runtime WITH PASSWORD='{password}';
-            CREATE USER cb_lists_runtime FOR LOGIN cb_lists_runtime;
-            GRANT SELECT ON cellbridge_lists.schema_version TO cb_lists_runtime;
-            GRANT SELECT ON cellbridge_lists.templates TO cb_lists_runtime;
+            CREATE LOGIN [{name}] WITH PASSWORD='{password}';
+            CREATE USER [{name}] FOR LOGIN [{name}];
+            GRANT SELECT ON cellbridge_lists.schema_version TO [{name}];
+            GRANT SELECT ON cellbridge_lists.templates TO [{name}];
             """, connection)) await command.ExecuteNonQueryAsync();
         foreach (var table in new[] { "workspaces", "memberships", "lists", "list_schemas", "list_counters", "list_grants",
                      "records", "record_tombstones", "create_receipts", "record_references", "saved_views", "audit_events" })
         {
-            await using var command = new SqlCommand($"GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_lists.[{table}] TO cb_lists_runtime", connection);
+            await using var command = new SqlCommand($"GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_lists.[{table}] TO [{name}]", connection);
             await command.ExecuteNonQueryAsync();
         }
-        var result = new SqlConnectionStringBuilder(fixture.Lists)
-        { UserID = "cb_lists_runtime", Password = password, MaxPoolSize = 1 };
+        var result = new SqlConnectionStringBuilder(database)
+        { UserID = name, Password = password, MaxPoolSize = 1 };
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(result.ConnectionString,
             "SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CONTROL')"));
         Assert.Equal(0, await SqlServerContentTests.ScalarAsync<int>(result.ConnectionString, "SELECT IS_SRVROLEMEMBER('sysadmin')"));

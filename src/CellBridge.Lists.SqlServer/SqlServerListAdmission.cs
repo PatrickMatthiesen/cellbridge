@@ -8,8 +8,7 @@ internal sealed partial class EfListEngine
     private async Task CheckContextAdmissionAsync(ListDbContext db, Guid workspaceId, Guid listId, string subject,
         ListAccess requiredAccess, OperationAuthorization? authorization, CancellationToken ct)
     {
-        // SQL Server promises source admission before it inspects receipts or schemas.
-        // PostgreSQL keeps its guarded compiled projection for the same decision.
+        // Check membership and source access before reading receipts or schemas.
         await AuthorizeMemberAsync(db, workspaceId, subject, ct, authorization);
         await RequireAccessAsync(db, workspaceId, listId, subject, requiredAccess, ct, authorization);
     }

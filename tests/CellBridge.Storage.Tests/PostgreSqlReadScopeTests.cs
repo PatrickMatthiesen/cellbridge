@@ -53,7 +53,7 @@ public sealed class PostgreSqlReadScopeTests
             var normal = new PostgreSqlStateStore(source);
             var state = (await new CellBridgeDocumentService(new(normal, new PostgreSqlContentStore(source)))
                 .CreateAsync("/health-snapshot.docx", MinimalDocx.Create(), TestActor.Value))!;
-            var injection = new AfterConfiguration(async () =>
+            var injection = new AfterFirstRead(async () =>
             {
                 await using var corrupt = source.CreateCommand("UPDATE cellbridge_documents SET path_key='/WRONG.DOCX' WHERE resource_id=$1");
                 corrupt.Parameters.AddWithValue(state.ResourceId);
@@ -129,13 +129,15 @@ public sealed class PostgreSqlReadScopeTests
         { Committed++; return Task.CompletedTask; }
     }
 
-    private sealed class AfterConfiguration(Func<Task> action) : DbCommandInterceptor
+    private sealed class AfterFirstRead(Func<Task> action) : DbCommandInterceptor
     {
         public bool Injected { get; private set; }
         public override async ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
             DbDataReader result, CancellationToken cancellationToken = default)
         {
-            if (!Injected && command.CommandText.Contains("FROM cellbridge_schema", StringComparison.Ordinal))
+            // The first read establishes the transaction's snapshot. Change the
+            // namespace from another connection before the remaining reads.
+            if (!Injected)
             { Injected = true; await action(); }
             return result;
         }

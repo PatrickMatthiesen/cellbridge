@@ -3,26 +3,12 @@ using Microsoft.EntityFrameworkCore;
 namespace CellBridge.Lists.SqlServer;
 
 /// <summary>
-/// SQL Server Lists runtime with typed SQL queries, bounded list discovery,
-/// built-in and host authorization, schema/record operations, views and audit.
-/// Mutations serialize per workspace.
+/// Stores Lists in SQL Server. Mutations run one at a time within each workspace.
 /// </summary>
 /// <remarks>
-/// Run SqlServerListMigrator and SqlServerListSetup with administrator options;
-/// construct this engine with a separate restricted runtime principal. Health
-/// requires SELECT on migration history, VIEW DEFINITION on the Lists schema,
-/// and the minimum object permissions declared in SqlServerListHealth.
+/// Run SqlServerListMigrator and SqlServerListSetup with setup credentials,
+/// then construct this engine with restricted runtime credentials.
 /// A supplied external connection must be reserved for one operation at a time.
-/// Cancellation before commit rolls back; commit itself does not accept caller
-/// cancellation. A store failure during commit may leave an uncertain outcome.
-/// Repeat an original create to resolve that outcome while its receipt is live.
-/// Logical storage counts compact System.Text.Json output in UTF-8, with its
-/// default escaping and persisted scalar spellings, plus fixed row charges.
-/// It does not count SQL Server nvarchar allocation or PostgreSQL normalization.
-/// An authorized create attempt prunes its expired receipt and reclaims only
-/// that receipt charge. Permanent identity claims never expire. Queries use
-/// exact SQL scalar keys and bounded result pages; unindexed field scans remain
-/// subject to the configured statement timeout.
 /// </remarks>
 public sealed class SqlServerListEngine : IListEngine, IPagedListEngine
 {

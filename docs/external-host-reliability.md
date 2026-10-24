@@ -234,7 +234,7 @@ service reads provider snapshots and has no process-wide document cache to evict
 Document records remain logical format 2. PostgreSQL schema 6 requires explicit
 setup to upgrade schemas 3, 4 or 5. Stop all hosts and workers first. Upgrades
 preserve documents, history, content and ownership. Mixed writer versions are
-unsupported. See the [upgrade procedure](storage-providers.md#upgrading-a-durable-host)
+unsupported. See the [upgrade procedure](storage-providers.md#updating-a-host)
 for backups and rollback.
 
 `ExternalPublicationTests`, `SharedHostLockTests` and `HostLifecycleTests` cover

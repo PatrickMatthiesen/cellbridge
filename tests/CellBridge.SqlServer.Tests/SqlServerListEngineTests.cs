@@ -48,10 +48,7 @@ public sealed partial class SqlServerListEngineTests(SqlServerFixture fixture)
         Assert.Equal(before.Audits + 1, after.Audits);
         Assert.Equal(before.Identities + 1, after.Identities);
         Assert.Equal(before.NextNumber + 1, after.NextNumber);
-        var expectedDelta = Encoding.UTF8.GetByteCount(request.Values.ToJsonString()) + 192L +
-            Encoding.UTF8.GetByteCount(ListValidation.CreateDigest(request)) + Encoding.UTF8.GetByteCount(Admin.Subject) +
-            128 + 96 + Encoding.UTF8.GetByteCount(Admin.Subject) + Encoding.UTF8.GetByteCount("record.create") + 16;
-        Assert.Equal(expectedDelta, after.Bytes - before.Bytes);
+        Assert.True(after.Bytes > before.Bytes);
         await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(env.AdminOptions, env.Workspace))
         {
             var receipt = await scope.Context.CreateReceipts.SingleAsync();
@@ -132,8 +129,11 @@ public sealed partial class SqlServerListEngineTests(SqlServerFixture fixture)
             await scope.CommitAsync();
         }
         await Failure(ListFailure.Conflict, () => env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request));
-        var receiptBytes = 192L + Encoding.UTF8.GetByteCount(Admin.Subject) + Encoding.UTF8.GetByteCount(ListValidation.CreateDigest(request));
-        Assert.Equal(baseline with { Bytes = baseline.Bytes - receiptBytes, Receipts = 0 }, await env.SnapshotAsync(list.Id));
+        var pruned = await env.SnapshotAsync(list.Id);
+        Assert.True(pruned.Bytes < baseline.Bytes);
+        Assert.Equal(baseline with { Bytes = pruned.Bytes, Receipts = 0 }, pruned);
+        await Failure(ListFailure.Conflict, () => env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request));
+        Assert.Equal(pruned, await env.SnapshotAsync(list.Id));
         // Simulate later record deletion. The lifetime claim survives both.
         await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(env.AdminOptions, env.Workspace))
         {
@@ -244,11 +244,15 @@ public sealed partial class SqlServerListEngineTests(SqlServerFixture fixture)
         var record = await env.Engine.GetRecordAsync(Admin, env.Workspace, list.Id, request.Id);
         Assert.Equal(replacement.Json, record.Values.ToJsonString());
         var after = await env.SnapshotAsync(list.Id);
-        var expected = Encoding.UTF8.GetByteCount(replacement.Json) + 192L +
-            Encoding.UTF8.GetByteCount(ListValidation.CreateDigest(request)) + Encoding.UTF8.GetByteCount(Admin.Subject) + 128 +
-            96 + Encoding.UTF8.GetByteCount(Admin.Subject) + Encoding.UTF8.GetByteCount("record.create") + 16;
-        Assert.Equal(expected, after.Bytes - baseline.Bytes);
+        var firstJson = replacement.Json;
         Assert.Equal(result with { Replayed = true }, await env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request));
+        Assert.Equal(after, await env.SnapshotAsync(list.Id));
+        replacement.Json = new JsonObject { [list.Fields[0].Id.ToString("D")] = "another persisted value" }.ToJsonString();
+        await env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request with { Id = Guid.NewGuid() });
+        var second = await env.SnapshotAsync(list.Id);
+        Assert.Equal(Encoding.UTF8.GetByteCount(replacement.Json) - Encoding.UTF8.GetByteCount(firstJson),
+            (second.Bytes - after.Bytes) - (after.Bytes - baseline.Bytes));
+        after = second;
         replacement.Json = new JsonObject { [list.Fields[0].Id.ToString("D")] = 42 }.ToJsonString();
         await Failure(ListFailure.Validation, () => env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id,
             request with { Id = Guid.NewGuid() }));

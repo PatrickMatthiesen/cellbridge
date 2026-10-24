@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace CellBridge.Lists.SqlServer.Migrations
 {
     [DbContext(typeof(SqlServerListDbContext))]
-    [Migration("20261023000002_WorkspaceIsolation")]
-    partial class WorkspaceIsolation
+    [Migration("20261024194624_InitialListsStorage")]
+    partial class InitialListsStorage
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)

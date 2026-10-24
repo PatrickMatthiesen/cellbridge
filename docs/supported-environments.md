@@ -76,7 +76,7 @@ The portable archive tests validate recovery into an empty destination with the
 documented context restrictions. The database runner below tests one quiescent
 logical backup procedure. Other operator procedures, physical snapshots and
 replica backups still need their own qualification. See [provider recovery](provider-portability.md),
-[storage configuration](storage-providers.md) and [durable host upgrades](storage-providers.md#upgrading-a-durable-host).
+[storage configuration](storage-providers.md) and [host updates](storage-providers.md#updating-a-host).
 
 ## Controlled database interruption and logical restore
 

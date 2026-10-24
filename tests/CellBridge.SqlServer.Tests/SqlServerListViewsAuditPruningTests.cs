@@ -85,8 +85,12 @@ public sealed partial class SqlServerListEngineTests
         Assert.Equal("é persisted", saved.Name);
         Assert.Empty(saved.VisibleFields);
         var json = JsonSerializer.Serialize(saved, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        var expected = Encoding.UTF8.GetByteCount(json) + 64L + 96 + Encoding.UTF8.GetByteCount(Admin.Subject) + Encoding.UTF8.GetByteCount("view.save");
-        Assert.Equal(expected, (await env.SnapshotAsync(list.Id)).Bytes - before.Bytes);
+        var after = await env.SnapshotAsync(list.Id);
+        var second = await new SqlServerListEngine(env.OptionsWith(new RewriteView("another persisted name"))).SaveViewAsync(
+            Admin, env.Workspace, list.Id, new(Guid.NewGuid(), "Caller", new(Limit: 1), [list.Fields[0].Id]));
+        var secondJson = JsonSerializer.Serialize(second, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.Equal(Encoding.UTF8.GetByteCount(secondJson) - Encoding.UTF8.GetByteCount(json),
+            ((await env.SnapshotAsync(list.Id)).Bytes - after.Bytes) - (after.Bytes - before.Bytes));
         var audit = (await env.Engine.GetAuditAsync(Admin, env.Workspace, 1)).Single();
         Assert.Equal("view.save", audit.Action);
         Assert.Empty(audit.FieldIds);
@@ -131,7 +135,9 @@ public sealed partial class SqlServerListEngineTests
         var env = await SetupAsync();
         var list = await env.CreateListAsync();
         var request = Request(list);
+        var empty = await env.SnapshotAsync(list.Id);
         await env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request);
+        var createBytes = (await env.SnapshotAsync(list.Id)).Bytes - empty.Bytes;
         await env.Engine.SetMembershipAsync(Admin, env.Workspace, "reader", true, false, false);
         await env.Engine.SetListGrantAsync(Admin, env.Workspace, list.Id, "reader", ListAccess.Read);
         await using (var scope = await SqlServerListWorkspaceTransaction.OpenAsync(env.AdminOptions, env.Workspace))
@@ -141,10 +147,8 @@ public sealed partial class SqlServerListEngineTests
             await scope.CommitAsync();
         }
         var before = await env.SnapshotAsync(list.Id);
-        var receiptBytes = 192L + Encoding.UTF8.GetByteCount(Admin.Subject) + Encoding.UTF8.GetByteCount(ListValidation.CreateDigest(request));
-        var fresh = new CreateRecordRequest(Guid.NewGuid(), 1, new JsonObject());
-        var freshDelta = 2L + receiptBytes + 128 + 96 + Encoding.UTF8.GetByteCount(Admin.Subject) + Encoding.UTF8.GetByteCount("record.create");
-        var max = before.Bytes + freshDelta - receiptBytes;
+        var fresh = request with { Id = Guid.NewGuid() };
+        var max = before.Bytes + createBytes - 1;
         var quota = new SqlServerListEngine(env.RuntimeOptions, new ListLimits { MaxWorkspaceBytes = max });
         await Failure(ListFailure.Limit, () => quota.CreateRecordAsync(Admin, env.Workspace, list.Id, fresh));
         await Failure(ListFailure.NotFound, () => env.Engine.CreateRecordAsync(new("reader"), env.Workspace, list.Id, request));
@@ -158,17 +162,22 @@ public sealed partial class SqlServerListEngineTests
         Assert.Equal(before, await env.SnapshotAsync(list.Id));
         await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => Failure(ListFailure.Conflict,
             () => env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request))));
-        Assert.Equal(before with { Bytes = before.Bytes - receiptBytes, Receipts = 0 }, await env.SnapshotAsync(list.Id));
+        var pruned = await env.SnapshotAsync(list.Id);
+        Assert.True(pruned.Bytes < before.Bytes);
+        Assert.Equal(before with { Bytes = pruned.Bytes, Receipts = 0 }, pruned);
+        await Failure(ListFailure.Conflict, () => env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, request));
+        Assert.Equal(pruned, await env.SnapshotAsync(list.Id));
         Assert.Equal(2, (await quota.CreateRecordAsync(Admin, env.Workspace, list.Id, fresh)).Number);
         var after = await env.SnapshotAsync(list.Id);
-        Assert.Equal(max, after.Bytes);
+        Assert.Equal(pruned.Bytes + createBytes, after.Bytes);
+        Assert.True(after.Bytes <= max);
         Assert.Equal(2, after.Claims);
         Assert.Equal(2, after.Identities);
         Assert.Equal(2, after.Records);
         Assert.Equal(1, after.Receipts);
     }
 
-    private sealed class RewriteView : SaveChangesInterceptor
+    private sealed class RewriteView(string name = "é persisted") : SaveChangesInterceptor
     {
         public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
             InterceptionResult<int> result, CancellationToken cancellationToken = default)
@@ -176,7 +185,7 @@ public sealed partial class SqlServerListEngineTests
             foreach (var entry in eventData.Context!.ChangeTracker.Entries<SavedViewRow>().Where(entry => entry.State is EntityState.Added or EntityState.Modified))
             {
                 var json = JsonNode.Parse(entry.Entity.Definition)!.AsObject();
-                json["name"] = "é persisted";
+                json["name"] = name;
                 json["visibleFields"] = new JsonArray();
                 entry.Entity.Definition = json.ToJsonString();
             }

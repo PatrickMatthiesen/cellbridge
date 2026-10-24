@@ -10,24 +10,21 @@ scope and qualification criteria; this guide describes the current libraries.
 All shipping packages use version `0.1.0-beta.4`. Each database provider can be
 used without the other provider or the document-storage packages.
 
-Both database providers compile the EF operations in `src/SharedLists/Engine`.
-The shared implementation owns authorization order, validation, receipts,
-accounting and transaction boundaries. Provider helpers supply database locks,
-security settings, JSON expressions and mappings. Filtering, sorting and paging
-execute in the database. Required locking cannot be disabled.
+PostgreSQL and SQL Server use the same Lists operations. Each provider owns its
+database mappings, security settings and SQL. Filters, sorting and paging run in
+the database. Required locking cannot be disabled.
 
 ## Library and host responsibilities
 
 `CellBridge.Lists` defines schemas, templates, validation, bounded queries and
 three-way merge previews. `IListEngine` is the authorized operation contract.
-The PostgreSQL and SQL Server providers store list state, receipts and audit
-events in their own `cellbridge_lists` schema. A workspace can use the built-in membership and grant
+Both providers store list state, receipts and audit events in a separate
+`cellbridge_lists` schema. A workspace can use built-in membership and grant
 tables or an [asynchronous host authority](host-list-authorization.md). The
 ASP.NET Core adapter maps native JSON endpoints, exports and a limited read-only
 OData feed.
-`SqlServerListEngine` implements both `IListEngine` and `IPagedListEngine`,
-including schema publication, record mutations, references, create retry
-receipts, saved views and audit. Its typed queries and paging execute in SQL.
+`SqlServerListEngine` supports paged queries, record changes, references, saved
+views and audit.
 
 The host authenticates callers and maps each validated identity to a stable,
 issuer-qualified `ListActor.Subject`. It owns workspace registration, account
@@ -415,10 +412,9 @@ unavailability; detailed store messages are not returned.
 
 ### SQL Server setup and runtime
 
-Install `CellBridge.Lists.SqlServer` independently of document storage. Provision
-the database and separate setup/runtime principals through the host's secret and
-deployment system. Stop list hosts and workers before migrating. Setup uses the
-public EF options and migrator, then provisions workspaces and optional templates:
+Install `CellBridge.Lists.SqlServer` independently of document storage. Use
+separate setup and runtime database users. Stop list hosts and workers before
+migrating. Run the public migrator and provision workspaces with setup credentials:
 
 ```csharp
 using CellBridge.Lists;
@@ -435,15 +431,13 @@ await SqlServerListSetup.RegisterTemplateAsync(setupOptions,
         [new ListField(titleFieldId, "Title", ListFieldType.Text, Required: true)]));
 ```
 
-For host authority, provision with `SqlServerListSetup.RegisterHostWorkspaceAsync`
-instead and pass the host's `IListAuthorizationProvider` to the engine constructor.
-Workspace authorization mode, policy domain and scope are immutable.
+For host authorization, use `RegisterHostWorkspaceAsync` and pass the host's
+`IListAuthorizationProvider` to the engine. A workspace's authorization mode,
+policy domain and scope cannot change after registration.
 
-The migrator owns `SqlServerListDbContext`, the `cellbridge_lists` schema and its
-`__CellBridgeListsMigrationsHistory` table. It does not create users or grant
-runtime permissions. After migration, grant the following to a dedicated database
-user named `cellbridge_lists_runtime`. These are the minimum object permissions
-checked by the provider's runtime health contract:
+The migrator creates the `cellbridge_lists` schema and migration history. It does
+not create users or grant runtime permissions. Grant the following permissions
+to a dedicated database user named `cellbridge_lists_runtime`:
 
 ```sql
 GRANT VIEW DEFINITION ON SCHEMA::cellbridge_lists TO cellbridge_lists_runtime;
@@ -467,11 +461,10 @@ GRANT EXECUTE ON OBJECT::cellbridge_lists.uuid_key TO cellbridge_lists_runtime;
 GRANT EXECUTE ON OBJECT::cellbridge_lists.key_compare TO cellbridge_lists_runtime;
 ```
 
-Keep the runtime principal out of owner and DDL roles. Do not grant broad schema
-or table writes, security-policy authority, user/role administration or ownership.
-Health checks reject excess table and query-function permissions as well as missing grants.
-SQL Server delayed durability must be `DISABLED`. Row-level security uses
-`CONTEXT_INFO`; host authorization still decides whether an actor may operate.
+Keep this user out of owner and DDL roles. Do not grant broad table writes or
+permission to change security policies. Runtime health checks verify these
+permissions. SQL Server delayed durability must be `DISABLED`. Row-level security
+uses `CONTEXT_INFO`; host authorization still decides whether an actor may operate.
 
 Register the engine with restricted runtime options, then use the same
 `AddCellBridgeLists` and endpoint mapping shown above:
@@ -487,10 +480,9 @@ builder.Services.AddSingleton<IListEngine>(engine);
 
 Migration and provisioning are explicit setup steps. Registration, health checks
 and requests never migrate schemas. Do not enable `EnableRetryOnFailure`; the
-engine owns its transactions and create retry receipts. Mutations serialize per
-workspace. Field queries use exact scalar keys and bounded pages; unindexed scans
-can reach the statement timeout. These packages do not establish SQL Server
-performance, full provider parity or live reporting-client compatibility.
+engine manages transactions and create retries. Required database locks stay
+enabled. SQL Server performance and live reporting-client compatibility have not
+been qualified.
 
 ### Shared limits and operation
 

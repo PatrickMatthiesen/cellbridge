@@ -101,13 +101,19 @@ public sealed class SqlServerDocumentTests(SqlServerFixture fixture)
         await using var gate = new SqlServerDocumentDbContext(database.Options(admin: true));
         await using var transaction = await gate.Database.BeginTransactionAsync();
         await SqlServerDocumentDatabase.LockAsync(gate, "CellBridge.Document." + id.ToString("N"), default);
+        var attempted = new ObserveDocumentLock(id);
         var invoked = 0;
-        var waiting = second.State.TransitionAsync(id, (state, now) =>
+        var waiting = database.Provider(attempted).State.TransitionAsync(id, (state, now) =>
         { Interlocked.Increment(ref invoked); return new StateTransition<DateTime>(null, now); }).AsTask();
-        await Task.Delay(150);
-        Assert.Equal(0, Volatile.Read(ref invoked));
-        var release = DateTime.SpecifyKind(await gate.Database.SqlQueryRaw<DateTime>("SELECT SYSUTCDATETIME() AS Value").SingleAsync(), DateTimeKind.Utc);
-        await transaction.CommitAsync();
+        DateTime release;
+        try
+        {
+            await attempted.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.False(waiting.IsCompleted);
+            Assert.Equal(0, Volatile.Read(ref invoked));
+            release = DateTime.SpecifyKind(await gate.Database.SqlQueryRaw<DateTime>("SELECT SYSUTCDATETIME() AS Value").SingleAsync(), DateTimeKind.Utc);
+        }
+        finally { await transaction.CommitAsync(); }
         var observed = await waiting.WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Equal(DateTimeKind.Utc, observed.Kind);
         Assert.True(observed >= release);
@@ -162,6 +168,19 @@ public sealed class SqlServerDocumentTests(SqlServerFixture fixture)
         var index = ((QueryChangesSubResponseData)generated.SubResponses[0].Data!).StorageIndexExtendedGuid;
         return new() { DataElementPackage = generated.DataElementPackage, SubRequests = { new(RequestTypes.PutChanges)
         { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = index, ExpectedStorageIndex = StorageIds.Restore(state.Partitions.Single(p => p.Kind == 0).StorageIndex!) } } } };
+    }
+
+    private sealed class ObserveDocumentLock(Guid id) : DbCommandInterceptor
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("sp_getapplock", StringComparison.Ordinal) &&
+                command.Parameters.Cast<DbParameter>().Any(parameter => Equals(parameter.Value, "CellBridge.Document." + id.ToString("N"))))
+                Entered.TrySetResult();
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
     }
 
     private sealed class CommitObservation : DbTransactionInterceptor

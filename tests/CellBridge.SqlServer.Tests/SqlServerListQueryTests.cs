@@ -157,6 +157,40 @@ public sealed partial class SqlServerListEngineTests
     }
 
     [Fact]
+    public async Task LongTextFiltersUseParametersAndKeepDatabasePagesBounded()
+    {
+        var observer = new RecordCommands();
+        var env = await SetupAsync(observer);
+        var field = new ListField(Guid.NewGuid(), "Text", ListFieldType.Text, MaxLength: 65536);
+        var list = await env.Engine.CreateListAsync(Admin, env.Workspace, new(Guid.NewGuid(), "Parameters", [field]));
+        var values = new[] { "'; THROW 51000, 'query value', 1; --" + new string('x', 5001), "another" + new string('y', 5001) };
+        foreach (var value in values)
+            for (var index = 0; index < 3; index++)
+                await env.Engine.CreateRecordAsync(Admin, env.Workspace, list.Id, new(Guid.NewGuid(), 1,
+                    new JsonObject { [field.Id.ToString("D")] = value }));
+
+        string? previousSql = null;
+        foreach (var value in values)
+        {
+            observer.Commands.Clear();
+            observer.Parameters.Clear();
+            var page = await env.Engine.QueryAsync(Admin, env.Workspace, list.Id,
+                new([new(field.Id, FilterOperator.Equal, JsonValue.Create(value))], field.Id, Limit: 2));
+            Assert.Equal(2, page.Records.Count);
+            Assert.NotNull(page.NextRecordId);
+            Assert.All(page.Records, record => Assert.Equal(value, record.Values[field.Id.ToString("D")]!.GetValue<string>()));
+            var sql = Assert.Single(observer.Commands);
+            var parameters = Assert.Single(observer.Parameters);
+            Assert.Contains("TOP(", sql.Replace(" ", ""));
+            Assert.DoesNotContain(value, sql);
+            Assert.Contains(3, parameters);
+            Assert.Contains(new JsonObject { [field.Id.ToString("D")] = value }.ToJsonString(), parameters);
+            if (previousSql is not null) Assert.Equal(previousSql, sql);
+            previousSql = sql;
+        }
+    }
+
+    [Fact]
     public async Task QueryPageKeepsItsAnchorStableAgainstConcurrentMutationAndCleansUpCancellation()
     {
         var env = await SetupAsync();
@@ -191,10 +225,15 @@ public sealed partial class SqlServerListEngineTests
     private sealed class RecordCommands : DbCommandInterceptor
     {
         public List<string> Commands { get; } = [];
+        public List<object?[]> Parameters { get; } = [];
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
-            if (command.CommandText.Contains("FROM [cellbridge_lists].[records]", StringComparison.Ordinal)) Commands.Add(command.CommandText);
+            if (command.CommandText.Contains("FROM [cellbridge_lists].[records]", StringComparison.Ordinal))
+            {
+                Commands.Add(command.CommandText);
+                Parameters.Add(command.Parameters.Cast<DbParameter>().Select(parameter => parameter.Value).ToArray());
+            }
             return ValueTask.FromResult(result);
         }
     }

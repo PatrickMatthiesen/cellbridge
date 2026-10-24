@@ -45,8 +45,7 @@ internal sealed partial class EfListEngine
         await RequireAnchorAsync(db, workspaceId, authorization, authorization is not null, ct);
     }
 
-    // SQL Server's workspace lock protects these rows for the whole operation.
-    // Keep its existing coarse protection while PostgreSQL retains row locks.
+    // The workspace lock already protects these rows for the whole operation.
     private static Task LockQuotaAsync(DbConnection connection, DbTransaction transaction, Guid workspaceId, CancellationToken ct) => Task.CompletedTask;
     private static Task LockWorkspaceMutationAsync(DbConnection connection, DbTransaction transaction, Guid workspaceId, CancellationToken ct) => Task.CompletedTask;
     private static Task LockListSchemaSharedAsync(DbConnection connection, DbTransaction transaction, Guid workspaceId, Guid listId, CancellationToken ct) => Task.CompletedTask;

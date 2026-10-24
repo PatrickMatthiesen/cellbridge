@@ -1,4 +1,4 @@
--- Frozen SQL for migration 20261024000001_ExactQueries.
+-- Query functions for the initial SQL Server Lists schema.
 CREATE FUNCTION cellbridge_lists.json_scalar(@json nvarchar(max), @field nvarchar(36))
 RETURNS nvarchar(max) WITH SCHEMABINDING AS
 BEGIN

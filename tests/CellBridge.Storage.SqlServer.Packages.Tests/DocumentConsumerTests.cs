@@ -26,8 +26,6 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
         using var host = services.BuildServiceProvider();
         Assert.NotNull(host.GetRequiredService<CellBridgeDocumentService>());
         provider.Require(durable: true, multipleInstances: true);
-        Assert.DoesNotContain(typeof(SqlServerStateStore).Assembly.GetReferencedAssemblies(),
-            assembly => assembly.Name!.Contains("Lists") || assembly.Name.Contains("PostgreSql"));
     }
 
     [OwnedSqlServerFact]

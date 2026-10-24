@@ -8,7 +8,7 @@
     <Description>SQL Server runtime for native workspace Lists with built-in and host authorization, typed queries, list paging, views, audit and atomic schema and record operations.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <EmbeddedResource Include="Migrations/20261024000001_ExactQueries.sql" />
+    <EmbeddedResource Include="Migrations/InitialListsStorage.sql" />
     <ProjectReference Include="../CellBridge.Lists/CellBridge.Lists.csproj" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.13" />

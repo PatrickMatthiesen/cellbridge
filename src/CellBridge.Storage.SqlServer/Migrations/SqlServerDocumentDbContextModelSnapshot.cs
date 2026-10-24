@@ -26,8 +26,8 @@ namespace CellBridge.Storage.SqlServer.Migrations
             modelBuilder.Entity("CellBridge.Storage.Shared.ChunkRow", b =>
                 {
                     b.Property<string>("ObjectKey")
-                        .HasColumnName("Key")
                         .HasColumnType("char(64)")
+                        .HasColumnName("Key")
                         .UseCollation("Latin1_General_100_BIN2");
 
                     b.Property<int>("Ordinal")
@@ -47,11 +47,44 @@ namespace CellBridge.Storage.SqlServer.Migrations
                         });
                 });
 
+            modelBuilder.Entity("CellBridge.Storage.Shared.DocumentRow", b =>
+                {
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("bit");
+
+                    b.Property<byte[]>("PathHash")
+                        .IsRequired()
+                        .HasColumnType("binary(32)");
+
+                    b.Property<byte[]>("PathKey")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)");
+
+                    b.Property<int>("RetiredPathCount")
+                        .HasColumnType("int");
+
+                    b.Property<long>("StateVersion")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.HasKey("ResourceId");
+
+                    b.HasIndex("PathHash");
+
+                    b.ToTable("documents", "cellbridge_documents", t =>
+                        {
+                            t.HasCheckConstraint("documents_version", "[StateVersion] >= 0");
+                        });
+                });
+
             modelBuilder.Entity("CellBridge.Storage.Shared.ObjectRow", b =>
                 {
                     b.Property<string>("ObjectKey")
-                        .HasColumnName("Key")
                         .HasColumnType("char(64)")
+                        .HasColumnName("Key")
                         .UseCollation("Latin1_General_100_BIN2");
 
                     b.Property<long>("Length")
@@ -70,11 +103,99 @@ namespace CellBridge.Storage.SqlServer.Migrations
                         });
                 });
 
+            modelBuilder.Entity("CellBridge.Storage.Shared.ReadHeadRow", b =>
+                {
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("LifecycleGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<byte[]>("MetadataJson")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)")
+                        .HasColumnName("Data");
+
+                    b.Property<int>("RevisionCount")
+                        .HasColumnType("int");
+
+                    b.Property<long>("StateVersion")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("ResourceId");
+
+                    b.ToTable("metadata", "cellbridge_documents", t =>
+                        {
+                            t.HasCheckConstraint("metadata_revisions", "[RevisionCount] > 0 AND [LifecycleGeneration] > 0");
+                        });
+                });
+
+            modelBuilder.Entity("CellBridge.Storage.Shared.RecoveryReceiptRow", b =>
+                {
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("ReceiptJson")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)")
+                        .HasColumnName("Data");
+
+                    b.HasKey("OperationId");
+
+                    b.ToTable("recovery_receipts", "cellbridge_documents");
+                });
+
+            modelBuilder.Entity("CellBridge.Storage.Shared.RevisionSummaryRow", b =>
+                {
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("LifecycleGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal>("RevisionNumber")
+                        .HasPrecision(20)
+                        .HasColumnType("decimal(20,0)");
+
+                    b.Property<byte[]>("SummaryJson")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)")
+                        .HasColumnName("Data");
+
+                    b.HasKey("ResourceId", "LifecycleGeneration", "RevisionNumber");
+
+                    b.ToTable("revisions", "cellbridge_documents", t =>
+                        {
+                            t.HasCheckConstraint("revisions_number", "[RevisionNumber] BETWEEN 1 AND 18446744073709551615 AND [LifecycleGeneration] > 0");
+                        });
+                });
+
+            modelBuilder.Entity("CellBridge.Storage.Shared.StateRow", b =>
+                {
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("StateVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<byte[]>("StateJson")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)")
+                        .HasColumnName("Data");
+
+                    b.HasKey("ResourceId", "StateVersion");
+
+                    b.ToTable("snapshots", "cellbridge_documents", t =>
+                        {
+                            t.HasCheckConstraint("snapshots_version", "[StateVersion] >= 0");
+                        });
+                });
+
             modelBuilder.Entity("CellBridge.Storage.Shared.UsageRow", b =>
                 {
                     b.Property<int>("Singleton")
-                        .HasColumnName("Id")
-                        .HasColumnType("int");
+                        .HasColumnType("int")
+                        .HasColumnName("Id");
 
                     b.Property<long>("DocumentCount")
                         .ValueGeneratedOnAdd()
@@ -114,66 +235,6 @@ namespace CellBridge.Storage.SqlServer.Migrations
                         });
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.Shared.ReadHeadRow", b =>
-                {
-                    b.Property<Guid>("ResourceId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<byte[]>("MetadataJson")
-                        .IsRequired()
-                        .HasColumnName("Data")
-                        .HasColumnType("varbinary(max)");
-
-                    b.Property<long>("LifecycleGeneration")
-                        .HasColumnType("bigint");
-
-                    b.Property<int>("RevisionCount")
-                        .HasColumnType("int");
-
-                    b.Property<long>("StateVersion")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("ResourceId");
-
-                    b.ToTable("metadata", "cellbridge_documents", t =>
-                        {
-                            t.HasCheckConstraint("metadata_revisions", "[RevisionCount] > 0 AND [LifecycleGeneration] > 0");
-                        });
-                });
-
-            modelBuilder.Entity("CellBridge.Storage.Shared.DocumentRow", b =>
-                {
-                    b.Property<Guid>("ResourceId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<bool>("IsDeleted")
-                        .HasColumnType("bit");
-
-                    b.Property<byte[]>("PathHash")
-                        .IsRequired()
-                        .HasColumnType("binary(32)");
-
-                    b.Property<byte[]>("PathKey")
-                        .IsRequired()
-                        .HasColumnType("varbinary(max)");
-
-                    b.Property<int>("RetiredPathCount")
-                        .HasColumnType("int");
-
-                    b.Property<long>("StateVersion")
-                        .IsConcurrencyToken()
-                        .HasColumnType("bigint");
-
-                    b.HasKey("ResourceId");
-
-                    b.HasIndex("PathHash");
-
-                    b.ToTable("documents", "cellbridge_documents", t =>
-                        {
-                            t.HasCheckConstraint("documents_version", "[StateVersion] >= 0");
-                        });
-                });
-
             modelBuilder.Entity("CellBridge.Storage.SqlServer.DocumentSchema", b =>
                 {
                     b.Property<int>("Id")
@@ -194,27 +255,6 @@ namespace CellBridge.Storage.SqlServer.Migrations
                         {
                             Id = 1,
                             Version = 1
-                        });
-                });
-
-            modelBuilder.Entity("CellBridge.Storage.Shared.StateRow", b =>
-                {
-                    b.Property<Guid>("ResourceId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<long>("StateVersion")
-                        .HasColumnType("bigint");
-
-                    b.Property<byte[]>("StateJson")
-                        .IsRequired()
-                        .HasColumnName("Data")
-                        .HasColumnType("varbinary(max)");
-
-                    b.HasKey("ResourceId", "StateVersion");
-
-                    b.ToTable("snapshots", "cellbridge_documents", t =>
-                        {
-                            t.HasCheckConstraint("snapshots_version", "[StateVersion] >= 0");
                         });
                 });
 
@@ -241,54 +281,14 @@ namespace CellBridge.Storage.SqlServer.Migrations
                     b.ToTable("reservations", "cellbridge_documents");
                 });
 
-            modelBuilder.Entity("CellBridge.Storage.Shared.RecoveryReceiptRow", b =>
-                {
-                    b.Property<Guid>("OperationId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<byte[]>("ReceiptJson")
-                        .IsRequired()
-                        .HasColumnName("Data")
-                        .HasColumnType("varbinary(max)");
-
-                    b.HasKey("OperationId");
-
-                    b.ToTable("recovery_receipts", "cellbridge_documents");
-                });
-
-            modelBuilder.Entity("CellBridge.Storage.Shared.RevisionSummaryRow", b =>
-                {
-                    b.Property<Guid>("ResourceId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<long>("LifecycleGeneration")
-                        .HasColumnType("bigint");
-
-                    b.Property<decimal>("RevisionNumber")
-                        .HasPrecision(20)
-                        .HasColumnType("decimal(20,0)");
-
-                    b.Property<byte[]>("SummaryJson")
-                        .IsRequired()
-                        .HasColumnName("Data")
-                        .HasColumnType("varbinary(max)");
-
-                    b.HasKey("ResourceId", "LifecycleGeneration", "RevisionNumber");
-
-                    b.ToTable("revisions", "cellbridge_documents", t =>
-                        {
-                            t.HasCheckConstraint("revisions_number", "[RevisionNumber] BETWEEN 1 AND 18446744073709551615 AND [LifecycleGeneration] > 0");
-                        });
-                });
-
             modelBuilder.Entity("CellBridge.Storage.Shared.ChunkRow", b =>
                 {
                     b.HasOne("CellBridge.Storage.Shared.ObjectRow", null)
                         .WithMany()
                         .HasForeignKey("ObjectKey")
-                        .HasConstraintName("FK_chunks_objects_Key")
                         .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
+                        .IsRequired()
+                        .HasConstraintName("FK_chunks_objects_Key");
                 });
 #pragma warning restore 612, 618
         }

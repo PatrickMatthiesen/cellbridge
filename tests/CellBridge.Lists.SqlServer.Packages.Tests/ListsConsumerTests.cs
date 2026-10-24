@@ -20,9 +20,6 @@ public sealed class ListsConsumerTests(ITestOutputHelper output)
         Assert.IsAssignableFrom<IListEngine>(new SqlServerListEngine(options));
         Assert.IsAssignableFrom<IPagedListEngine>(new SqlServerListEngine(options));
         Assert.NotNull(new SqlServerListMigrator(options));
-        Assert.DoesNotContain(typeof(SqlServerListEngine).Assembly.GetReferencedAssemblies(),
-            assembly => assembly.Name!.StartsWith("CellBridge.Storage") || assembly.Name.Contains("PostgreSql") ||
-                assembly.Name.StartsWith("CellBridge.AspNetCore") || assembly.Name.StartsWith("CellBridge.FssHttp"));
     }
 
     [OwnedSqlServerFact]

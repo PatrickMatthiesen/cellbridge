@@ -6,26 +6,13 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace CellBridge.Storage.SqlServer.Migrations
 {
     /// <inheritdoc />
-    public partial class DocumentStateStorage : Migration
+    public partial class InitialDocumentStorage : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.AddColumn<long>(
-                name: "DocumentCount",
-                schema: "cellbridge_documents",
-                table: "usage",
-                type: "bigint",
-                nullable: false,
-                defaultValue: 0L);
-
-            migrationBuilder.AddColumn<long>(
-                name: "MaxDocuments",
-                schema: "cellbridge_documents",
-                table: "usage",
-                type: "bigint",
-                nullable: false,
-                defaultValue: 10000L);
+            migrationBuilder.EnsureSchema(
+                name: "cellbridge_documents");
 
             migrationBuilder.CreateTable(
                 name: "documents",
@@ -35,9 +22,9 @@ namespace CellBridge.Storage.SqlServer.Migrations
                     ResourceId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                     PathKey = table.Column<byte[]>(type: "varbinary(max)", nullable: false),
                     PathHash = table.Column<byte[]>(type: "binary(32)", nullable: false),
+                    RetiredPathCount = table.Column<int>(type: "int", nullable: false),
                     StateVersion = table.Column<long>(type: "bigint", nullable: false),
-                    IsDeleted = table.Column<bool>(type: "bit", nullable: false),
-                    RetiredPathCount = table.Column<int>(type: "int", nullable: false)
+                    IsDeleted = table.Column<bool>(type: "bit", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -60,6 +47,21 @@ namespace CellBridge.Storage.SqlServer.Migrations
                 {
                     table.PrimaryKey("PK_metadata", x => x.ResourceId);
                     table.CheckConstraint("metadata_revisions", "[RevisionCount] > 0 AND [LifecycleGeneration] > 0");
+                });
+
+            migrationBuilder.CreateTable(
+                name: "objects",
+                schema: "cellbridge_documents",
+                columns: table => new
+                {
+                    Key = table.Column<string>(type: "char(64)", nullable: false, collation: "Latin1_General_100_BIN2"),
+                    Length = table.Column<long>(type: "bigint", nullable: false),
+                    Sha256 = table.Column<string>(type: "char(64)", nullable: false, collation: "Latin1_General_100_BIN2")
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_objects", x => x.Key);
+                    table.CheckConstraint("objects_length", "[Length] >= 0");
                 });
 
             migrationBuilder.CreateTable(
@@ -135,25 +137,58 @@ namespace CellBridge.Storage.SqlServer.Migrations
                     table.CheckConstraint("snapshots_version", "[StateVersion] >= 0");
                 });
 
+            migrationBuilder.CreateTable(
+                name: "usage",
+                schema: "cellbridge_documents",
+                columns: table => new
+                {
+                    Id = table.Column<int>(type: "int", nullable: false),
+                    StoredBytes = table.Column<long>(type: "bigint", nullable: false),
+                    DocumentCount = table.Column<long>(type: "bigint", nullable: false, defaultValue: 0L),
+                    MaxStoredBytes = table.Column<long>(type: "bigint", nullable: false),
+                    MaxDocuments = table.Column<long>(type: "bigint", nullable: false, defaultValue: 10000L)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_usage", x => x.Id);
+                    table.CheckConstraint("usage_bytes", "[StoredBytes] >= 0 AND [MaxStoredBytes] > 0");
+                    table.CheckConstraint("usage_documents", "[DocumentCount] >= 0 AND [MaxDocuments] > 0");
+                    table.CheckConstraint("usage_singleton", "[Id] = 1");
+                });
+
+            migrationBuilder.CreateTable(
+                name: "chunks",
+                schema: "cellbridge_documents",
+                columns: table => new
+                {
+                    Key = table.Column<string>(type: "char(64)", nullable: false, collation: "Latin1_General_100_BIN2"),
+                    Ordinal = table.Column<int>(type: "int", nullable: false),
+                    Bytes = table.Column<byte[]>(type: "varbinary(max)", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_chunks", x => new { x.Key, x.Ordinal });
+                    table.CheckConstraint("chunks_length", "DATALENGTH([Bytes]) BETWEEN 1 AND 65536");
+                    table.CheckConstraint("chunks_ordinal", "[Ordinal] >= 0");
+                    table.ForeignKey(
+                        name: "FK_chunks_objects_Key",
+                        column: x => x.Key,
+                        principalSchema: "cellbridge_documents",
+                        principalTable: "objects",
+                        principalColumn: "Key");
+                });
+
             migrationBuilder.InsertData(
                 schema: "cellbridge_documents",
                 table: "schema_version",
                 columns: new[] { "Id", "Version" },
                 values: new object[] { 1, 1 });
 
-            migrationBuilder.UpdateData(
+            migrationBuilder.InsertData(
                 schema: "cellbridge_documents",
                 table: "usage",
-                keyColumn: "Id",
-                keyValue: 1,
-                column: "MaxDocuments",
-                value: 10000L);
-
-            migrationBuilder.AddCheckConstraint(
-                name: "usage_documents",
-                schema: "cellbridge_documents",
-                table: "usage",
-                sql: "[DocumentCount] >= 0 AND [MaxDocuments] > 0");
+                columns: new[] { "Id", "MaxDocuments", "MaxStoredBytes", "StoredBytes" },
+                values: new object[] { 1, 10000L, 10737418240L, 0L });
 
             migrationBuilder.CreateIndex(
                 name: "IX_documents_PathHash",
@@ -171,6 +206,10 @@ namespace CellBridge.Storage.SqlServer.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.DropTable(
+                name: "chunks",
+                schema: "cellbridge_documents");
+
             migrationBuilder.DropTable(
                 name: "documents",
                 schema: "cellbridge_documents");
@@ -199,20 +238,13 @@ namespace CellBridge.Storage.SqlServer.Migrations
                 name: "snapshots",
                 schema: "cellbridge_documents");
 
-            migrationBuilder.DropCheckConstraint(
-                name: "usage_documents",
-                schema: "cellbridge_documents",
-                table: "usage");
+            migrationBuilder.DropTable(
+                name: "usage",
+                schema: "cellbridge_documents");
 
-            migrationBuilder.DropColumn(
-                name: "DocumentCount",
-                schema: "cellbridge_documents",
-                table: "usage");
-
-            migrationBuilder.DropColumn(
-                name: "MaxDocuments",
-                schema: "cellbridge_documents",
-                table: "usage");
+            migrationBuilder.DropTable(
+                name: "objects",
+                schema: "cellbridge_documents");
         }
     }
 }
