@@ -136,6 +136,20 @@ public sealed partial class HttpTests
     }
 
     [Fact]
+    public async Task Nullable_filter_value_may_be_omitted()
+    {
+        await using var host = await Host.Create();
+        var body = "{\"query\":{\"filters\":[{\"fieldId\":\"" + host.Engine.Text +
+            "\",\"operator\":\"Equal\"}]}}";
+
+        var response = await host.Post("/records/query", body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var filter = Assert.Single(host.Engine.LastQuery!.Filters!);
+        Assert.Null(filter.Value);
+    }
+
+    [Fact]
     public async Task Bodies_are_bounded_before_json_parsing()
     {
         await using var host = await Host.Create(configure: o => o.MaxRequestBodyBytes = 1024);

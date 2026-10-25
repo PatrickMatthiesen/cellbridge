@@ -4,10 +4,9 @@ The experimental `CellBridge.Lists`, `CellBridge.Lists.PostgreSql`,
 `CellBridge.Lists.SqlServer` and
 `CellBridge.Lists.AspNetCore` packages add typed records to customer workspaces.
 They are optional and independent of Office document storage, SOAP and binary
-synchronization. They do not implement SharePoint list APIs. The
-[implementation plan](list-engine-implementation-plan.md) records the broader
-scope and qualification criteria; this guide describes the current libraries.
-All shipping packages use version `0.1.0-beta.4`. Each database provider can be
+synchronization. They do not implement SharePoint list APIs. The four Lists
+packages are independent of the seven document packages. They share the beta
+release version but keep their database dependencies separate. Each database provider can be
 used without the other provider or the document-storage packages.
 
 PostgreSQL and SQL Server use the same Lists operations. Each provider owns its
@@ -545,13 +544,8 @@ Focused checks run independently of Office protocol tests:
 ```sh
 dotnet test tests/CellBridge.Lists.Tests/CellBridge.Lists.Tests.csproj
 dotnet test tests/CellBridge.Lists.AspNetCore.Tests/CellBridge.Lists.AspNetCore.Tests.csproj
-node tools/testing/test-list-example-ui.cjs
 dotnet test tests/CellBridge.Lists.PostgreSql.Tests
 ```
-
-The example regression script uses Node 24 and checks retained drafts, exact
-numeric values and workspace targeting across delayed or failed requests.
-Both Linux and Windows CI run it.
 
 The PostgreSQL tests reuse the application AppHost with disposable storage and
 require a working container runtime. They apply the current setup and clean up

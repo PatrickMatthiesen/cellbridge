@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using System.Reflection;
 using System.Text;
 
 namespace CellBridge.Storage.SqlServer;
@@ -57,11 +56,11 @@ public sealed partial class SqlServerDocumentDbContext(DbContextOptions<SqlServe
             entity.ToTable(table => table.HasCheckConstraint("usage_documents", "[DocumentCount] >= 0 AND [MaxDocuments] > 0"));
             entity.HasData(new UsageRow { Singleton = true, MaxStoredBytes = 10L * 1024 * 1024 * 1024, MaxDocuments = 10000 });
         });
-        modelBuilder.HasDbFunction(typeof(DocumentSql).GetMethod(nameof(DocumentSql.ByteLength))!)
+        modelBuilder.HasDbFunction(() => DocumentSql.ByteLength(default!))
             .HasName("DATALENGTH").IsBuiltIn();
-        modelBuilder.HasDbFunction(typeof(DocumentSql).GetMethod(nameof(DocumentSql.ClockUtc))!)
+        modelBuilder.HasDbFunction(() => DocumentSql.ClockUtc())
             .HasName("SYSUTCDATETIME").IsBuiltIn();
-        modelBuilder.HasDbFunction(typeof(SqlServerDocumentDbContext).GetMethod(nameof(ByteLength), BindingFlags.Static | BindingFlags.NonPublic)!).HasName("DATALENGTH").IsBuiltIn();
+        modelBuilder.HasDbFunction(() => ByteLength(default!)).HasName("DATALENGTH").IsBuiltIn();
         modelBuilder.Entity<DocumentRow>(entity =>
         {
             entity.ToTable("documents", table => table.HasCheckConstraint("documents_version", "[StateVersion] >= 0"));

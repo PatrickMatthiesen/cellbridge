@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Metadata.Conventions;
-using System.Reflection;
 
 namespace CellBridge.Lists.PostgreSql;
 
@@ -156,16 +155,23 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
         modelBuilder.Entity<AuditEventRow>().HasOne<WorkspaceRow>().WithMany()
             .HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade)
             .HasConstraintName("audit_events_workspace_id_fkey");
-        modelBuilder.HasDbFunction(typeof(PostgreSqlListDbContext).GetMethod(nameof(UuidKey), BindingFlags.Static | BindingFlags.NonPublic)!)
+        modelBuilder.HasDbFunction(() => UuidKey(default))
             .HasTranslation(arguments => arguments[0]);
 
-        MapFunction(modelBuilder, nameof(JsonText), "jsonb_extract_path_text", schema: null, builtIn: true);
-        MapFunction(modelBuilder, nameof(Utf16Key), "utf16_key");
-        MapFunction(modelBuilder, nameof(TimestampKey), "timestamp_key");
-        MapFunction(modelBuilder, nameof(Utf16Compare), "utf16_compare");
-        MapFunction(modelBuilder, nameof(TimestampCompare), "timestamp_compare");
-        MapFunction(modelBuilder, nameof(CCompare), "c_compare");
-        MapFunction(modelBuilder, nameof(ClockTimestamp), "clock_timestamp", schema: null, builtIn: true);
+        modelBuilder.HasDbFunction(() => JsonText(default!, default!))
+            .HasName("jsonb_extract_path_text").IsBuiltIn();
+        modelBuilder.HasDbFunction(() => Utf16Key(default))
+            .HasName("utf16_key").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => TimestampKey(default))
+            .HasName("timestamp_key").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => Utf16Compare(default, default))
+            .HasName("utf16_compare").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => TimestampCompare(default, default))
+            .HasName("timestamp_compare").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => CCompare(default, default))
+            .HasName("c_compare").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => ClockTimestamp())
+            .HasName("clock_timestamp").IsBuiltIn();
     }
 
     private static void Configure<TEntity>(EntityTypeBuilder<TEntity> entity, string table, string[] key)
@@ -175,16 +181,6 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
         entity.HasKey(key).HasName(table + "_pkey");
         foreach (var property in entity.Metadata.GetProperties())
             property.SetColumnName(ToSnakeCase(property.Name));
-    }
-
-    private static void MapFunction(ModelBuilder modelBuilder, string methodName, string databaseName,
-        string? schema = "cellbridge_lists", bool builtIn = false)
-    {
-        var method = typeof(PostgreSqlListDbContext).GetMethod(methodName,
-            BindingFlags.Static | BindingFlags.NonPublic) ?? throw new InvalidOperationException();
-        var function = modelBuilder.HasDbFunction(method).HasName(databaseName);
-        if (schema is not null) function.HasSchema(schema);
-        if (builtIn) function.IsBuiltIn();
     }
 
     private static string ToSnakeCase(string value) => string.Concat(value.Select((character, index) =>

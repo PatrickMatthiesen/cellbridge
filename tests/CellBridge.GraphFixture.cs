@@ -1,3 +1,5 @@
+#nullable enable
+
 using CellBridge.FssHttpB;
 
 namespace CellBridge.Tests;

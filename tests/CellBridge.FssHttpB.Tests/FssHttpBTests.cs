@@ -46,8 +46,7 @@ public class ExGuidTests
         ExGuid.Null.Serialize(writer);
         byte[] bytes = writer.ToArray();
 
-        Assert.Equal(1, bytes.Length);
-        Assert.Equal(0x00, bytes[0]);
+        Assert.Equal(0x00, Assert.Single(bytes));
 
         var decoded = ExGuid.Deserialize(new BinaryReaderEx(bytes));
         Assert.True(decoded.IsNull);
@@ -94,7 +93,7 @@ public class SerialNumberTests
         SerialNumber.Null.Serialize(writer);
         byte[] bytes = writer.ToArray();
 
-        Assert.Equal(1, bytes.Length);
+        Assert.Single(bytes);
         Assert.True(SerialNumber.Deserialize(new BinaryReaderEx(bytes)).IsNull);
     }
 
@@ -177,7 +176,7 @@ public class StreamObjectHeaderTests
         end.Serialize(writer);
         byte[] bytes = writer.ToArray();
 
-        Assert.Equal(1, bytes.Length);
+        Assert.Single(bytes);
 
         var decoded = StreamObjectHeaderEnd.Parse(new BinaryReaderEx(bytes));
         Assert.IsType<StreamObjectHeaderEnd8Bit>(decoded);

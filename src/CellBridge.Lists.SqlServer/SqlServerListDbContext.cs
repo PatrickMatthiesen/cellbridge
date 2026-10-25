@@ -48,17 +48,18 @@ public sealed class SqlServerListDbContext(DbContextOptions<SqlServerListDbConte
     {
         modelBuilder.HasDefaultSchema(Schema);
 
-        modelBuilder.HasDbFunction(typeof(SqlServerListDbContext).GetMethod(nameof(ClockTimestamp),
-            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!)
+        modelBuilder.HasDbFunction(() => ClockTimestamp())
             .HasTranslation(_ => new SqlFunctionExpression("TODATETIMEOFFSET",
                 [new SqlFunctionExpression("SYSUTCDATETIME", [], false, [], typeof(DateTime),
                     new DateTimeTypeMapping("datetime2", System.Data.DbType.DateTime2)),
                  new SqlConstantExpression("+00:00", typeof(string), new StringTypeMapping("varchar(6)", System.Data.DbType.AnsiString))],
                 false, [false, false], typeof(DateTimeOffset), new DateTimeOffsetTypeMapping("datetimeoffset", System.Data.DbType.DateTimeOffset)));
-        foreach (var (method, name) in new[] { (nameof(ScalarKey), "scalar_key"), (nameof(UuidKey), "uuid_key"), (nameof(KeyCompare), "key_compare") })
-            modelBuilder.HasDbFunction(typeof(SqlServerListDbContext).GetMethod(method,
-                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!)
-                .HasName(name).HasSchema(Schema);
+        modelBuilder.HasDbFunction(() => ScalarKey(default!, default!, default))
+            .HasName("scalar_key").HasSchema(Schema);
+        modelBuilder.HasDbFunction(() => UuidKey(default))
+            .HasName("uuid_key").HasSchema(Schema);
+        modelBuilder.HasDbFunction(() => KeyCompare(default, default))
+            .HasName("key_compare").HasSchema(Schema);
 
         Configure(modelBuilder.Entity<SchemaVersionRow>(), "schema_version", [nameof(SchemaVersionRow.Singleton)]);
         Configure(modelBuilder.Entity<TemplateRow>(), "templates", [nameof(TemplateRow.TemplateId), nameof(TemplateRow.Version)]);

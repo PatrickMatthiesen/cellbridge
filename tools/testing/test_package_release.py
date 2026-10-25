@@ -12,13 +12,12 @@ COMMIT = "a" * 40
 
 
 def artifacts(path):
-    for name in PROJECTS:
-        package_id = "CellBridge." + name
+    for package_id in PROJECTS:
         metadata = f'''<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
           <metadata><id>{package_id}</id><version>{VERSION}</version>
           <license type="expression">MIT</license><readme>README.md</readme>
           <repository type="git" url="https://github.com/PatrickMatthiesen/cellbridge" commit="{COMMIT}"/>
-          <dependencies><group targetFramework="net10.0"><dependency id="CellBridge.Storage" version="{VERSION}"/></group></dependencies>
+          <dependencies><group targetFramework="net10.0"><dependency id="CellBridge" version="{VERSION}"/></group></dependencies>
           </metadata></package>'''
         for extension, binary in (("nupkg", "dll"), ("snupkg", "pdb")):
             with zipfile.ZipFile(path / f"{package_id}.{VERSION}.{extension}", "w") as z:
@@ -100,8 +99,8 @@ def test_uploads_primaries_before_symbols_and_discovers_symbol_endpoint():
     push_packages("packages", VERSION, "temporary-fixture-key",
         lambda command: (calls.append(command), SimpleNamespace(returncode=0))[1])
     assert len(calls) == 2 * len(PROJECTS)
-    assert [Path(c[3]).name for c in calls[:len(PROJECTS)]] == [f"CellBridge.{n}.{VERSION}.nupkg" for n in PROJECTS]
-    assert [Path(c[3]).name for c in calls[len(PROJECTS):]] == [f"CellBridge.{n}.{VERSION}.snupkg" for n in PROJECTS]
+    assert [Path(c[3]).name for c in calls[:len(PROJECTS)]] == [f"{n}.{VERSION}.nupkg" for n in PROJECTS]
+    assert [Path(c[3]).name for c in calls[len(PROJECTS):]] == [f"{n}.{VERSION}.snupkg" for n in PROJECTS]
     assert all("--no-symbols" in c for c in calls[:len(PROJECTS)])
     assert all("--no-symbols" not in c for c in calls[len(PROJECTS):])
     assert all("--skip-duplicate" not in c for c in calls)
@@ -119,4 +118,4 @@ def test_upload_failure_stops_without_retry_or_secret_in_exception(failure_at):
         push_packages("packages", VERSION, "temporary-fixture-key", upload)
     assert len(calls) == failure_at + 1
     assert "temporary-fixture-key" not in str(error.value)
-    assert "Publishing stopped at CellBridge." in str(error.value)
+    assert "Publishing stopped at CellBridge" in str(error.value)

@@ -149,7 +149,9 @@ public class PublicationTests
     [PostgreSqlFact]
     public async Task WaitingTransitionReadsNewPointerAndTimeAfterLockRelease()
     {
-        await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
+        var connectionString = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!)
+        { ApplicationName = "CellBridge.PublicationTests.WaitingTransition" }.ConnectionString;
+        await using var source = NpgsqlDataSource.Create(connectionString);
         var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var now = DateTime.UtcNow;
@@ -170,10 +172,33 @@ public class PublicationTests
             Assert.True(clock > now.AddMilliseconds(250));
             return new StateTransition<DateTime>(current with { Coordination = coordinator.Capture() }, clock);
         }).AsTask();
-        await Task.Delay(400);
+        await WaitForDatabaseLockWait(source);
+        await WaitUntilAsync(() => DateTime.UtcNow > now.AddMilliseconds(250));
         Assert.False(waiting.IsCompleted);
         await transaction.CommitAsync();
         await waiting.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Null((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Coordination.Exclusive);
+    }
+
+    private static async Task WaitForDatabaseLockWait(NpgsqlDataSource source)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (true)
+        {
+            await using var command = source.CreateCommand("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE application_name = $1 AND wait_event_type = 'Lock')
+                """);
+            command.Parameters.AddWithValue("CellBridge.PublicationTests.WaitingTransition");
+            if ((bool)(await command.ExecuteScalarAsync(timeout.Token))!) return;
+            await Task.Delay(10, timeout.Token);
+        }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (!condition()) await Task.Delay(10, timeout.Token);
     }
 }

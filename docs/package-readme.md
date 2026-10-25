@@ -5,7 +5,11 @@ It is experimental software. The packages contain the protocol
 libraries, reusable host and storage providers. API and storage compatibility
 may change before a stable release.
 
-Start with `CellBridge.AspNetCore` and a storage provider. PostgreSQL is the
+Install `CellBridge`, `CellBridge.AspNetCore` and a storage provider. Core
+contains SOAP/MTOM handling, document execution and storage contracts.
+`CellBridge.AspNetCore` contains HTTP, login and dependency-registration code.
+Providers depend on core, not the HTTP package. `CellBridge.FssHttpB` is a
+standalone binary protocol package. PostgreSQL is the
 sample host's default storage. `CellBridge.Storage.InMemory` loses its contents
 when the process stops. Applications provide authentication and
 document permissions. `AddCellBridgeIdentityLogin<TUser>` reuses existing Identity
@@ -50,5 +54,7 @@ in the repository guides before changing an installation with stored documents.
 - [Embedding in another host](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/package-integration.md)
 - [Capabilities and limitations](https://github.com/PatrickMatthiesen/cellbridge/blob/main/README.md)
 - [Package consumer example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/NuGetConsumer)
+- [HostAuthorizedLists example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/HostAuthorizedLists)
+- [DocumentLibrary example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/DocumentLibrary)
 
 Licensed under MIT.

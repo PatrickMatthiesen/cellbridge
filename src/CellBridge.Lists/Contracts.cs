@@ -39,7 +39,7 @@ public sealed record CreateRecordRequest(Guid Id, long SchemaVersion, JsonObject
 public sealed record CreateRecordResult(Guid Id, long Revision, long Number, bool Replayed = false);
 public sealed record FieldChange(Guid FieldId, JsonNode? Value = null, bool Remove = false);
 public sealed record UpdateRecordRequest(long ExpectedRevision, long SchemaVersion, IReadOnlyList<FieldChange> Changes);
-public sealed record RecordFilter(Guid FieldId, FilterOperator Operator, JsonNode? Value);
+public sealed record RecordFilter(Guid FieldId, FilterOperator Operator, JsonNode? Value = null);
 public sealed record ListQuery(IReadOnlyList<RecordFilter>? Filters = null, Guid? SortFieldId = null,
     bool Descending = false, Guid? AfterRecordId = null, int Limit = 100);
 public sealed record RecordPage(IReadOnlyList<ListRecord> Records, Guid? NextRecordId, long SchemaVersion);

@@ -5,7 +5,7 @@ using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
-using CellBridge.Storage.Conformance;
+using CellBridge.TestInfrastructure;
 using CellBridge.Storage.SqlServer;
 using CellBridge.TestFixtures;
 using CellBridge.Tests;

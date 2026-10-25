@@ -3,7 +3,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
-    <ProjectReference Include="../CellBridge.Storage.Abstractions/CellBridge.Storage.Abstractions.csproj" />
+    <ProjectReference Include="../CellBridge/CellBridge.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.12" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
   </ItemGroup>

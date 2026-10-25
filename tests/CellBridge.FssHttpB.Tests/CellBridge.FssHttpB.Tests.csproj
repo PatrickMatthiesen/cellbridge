@@ -20,7 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
-    <ProjectReference Include="..\..\src\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
+    <ProjectReference Include="..\..\src\CellBridge\CellBridge.csproj" />
   </ItemGroup>
 
   <ItemGroup>

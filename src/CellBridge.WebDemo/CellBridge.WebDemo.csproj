@@ -5,9 +5,8 @@
     <ProjectReference Include="../CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <ProjectReference Include="../CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
     <ProjectReference Include="../CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
-    <ProjectReference Include="..\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
+    <ProjectReference Include="..\CellBridge\CellBridge.csproj" />
     <ProjectReference Include="..\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
-    <ProjectReference Include="..\CellBridge.Storage\CellBridge.Storage.csproj" />
     <ProjectReference Include="..\CellBridge.ServiceDefaults\CellBridge.ServiceDefaults.csproj" />
   </ItemGroup>
 

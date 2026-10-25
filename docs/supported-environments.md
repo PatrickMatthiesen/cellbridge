@@ -24,31 +24,23 @@ and the source commit when qualifying a deployment.
 
 | Configuration | Relevant checks | Boundary established by passing checks |
 | --- | --- | --- |
-| PostgreSQL state and content | `ProcessTests.ProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` and provider conformance | Killing the writer before publication exposes previous state. Killing it after commit preserves content, receipt and pending delivery; retry recovers the commit. |
+| PostgreSQL state and content | `ProcessTests.ProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` and provider contract tests | Killing the writer before publication exposes previous state. Killing it after commit preserves content, receipt and pending delivery; retry recovers the commit. |
 | PostgreSQL state and local filesystem content | `ProcessTests.FileSystemProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` | The same process boundary with immutable files under the reported temporary root. |
 | PostgreSQL state and filesystem content under the run output root | `ProcessTests.ConfiguredFileSystemProcessDeathBeforeAndAfterCommitPreservesPublicationBoundary` | The same process boundary on the reported output filesystem. Missing qualification inputs cause a skip. |
 | Portable recovery across PostgreSQL/filesystem content | `PortabilityProviderTests.PostgreSqlToFileSystemToPostgreSqlRetainsEverySnapshotRootAndRestores` and portability failure tests | Export/import preserves current and retained graph/content roots, history, receipts and pending delivery. A reopened provider can restore a retained revision. |
 | Disposable local Linux PostgreSQL, with PostgreSQL or local filesystem content | `DatabaseRecoveryTests`, with the native recovery fixture | Database process termination before publication SQL, clean database stop/start after acknowledged saves, and quiescent custom-format `pg_dump`/`pg_restore`, each with state and content verification. |
-| In-memory state and content | Volatile provider conformance | API behavior during a process lifetime, with no restart recovery guarantee. |
+| In-memory state and content | In-memory provider tests | API behavior during a process lifetime, with no restart recovery guarantee. |
 
 Current CI exercises PostgreSQL 18 in Linux containers and protocol/package
 checks on Windows. A runner label does not identify its backing filesystem or
 qualify physical power loss. Record a successful run's environment before adding
 a concrete configuration to a deployment's supported matrix.
 
-The local recovery run on 2026-10-06 used .NET 10.0.12 on Windows build
-10.0.26200, with PostgreSQL 18.3 in a Linux container. The database reported
-`fsync`, `synchronous_commit` and `full_page_writes` as `on`. The PostgreSQL
-content process checks passed. The filesystem process checks passed on the
-temporary C: NTFS root and the output D: ReFS root. These results qualify the
-application process interruption boundary above, not database or hardware
-failure. Filesystem object reclamation remains Linux-only; Windows rejects that
-operation and preserves the stored objects and accounting.
-
 The repository selects stable .NET 10 SDKs through `global.json`; it permits
 newer .NET 10 feature bands and excludes prerelease SDKs. See Microsoft's
 [SDK selection rules](https://learn.microsoft.com/en-us/dotnet/core/tools/global-json).
-Retain `dotnet --info` and the source commit with each qualification report.
+Retain `dotnet --info`, the environment report and test results for each
+qualification run.
 
 ## Limits and recovery
 
@@ -59,6 +51,9 @@ failover or qualify SMB/NFS semantics. Those scenarios
 remain unqualified until their own fault/restore procedures pass with independent
 state and content verification. Flushing and atomic rename are prerequisites,
 not proof of hardware durability.
+
+Filesystem orphan collection is Linux-only. Windows rejects that operation and
+preserves the stored objects and accounting.
 
 Every host must read the same filesystem content. Separate local roots on
 different machines cannot provide shared content. Enable `SharedContent` only
@@ -96,23 +91,6 @@ All six recovery cases must execute and pass. Skipped cases do not qualify a
 database recovery run. Retain TRX results, environment reports and backup evidence
 with source/runtime information. These checks preserve the existing provider
 schema and publication semantics.
-
-The Debian qualification on 2026-10-09 covers both PostgreSQL content and
-local filesystem content. All six controlled database recovery cases and the
-19 existing process/provider/environment checks passed without skips. Every
-retained source and restored save reply decoded fully through OfficeInspectors,
-with status zero, alongside raw-state/content equality and the separate
-reference-save controls. The original pre-correction run had two passing outage
-cases and four failures caused by storage-index wire/fixture framing. The merged
-framing corrections resolve those failures; no decoding exemption remains.
-
-That qualification used Debian 13.7, SDK 10.0.401, .NET 10.0.12 and Npgsql 10.0.3.
-PostgreSQL and both backup clients were 18.3, from the Debian 13 container image.
-Local content was on ext4; PGDATA was on the container overlay filesystem. All
-three recorded database durability settings were `on`. The retained run summary
-identifies the actual clean source commit, image digest and runtime versions;
-these local results do not qualify other storage deployments. Passing raw-state
-or content comparisons alone is insufficient: retained replies must decode fully.
 
 The interruption case holds a real provider transaction after calculating the
 proposed save, before executing publication SQL. It kills the verified database

@@ -108,49 +108,18 @@ publicOrigin as the scheme and authority. Configure forwarded headers or the
 Office forms authentication PublicOrigin for the public HTTPS origin. Existing
 Office login completion URLs retain their mounted completion-path contract.
 
-## Validation evidence
+## Validation evidence and limits
 
 Endpoint tests cover routing, escaping, authorization and stale URL behavior.
 Storage tests cover atomic moves and PostgreSQL persistence, including provider
-recreation and permission revocation.
+recreation and permission revocation. Desktop Word, Excel and PowerPoint checks
+have exercised saves by resource ID after a move. They used one authenticated
+user. Normal-close behavior, live permission revocation during an open session,
+other Office builds and mounted applications remain unqualified. Follow the
+[desktop validation guide](demo-library.md) when qualifying another host or
+client configuration.
 
-On October 17, 2026, desktop Word for Microsoft 365 x64, build
-`16.0.20430.20146`, ran against the standard localhost HTTPS host with PostgreSQL
-on Windows build 26200. The document API drove these native Word checks, with
-separate UI observations and independently downloaded server content:
-
-- Open `/shared/issue72/team space/東京/Project plan æ.docx` for editing. Word
-  displayed `Project plan æ.docx`, saved one edit and reported Saved.
-- Move that resource to another nested directory while Word remained open,
-  using its current owner's lock identity. Save a second edit through the open
-  session, then close and reopen at the new URL in a fresh Word process.
-  Both edits survived. Independently downloaded revisions advanced from 1 to 3.
-- Move an existing flat document to
-  `/shared/issue72/migrated team/東京/Migrated plan ø.docx`. Word displayed
-  `Migrated plan ø.docx`, saved an edit and reopened that edit in a fresh process.
-
-The initial native requests exposed an omitted-ID bootstrap bug. Word sends
-`UseResourceID="true"` before it knows the ID. The server now uses the URL when
-the optional ID attribute is absent, then returns the stable ID, following
+When `UseResourceID="true"` arrives without a `ResourceID`, the URL identifies
+the initial request and the successful response returns the stable ID, following
 [MS-FSSHTTP section 2.2.3.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/91fb9fd5-ef2d-4484-b57c-f0aedf7d0f00).
 Explicit empty, malformed and unknown IDs still fail without URL fallback.
-
-On the same date and desktop, Excel and PowerPoint each opened
-`/shared/issue72-office/team space/東京/Project plan æ.xlsx` or `.pptx` as editable.
-Each application saved an edit, kept the document open while its resource moved
-to `/shared/issue72-office/moved team/東京/`, and saved another edit. Independent
-HTTP downloads contained both edits, with content versions advancing from 1 to 3.
-Fresh application processes reopened the current URLs and displayed both edits.
-Both retired path-only downloads returned 404. Excel also displayed a prompt to
-save to finish moving the file; confirming Save completed that client step.
-PowerPoint completed without that prompt.
-
-Raw requests/responses, downloaded packages, native results and UI captures are
-retained locally under ignored `artifacts/issue72-desktop` (Word) and
-`artifacts/issue72-office` (Excel and PowerPoint). These checks used one
-authenticated user and explicit sign-in for each fresh process. Automated
-close calls do not establish normal-close prompt behavior. Live permission
-revocation, other Office builds, mounted
-applications and ShareBridge's metadata integration were not tested in this run.
-Follow the [desktop validation guide](demo-library.md) when qualifying another
-host or client configuration.

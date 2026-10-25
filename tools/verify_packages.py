@@ -36,7 +36,7 @@ if not version or "-beta." not in version:
 source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
 source_status = subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True)
 for name in PROJECTS:
-    run(["dotnet", "pack", str(root / "src" / ("CellBridge." + name)),
+    run(["dotnet", "pack", str(root / "src" / name),
          "-c", "Release", "-o", str(output), "--nologo", "--verbosity", "quiet", *build_options])
 if source_commit != subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip() or \
         source_status != subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True):
@@ -46,14 +46,15 @@ manifest = build_manifest(output, version, source_commit, bool(source_status.str
 consumer = root / "examples" / "NuGetConsumer" / "NuGetConsumer.csproj"
 tests = root / "tests" / "CellBridge.Packages.Tests" / "CellBridge.Packages.Tests.csproj"
 library = root / "examples" / "DocumentLibrary" / "CellBridge.DocumentLibrary.csproj"
-library_setup = library.parent / "Setup" / "CellBridge.DocumentLibrary.Setup.csproj"
 library_tests = root / "tests" / "CellBridge.DocumentLibrary.Tests" / "CellBridge.DocumentLibrary.Tests.csproj"
+list_example = root / "examples" / "HostAuthorizedLists" / "HostAuthorizedLists.csproj"
+core_consumer = root / "tests" / "CellBridge.Packages.Tests" / "CoreConsumer" / "CellBridge.Core.PackageConsumer.csproj"
 sql_consumers = [root / "tests" / name / f"{name}.csproj" for name in
                  ("CellBridge.Storage.SqlServer.Packages.Tests", "CellBridge.Lists.SqlServer.Packages.Tests")]
-projects = (consumer, tests, library, library_setup, library_tests, *sql_consumers)
+projects = (consumer, tests, library, library_tests, list_example, core_consumer, *sql_consumers)
 # The application and its test/probe projects may reference each other, but no
 # project may bypass the packed libraries through a source project reference.
-for directory in (consumer.parent, tests.parent, library.parent, library_tests.parent,
+for directory in (consumer.parent, tests.parent, library.parent, library_tests.parent, list_example.parent, core_consumer.parent,
                   *(project.parent for project in sql_consumers)):
     for project in directory.rglob("*.csproj"):
         for reference in ET.parse(project).iter("ProjectReference"):
@@ -65,7 +66,7 @@ for directory in (consumer.parent, tests.parent, library.parent, library_tests.p
 config = output / "NuGet.Config"
 config.write_text(f'''<configuration>
   <packageSources><clear/><add key="local" value="{escape(str(output), {'"': '&quot;'})}"/><add key="nuget" value="https://api.nuget.org/v3/index.json"/></packageSources>
-  <packageSourceMapping><clear/><packageSource key="local"><package pattern="CellBridge.*"/></packageSource><packageSource key="nuget"><package pattern="*"/></packageSource></packageSourceMapping>
+  <packageSourceMapping><clear/><packageSource key="local"><package pattern="CellBridge"/><package pattern="CellBridge.*"/></packageSource><packageSource key="nuget"><package pattern="*"/></packageSource></packageSourceMapping>
 </configuration>''')
 for project in projects:
     # A previous build must not supply an unreferenced CellBridge assembly.
@@ -74,11 +75,22 @@ for project in projects:
 for project in projects:
     run(["dotnet", "restore", str(project), "--configfile", str(config),
          "--force", "--no-cache", "--packages", str(output / "consumer-cache"), *build_options])
-for project in (consumer, library_setup, *sql_consumers):
+for project in (consumer, library, list_example, core_consumer, *sql_consumers):
     run(["dotnet", "build", str(project), "-c", "Release", "--no-restore", "--nologo", *build_options])
 for project, results in ((tests, "test-results"), (library_tests, "document-library-tests")):
     run(["dotnet", "test", str(project), "-c", "Release", "--no-restore", "--nologo", *build_options,
          "--logger", "trx", "--results-directory", str(output / results)])
+
+core_assets = json.loads((core_consumer.parent / "obj" / "project.assets.json").read_text())
+framework_references = core_assets["project"]["frameworks"]["net10.0"].get("frameworkReferences", {})
+if "Microsoft.AspNetCore.App" in framework_references:
+    raise RuntimeError("The CellBridge core package requires the ASP.NET Core shared framework.")
+core_libraries = core_assets["libraries"]
+if "CellBridge/" + version not in core_libraries or "CellBridge.FssHttpB/" + version not in core_libraries:
+    raise RuntimeError("The core consumer did not restore CellBridge and its binary codec from packages.")
+if any(name.startswith("CellBridge.AspNetCore/") or name.startswith("CellBridge.Storage.")
+       for name in core_libraries):
+    raise RuntimeError("The CellBridge core package depends on a host adapter or storage provider.")
 
 # Check the complete restored graph and copied runtime assemblies. A package-only
 # csproj alone cannot detect stale DLLs or an unintended cross-domain dependency.
@@ -88,7 +100,8 @@ for project in sql_consumers:
     if {pathlib.Path(path).resolve() for path in assets["packageFolders"]} != {(output / "consumer-cache").resolve()}:
         raise RuntimeError(f"Consumer restored outside the isolated package cache: {project.name}")
     libraries = assets["libraries"]
-    cellbridge = {name: library for name, library in libraries.items() if name.startswith("CellBridge.")}
+    cellbridge = {name: library for name, library in libraries.items()
+                  if name.split("/", 1)[0] == "CellBridge" or name.startswith("CellBridge.")}
     lists_only = project.stem.startswith("CellBridge.Lists.")
     for name, library_info in cellbridge.items():
         package_id, resolved_version = name.split("/")
@@ -111,7 +124,7 @@ for project in sql_consumers:
                     if not copied.is_file() or hashlib.sha256(copied.read_bytes()).hexdigest() != sha256:
                         raise RuntimeError(f"Consumer assembly differs from packed assembly: {copied}")
                     binaries.append({"package": package_id, "assembly": filename, "sha256": sha256})
-    actual = {p.name for p in (project.parent / "bin" / "Release" / "net10.0").glob("CellBridge.*.dll")
+    actual = {p.name for p in (project.parent / "bin" / "Release" / "net10.0").glob("CellBridge*.dll")
               if p.stem != project.stem}
     if actual != {entry["assembly"] for entry in binaries}:
         raise RuntimeError(f"Consumer contains unexpected CellBridge assemblies: {project.name}")
