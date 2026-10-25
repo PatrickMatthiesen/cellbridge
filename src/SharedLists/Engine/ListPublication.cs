@@ -42,7 +42,8 @@ internal sealed partial class EfListEngine
         DbTransaction transaction, ListDefinition definition, RecordRow record, ListRecord expected,
         CreateReceiptRow? receipt, CreateReceiptRow? expectedReceipt, WorkspaceRow workspace,
         AuditEventRow audit, long preparedBytes, JsonObject? previousValues,
-        OperationAuthorization? authorization, CancellationToken ct)
+        IReadOnlySet<Guid> preparedReferenceFieldIds, OperationAuthorization? authorization,
+        CancellationToken ct)
     {
         var entities = receipt is null ? new object[] { record } : [record, receipt];
         await ReloadPublicationAsync(db, ct, entities);
@@ -53,21 +54,25 @@ internal sealed partial class EfListEngine
             var values = ListJson.Object(record.ValuesJson);
             ListValidation.ValidateValues(definition, values, _limits);
             var references = ReferenceAssignments(definition, values);
-            var referenceFieldIds = previousValues is null
+            var changedReferenceFieldIds = previousValues is null
                 ? definition.Fields.Where(field => field.Type == ListFieldType.Reference)
                     .Select(field => field.Id).ToHashSet()
                 : ChangedFields(previousValues, values)
                     .Where(fieldId => definition.Fields.Any(field =>
                         field.Id == fieldId && field.Type == ListFieldType.Reference)).ToHashSet();
-            var changedReferences = references.Where(reference =>
-                referenceFieldIds.Contains(reference.FieldId)).ToArray();
-            if (changedReferences.Length != 0)
+            var referencesToValidate = references.Where(reference =>
+                changedReferenceFieldIds.Contains(reference.FieldId)).ToArray();
+            if (referencesToValidate.Length != 0)
                 await ValidateReferenceAssignmentsAsync(db, connection, transaction, record.WorkspaceId,
-                    record.ModifiedBy, changedReferences, ct, authorization);
+                    record.ModifiedBy, referencesToValidate, ct, authorization);
+            var referenceFieldIdsToReconcile = preparedReferenceFieldIds
+                .Concat(changedReferenceFieldIds).ToHashSet();
+            var referencesToReconcile = references.Where(reference =>
+                referenceFieldIdsToReconcile.Contains(reference.FieldId)).ToArray();
             var existing = await db.RecordReferences.Where(row => row.WorkspaceId == record.WorkspaceId &&
                 row.SourceListId == record.ListId && row.SourceRecordId == record.RecordId &&
-                referenceFieldIds.Contains(row.FieldId)).ToListAsync(ct);
-            var replacements = changedReferences.ToDictionary(reference => reference.FieldId);
+                referenceFieldIdsToReconcile.Contains(row.FieldId)).ToListAsync(ct);
+            var replacements = referencesToReconcile.ToDictionary(reference => reference.FieldId);
             foreach (var edge in existing)
             {
                 if (!replacements.Remove(edge.FieldId, out var replacement)) db.RecordReferences.Remove(edge);

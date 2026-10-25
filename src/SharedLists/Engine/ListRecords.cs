@@ -483,7 +483,8 @@ internal sealed partial class EfListEngine
         StagePublicationAudit(db, audit);
         await SaveRequiredAsync(db, ct);
         await ValidatePublishedRecordAsync(db, connection, transaction, definition, record, expected, receipt, expectedReceipt,
-            workspace, audit, valueBytes, null, authorization, ct);
+            workspace, audit, valueBytes, null, references.Select(reference => reference.FieldId).ToHashSet(),
+            authorization, ct);
         return new CreateRecordResult(request.Id, 1, number);
     }
 
@@ -587,7 +588,7 @@ internal sealed partial class EfListEngine
         StagePublicationAudit(db, audit);
         await SaveRequiredAsync(db, ct);
         await ValidatePublishedRecordAsync(db, connection, transaction, definition, record, expected, null, null,
-            workspace, audit, valueBytes, current.Values, authorization, ct);
+            workspace, audit, valueBytes, current.Values, changedReferenceIds, authorization, ct);
         // Save interceptors may replace the tracked JSON before persistence.
         return StringComparer.Ordinal.Equals(record.ValuesJson, valuesJson)
             ? ToListRecord(record, responseValues)
