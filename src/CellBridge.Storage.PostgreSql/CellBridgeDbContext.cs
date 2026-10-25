@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using System.Reflection;
 
 namespace CellBridge.Storage.PostgreSql;
 
@@ -23,13 +22,11 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
 
     internal static void ConfigureModel(ModelBuilder modelBuilder)
     {
-        modelBuilder.HasDbFunction(typeof(DocumentSql).GetMethod(nameof(DocumentSql.ClockUtc),
-                BindingFlags.Static | BindingFlags.Public)!)
+        modelBuilder.HasDbFunction(() => DocumentSql.ClockUtc())
             .HasName("clock_timestamp").IsBuiltIn();
-        modelBuilder.HasDbFunction(typeof(DocumentSql).GetMethod(nameof(DocumentSql.ByteLength),
-                BindingFlags.Static | BindingFlags.Public)!)
+        modelBuilder.HasDbFunction(() => DocumentSql.ByteLength(default!))
             .HasName("octet_length").IsBuiltIn();
-        modelBuilder.HasDbFunction(typeof(CellBridgeDbContext).GetMethod(nameof(OctetLength), BindingFlags.Static | BindingFlags.NonPublic)!).HasName("octet_length").IsBuiltIn();
+        modelBuilder.HasDbFunction(() => OctetLength(default!)).HasName("octet_length").IsBuiltIn();
         modelBuilder.Entity<SchemaVersionRow>(entity =>
         {
             entity.ToTable("cellbridge_schema");

@@ -14,6 +14,24 @@ internal sealed class BenchmarkDatabase : IAsyncDisposable
     public NpgsqlDataSource Admin { get; private set; } = null!;
     public NpgsqlDataSource Runtime { get; private set; } = null!;
 
+    public async Task ResetListsAsync()
+    {
+        await using (var drop = Admin.CreateCommand("DROP SCHEMA cellbridge_lists CASCADE"))
+            await drop.ExecuteNonQueryAsync();
+        await PostgreSqlListSetup.InitializeAsync(Admin, role);
+    }
+
+    public async Task<Dictionary<string, long>> CountsAsync()
+    {
+        var result = new Dictionary<string, long>();
+        foreach (var table in new[] { "records", "audit_events", "create_receipts" })
+        {
+            await using var command = Admin.CreateCommand($"SELECT count(*) FROM cellbridge_lists.{table}");
+            result[$"cellbridge_lists.{table}"] = (long)(await command.ExecuteScalarAsync())!;
+        }
+        return result;
+    }
+
     private BenchmarkDatabase(string connection) => cluster = NpgsqlDataSource.Create(connection);
 
     public static async Task<BenchmarkDatabase> OpenAsync(string connection)

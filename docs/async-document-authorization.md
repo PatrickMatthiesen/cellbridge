@@ -29,7 +29,10 @@ For a host owning its routes, construct `CellBridgeDocumentService` with the nam
 
 Use `CreateExternalAsync` with a host-selected resource GUID and `DocumentAuthorizationScope` for ordinary creation. It requires both the actor's explicit `CanCreate` host capability and the provider's `Create` decision. `ImportExternalAsync` is a trusted import operation requiring `CanCreate`, not a user-level bypass for upload routes. The host supplies scope through trusted resource registration. Document paths do not determine tenant membership. Moving a path keeps the existing scope; changing authority scope requires explicit binding migration.
 
-The [document library web example](../examples/DocumentLibrary/README.md) shows an async permission provider in an authenticated host, with optional caching, document saves and version history.
+The package consumer tests cover external authorization and cache invalidation.
+The [documents and Lists composition example](../examples/DocumentLibrary/README.md)
+shows authenticated endpoint composition, but it uses the in-memory document
+provider's native permissions rather than an external document authority.
 
 ## Operation boundaries
 

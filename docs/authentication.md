@@ -202,9 +202,11 @@ the validated CellBridge subject.
 
 The default `StoredGrantAuthorizationPolicy` uses document ownership and grants.
 Register `ICellBridgeAuthorizationPolicy` before `AddCellBridge` to replace it.
-The [host authorization consumer](../examples/HostAuthorization/README.md) runs
-JWT authentication, catalog/download checks and a coordinated revocation without
-Identity accounts or CellBridge grants.
+The [DocumentLibrary example](../examples/DocumentLibrary/README.md) maps
+Documents and Lists from one authenticated principal. It uses stored document
+grants and a host-owned Lists authority. The
+[HostAuthorizedLists example](../examples/HostAuthorizedLists/README.md) shows
+Lists-only host authorization.
 
 ### Host-owned policy
 

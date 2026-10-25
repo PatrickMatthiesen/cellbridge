@@ -1,5 +1,0 @@
-{
-  "appHost": { "path": "AppHost/AppHost.csproj" },
-  "sdk": { "version": "17.0.0-preview.1.26520.1" },
-  "channel": "daily"
-}

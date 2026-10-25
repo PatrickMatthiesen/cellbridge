@@ -132,7 +132,7 @@ public sealed class NestedDocumentEndpointTests
         Assert.Equal("Success", Error(xml));
         var response = xml.Descendants(Protocol + "Response").Single();
         Assert.Equal("http://localhost" + url, (string?)response.Attribute("Url"));
-        Assert.Equal(state.ResourceId, Guid.Parse((string?)response.Attribute("ResourceID")!));
+        Assert.Equal(state.ResourceId, Guid.Parse(Assert.IsType<string>(response.Attribute("ResourceID")?.Value)));
     }
 
     [Theory]

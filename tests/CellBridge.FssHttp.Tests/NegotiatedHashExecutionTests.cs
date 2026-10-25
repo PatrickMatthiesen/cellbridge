@@ -66,10 +66,13 @@ public sealed class NegotiatedHashExecutionTests
         Assert.True(Assert.Single(response.DataElementPackage!.DataElements).SerialNumber.IsNull);
     }
 
-    private static DataElement RawGroup(int length) => Assert.Single(StorageManifestBuilder.BuildQueryChangesResponse(1,
-        new byte[length]).DataElementPackage!.DataElements
-        .Where(e => e.DataElementType == DataElementType.ObjectGroupDataElementData)) is { } element
-        ? new(element.DataElementType, element.DataElementExtendedGuid, SerialNumber.Null) { Data = element.Data } : throw new Exception();
+    private static DataElement RawGroup(int length)
+    {
+        var element = Assert.Single(StorageManifestBuilder.BuildQueryChangesResponse(1,
+            new byte[length]).DataElementPackage!.DataElements,
+            element => element.DataElementType == DataElementType.ObjectGroupDataElementData);
+        return new(element.DataElementType, element.DataElementExtendedGuid, SerialNumber.Null) { Data = element.Data };
+    }
     private static FsshttpbResponse Result(DataElement element, RequestTypes type, ulong id) => new()
     { DataElementPackage = new() { DataElements = { element } }, SubResponses = { new() { RequestId = id, RequestType = type } } };
     private static long Size(DataElement element) { var writer = new BinaryWriterEx(); element.Serialize(writer); return writer.Length; }

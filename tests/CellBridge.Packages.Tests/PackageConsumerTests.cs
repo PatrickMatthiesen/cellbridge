@@ -4,7 +4,6 @@ using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
 using CellBridge.FssHttp;
 using CellBridge.Storage.Abstractions;
-using CellBridge.Storage.Conformance;
 using CellBridge.Storage.InMemory;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -15,6 +14,51 @@ namespace CellBridge.Packages.Tests;
 
 public sealed class PackageConsumerTests
 {
+    [Fact]
+    public async Task PackagedHostAppliesExternalAuthorizationInvalidationToDownloads()
+    {
+        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var authority = new MutableDocumentAuthority();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        TestActor.Register(builder.Services);
+        builder.Services.AddSingleton(authority);
+        builder.Services.AddSingleton(sp => new CachedDocumentAuthorizationProvider(
+            sp.GetRequiredService<MutableDocumentAuthority>(),
+            new() { Capacity = 8, DecisionTtl = TimeSpan.FromMinutes(1) }));
+        builder.Services.AddCellBridgeWithExternalAuthorization<CachedDocumentAuthorizationProvider>(
+            provider, requireDurability: false);
+
+        await using var app = builder.Build();
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.MapCellBridge();
+        await app.StartAsync();
+
+        var bytes = new byte[] { 1, 2, 3, 4 };
+        var id = Guid.NewGuid();
+        var documents = app.Services.GetRequiredService<CellBridgeDocumentService>();
+        Assert.NotNull(await documents.CreateExternalAsync(id, "/shared/external.bin", bytes,
+            new("tenant", "workspace"), TestActor.Value));
+
+        using var client = TestActor.CreateClient(app.GetTestServer(), "reader");
+        Assert.Equal(bytes, await client.GetByteArrayAsync("/shared/external.bin"));
+
+        authority.Allowed = false;
+        Assert.Equal(bytes, await client.GetByteArrayAsync("/shared/external.bin"));
+
+        app.Services.GetRequiredService<CachedDocumentAuthorizationProvider>()
+            .InvalidateSubject("tests:reader");
+        using var denied = await client.GetAsync("/shared/external.bin");
+
+        Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+        Assert.Empty(await denied.Content.ReadAsByteArrayAsync());
+        Assert.Null(denied.Headers.ETag);
+        Assert.NotEqual((long)bytes.Length, denied.Content.Headers.ContentLength);
+        Assert.Null(denied.Content.Headers.LastModified);
+        Assert.Null(denied.Content.Headers.ContentDisposition);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -45,14 +89,15 @@ public sealed class PackageConsumerTests
         public override bool CanSeek => false;
     }
 
-    [Fact]
-    public async Task CustomProviderPassesConformance()
+    private sealed class MutableDocumentAuthority : IDocumentAuthorizationProvider
     {
-        var provider = new StorageProvider(
-            new CustomStateProvider(),
-            new InMemoryContentStore());
-
-        await ProviderConformance.VerifyAsync(provider);
+        public string PolicyDomain => "package-test:documents";
+        public bool Allowed { get; set; } = true;
+        public ValueTask<DocumentAuthorizationDecision> AuthorizeAsync(DocumentAuthorizationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            return ValueTask.FromResult(new DocumentAuthorizationDecision(Allowed));
+        }
     }
 
     [Fact]

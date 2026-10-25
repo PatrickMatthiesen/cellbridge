@@ -4,6 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- Vendored 2015 Interop-TestSuites sources predate nullable annotations. -->
     <Nullable>disable</Nullable>
+    <NoWarn>$(NoWarn);CS8073;CS8632</NoWarn>
     <IsPackable>false</IsPackable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
@@ -44,7 +45,7 @@
     <Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" />
     <Compile Include="MicrosoftProtocol\**\*.cs" />
     <Compile Remove="MicrosoftProtocol\FssHttpD\**\*.cs" />
-    <ProjectReference Include="..\..\src\CellBridge.FssHttp\CellBridge.FssHttp.csproj" />
+    <ProjectReference Include="..\..\src\CellBridge\CellBridge.csproj" />
     <ProjectReference Include="..\..\src\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
     <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />

@@ -117,9 +117,9 @@ continue to inline base64.
 
 ## Authorities
 
-The [protocol completion plan](protocol-completion-plan.md) distinguishes known
-implementation gaps, valid fallbacks, unverified clients and performance work,
-and orders the remaining work including OneNote desktop synchronization.
+The [protocol requirements ledger](protocol-requirements.md) records normative
+requirements, selected fallbacks, fixture scope and unresolved acceptance checks.
+OneNote desktop synchronization and two-desktop coauthoring remain unqualified.
 
 - [MS-OCPROTO](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-ocproto/)
 - [MS-FSSHTTP](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/)

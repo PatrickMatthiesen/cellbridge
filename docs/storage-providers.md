@@ -8,6 +8,8 @@ SQL Server holds document identities, revisions, synchronization graphs, save
 receipts, sessions and leases. Content uses database chunks or immutable filesystem
 objects. In-memory stores are available for disposable development.
 
+The `CellBridge` core package contains document and storage contracts. Provider
+packages depend on core; `CellBridge.AspNetCore` adds HTTP and hosting adapters.
 Document storage and Lists use separate contexts, migrations and package
 dependencies. PostgreSQL and SQL Server each own their EF model. Legacy schema
 upgrades retain their data transforms.
@@ -185,9 +187,10 @@ publishes an older retained version through the regular document service.
 
 ## Consume the packages
 
-The reusable packages target .NET 10. Use the same version for all CellBridge
-packages. [CellBridge.AspNetCore](https://www.nuget.org/packages/CellBridge.AspNetCore)
-provides endpoint registration and save orchestration. Choose state and content
+The eleven shipping packages target .NET 10 and share one version. Install
+`CellBridge` for protocol execution and storage contracts, `CellBridge.AspNetCore`
+for HTTP endpoints, login integration and dependency registration, and the
+provider packages you use. `CellBridge.FssHttpB` remains standalone. Choose state and content
 stores from `.PostgreSql`, `.SqlServer`, `.FileSystem` and `.InMemory`; filesystem storage
 supplies content only.
 
@@ -263,7 +266,7 @@ request permission limits and accepted-save receipts.
 supported binary operations. The sample's catalog, Office file generation and
 Aspire setup live outside these packages.
 
-Build the protocol and optional list packages, the [consumer example](../examples/NuGetConsumer/README.md)
+Build the core and optional Lists packages, the [consumer example](../examples/NuGetConsumer/README.md)
 and its [tests](../tests/CellBridge.Packages.Tests/README.md) with Aspire stopped:
 
 ```sh
@@ -494,12 +497,9 @@ one scope object. Charge state JSON, unique content/reservations and document
 identities under one atomic admission mechanism. Wrappers preserve this
 coordination; the marker alone does not implement accounting.
 
-### Conformance checks
-
-Run `CellBridge.Storage.Conformance.ProviderConformance.VerifyAsync(provider)`
-against a disposable backend; it retains its test records and objects.
-Also run the repository's save, lease, crash and replay cases. Verify hardware
-flushes and distributed locking in the intended deployment environment.
+Repository provider tests cover save, lease, crash and replay behavior. Hardware
+flushes and distributed locking still require qualification in the intended
+deployment environment.
 
 ## Limits and qualification
 

@@ -9,7 +9,7 @@ from package_manifest import PROJECTS, validate_release
 def push_packages(output, version, api_key, run=subprocess.run):
     for extension in ("nupkg", "snupkg"):
         for name in PROJECTS:
-            package = Path(output) / f"CellBridge.{name}.{version}.{extension}"
+            package = Path(output) / f"{name}.{version}.{extension}"
             command = ["dotnet", "nuget", "push", str(package), "--api-key", api_key,
                        "--source", "https://api.nuget.org/v3/index.json"]
             # Suppress automatic symbol uploads while publishing the primaries.

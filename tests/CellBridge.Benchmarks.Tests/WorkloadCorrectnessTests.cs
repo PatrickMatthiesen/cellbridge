@@ -17,6 +17,16 @@ namespace CellBridge.Benchmarks.Tests;
 
 public sealed class SyntheticWorkloadTests
 {
+    [Fact]
+    public void Service_save_input_matches_the_preserved_measurement_payload()
+    {
+        var payload = StorageBenchmarkInputs.Package(1, 42);
+
+        Assert.Equal(1_050_773, payload.Length);
+        Assert.Equal("83eaba2676ad6a42bfe7e60be47b3b66be8d2a17bb6a85f97a992d7a3dd85e19",
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(payload)));
+    }
+
     [Theory]
     [InlineData("full")]
     [InlineData("changed-full")]

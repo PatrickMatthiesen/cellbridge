@@ -49,7 +49,6 @@ Capture and desktop evidence tooling retains its Python dependencies:
 python3 -m venv tools/capture/.venv
 tools/capture/.venv/bin/python -m pip install --require-hashes -r tools/capture/requirements-dev.txt
 tools/capture/.venv/bin/python -m pytest tools/capture tools/testing -q
-node tools/testing/test-list-example-ui.cjs
 ```
 
 ## SQL Server engine checks
@@ -80,9 +79,9 @@ python3 tools/verify_packages.py --sqlserver
 python3 tools/check_release.py --version <version> --commit <sha>
 ```
 
-The verifier packs the libraries, builds package-only examples and runs
+The verifier packs the shipping libraries, builds package-only examples and runs
 [consumer checks](../tests/CellBridge.Packages.Tests/README.md) against an isolated
-local feed and cache. It validates the fourteen packages and symbols, readmes,
+local feed and cache. It validates the eleven shipping packages and symbols, readmes,
 license, repository metadata and package versions, then writes
 `artifacts/packages/manifest.json`.
 

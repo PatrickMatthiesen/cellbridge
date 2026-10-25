@@ -7,7 +7,7 @@
     <Description>SQL Server document state and content storage with explicit migrations for CellBridge.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../CellBridge.Storage.Abstractions/CellBridge.Storage.Abstractions.csproj" />
+    <ProjectReference Include="../CellBridge/CellBridge.csproj" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13" PrivateAssets="all" />

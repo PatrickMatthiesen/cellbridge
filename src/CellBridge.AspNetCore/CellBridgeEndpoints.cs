@@ -113,7 +113,7 @@ public static class CellBridgeEndpoints
                 return Results.Empty;
             });
         routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], (HttpContext context) =>
-            DocumentUrlPaths.TryRequestPath(context, out _) ? Results.Ok() : Results.BadRequest());
+            HttpDocumentPath.TryRequestPath(context, out _) ? Results.Ok() : Results.BadRequest());
         routes.MapPost("/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
         routes.MapMethods("/shared/{**documentPath}", ["GET", "HEAD", "OPTIONS", "POST"], HandleSharedRequest);
         return app;
@@ -122,7 +122,7 @@ public static class CellBridgeEndpoints
 
 private static async Task<IResult> HandleSharedRequest(HttpContext context, CellBridgeDocumentService service)
 {
-    if (!DocumentUrlPaths.TryRequestPath(context, out var path)) return Results.BadRequest();
+    if (!HttpDocumentPath.TryRequestPath(context, out var path)) return Results.BadRequest();
     const string marker = "/_vti_bin/cellstorage.svc";
     var protocol = path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
     if (protocol >= 0 && (protocol + marker.Length == path.Length || path[protocol + marker.Length] == '/'))
@@ -183,7 +183,7 @@ static bool ProtocolRequestAllowed(HttpContext context)
 
 static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocumentService service)
 {
-    if (!DocumentUrlPaths.TryRequestPath(ctx, out _)) return Results.BadRequest();
+    if (!HttpDocumentPath.TryRequestPath(ctx, out _)) return Results.BadRequest();
     var actor = CellBridgeActor.FromPrincipal(ctx.User);
     if (actor is null) return Results.Unauthorized();
     var admission = ctx.RequestServices.GetRequiredService<ProtocolRequestAdmission>();

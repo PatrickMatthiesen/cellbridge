@@ -1,17 +1,28 @@
 # CellBridge
 
 [![Build and tests](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml/badge.svg?branch=main)](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml)
-[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](src/CellBridge/CellBridge.csproj)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Edit Microsoft Office documents in their desktop apps and save them to your own
 ASP.NET Core server. CellBridge implements MS-FSSHTTP and MS-FSSHTTPB, the
 protocols Office uses to open documents, send changes and coordinate editing.
 
-The repository includes reusable .NET libraries and a sample document library.
-Create or import a file, open it in Word, Excel or PowerPoint, and save changes
-back to CellBridge. Use the sample to try desktop editing, or add the endpoints
-to your own ASP.NET Core application.
+The repository ships eleven NuGet packages, one development AppHost and three
+examples. The shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
+`CellBridge.AspNetCore`, `CellBridge.Storage.InMemory`,
+`CellBridge.Storage.PostgreSql`, `CellBridge.Storage.SqlServer`,
+`CellBridge.Storage.FileSystem`, `CellBridge.Lists`,
+`CellBridge.Lists.PostgreSql`, `CellBridge.Lists.SqlServer` and
+`CellBridge.Lists.AspNetCore`. The `CellBridge` core package contains SOAP/MTOM handling, document
+execution and storage contracts. `CellBridge.AspNetCore` adds HTTP endpoints,
+login integration and dependency registration. Storage providers depend on
+core, not the HTTP package. `CellBridge.FssHttpB` remains standalone.
+
+The examples cover document hosting with NuGet packages, Lists-only hosting
+with HostAuthorizedLists, and Documents plus Lists composition with
+DocumentLibrary. WebDemo is the richer development application for desktop
+editing and manual protocol checks.
 
 CellBridge is experimental. The APIs may change, and CellBridge has not been
 tested at production scale.
@@ -45,11 +56,6 @@ unimplemented or disabled. See [revision history](docs/revision-history.md),
 The development application `src/CellBridge.WebDemo` hosts the protocol endpoints
 and a Razor Pages library at `/library`. It creates blank documents and uses
 the sample Identity accounts.
-The [package-only document library](examples/DocumentLibrary/README.md) also creates
-blank documents and adds uploads, Office links, downloads, history, permissions
-and save-delivery status.
-It stores actual destination files separately from CellBridge state and tests
-recovery after lost save replies. Its built-in identities are for local testing.
 
 Install the .NET 10 SDK, an Aspire CLI compatible with the preview packages pinned
 in `src/CellBridge.AppHost/CellBridge.AppHost.csproj`, Docker and Python 3.12 or newer.
@@ -103,10 +109,10 @@ Custom HTML is optional. CellBridge handles sign-in, CSRF
 and the Office challenge/completion flow; see [login integration](docs/package-integration.md#use-the-built-in-login-page).
 
 For applications with their own document permissions, start with
-[async host authorization](docs/async-document-authorization.md) and the
-[document library web example](examples/DocumentLibrary/README.md).
-The existing [versioned policy example](examples/HostAuthorization/README.md)
-retains coordinated binding updates and lease reconciliation.
+[async host authorization](docs/async-document-authorization.md).
+The [HostAuthorizedLists example](examples/HostAuthorizedLists/README.md) shows
+Lists-only host authorization. DocumentLibrary shows how one ASP.NET Core host
+maps both endpoint families and derives their actors from the same identity.
 The [integration guide](docs/package-integration.md) covers parsed SOAP requests,
 resource IDs and save receipts. To publish saves to an external file store or
 share locks with WOPI, follow [external host reliability](docs/external-host-reliability.md).
@@ -129,7 +135,7 @@ own disposable hosts by default. Remote and desktop checks remain opt-in.
 - [Provider export, migration and recovery](docs/provider-portability.md)
 - [Document library and desktop editing](docs/demo-library.md)
 - [Authentication and permissions](docs/authentication.md)
-- [Storage, hosting and provider authoring](docs/storage-providers.md)
+- [Storage and hosting](docs/storage-providers.md)
 - [Document paths and migration](docs/document-paths.md)
 - [Protocol support and compatibility](docs/interoperability.md)
 - [Architecture](docs/architecture.md)

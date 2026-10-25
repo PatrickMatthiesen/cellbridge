@@ -8,7 +8,7 @@ upstream commit, retained license and port changes.
 
 The port contains the FSSHTTPB request/response, FSSHTTPD node/ZIP and OneStore
 property grammars used by the former adapter. The server does not depend on it.
-Its parsing code has no dependency on `CellBridge.FssHttpB`, so the tests compare
+Its parsing code has no dependency on `CellBridge` or `CellBridge.FssHttpB`, so the tests compare
 server-generated responses against a separately maintained parser. The existing
 Interop-TestSuites checks provide another independent comparison.
 

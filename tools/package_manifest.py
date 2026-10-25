@@ -5,14 +5,15 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 import zipfile
 
-PROJECTS = ["FssHttpB", "Storage.Abstractions", "Storage", "FssHttp", "Storage.InMemory",
-            "Storage.PostgreSql", "Storage.SqlServer", "Storage.FileSystem", "Storage.Conformance", "AspNetCore",
-            "Lists", "Lists.PostgreSql", "Lists.SqlServer", "Lists.AspNetCore"]
+PROJECTS = ["CellBridge.FssHttpB", "CellBridge", "CellBridge.Storage.InMemory",
+            "CellBridge.Storage.PostgreSql", "CellBridge.Storage.SqlServer", "CellBridge.Storage.FileSystem",
+            "CellBridge.AspNetCore", "CellBridge.Lists", "CellBridge.Lists.PostgreSql",
+            "CellBridge.Lists.SqlServer", "CellBridge.Lists.AspNetCore"]
 
 
 def build_manifest(output, version, source_commit, source_dirty):
     output = Path(output)
-    expected = {f"CellBridge.{name}.{version}.nupkg" for name in PROJECTS}
+    expected = {f"{name}.{version}.nupkg" for name in PROJECTS}
     if {p.name for p in output.glob("*.nupkg")} != expected:
         raise RuntimeError("Packed artifacts do not match the expected package set and version.")
     if {p.name for p in output.glob("*.snupkg")} != {n.replace(".nupkg", ".snupkg") for n in expected}:
@@ -37,7 +38,8 @@ def build_manifest(output, version, source_commit, source_dirty):
             if repository.get("commit") != source_commit:
                 raise RuntimeError(f"Repository commit mismatch in {path.name}.")
             for dependency in metadata.findall(".//{*}dependency"):
-                if dependency.get("id", "").startswith("CellBridge.") and dependency.get("version") != version:
+                if (dependency.get("id") == "CellBridge" or dependency.get("id", "").startswith("CellBridge.")) and \
+                        dependency.get("version") != version:
                     raise RuntimeError(f"Inconsistent internal dependency version in {path.name}.")
             if not any(n.startswith("lib/net10.0/") and n.endswith(".dll") for n in package.namelist()):
                 raise RuntimeError(f"Missing .NET 10 assembly in {path.name}.")

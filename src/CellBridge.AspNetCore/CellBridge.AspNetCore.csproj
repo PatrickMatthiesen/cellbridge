@@ -2,9 +2,7 @@
   <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
-    <ProjectReference Include="../CellBridge.FssHttp/CellBridge.FssHttp.csproj" />
-    <ProjectReference Include="../CellBridge.Storage/CellBridge.Storage.csproj" />
-    <Compile Include="../SharedAuthorization/BoundedAuthorizationCache.cs" Link="Authorization/BoundedAuthorizationCache.cs" />
+    <ProjectReference Include="../CellBridge/CellBridge.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="CellBridge.FssHttp.Tests" />

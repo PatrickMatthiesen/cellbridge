@@ -1,3 +1,5 @@
+#nullable enable
+
 using System.Net.Http.Headers;
 using System.Text;
 using System.Xml.Linq;
