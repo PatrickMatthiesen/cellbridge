@@ -63,6 +63,7 @@ public sealed class PostgreSqlFileSystemContentStore : IContentStore, IStorageBu
             await using (var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken))
             {
                 await PostgreSqlStateStore.ConfigureTransactionAsync(context, cancellationToken);
+                await PostgreSqlDocumentDatabase.AcquirePublicationAsync(context, false, cancellationToken);
                 var (connection, transaction) = PostgreSqlDatabase.GetTransaction(context);
                 int inserted;
                 // The reservation must be conflict-tolerant across hosts.

@@ -3,7 +3,7 @@ using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
-using CellBridge.Storage.Conformance;
+using CellBridge.TestInfrastructure;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;

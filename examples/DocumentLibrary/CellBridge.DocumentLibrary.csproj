@@ -4,18 +4,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-    <CellBridgePackageVersion Condition="'$(CellBridgePackageVersion)' == ''">0.1.0-beta.4</CellBridgePackageVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="CellBridge.AspNetCore" Version="$(CellBridgePackageVersion)" />
-    <PackageReference Include="CellBridge.Storage.InMemory" Version="$(CellBridgePackageVersion)" />
-    <PackageReference Include="CellBridge.Storage.PostgreSql" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Lists" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="CellBridge.Lists.AspNetCore" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="CellBridge.Lists.PostgreSql" Version="$(CellBridgePackageVersion)" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Remove="Setup/**;aspire/**" />
-    <Content Remove="Setup/**;aspire/**" />
-    <None Remove="Setup/**;aspire/**" />
+    <PackageReference Include="CellBridge.Storage.InMemory" Version="$(CellBridgePackageVersion)" />
   </ItemGroup>
 </Project>

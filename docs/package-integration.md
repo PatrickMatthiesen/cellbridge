@@ -20,16 +20,17 @@ Binary PutChanges accepts at most 1,024 author logins with 65,536 cumulative
 UTF-16 characters. Configure `CellBridgeOptions` for HTTP admission limits and
 keep host/proxy upload and response limits aligned with them.
 
-The beta targets .NET 10. Use `CellBridge.AspNetCore` with a storage provider;
-the protocol and provider packages can also be consumed separately. See
+The beta targets .NET 10. Use `CellBridge.AspNetCore` with a storage provider.
+Direct integrations can use `CellBridge` without the HTTP adapter, and
+`CellBridge.FssHttpB` remains standalone. See
 [provider composition](storage-providers.md#consume-the-packages) and the
 [package consumer](../examples/NuGetConsumer/README.md).
 
 The snippets below show the CellBridge integration in an existing application.
-The [document-library example](../examples/DocumentLibrary/README.md) is a complete
-application with PostgreSQL, a separate file store, document permissions and
-private test accounts. It uses the public package registrations below. Its file catalogue, directory
-selection and private test accounts belong to the example.
+The [DocumentLibrary example](../examples/DocumentLibrary/README.md) is a small
+package-only host that maps Documents and Lists from one authenticated principal.
+It uses volatile document storage and a preprovisioned PostgreSQL Lists database;
+it is not a durable document-management application.
 
 ## Use the built-in login pages
 

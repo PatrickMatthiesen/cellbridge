@@ -1,22 +1,89 @@
 # Storage providers and reusable hosting
 
 See [tested environments and recovery limits](supported-environments.md) and the
-[upgrade procedure](#upgrading-a-durable-host) before upgrading a durable host.
+[upgrade procedure](#updating-a-host) before updating a host with stored documents.
 
-CellBridge stores document state separately from file content. PostgreSQL holds
-document identities, current revisions, synchronization graphs, save receipts,
-sessions and leases. Content uses PostgreSQL chunks or immutable filesystem
+CellBridge stores document state separately from file content. PostgreSQL or
+SQL Server holds document identities, revisions, synchronization graphs, save
+receipts, sessions and leases. Content uses database chunks or immutable filesystem
 objects. In-memory stores are available for disposable development.
 
-The PostgreSQL package owns its EF Core model and versioned migrations. It does
-not add entities to the application's DbContext. Document storage and native
-Lists use independent contexts, migration histories and package dependencies.
-Only PostgreSQL is implemented and tested by these providers.
-EF generates the table and index migrations from the owned model. Legacy schema
-upgrades retain their data transforms. PostgreSQL locks remain explicit where EF
-does not express the required locking operation.
+The `CellBridge` core package contains document and storage contracts. Provider
+packages depend on core; `CellBridge.AspNetCore` adds HTTP and hosting adapters.
+Document storage and Lists use separate contexts, migrations and package
+dependencies. PostgreSQL and SQL Server each own their EF model. Legacy schema
+upgrades retain their data transforms.
 
-## Run the durable sample
+PostgreSQL and SQL Server use the same document operations. Each provider owns
+its database mappings and migration history. Required database locks stay enabled.
+
+`CellBridge.Storage.SqlServer` and `CellBridge.Lists.SqlServer` are independent
+.NET 10 packages. Use the same version for every CellBridge package. Each
+package has its own schema and explicit migrator. Neither depends on PostgreSQL
+or on the other SQL Server package. The demo does not use these providers. Live
+Office editing against SQL Server has not been validated. See [Lists setup](lists.md#sql-server-setup-and-runtime)
+and [SQL Server engine checks](automated-testing.md#sql-server-engine-checks).
+
+SQL Server consumers run initialization separately with setup credentials and
+all hosts stopped:
+
+```csharp
+using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.SqlServer;
+using Microsoft.EntityFrameworkCore;
+
+var limits = new StorageLimits();
+var setupOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
+    .UseSqlServer(setupConnectionString).Options;
+await new SqlServerStorageMigrator(setupOptions, limits).MigrateAsync();
+```
+
+The host then uses restricted runtime credentials:
+
+```csharp
+var runtimeOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
+    .UseSqlServer(runtimeConnectionString).Options;
+var provider = new StorageProvider(
+    new SqlServerStateStore(runtimeOptions, limits),
+    new SqlServerContentStore(runtimeOptions, limits.MaxObjectBytes), limits);
+builder.Services.AddCellBridge(provider, multipleInstances: true);
+await provider.CheckHealthAsync();
+```
+
+Import `CellBridge.AspNetCore` for `AddCellBridge`. Pass the same runtime options
+instance to both stores so they share one byte budget. Registration, health
+checks and requests never migrate schemas. Do not enable EF automatic execution
+strategy retries. Retry protocol operations with the same operation identity to
+replay an accepted save.
+
+SQL Server requires `DELAYED_DURABILITY = DISABLED`. Runtime credentials need
+data access to the document tables, read access to `schema_version` and `usage`,
+and update access to `usage.StoredBytes` and `usage.DocumentCount`. They do not
+need schema, migration-history or quota-limit write permissions. Host
+authorization still controls document operations. The provider uses database
+locks to coordinate hosts; these locks cannot be disabled.
+
+SQL Server provides explicit quiescent collection through
+`CellBridge.Storage.SqlServer.StorageMaintenance`. Stop every host, reader, writer
+and publisher before applying it. Use maintenance credentials with delete access
+to the owned content objects and chunks, read access to the document inventory and
+usage ledger, and update access to `usage.StoredBytes`. The normal runtime login
+used by the engine tests cannot delete content.
+
+```csharp
+var maintenance = new CellBridge.Storage.SqlServer.StorageMaintenance(options, limits);
+var preview = await maintenance.CollectOrphansAsync();
+var applied = await maintenance.CollectOrphansAsync(apply: true, quiescent: true);
+```
+
+The dry run removes nothing. Apply deletes only unreferenced objects and chunks
+and updates the byte ledger in one transaction. Stop all readers and writers
+before applying collection. The provider checks retained snapshots, history,
+receipts and recovery data before deleting anything. An invalid inventory aborts
+the operation. Database locks protect the collection transaction, but they do not
+replace the requirement to stop all hosts and workers first.
+
+## Run the PostgreSQL sample
 
 With Aspire stopped, build and start from the repository root:
 
@@ -26,7 +93,7 @@ aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.cspr
 aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
-Aspire uses an application-scoped durable PostgreSQL volume. The `storage-init`
+Aspire uses a PostgreSQL volume that retains data between runs. The `storage-init`
 resource initializes fresh/current storage, and the host checks both stores
 before serving requests. [Provision an account](authentication.md#first-setup)
 to use the library. Removing the volume removes its persisted data.
@@ -36,7 +103,7 @@ Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
 or schema-6 databases and upgrades schemas 3, 4 and 5 while preserving documents
 and retained snapshots. Stop all hosts and workers using the database first.
 Unsupported schemas, corruption or exceeded limits abort the upgrade without
-changing persisted data. Follow the [upgrade procedure](#upgrading-a-durable-host)
+changing persisted data. Follow the [upgrade procedure](#updating-a-host)
 for backups and rollback.
 
 Consumers can invoke the same migration implementation from their own initializer
@@ -120,10 +187,11 @@ publishes an older retained version through the regular document service.
 
 ## Consume the packages
 
-The reusable packages target .NET 10. Use the same version for all CellBridge
-packages. [CellBridge.AspNetCore](https://www.nuget.org/packages/CellBridge.AspNetCore)
-provides endpoint registration and save orchestration. Choose state and content
-stores from `.PostgreSql`, `.FileSystem` and `.InMemory`; filesystem storage
+The eleven shipping packages target .NET 10 and share one version. Install
+`CellBridge` for protocol execution and storage contracts, `CellBridge.AspNetCore`
+for HTTP endpoints, login integration and dependency registration, and the
+provider packages you use. `CellBridge.FssHttpB` remains standalone. Choose state and content
+stores from `.PostgreSql`, `.SqlServer`, `.FileSystem` and `.InMemory`; filesystem storage
 supplies content only.
 
 For an initialized PostgreSQL database:
@@ -198,20 +266,26 @@ request permission limits and accepted-save receipts.
 supported binary operations. The sample's catalog, Office file generation and
 Aspire setup live outside these packages.
 
-Build the protocol and optional list packages, the [consumer example](../examples/NuGetConsumer/README.md)
+Build the core and optional Lists packages, the [consumer example](../examples/NuGetConsumer/README.md)
 and its [tests](../tests/CellBridge.Packages.Tests/README.md) with Aspire stopped:
 
 ```sh
 python3 tools/verify_packages.py
 ```
 
-Outputs and the isolated package cache stay in `artifacts/packages`.
+The default command builds both package-only document and Lists consumers, runs
+non-database checks and reports database skips. Add `--sqlserver` to run them
+against separate empty databases in the disposable Aspire SQL Server environment.
+Outputs and the isolated feed/cache stay in ignored `artifacts/packages`. See
+[package checks](automated-testing.md#package-checks) for evidence and prerequisites.
 
 ### Provider composition constraints
 
 Pass consistent `StorageLimits` to the state store, content store's object-size
 argument, `StorageProvider` and schema setup. PostgreSQL state/content stores
-must share one `NpgsqlDataSource` instance. Empty in-memory stores composed
+must share one `NpgsqlDataSource` instance, or the same EF options instance.
+SQL Server state/content stores must share the same EF options instance.
+Empty in-memory stores composed
 through `StorageProvider` share their counters.
 
 `StorageCapabilities.AtomicBudgets` reports coordinated accounting.
@@ -252,13 +326,13 @@ extend leases; editor expiry and editor-partition knowledge advance together.
 
 PostgreSQL requires `fsync=on`, forces `synchronous_commit=on`, uses five-second
 lock and 30-second statement timeouts, and reads from the primary. Replication
-failover needs deployment-specific durability settings. Storage failures do not
+failover needs database settings that prevent loss of acknowledged saves. Storage failures do not
 switch the host to volatile storage.
 
-## Filesystem durability and retention
+## Filesystem writes and retention
 
 Content writes accept non-seekable streams, check quotas, hash bytes and flush a
-temporary file before publishing its SHA-256 key with a durable rename.
+temporary file before renaming it to its SHA-256 key.
 Linux synchronizes directories and newly created parent entries. Windows uses
 write-through flushes and `MoveFileEx` with `MOVEFILE_WRITE_THROUGH`.
 
@@ -305,7 +379,7 @@ content; deletion refuses a document with undelivered entries. See
 [conditional deletion and recreation](external-host-reliability.md#deletion-recreation-and-local-eviction).
 
 `LifecycleCollectionTests` runs collection after deletion and again after
-recreation for both durable content backends. Each sweep removes an unrelated
+recreation for both PostgreSQL and filesystem content. Each sweep removes an unrelated
 orphan and verifies retained bytes using fresh provider connections. The tests
 also preserve a separate live publication queue. Its saved content has history
 references too, so these cases do not establish an exclusive publication pin.
@@ -333,7 +407,7 @@ Missing referenced content is corruption and is never replaced by reseeding.
 The filesystem and storage hardware must honor flush/rename operations;
 power-loss and shared-filesystem behavior need deployment-specific qualification.
 
-### Upgrading a durable host
+### Updating a host
 
 1. Record the installed package versions, database schema and content provider.
    Keep the previous binaries and configuration.
@@ -348,7 +422,7 @@ power-loss and shared-filesystem behavior need deployment-specific qualification
    Older development schemas need a separate migration or recreation; setup rejects them.
 5. Start one upgraded host. Check provider health, document identities,
    permissions, downloads and a save/reopen cycle before enabling other writers.
-   Verify publication workers' destination bindings and durable receipt stores
+   Verify publication workers' destination bindings and stored receipts
    before restarting them.
 
 There is no schema-6 downgrade. For rollback, stop upgraded writers and
@@ -359,7 +433,7 @@ them separately. Do not run older writers against the migrated database.
 ## Implement a provider
 
 Implement `IDocumentStateStore` and `IContentStore`, then compose a
-`StorageProvider`. Advertise durability/shared flags for guarantees provided by
+`StorageProvider`. Set storage capability flags only for guarantees provided by
 the complete deployed backend.
 
 ### State contract
@@ -413,7 +487,7 @@ cycles are bounded separately from invalid revision-base cycles.
 
 ### Content and budget contracts
 
-`WriteAsync` completes durable publication before returning an immutable handle.
+`WriteAsync` stores the content before returning an immutable handle.
 Handles are not recycled and remain readable after restart. Open a stream for
 each read and report corruption/storage failures explicitly. Content reclamation
 requires quiescent maintenance over all retained snapshots.
@@ -423,12 +497,9 @@ one scope object. Charge state JSON, unique content/reservations and document
 identities under one atomic admission mechanism. Wrappers preserve this
 coordination; the marker alone does not implement accounting.
 
-### Conformance checks
-
-Run `CellBridge.Storage.Conformance.ProviderConformance.VerifyAsync(provider)`
-against a disposable backend; it retains its test records and objects.
-Also run the repository's save, lease, crash and replay cases. Verify hardware
-flushes and distributed locking in the intended deployment environment.
+Repository provider tests cover save, lease, crash and replay behavior. Hardware
+flushes and distributed locking still require qualification in the intended
+deployment environment.
 
 ## Limits and qualification
 
@@ -446,13 +517,12 @@ The sample binds positive `StorageLimits` from `Storage`:
 | `MaxSaveReceipts` | 10,000 | Receipt identities per document; identities are not evicted. |
 | `MaxRetainedStateSnapshots` | 64 | PostgreSQL metadata history per document. |
 | `MaxHistoryRevisions` | 1,000 | Immutable file/application-metadata publications per document; no automatic expiration. |
-| `MaxRestoreReceipts` | 1,000 | Durable keyed restore receipts per document; identities are not evicted. |
+| `MaxRestoreReceipts` | 1,000 | Stored keyed restore receipts per document; identities are not evicted. |
 | `MaxRetiredPathKeys` | 128 | Permanently reserved names per resource after rename; keys are not evicted. |
 
 
 Accounting includes reservations and charged orphans, but excludes database
-row/index overhead, WAL, spool files and allocator overhead. Each durable content
-store admits four spool writers. Duplicate content is charged once. A rejected
+row/index overhead, WAL, spool files and allocator overhead. Each content store admits four spool writers. Duplicate content is charged once. A rejected
 save preserves the selected revision; content staged before rejection stays
 charged until collected.
 
@@ -461,7 +531,7 @@ The creation API returns HTTP 507 for quota failures, file saves return Win32
 can reject a request earlier.
 
 Requests and graph payloads occupy memory, and graph merging retains defensive
-copies. Durable package reconstruction/ZIP validation use a seekable staging file;
+copies. Package reconstruction and ZIP validation use a seekable staging file;
 MTOM output streams without a base64 round trip or complete multipart buffer.
 Configured defaults are admission limits rather than qualified Office file sizes. Automatic graph
 pruning is disabled, so even a constant-size file can accumulate history until a

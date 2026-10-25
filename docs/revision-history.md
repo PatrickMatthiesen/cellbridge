@@ -117,8 +117,7 @@ exports/imports retained history and provides an operator restore-version comman
 The JSON state codec remains format 2 with additive defaults. New binaries read
 old state and preserve history/lifecycle/publication fields through detached capture.
 Upgrade all hosts together: old binaries can discard unknown JSON fields when writing.
-Rolling downgrade compatibility is not supported. Existing public constructors and
-legacy receipt semantics remain available; no beta package is republished by this change.
+Rolling downgrade compatibility is not supported.
 
 ## Evidence and remaining gates
 

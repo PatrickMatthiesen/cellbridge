@@ -1,99 +1,42 @@
 using CellBridge.AspNetCore;
-using CellBridge.DocumentLibrary;
-using CellBridge.Storage.Abstractions;
-using Microsoft.AspNetCore.Authentication.Cookies;
 using CellBridge.Lists;
 using CellBridge.Lists.AspNetCore;
 using CellBridge.Lists.PostgreSql;
+using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.InMemory;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
+var documents = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
 
-var provider = DocumentLibraryStorage.Create(builder);
-builder.Services.AddSingleton(sp => new DocumentLibraryDestination(
-    sp.GetRequiredService<DocumentLibraryOptions>().DestinationRoot!));
-builder.Services.AddSingleton<DocumentLibraryService>();
-var listsEnabled = builder.Configuration.GetValue("Lists:Enabled", false);
-if (listsEnabled)
-{
-    var connectionString = builder.Configuration.GetConnectionString("lists")
-        ?? throw new InvalidOperationException("ConnectionStrings:lists is required when Lists:Enabled=true.");
-    if (builder.Configuration["Lists:RuntimePassword"] is { } password)
-        connectionString = new NpgsqlConnectionStringBuilder(connectionString) { Password = password }.ConnectionString;
-    builder.Services.AddKeyedSingleton("lists", (_, _) => NpgsqlDataSource.Create(connectionString));
-    builder.Services.AddSingleton<IListEngine>(services =>
-        new PostgreSqlListEngine(services.GetRequiredKeyedService<NpgsqlDataSource>("lists")));
-    builder.Services.AddCellBridgeLists(options => options.ActorResolver = context =>
-        CellBridgeActor.FromPrincipal(context.User) is { } actor ? new ListActor(actor.Identity.Subject) : null);
-}
-builder.Services.AddAuthorization(options => options.AddPolicy("permission-admin",
-    policy => policy.RequireClaim("document-library:permission-admin", "true")));
+builder.Services.AddCellBridge(documents, requireDurability: false);
+builder.Services.AddAuthentication("CellBridge");
+builder.Services.AddCellBridgeCookieLogin<ExampleLoginAuthenticator>("CellBridge");
 
-builder.Services.AddSingleton<DocumentLibraryPermissionProvider>();
-if (builder.Configuration.GetValue("DocumentLibrary:AuthorizationCache:Enabled", false))
-{
-    builder.Services.AddSingleton(services =>
-    {
-        var cache = services.GetRequiredService<DocumentLibraryOptions>().AuthorizationCache;
-        return new CachedDocumentAuthorizationProvider(services.GetRequiredService<DocumentLibraryPermissionProvider>(),
-            new() { Capacity = cache.Capacity, DecisionTtl = cache.DecisionTtl });
-    });
-    builder.Services.AddCellBridgeWithExternalAuthorization<CachedDocumentAuthorizationProvider>(provider,
-        requireDurability: !builder.Environment.IsEnvironment("Testing"),
-        configure: options => options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"]);
-}
-else
-{
-    builder.Services.AddCellBridgeWithExternalAuthorization<DocumentLibraryPermissionProvider>(provider,
-        requireDurability: !builder.Environment.IsEnvironment("Testing"),
-        configure: options => options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"]);
-}
-builder.Services.AddCellBridgeExternalPublishing<DocumentLibraryDestination>(options =>
-    options.PollingInterval = builder.Configuration.GetValue("DocumentLibrary:PublicationInterval", TimeSpan.FromSeconds(1)));
-
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme);
-builder.Services.AddCellBridgeCookieLogin<LocalLoginAuthenticator>(
-    CookieAuthenticationDefaults.AuthenticationScheme,
-    configureCookie: cookie =>
-    {
-        cookie.Cookie.Name = "CellBridge.DocumentLibrary.Local";
-        cookie.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-    },
-    configure: login =>
-    {
-        login.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"];
-        login.IsRequestAllowed = context =>
-            DocumentLibraryAuthentication.IsRequestAllowed(context, builder.Environment);
-    });
+var listConnection = builder.Configuration.GetConnectionString("lists")
+    ?? throw new InvalidOperationException("Configure ConnectionStrings:lists.");
+builder.Services.AddSingleton(NpgsqlDataSource.Create(listConnection));
+builder.Services.AddSingleton<IListAuthorizationProvider, ExampleListAuthorization>();
+builder.Services.AddSingleton<IListEngine>(services => new PostgreSqlListEngine(
+    services.GetRequiredService<NpgsqlDataSource>(),
+    null,
+    services.GetRequiredService<IListAuthorizationProvider>()));
+builder.Services.AddCellBridgeLists(options => options.ActorResolver = context =>
+    CellBridgeActor.FromPrincipal(context.User) is { } actor
+        ? new ListActor(actor.Identity.Subject, "example-tenant")
+        : null);
 
 var app = builder.Build();
-app.Use(async (context, next) =>
-{
-    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
-    context.Response.Headers["Referrer-Policy"] = "no-referrer";
-    context.Response.Headers["Content-Security-Policy"] =
-        "default-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
-    await next();
-});
-app.UseStaticFiles();
-app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseAntiforgery();
-
-app.MapDocumentLibrary();
 app.MapCellBridge();
-if (listsEnabled)
-{
-    app.MapCellBridgeLists();
-    app.MapDocumentLibraryLists();
-}
-app.MapHealthChecks("/health").AllowAnonymous();
+app.MapCellBridgeLists();
+app.MapGet("/", () => "CellBridge Documents and Lists example").AllowAnonymous();
 
-await app.Services.GetRequiredService<StorageProvider>().CheckHealthAsync();
-await app.Services.GetRequiredService<DocumentLibraryService>().InitializeAsync();
-if (listsEnabled && app.Services.GetRequiredService<IListEngine>() is PostgreSqlListEngine lists)
-    await lists.CheckHealthAsync();
+var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
+await service.CreateAsync("/shared/example.txt", "Example document\n"u8.ToArray(),
+    new(new("example:owner", "owner", "Example owner"), CanCreate: true));
+
 await app.RunAsync();
 
 public partial class Program;

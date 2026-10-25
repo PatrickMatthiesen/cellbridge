@@ -7,7 +7,13 @@ using CellBridge.Lists.AspNetCore;
 using CellBridge.Lists.PostgreSql;
 using CellBridge.TestInfrastructure;
 using Npgsql;
+using BenchmarkDotNet.Running;
 
+if (args.Any(argument => argument is "--filter" or "--list" or "--help" or "-h"))
+{
+    BenchmarkSwitcher.FromAssembly(typeof(PostgreSqlPagingBenchmarks).Assembly).Run(args);
+    return 0;
+}
 return await Benchmark.RunAsync(BenchmarkMetadata.Arguments(args, "ListsBenchmark__Arguments"));
 
 internal static class Benchmark

@@ -13,8 +13,18 @@ operations retain authorization, forced workspace RLS, validation, conditional
 revisions, receipts, auditing, foreign keys and synchronous commits. Connection
 strings and credentials are excluded from the report.
 
-For the corrected warm BenchmarkDotNet SQL/EF comparison, see
-[Warm PostgreSQL provider comparisons](postgresql-comparison.md).
+Focused BenchmarkDotNet cases measure provider paging and mutations. Paging prepares
+1,000 records and measures first and second pages with fresh or explicitly analyzed
+PostgreSQL statistics. Mutation cases measure batches of 16 record creates or patches.
+Schema reset, fixture preparation and result checks run outside the timed method.
+
+```sh
+dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --filter '*PostgreSqlPaging*' --artifacts artifacts/provider-benchmarks/paging --exporters json
+dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --filter '*PostgreSqlListMutation*' --artifacts artifacts/provider-benchmarks/mutations --exporters json
+```
+
+Each benchmark uses a disposable PostgreSQL environment. These method measurements
+are separate from the command-line saturation and loopback HTTP workloads below.
 
 ## Run a local measurement
 

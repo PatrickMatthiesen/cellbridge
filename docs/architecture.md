@@ -11,24 +11,28 @@ behavior and unsupported operations.
 flowchart TD
     Office[Desktop Office] -->|HTTPS discovery and download| Host[CellBridge.AspNetCore endpoints]
     Office -->|SOAP or MTOM| Host
-    Host --> Soap[CellBridge.FssHttp]
-    Soap --> Binary[CellBridge.FssHttpB]
-    Host --> Service[CellBridgeDocumentService]
+    Host --> Http[CellBridge.AspNetCore]
+    Http --> Core[CellBridge core]
+    Core --> Soap[MS-FSSHTTP SOAP/MTOM]
+    Core --> Binary[CellBridge.FssHttpB]
+    Core --> Service[CellBridgeDocumentService]
     Service --> State[IDocumentStateStore]
     Service --> Content[IContentStore]
-    State --> PostgreSQL[PostgreSQL document state]
-    Content --> Blobs[PostgreSQL chunks or filesystem objects]
+    State --> Database[PostgreSQL or SQL Server document state]
+    Content --> Blobs[Database chunks or filesystem objects]
 ```
 
-`/_vti_bin/cellstorage.svc` handles the outer MS-FSSHTTP envelope. Cell
-subrequests carry MS-FSSHTTPB requests inline as base64 or in MTOM attachments.
+The `CellBridge` package handles `/_vti_bin/cellstorage.svc`, document execution
+and storage contracts. `CellBridge.AspNetCore` owns HTTP routing, authentication
+integration and dependency registration. Cell subrequests carry MS-FSSHTTPB
+requests inline as base64 or in MTOM attachments.
 `CellBridgeRequestProcessor` executes parsed SOAP requests for the mapped endpoint
 and direct callers. It resolves document identity and sends binary Cell requests
 to `CellBridgeDocumentService.ExecuteAsync`. Direct binary integrations use that
 same service. The service validates the request, selects each operation's target
 partition and runs the operations in request order. Internal handlers prepare
-file and metadata graphs and build query responses. Both InMemory and PostgreSQL
-use this execution path.
+file and metadata graphs and build query responses. InMemory, PostgreSQL and SQL
+Server use this execution path.
 
 The endpoint serializes each operation's protocol response. HTTP 200 alone does
 not indicate save success.
@@ -42,32 +46,48 @@ See [authentication and permissions](authentication.md).
 
 ## Libraries and executables
 
+The eleven shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
+`CellBridge.AspNetCore`, `CellBridge.Storage.InMemory`,
+`CellBridge.Storage.PostgreSql`, `CellBridge.Storage.SqlServer`,
+`CellBridge.Storage.FileSystem`, `CellBridge.Lists`,
+`CellBridge.Lists.PostgreSql`, `CellBridge.Lists.SqlServer` and
+`CellBridge.Lists.AspNetCore`.
+
 | Project | Responsibility |
 | --- | --- |
-| `CellBridge.FssHttp` | SOAP/MTOM parsing, response serialization and subrequest models |
+| `CellBridge` | SOAP/MTOM parsing, document execution, storage contracts, document state and persistence codecs |
 | `CellBridge.FssHttpB` | Binary framing, manifests, graph data and synchronization messages |
-| `CellBridge.Storage.Abstractions` | Immutable document records, state transitions and content handles |
-| `CellBridge.Storage` | Detached protocol documents and persistence codecs |
 | `CellBridge.Storage.PostgreSql` | EF Core document persistence, explicit migrations, per-document coordination and chunked content |
-| `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory durability operations |
+| `CellBridge.Storage.SqlServer` | Independent EF Core document persistence, explicit migrations, coordinated state and chunked content |
+| `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory flushes |
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
-| `CellBridge.Storage.Conformance` | Provider contract checks for consumers |
-| `CellBridge.AspNetCore` | Save orchestration, discovery, download and cellstorage endpoints |
+| `CellBridge.AspNetCore` | HTTP endpoints, login integration and dependency registration |
 | `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
 | `CellBridge.Lists.PostgreSql` | Independent EF Core list persistence and migrations, JSONB records, workspace isolation and grants |
+| `CellBridge.Lists.SqlServer` | List persistence, migrations, SQL queries, workspace authorization, views and audit |
 | `CellBridge.Lists.AspNetCore` | Opt-in list APIs, protected paging, CSV/XLSX and read-only OData subset |
 | `CellBridge.WebDemo` | Non-packable development host, Razor Pages, package generation and catalog APIs |
-| `CellBridge.Authentication` | Sample Identity account store, cookies, shared keys and login endpoints |
+| `CellBridge.Authentication` | Development Identity account store and key protection |
 | `tools/CellBridge.Admin` | Operator account provisioning, explicit file imports and document permission updates |
 | `tools/CellBridge.Storage.Setup` | Current-schema initialization and quiescent object maintenance |
 | `src/CellBridge.AppHost/CellBridge.AppHost.csproj` | PostgreSQL, schema initialization, WebDemo and optional capture proxy |
 
-The binary library is independent of ASP.NET Core and storage. Provider contracts
-are independent of the protocols. The sample owns file creation and Aspire setup.
+The binary library is independent of ASP.NET Core and storage. Storage providers
+depend on `CellBridge` and do not depend on `CellBridge.AspNetCore`. One AppHost
+starts WebDemo, PostgreSQL, initialization and optional capture.
 
 The optional [list engine](lists.md) uses separate database tables, setup and
 runtime credentials. Hosts supply validated identities and customer workspaces.
 Its APIs and state are independent of Office document synchronization.
+PostgreSQL and SQL Server use the same document and Lists operations. Each
+provider owns its mappings, migrations, security settings and SQL. Required
+database locking stays enabled. Document and Lists packages have independent
+storage dependencies.
+
+SQL Server consumers explicitly call the document or Lists migrator with setup
+credentials before starting stores or engines with restricted runtime
+credentials. Registration and requests never apply migrations. See
+[document setup](storage-providers.md) and [Lists setup](lists.md#sql-server-setup-and-runtime).
 
 ## Document identity and partitions
 
@@ -86,8 +106,8 @@ choosing an individual binary object by size.
 The document service reconstructs the package into an exclusive temporary file.
 It checks every ZIP member against the limit on expanded bytes before storing
 immutable content.
-The staging file is deleted on success, failure or cancellation. Both InMemory
-and PostgreSQL use this preparation before the coordinated state update.
+The staging file is deleted on success, failure or cancellation. InMemory,
+PostgreSQL and SQL Server use this preparation before updating state.
 
 The service then reads the current state and database time, rechecks Write permission,
 coherency and leases, and commits the selected revision with a save receipt.

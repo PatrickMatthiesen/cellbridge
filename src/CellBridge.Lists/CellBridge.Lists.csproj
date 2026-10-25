@@ -7,5 +7,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="CellBridge.Lists.PostgreSql" />
+    <InternalsVisibleTo Include="CellBridge.Lists.SqlServer" />
   </ItemGroup>
 </Project>

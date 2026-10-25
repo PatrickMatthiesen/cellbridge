@@ -445,8 +445,12 @@ public sealed class FssHttpLockCoordinatorTests
         var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
         var active = 0;
         var maximum = 0;
+        using var firstEntered = new ManualResetEventSlim();
+        using var secondAttempting = new ManualResetEventSlim();
+        using var releaseFirst = new ManualResetEventSlim();
+        using var secondEntered = new ManualResetEventSlim();
 
-        object Write()
+        object Write(ManualResetEventSlim? entered = null)
         {
             var current = Interlocked.Increment(ref active);
             while (true)
@@ -455,17 +459,74 @@ public sealed class FssHttpLockCoordinatorTests
                 if (observed >= current || Interlocked.CompareExchange(ref maximum, current, observed) == observed)
                     break;
             }
-
-            Thread.Sleep(25);
+            entered?.Set();
+            if (entered == firstEntered) releaseFirst.Wait();
             Interlocked.Decrement(ref active);
             return new object();
         }
 
-        Parallel.Invoke(
-            () => Assert.True(coordinator.ExecuteCellWrite(
-                new Dictionary<string, string>(), Write, out object? _, out string? _)),
-            () => Assert.True(coordinator.ExecuteCellWrite(
-                new Dictionary<string, string>(), Write, out object? _, out string? _)));
+        Exception? firstFailure = null;
+        Exception? secondFailure = null;
+        var firstResult = false;
+        var secondResult = false;
+        var secondStarted = false;
+        var firstEnteredInTime = false;
+        var secondAttemptedInTime = false;
+        var secondBlocked = false;
+        var secondEnteredBeforeRelease = false;
+        var firstJoined = false;
+        var secondJoined = true;
+        var first = new Thread(() =>
+        {
+            try
+            {
+                firstResult = coordinator.ExecuteCellWrite(
+                    new Dictionary<string, string>(), () => Write(firstEntered), out object? _, out string? _);
+            }
+            catch (Exception error) { firstFailure = error; }
+        }) { IsBackground = true };
+        var second = new Thread(() =>
+        {
+            try
+            {
+                secondAttempting.Set();
+                secondResult = coordinator.ExecuteCellWrite(
+                    new Dictionary<string, string>(), () => Write(secondEntered), out object? _, out string? _);
+            }
+            catch (Exception error) { secondFailure = error; }
+        }) { IsBackground = true };
+        try
+        {
+            first.Start();
+            firstEnteredInTime = firstEntered.Wait(TimeSpan.FromSeconds(5));
+            if (firstEnteredInTime)
+            {
+                second.Start();
+                secondStarted = true;
+                secondAttemptedInTime = secondAttempting.Wait(TimeSpan.FromSeconds(5));
+                secondBlocked = SpinWait.SpinUntil(() =>
+                    second.ThreadState.HasFlag(ThreadState.WaitSleepJoin) || secondEntered.IsSet ||
+                    second.ThreadState.HasFlag(ThreadState.Stopped), TimeSpan.FromSeconds(5));
+                secondEnteredBeforeRelease = secondEntered.IsSet;
+            }
+        }
+        finally
+        {
+            releaseFirst.Set();
+            firstJoined = first.Join(TimeSpan.FromSeconds(5));
+            if (secondStarted) secondJoined = second.Join(TimeSpan.FromSeconds(5));
+        }
+
+        if (firstFailure is not null) throw new AggregateException("The first lock-test worker failed.", firstFailure);
+        if (secondFailure is not null) throw new AggregateException("The second lock-test worker failed.", secondFailure);
+        Assert.True(firstEnteredInTime);
+        Assert.True(secondAttemptedInTime);
+        Assert.True(secondBlocked);
+        Assert.False(secondEnteredBeforeRelease);
+        Assert.True(firstJoined);
+        Assert.True(secondJoined);
+        Assert.True(firstResult);
+        Assert.True(secondResult);
 
         Assert.Equal(1, maximum);
     }

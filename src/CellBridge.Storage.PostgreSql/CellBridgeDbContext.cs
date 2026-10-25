@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using System.Reflection;
 
 namespace CellBridge.Storage.PostgreSql;
 
@@ -17,19 +16,17 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
     internal DbSet<UsageRow> Usage => Set<UsageRow>();
     internal DbSet<RecoverySchemaRow> RecoverySchema => Set<RecoverySchemaRow>();
     internal DbSet<RecoveryReceiptRow> RecoveryReceipts => Set<RecoveryReceiptRow>();
-    internal static DateTime ClockTimestamp() => throw new InvalidOperationException("Database translation only.");
     internal static int OctetLength(string value) => throw new InvalidOperationException("Database translation only.");
 
     protected override void OnModelCreating(ModelBuilder modelBuilder) => ConfigureModel(modelBuilder);
 
     internal static void ConfigureModel(ModelBuilder modelBuilder)
     {
-        modelBuilder.HasDbFunction(typeof(CellBridgeDbContext).GetMethod(nameof(ClockTimestamp),
-                BindingFlags.Static | BindingFlags.NonPublic)!)
+        modelBuilder.HasDbFunction(() => DocumentSql.ClockUtc())
             .HasName("clock_timestamp").IsBuiltIn();
-        modelBuilder.HasDbFunction(typeof(CellBridgeDbContext).GetMethod(nameof(OctetLength),
-                BindingFlags.Static | BindingFlags.NonPublic)!)
+        modelBuilder.HasDbFunction(() => DocumentSql.ByteLength(default!))
             .HasName("octet_length").IsBuiltIn();
+        modelBuilder.HasDbFunction(() => OctetLength(default!)).HasName("octet_length").IsBuiltIn();
         modelBuilder.Entity<SchemaVersionRow>(entity =>
         {
             entity.ToTable("cellbridge_schema");
@@ -39,6 +36,8 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
         modelBuilder.Entity<DocumentRow>(entity =>
         {
             entity.ToTable("cellbridge_documents");
+            entity.Ignore(row => row.PathHash);
+            entity.Ignore(row => row.RetiredPathCount);
             entity.HasKey(row => row.ResourceId).HasName("cellbridge_documents_pkey");
             entity.Property(row => row.ResourceId).HasColumnName("resource_id").ValueGeneratedNever();
             entity.Property(row => row.PathKey).HasColumnName("path_key").UseCollation("C");
@@ -128,60 +127,4 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
             entity.Property(row => row.ReceiptJson).HasColumnName("receipt_json");
         });
     }
-}
-
-internal sealed class SchemaVersionRow { public int Version { get; set; } }
-internal sealed class DocumentRow
-{
-    public Guid ResourceId { get; set; }
-    public required string PathKey { get; set; }
-    public long StateVersion { get; set; }
-    public bool IsDeleted { get; set; }
-}
-internal sealed class StateRow
-{
-    public Guid ResourceId { get; set; }
-    public long StateVersion { get; set; }
-    public required string StateJson { get; set; }
-}
-internal sealed class ReadHeadRow
-{
-    public Guid ResourceId { get; set; }
-    public long StateVersion { get; set; }
-    public long LifecycleGeneration { get; set; }
-    public int RevisionCount { get; set; }
-    public required string MetadataJson { get; set; }
-}
-internal sealed class RevisionSummaryRow
-{
-    public Guid ResourceId { get; set; }
-    public long LifecycleGeneration { get; set; }
-    public decimal RevisionNumber { get; set; }
-    public required string SummaryJson { get; set; }
-}
-internal sealed class ObjectRow
-{
-    public required string ObjectKey { get; set; }
-    public long Length { get; set; }
-    public required string Sha256 { get; set; }
-}
-internal sealed class ChunkRow
-{
-    public required string ObjectKey { get; set; }
-    public int Ordinal { get; set; }
-    public required byte[] Bytes { get; set; }
-}
-internal sealed class UsageRow
-{
-    public bool Singleton { get; set; }
-    public long StoredBytes { get; set; }
-    public long DocumentCount { get; set; }
-    public long MaxStoredBytes { get; set; }
-    public long MaxDocuments { get; set; }
-}
-internal sealed class RecoverySchemaRow { public int Version { get; set; } }
-internal sealed class RecoveryReceiptRow
-{
-    public Guid OperationId { get; set; }
-    public required string ReceiptJson { get; set; }
 }

@@ -49,23 +49,53 @@ Capture and desktop evidence tooling retains its Python dependencies:
 python3 -m venv tools/capture/.venv
 tools/capture/.venv/bin/python -m pip install --require-hashes -r tools/capture/requirements-dev.txt
 tools/capture/.venv/bin/python -m pytest tools/capture tools/testing -q
-node tools/testing/test-list-example-ui.cjs
 ```
+
+## SQL Server engine checks
+
+Run the SQL Server tests with .NET 10, Docker on Linux x86-64 and an Aspire CLI
+compatible with the pinned hosting packages:
+
+```sh
+dotnet test tests/CellBridge.SqlServer.Tests --logger trx --results-directory artifacts/sqlserver
+```
+
+The fixture starts a disposable SQL Server 2022 Developer database. Allow at
+least 2 GiB for SQL Server plus memory for Aspire, .NET and Docker. The
+integration accepts Microsoft's license for the nonproduction Developer
+edition. Review the [container license and platform requirements](https://learn.microsoft.com/en-us/sql/linux/sql-server-linux-docker-container-deployment?view=sql-server-ver17)
+before running it elsewhere.
+
+The suite checks the document and Lists migrations, runtime permissions, document
+storage and recovery, and Lists authorization and operations. It does not test
+live Office editing or establish SQL Server performance or full provider parity.
+Fixture startup and health failures are setup failures, not test results.
 
 ## Package checks
 
 ```sh
 python3 tools/verify_packages.py
+python3 tools/verify_packages.py --sqlserver
 python3 tools/check_release.py --version <version> --commit <sha>
 ```
 
-The verifier packs the libraries, builds package-only examples and runs
+The verifier packs the shipping libraries, builds package-only examples and runs
 [consumer checks](../tests/CellBridge.Packages.Tests/README.md) against an isolated
-local feed/cache. It validates all twelve packages and symbols, readmes, license,
-repository metadata and internal versions, then writes
-`artifacts/packages/manifest.json`. Database consumer checks need an explicitly
-supplied disposable migrated database; skipped database checks do not establish
-durable consumer recovery. A release requires reviewed committed source and
+local feed and cache. It validates the eleven shipping packages and symbols, readmes,
+license, repository metadata and package versions, then writes
+`artifacts/packages/manifest.json`.
+
+The default command builds document and Lists package consumers and reports
+database checks as skipped. `--sqlserver` runs them against separate disposable
+databases using the SQL Server fixture above. Each consumer runs its package's
+migrator with setup credentials, then tests with restricted runtime credentials.
+
+The package-only test projects stay outside `CellBridge.slnx` because restore
+requires the packed feed. Outputs go under ignored `artifacts/packages`. A skipped
+check is not a pass. Package checks do not test live Office editing or SQL Server
+performance.
+
+A release requires reviewed committed source and
 `sourceDirty: false`. The [publish workflow](../.github/workflows/publish-nuget.yml)
 validates from `main`; use a new version for changed source.
 
@@ -164,7 +194,7 @@ python3 tools/testing/tailscale.py --https-port 8444
 tailscale serve status
 ```
 
-The development AppHost uses an application-scoped durable volume. Integration
+The development AppHost uses a volume that retains data between runs. Integration
 fixtures own separate disposable databases.
 
 The helper waits for WebDemo, discovers the current HTTP port and verifies the

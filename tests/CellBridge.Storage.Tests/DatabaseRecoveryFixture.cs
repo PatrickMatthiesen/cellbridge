@@ -20,6 +20,9 @@ public sealed class DatabaseRecoveryFixture : IAsyncLifetime
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         var builder = testingBuilder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
         builder.Resources.Remove(builder.Resources.Single(resource => resource.Name == "webdemo"));
+        // Each recovery test creates and initializes its own database. This
+        // fixture needs only the server and the database used to connect to it.
+        builder.Resources.Remove(builder.Resources.Single(resource => resource.Name == "storage-init"));
         // The fault tests restart this exact container. PGDATA uses its writable
         // layer, and the ownership checks below limit cleanup to this run.
         builder.CreateResourceBuilder<PostgresServerResource>("storage")
@@ -34,10 +37,6 @@ public sealed class DatabaseRecoveryFixture : IAsyncLifetime
         {
             await application.StartAsync(timeout.Token);
             await application.ResourceNotifications.WaitForResourceHealthyAsync("cellbridge", timeout.Token);
-            await application.ResourceNotifications.WaitForResourceAsync("storage-init", KnownResourceStates.Finished, timeout.Token);
-            if (application.ResourceNotifications.TryGetCurrentState("storage-init", out var initialized) &&
-                initialized.Snapshot.ExitCode is { } exitCode && exitCode != 0)
-                throw new InvalidOperationException($"PostgreSQL recovery schema setup failed with exit code {exitCode}.");
             containerId = (await Docker("inspect", "--format", "{{.Id}}", "cellbridge-recovery-" + marker)).Trim();
             var directory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../artifacts/recovery", marker));
             Directory.CreateDirectory(directory);

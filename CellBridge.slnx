@@ -1,28 +1,23 @@
 <Solution>
-  <Folder Name="/examples/">
-    <Project Path="examples/HostAuthorizedLists/HostAuthorizedLists.csproj" />
-  </Folder>
   <Folder Name="/src/">
     <Project Path="src/CellBridge.AppHost/CellBridge.AppHost.csproj" />
+    <Project Path="src/CellBridge.Lists.SqlServer/CellBridge.Lists.SqlServer.csproj" />
     <Project Path="src/CellBridge.Lists/CellBridge.Lists.csproj" />
     <Project Path="src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
     <Project Path="src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
     <Project Path="src/CellBridge.OfficeInspectors/CellBridge.OfficeInspectors.csproj" />
     <Project Path="src/CellBridge.Authentication/CellBridge.Authentication.csproj" />
     <Project Path="src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
-    <Project Path="src/CellBridge.Storage.Abstractions/CellBridge.Storage.Abstractions.csproj" />
+    <Project Path="src/CellBridge/CellBridge.csproj" />
     <Project Path="src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <Project Path="src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
-    <Project Path="src/CellBridge.Storage.Conformance/CellBridge.Storage.Conformance.csproj" />
     <Project Path="src/CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
-    <Project Path="src/CellBridge.FssHttp/CellBridge.FssHttp.csproj" />
     <Project Path="src/CellBridge.FssHttpB/CellBridge.FssHttpB.csproj" />
     <Project Path="src/CellBridge.ServiceDefaults/CellBridge.ServiceDefaults.csproj" />
-    <Project Path="src/CellBridge.Storage/CellBridge.Storage.csproj" />
+    <Project Path="src/CellBridge.Storage.SqlServer/CellBridge.Storage.SqlServer.csproj" />
     <Project Path="src/CellBridge.WebDemo/CellBridge.WebDemo.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/CellBridge.HostAuthorization.Tests/CellBridge.HostAuthorization.Tests.csproj" />
     <Project Path="tests/CellBridge.WebDemo.Tests/CellBridge.WebDemo.Tests.csproj" />
     <Project Path="tests/CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
     <Project Path="tests/CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
@@ -30,6 +25,7 @@
     <Project Path="tests/CellBridge.Lists.Tests/CellBridge.Lists.Tests.csproj" />
     <Project Path="tests/CellBridge.Lists.PostgreSql.Tests/CellBridge.Lists.PostgreSql.Tests.csproj" />
     <Project Path="tests/CellBridge.Lists.AspNetCore.Tests/CellBridge.Lists.AspNetCore.Tests.csproj" />
+    <Project Path="tests/CellBridge.SqlServer.Tests/CellBridge.SqlServer.Tests.csproj" />
     <Project Path="tests/CellBridge.Storage.Tests/CellBridge.Storage.Tests.csproj" />
     <Project Path="tests/CellBridge.FssHttp.Tests/CellBridge.FssHttp.Tests.csproj" />
     <Project Path="tests/CellBridge.FssHttpB.Tests/CellBridge.FssHttpB.Tests.csproj" />
@@ -45,7 +41,6 @@
     <Project Path="tools/CellBridge.Storage.Portability/CellBridge.Storage.Portability.csproj" />
   </Folder>
   <Folder Name="/benchmark/">
-    <Project Path="benchmark/CellBridge.PostgreSql.Comparison/CellBridge.PostgreSql.Comparison.csproj" />
     <Project Path="benchmark/CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />
     <Project Path="benchmark/CellBridge.Lists.Benchmark/CellBridge.Lists.Benchmark.csproj" />
     <Project Path="benchmark/CellBridge.Allocations.Benchmark/CellBridge.Allocations.Benchmark.csproj" />

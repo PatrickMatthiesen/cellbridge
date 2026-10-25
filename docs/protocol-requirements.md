@@ -1,37 +1,17 @@
 # Protocol requirements ledger
 
-This is the implementation ledger for [the completion plan](protocol-completion-plan.md)
-and [issue #18](https://github.com/PatrickMatthiesen/cellbridge/issues/18).
-The audit inventories the advertised profiles, outer schema fields, operation
-subtypes and errors, binary controls, graph and synchronization structures.
-The field tables below record gaps as well as implementation evidence. An
-inventoried field with unresolved applicability or an absent acceptance test
-remains open. This document does not establish exhaustive conformance or desktop
-OneNote support. The original audit used release commit
-`b22bc2d29ec0cff61cd212c7d41fc68a297b3003`. Current implementation status was
-reconciled with `4bce227` on 2026-10-08. Merged metadata, history, host reliability
-and profile work count as implemented; dated owner snapshots below record the
-evidence available at each review, not the current merge state.
-
-The profile/hashing update below uses merged main `8f1ac33` as its implementation
-base, including #49/#50/#51/#52. Historical owner snapshots later in this document
-remain provenance for those rounds. The finite matrix is the current decision
-for advertised profiles; it does not convert unresolved field conditions into
-passed acceptance tests.
+This ledger records requirements for the advertised profiles, their applicability,
+permitted fallbacks, implementation evidence and remaining acceptance criteria.
+An unresolved applicability question or missing acceptance case remains open.
+It does not establish exhaustive conformance, desktop OneNote support or two-desktop
+coauthoring. See [issue #18](https://github.com/PatrickMatthiesen/cellbridge/issues/18)
+for the broader protocol qualification work.
 
 Each row separates the wire requirement from CellBridge's implementation status.
 A MUST within an operation defines its behavior when supported; it does not make
 all optional protocol capabilities mandatory. Product exceptions describe the
 named Microsoft products. They are evidence for a profile decision, not permission
 to ignore every extension in every client version.
-
-The profile/hashing validation on 2026-10-05 passed the full isolated runner,
-including 824 .NET tests and 71 Python tests, with two platform-specific skips.
-The runner used disposable PostgreSQL and HTTP hosts in this worktree. Independent
-hash vectors and Microsoft decoding cover the bounded facility described below.
-Native Astra reviewed the design before implementation and the material changes.
-Raw reports remain under ignored `artifacts/testing/profile-hashing-full-4`.
-These checks do not establish desktop or external-host qualification.
 
 ## Profiles and evidence
 
@@ -64,7 +44,7 @@ table. Future Microsoft product profiles are outside this decision.
 | P10 | [Excluded record](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/d542b89c-9e81-4af6-885a-47b2f9c1ce53), C set and selected group | MUST return an excluded record for every declaration in a hashed group, including zero-size objects. Preserve references/cells and compact byte size. With D alone include ordinary data. | `ObjectGroupExcludedData`, `ObjectGroupWireHash`; `ProtocolHashingTests`, Microsoft primitive decoding in `NegotiatedHashInteropTests`. | Implemented query representation; hash/excluded uploads remain explicit failures; #26. |
 | P11 | [Query byte constraints][Bquery], all selected partitions | Byte maximum applies to data elements. No continuation implemented. Check both original and projected representations, union server budget and previously admitted query budgets before each append/publication. | `QueryChangesResponseShaper`, `QueryChangesResponseAssembler`; `NegotiatedHashExecutionTests` projection/serial/save-preflight cases. | Conservative explicit rejection, never truncated success; continuation #24. |
 | P12 | [File hash][Bquery], [note13][Bproducts], selected SP2010/2013 fallback | Client MAY set G=`0x40`; server SHOULD return file hash generally. Named products ignore it. This profile selects ignore, independently of request/data-element hashing. | `QueryChangesSubRequestData.ReturnFileHash`; `NegotiatedHashExecutionTests.ReturnFileHashIsByteEquivalentIgnoredIndependentlyOfDataElementHashNegotiation` with absent/enabled data-element negotiation; no file-hash fixture claimed. | Permitted omission; higher profile unadvertised; #26. |
-| P13 | [Version query][Bquery], [notes4/17][Bproducts], selected SP2010/2013 fallback | These products ignore QueryChangesVersioning and lack Version Token Knowledge. A waterline never means a version token. Higher profile's 0.0/current semantics do not apply to this ignore decision. | `IgnoredQueryChangesVersioning`; `HistoryProfileFallbackTests` byte-equivalent current result, merged #52. | Valid bounded fallback, historical SOAP support separate; #7/#18. |
+| P13 | [Version query][Bquery], [notes4/17][Bproducts], selected SP2010/2013 fallback | These products ignore QueryChangesVersioning and lack Version Token Knowledge. A waterline never means a version token. Higher profile's 0.0/current semantics do not apply to this ignore decision. | `IgnoredQueryChangesVersioning`; `HistoryProfileFallbackTests` byte-equivalent current result. | Valid bounded fallback, historical SOAP support separate; #7/#18. |
 | P14 | [Query flag byte][Bquery], selected common subset | A=`0x01` reserved MUST be ignored; B/E=`0x02/0x10` allow but do not require fragments; C/H=`0x04/0x80` MAY be set and ignored; D=`0x08` includes filtered knowledge; F=`0x20` SHOULD round, implemented; G=`0x40` P12. Optional second-byte I=`0x01` ignored under note14, remaining reserved MUST be ignored. Arguments F/G=`0x01/0x02` include manifest/cell changes, reserved mask `0xFC` ignored. | `QueryChangesSubRequestData`, `FsshttpbCellRequest`, `FileQueryResponseBuilder`; `BoundedProtocolMutationTests`, `QueryChangesExecutionTests`, `QueryKnowledgeResponseTests`; Q01-Q11/F rows. | Implemented selected controls and core singleton/header rejection; specialized unknown-object reference gates remain R04/#23/#24. |
 | P15 | [Put flags][Bput], selected complete file/metadata saves | A=`0x01` mapping coherency. D=`0x08` prescribes a forced coherency check after not-found; currently accepted but its exact error-choice condition remains R04. E=`0x10` ignored, F=`0x20` coalescing hint, G=`0x40` ignored. B/C=`0x02/0x04` partial transaction and H=`0x80` alternate writer mode reject. Reserved byte and ContentVersionCoherencyCheck ignored for this profile. AdditionalFlags A=`0x01` applied indexes implemented; D/E/F=`0x08/0x10/0x20` unsupported buffered/coalescing modes reject. | `FilePartitionSaveHandler`, metadata handler, `PutChangesSubRequestData`; `AppliedStorageIndexTests`, `MetadataPublicationTests`, captured saves; W/F rows. | Complete saves implemented; staging/alternate modes unsupported; FavorCoherencyFailure, diagnostic/reserved detail gates R04, #18/#24/#27. |
 | P16 | [Cell errors 2.2.3.2.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/81a517ea-ca3e-4483-9fa2-3ae6834abcf0), [Protocol errors 2.2.3.2.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/eaebb41b-e0af-4bec-8295-91a7af8e0dc6), mapped endpoints and direct execution | Wire and direct invalid binary version/minimum return Cell IncompatibleProtocolVersion `15`; invalid schema/signature/empty/structurally malformed requests return Cell RequestStreamSchemaError `18` before execution. Unsupported known operations and projection/budget rejection use Cell RequestNotSupported `4`. Outer unsupported operations emit `RequestNotSupported`; non-Success outer responses include ErrorMessage. Undecodable outer binary maps to Cell18 in the Cell subresponse. | `CellBridgeDocumentService`, `CellBridgeRequestProcessor`; `CellBinaryRequestExecutionTests`, `BoundedProtocolMutationTests`, `FssHttpTests`, `CoreCorrectnessTests`, negotiated hash suites. | Implemented bounded classification and safe error text; independent operation-specific response acceptance remains R02/#18/#26. |
@@ -93,7 +73,7 @@ recorded in [automated testing](automated-testing.md), [bounded validation](boun
 ## Outer operation inventory
 
 The [outer type enumeration][Otypes] lists fourteen operations. Dispatch is in
-[CellBridgeRequestProcessor](../src/CellBridge.AspNetCore/CellBridgeRequestProcessor.cs).
+[CellBridgeRequestProcessor](../src/CellBridge/Execution/CellBridgeRequestProcessor.cs).
 This table inventories all fourteen; each operation's attribute/error audit is a
 separate completion gate.
 
@@ -113,12 +93,12 @@ separate completion gate.
 | O12 | WhoAmI | Uses authenticated subject identity. `AuthorizationEndpointTests`, `LibraryAuthenticationTests`. | Implemented; schema/attribute audit #18. |
 | O13 | ServerTime | Reports server time. `FssHttpTests`, `CapturedWordOpenTests`. | Implemented; response schema audit #18. |
 | O14 | GetDocMetaInfo | Current document information. `MetadataVersioningResponseBuilderTests`. | Implemented current-state response; optional fields audit #18. |
-| O15 | GetVersions | Servable immutable history entries with canonical authorized URLs. `MetadataVersioningResponseBuilderTests`, `RevisionHistoryTests`; merged #52/RH rows. | Implemented bounded history; independent history/reference and client gates remain #7. |
+| O15 | GetVersions | Servable immutable history entries with canonical authorized URLs. `MetadataVersioningResponseBuilderTests`, `RevisionHistoryTests`; see RH rows. | Implemented bounded history; independent history/reference and client gates remain #7. |
 | O16 | AmIAlone | Stable file TransitionID required; true for one active coauthor without pending transition. Readers do not count. `LockTransitionTests`. | Pending suppressing true is a compatibility interpretation, documented below. Qualify #29/#5. |
 | O17 | LockStatus | Reports current shared/exclusive/unlocked state and expiry. `FssHttpLockCoordinatorTests`. | Implemented; response attributes/error audit #18. |
-| O18 | FileOperation | Rename with namespace reservation and identity preservation, merged #52. `OuterDocumentOperationTests`, [revision history](revision-history.md). | Implemented selected subtype; exact scalar/reference gates #18/#30. [Subtypes][Ofileops]. |
-| O19 | Versioning | GetVersionList and graph-aware RestoreVersion, merged #52. `RevisionHistoryTests`, `OuterDocumentOperationTests`. | Selected history subset implemented; token profiles/reference gates #7/#18. [Subtypes][Overops]. |
-| O20 | Properties | PropertyEnumerate and PropertyGet bounded document properties, merged #52. `OuterDocumentOperationTests`. | Selected subset implemented; independent scalar/reference gates #18/#30. [Subtypes][Opropops]. |
+| O18 | FileOperation | Rename with namespace reservation and identity preservation. `OuterDocumentOperationTests`, [revision history](revision-history.md). | Implemented selected subtype; exact scalar/reference gates #18/#30. [Subtypes][Ofileops]. |
+| O19 | Versioning | GetVersionList and graph-aware RestoreVersion. `RevisionHistoryTests`, `OuterDocumentOperationTests`. | Selected history subset implemented; token profiles/reference gates #7/#18. [Subtypes][Overops]. |
+| O20 | Properties | PropertyEnumerate and PropertyGet bounded document properties. `OuterDocumentOperationTests`. | Selected subset implemented; independent scalar/reference gates #18/#30. [Subtypes][Opropops]. |
 | O21 | Dependencies | OnSuccess, OnFail, OnNotSupported and OnExecute determine execution; OnExecute accepts evaluated unsupported fallback. Whole-batch token preflight prevents earlier mutation on later duplicates, and duplicate predecessors return a dependency error. `DependencyTests`, `CoreCorrectnessTests`. [Dependency rules][Odependencies]. | Implemented bounded wire-order behavior; independent cycle/batching acceptance remains #18. |
 | O22 | ResourceID, URL and GetFileProps | Resource identity wins when requested; unknown identity never creates a document or falls back to URL. GetFileProps accepts all XML Schema Boolean lexical values and supplements binary content. Every supplied Etag is checked. Identity/routing tests, `AuthorizationEndpointTests`, `CoreCorrectnessTests`, and captured Word open. | Implemented selected behavior; independent edge acceptance remains #18. |
 
@@ -229,7 +209,7 @@ Additional legacy enum values in `Enums.cs` do not establish a current requireme
 | --- | --- | --- | --- |
 | B01 | QueryAccess, type 1 | Reports read/write permission separately. `QueryAccessTests`, `AuthorizationTests`. | Implemented. |
 | B02 | QueryChanges, type 2 | Mixed/repeated file, persisted opaque metadata and editor queries share independent knowledge/errors and a deduplicated package. Query-only inline groups can carry negotiated schema-1 hashes. `RepeatedQueryTests`, `MixedPartitionQueryTests`, `NegotiatedHashStorageTests`, Microsoft-client interoperability tests. | Selected query/metadata/hash behavior implemented; filter specialization/reference qualification remain #18/#23/#26. |
-| B03 | PutChanges, type 5 | Graph-aware complete file and opaque metadata publication, coherency, requested applied indexes and durable receipts; merged #51. `FilePartitionSaveTests`, `MetadataPublicationTests`, `AppliedStorageIndexTests`. | Staging/alternate/buffered/coalescing modes remain unsupported; #27. |
+| B03 | PutChanges, type 5 | Graph-aware complete file and opaque metadata publication, coherency, requested applied indexes and durable receipts. `FilePartitionSaveTests`, `MetadataPublicationTests`, `AppliedStorageIndexTests`. | Staging/alternate/buffered/coalescing modes remain unsupported; #27. |
 | B04 | AllocateExtendedGuidRange, type 11 | Typed request/response codecs; fresh UUID namespace and exact count for 1..100000, with exclusive upper bound in 1000..100000. Requires write access; does not mutate content/state. `GuidAllocationTests`, independently decoded `GuidAllocationInteropTests`. [Allocation rules][Ballocate], [response bounds][Ballocresponse]. | Implemented #25; oversized/zero counts are an explicit local rejection policy. UUID namespaces avoid a persisted global counter; uniqueness has normal UUID collision probability. |
 | B05 | Enum-only QueryKnowledge / QueryRawStorage / PutRawStorage / QueryDiagnosticStoreInfo | Explicitly unsupported. Not listed in the current normative four-operation enumeration. | No new required method inferred. Historic-profile applicability still needs audit #18. |
 | B06 | UserAgent identity/version | GUID or strict UTF-8 ClientAndPlatform accepted; both accepted on read because simultaneous identity is SHOULD NOT, not MUST NOT. String form replaces GUID on output. Required version, duplicate/length/framing checks. `UserAgentTests`; captured no-UserAgent QueryAccess exception retained. [Request syntax][Breq]. | Compatibility defect #37 fixed; no inference of OneNote qualification. |
@@ -254,7 +234,7 @@ Code is in `QueryChangesSubRequestData`, `FileQueryResponseBuilder`,
 | Q05 | UserContentEquivalentVersionOk / response equivalent-version bit | No equivalence-version model. | Profile/product audit #18; version behavior #7. |
 | Q06 | IncludeStorageManifest / IncludeCellChanges / CellId | Actual mapped file cells selected from the index/manifest; multi-cell scopes use bounded current dependency closure, per-scope knowledge and waterline zero. `RepeatedQueryTests`, `InheritedFileGraphTests`. | Supported file scope subset #23; filter specialization and reference qualification remain. No invented wire root control. |
 | Q07 | Data constraint | Exact serialized byte budgeting; no continuation when too small. `QueryChangesExecutionTests`. | Budget behavior and payload-free length measurement implemented; continuation #24. Remaining parsing/restoration allocations are #33. |
-| Q08 | QueryChangesVersioning | SP2010/2013 ignore decision under note17; Waterline is never a version token. `IgnoredQueryChangesVersioning` and `HistoryProfileFallbackTests` byte-equivalence; merged #52/RH04. | Valid selected-profile fallback. Higher token profile remains unadvertised #7. |
+| Q08 | QueryChangesVersioning | SP2010/2013 ignore decision under note17; Waterline is never a version token. `IgnoredQueryChangesVersioning` and `HistoryProfileFallbackTests` byte-equivalence; see RH04. | Valid selected-profile fallback. Higher token profile remains unadvertised #7. |
 | Q09 | All / type / index-reference / cell / custom / ID / hierarchy filters | Parser skips specialization; full response by default; CellBridge returns an error when FailIfUnsupported permits failure. Filtered query tests. | Permitted full fallback; specialization is optional traffic reduction until a target client needs it. #23/#33. |
 | Q10 | GUID/serial ranges and mapping knowledge | Authoritative mapping serials, conservative retransmission, bounded entries. Query response decoding retains the validated complete Knowledge bytes, preserving all serial/mapping ranges on reserialization; scalar fields remain a minimal summary. Clear `KnowledgeBytes` to deliberately rebuild from scalar fields. `ClientKnowledge`, `StorageIndexMappingSerials`, `QueryKnowledgeResponseTests`. | Implemented supported forms; no broader response-knowledge parsing claim. Unknown request knowledge forms use validated full-response fallback. |
 | Q11 | Waterline, fragment, version-token and other knowledge forms | Waterline alone never suppresses bytes. Specialized forms need further audit. | Valid conservative fallback where permitted; fragment/version semantics depend on #24/#7. #18 tracks exact applicability. |
@@ -364,17 +344,17 @@ The existing stable V/O/B/Q/W/G identifiers above remain unchanged.
 
 | Evidence | Code path | Tests | Reviewed reference fixture |
 | --- | --- | --- | --- |
-| P | [SOAP parser](../src/CellBridge.FssHttp/CellStorageRequestParser.cs), [models/writer](../src/CellBridge.FssHttp/CellStorageModels.cs) | [FssHttpTests](../tests/CellBridge.FssHttp.Tests/FssHttpTests.cs), [response URL tests](../tests/CellBridge.FssHttp.Tests/ResponseUrlEncodingTests.cs) | [Word open](../testdata/api/word-enable-editing.xml) has ordinary envelope values; no malformed-schema oracle. |
-| I | [identity resolver](../src/CellBridge.AspNetCore/DocumentRequestResolver.cs) | [identity](../tests/CellBridge.FssHttp.Tests/DocumentIdentityTests.cs), [routing](../tests/CellBridge.Interop.Tests/IdentityRoutingTests.cs) | Word open plus [save-first](../testdata/sharepoint/fixtures/save_reopen/save-first.json); no unknown-ID reference error. |
-| D | [dependency evaluator](../src/CellBridge.AspNetCore/FssHttpDependencies.cs) | [provider dependency tests](../tests/CellBridge.Storage.Tests/DependencyTests.cs), [Microsoft client tests](../tests/CellBridge.Interop.Tests/DependencyTests.cs) | Word open has Coauth/SchemaLock/Cell fallback; no duplicate-token reference. |
-| C | [processor](../src/CellBridge.AspNetCore/CellBridgeRequestProcessor.cs), [document service](../src/CellBridge.AspNetCore/CellBridgeDocumentService.cs) | [partition routing](../tests/CellBridge.FssHttp.Tests/CellPartitionSelectorTests.cs), [authorization](../tests/CellBridge.Storage.Tests/AuthorizationTests.cs) | Word open and save-first ordinary Cell attributes only. |
-| L | [lock coordinator](../src/CellBridge.AspNetCore/FssHttpLockCoordinator.cs) | [lock transitions](../tests/CellBridge.FssHttp.Tests/LockTransitionTests.cs), [persistence](../tests/CellBridge.Storage.Tests/LockTransitionPersistenceTests.cs) | Word open lock lifecycle subset; conversion/coauthor reference gates remain. |
-| E | [editor execution](../src/CellBridge.AspNetCore/CellBridgeRequestProcessor.cs), [editor state](../src/CellBridge.Storage/DocumentStore.cs) | [editor tests](../tests/CellBridge.FssHttp.Tests/EditorsTableStateTests.cs), [authorization](../tests/CellBridge.Storage.Tests/AuthorizationTests.cs) | [editors table](../testdata/sharepoint/fixtures/v13_11/editors-table-token-8.fsshttpb.b64); no full metadata-error matrix. |
-| M | [outer metadata/version builder](../src/CellBridge.AspNetCore/MetadataVersioningResponseBuilder.cs) | [metadata/version tests](../tests/CellBridge.FssHttp.Tests/MetadataVersioningResponseBuilderTests.cs) | [metadata partition](../testdata/sharepoint/fixtures/v13_11/metadata-token-7.fsshttpb.b64) is binary, not evidence for public history. |
+| P | [SOAP parser](../src/CellBridge/FssHttp/CellStorageRequestParser.cs), [models/writer](../src/CellBridge/FssHttp/CellStorageModels.cs) | [FssHttpTests](../tests/CellBridge.FssHttp.Tests/FssHttpTests.cs), [response URL tests](../tests/CellBridge.FssHttp.Tests/ResponseUrlEncodingTests.cs) | [Word open](../testdata/api/word-enable-editing.xml) has ordinary envelope values; no malformed-schema oracle. |
+| I | [identity resolver](../src/CellBridge/Execution/DocumentRequestResolver.cs) | [identity](../tests/CellBridge.FssHttp.Tests/DocumentIdentityTests.cs), [routing](../tests/CellBridge.Interop.Tests/IdentityRoutingTests.cs) | Word open plus [save-first](../testdata/sharepoint/fixtures/save_reopen/save-first.json); no unknown-ID reference error. |
+| D | [dependency evaluator](../src/CellBridge/Execution/FssHttpDependencies.cs) | [provider dependency tests](../tests/CellBridge.Storage.Tests/DependencyTests.cs), [Microsoft client tests](../tests/CellBridge.Interop.Tests/DependencyTests.cs) | Word open has Coauth/SchemaLock/Cell fallback; no duplicate-token reference. |
+| C | [processor](../src/CellBridge/Execution/CellBridgeRequestProcessor.cs), [document service](../src/CellBridge/Execution/CellBridgeDocumentService.cs) | [partition routing](../tests/CellBridge.FssHttp.Tests/CellPartitionSelectorTests.cs), [authorization](../tests/CellBridge.Storage.Tests/AuthorizationTests.cs) | Word open and save-first ordinary Cell attributes only. |
+| L | [lock coordinator](../src/CellBridge/Execution/FssHttpLockCoordinator.cs) | [lock transitions](../tests/CellBridge.FssHttp.Tests/LockTransitionTests.cs), [persistence](../tests/CellBridge.Storage.Tests/LockTransitionPersistenceTests.cs) | Word open lock lifecycle subset; conversion/coauthor reference gates remain. |
+| E | [editor execution](../src/CellBridge/Execution/CellBridgeRequestProcessor.cs), [editor state](../src/CellBridge/Storage/DocumentStore.cs) | [editor tests](../tests/CellBridge.FssHttp.Tests/EditorsTableStateTests.cs), [authorization](../tests/CellBridge.Storage.Tests/AuthorizationTests.cs) | [editors table](../testdata/sharepoint/fixtures/v13_11/editors-table-token-8.fsshttpb.b64); no full metadata-error matrix. |
+| M | [outer metadata/version builder](../src/CellBridge/Execution/MetadataVersioningResponseBuilder.cs) | [metadata/version tests](../tests/CellBridge.FssHttp.Tests/MetadataVersioningResponseBuilderTests.cs) | [metadata partition](../testdata/sharepoint/fixtures/v13_11/metadata-token-7.fsshttpb.b64) is binary, not evidence for public history. |
 | B | [binary request](../src/CellBridge.FssHttpB/FsshttpbCellRequest.cs), [response](../src/CellBridge.FssHttpB/FsshttpbResponse.cs), [headers](../src/CellBridge.FssHttpB/StreamObjectHeader.cs) | [bounded framing](../tests/CellBridge.FssHttpB.Tests/BoundedProtocolMutationTests.cs), [bounds](../tests/CellBridge.FssHttpB.Tests/BinaryParsingBoundsTests.cs) | [13/11 fixtures](../testdata/sharepoint/fixtures/v13_11); malformed mutations are synthetic. |
-| K | [query codec](../src/CellBridge.FssHttpB/FsshttpbCellRequest.cs), [knowledge](../src/CellBridge.FssHttpB/ClientKnowledge.cs), [query shaping](../src/CellBridge.AspNetCore/QueryChangesResponseShaper.cs), [file selection](../src/CellBridge.AspNetCore/FileQueryResponseBuilder.cs) | [knowledge tests](../tests/CellBridge.FssHttpB.Tests/QueryKnowledgeResponseTests.cs), [budgets](../tests/CellBridge.Storage.Tests/BudgetAndQueryTests.cs) | 13/11 fixtures cover ordinary knowledge; specialized/filter/hash reference vectors absent. |
+| K | [query codec](../src/CellBridge.FssHttpB/FsshttpbCellRequest.cs), [knowledge](../src/CellBridge.FssHttpB/ClientKnowledge.cs), [query shaping](../src/CellBridge/Execution/QueryChangesResponseShaper.cs), [file selection](../src/CellBridge/Execution/FileQueryResponseBuilder.cs) | [knowledge tests](../tests/CellBridge.FssHttpB.Tests/QueryKnowledgeResponseTests.cs), [budgets](../tests/CellBridge.Storage.Tests/BudgetAndQueryTests.cs) | 13/11 fixtures cover ordinary knowledge; specialized/filter/hash reference vectors absent. |
 | G | [generic snapshot](../src/CellBridge.FssHttpB/GenericPartitionGraphSnapshot.cs), [file snapshot](../src/CellBridge.FssHttpB/PartitionGraphSnapshot.cs) | [bounded graph properties](../tests/CellBridge.FssHttpB.Tests/BoundedGraphPropertyTests.cs), [independent semantic decoding](../tests/CellBridge.Interop.Tests/BoundedDifferentialGraphTests.cs) | Save-first/save-second cover file graphs; generic multi-cell/BLOB generation is synthetic. |
-| T | [file publication](../src/CellBridge.AspNetCore/FilePartitionSaveHandler.cs), [document service](../src/CellBridge.AspNetCore/CellBridgeDocumentService.cs) | [bounded transactions](../tests/CellBridge.Storage.Tests/BoundedTransactionPropertyTests.cs), [save acknowledgements](../tests/CellBridge.Storage.Tests/SaveAcknowledgementTests.cs) | Save-first/save-second; rejected partial/stale cases are synthetic. |
+| T | [file publication](../src/CellBridge/Execution/FilePartitionSaveHandler.cs), [document service](../src/CellBridge/Execution/CellBridgeDocumentService.cs) | [bounded transactions](../tests/CellBridge.Storage.Tests/BoundedTransactionPropertyTests.cs), [save acknowledgements](../tests/CellBridge.Storage.Tests/SaveAcknowledgementTests.cs) | Save-first/save-second; rejected partial/stale cases are synthetic. |
 
 ### Discovery and profile boundaries
 
@@ -1246,172 +1226,50 @@ child issues. Allowed profile fallbacks, optional performance facilities and
 operational capabilities are not all missing mandatory implementations.
 
 
-### Owner implementation review snapshots
+## Completion rule
 
-These rows retain owner evidence at pinned heads before combined integration.
-Pending-main and merge-gate labels describe those snapshots. The final section
-records combined validation and the remaining qualification gates.
+A requirement row is complete only when it names the normative source, records
+the selected behavior, links current implementation and automated evidence, and
+states any remaining reference or client acceptance. A passing suite does not
+close an unresolved applicability or qualification gate. Every requirement that
+applies to the selected profiles and client workflows needs passing evidence or
+a cited permitted fallback. Unresolved entries prevent a blanket completion
+claim. Update README capability claims only after the corresponding desktop
+checks pass.
 
-The history task (#7/#30) owns immutable revision snapshots, independent revision
-numbers and the selected SP2010/2013 QueryChangesVersioning ignore fallback. The
-uploads task (#27/#28) owns applied-index responses and application metadata
-publication; staged Partial/PartialLast identity, abort/expiry and a reference
-metadata notebook remain distinct gates. The external-host task (#44/#45/#46)
-owns destination CAS/durable deduplication, publication delivery, shared locks,
-authoritative lifecycle generation and migration/fencing. Its implementation in
-[PR #50](https://github.com/PatrickMatthiesen/cellbridge/pull/50), pinned at
-`0284310d34cdd3d0b7be81da15b200231b656201`, merged into main as
-[`55ca2c2b5d4841c575697d8ec31ddd2e8f4739ce`](https://github.com/PatrickMatthiesen/cellbridge/commit/55ca2c2b5d4841c575697d8ec31ddd2e8f4739ce).
-The reviewed contract requires fresh ResourceId and matching SOAP ResourceId for recreated
-generations greater than one to prevent URL-only ABA. At that owner review,
-PRs #51/#52 and combined validation were still pending and the published package
-was beta.1. They have since landed; the combined validation below records their
-integration, and beta.2 includes them. Pinned owner runs remain narrower evidence
-than the combined run. Shared production interfaces were unchanged by that audit.
+## External-host contracts
 
-The following rows record PR #50 owner evidence at that pinned commit. Its
-[feature guide](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/docs/external-host-reliability.md)
-distinguishes host contracts from wire requirements: delivery journals, lifecycle
-generations and destination CAS are implementation mechanisms, not additional
-protocol fields mandated by the specifications.
+These contracts support durable protocol behavior. They are implementation
+requirements, not extra MS-FSSHTTP fields.
 
-| ID | Related normative obligation / host contract | Pinned implementation and evidence | Remaining gate |
+| ID | Normative condition or host contract | Current implementation and evidence | Remaining acceptance |
 | --- | --- | --- | --- |
-| EH01 | [MS-FSSHTTPB 3.1.4.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/94a442bc-ce2f-4f25-a245-82976b0b063c) incorporates submitted changes and MUST reply. External delivery is opt-in; when enabled its host contract requires atomic destination revision CAS and durable fingerprint-validated operation receipts. | [ExternalPublication.Append](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/src/CellBridge.Storage.Abstractions/ExternalPublication.cs) journals changed saves inside the document-service transition and retains immutable content pins; [ExternalRevisionPublisher](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/src/CellBridge.AspNetCore/ExternalRevisionPublisher.cs) retries exact operations outside provider coordination. [ExternalPublicationTests](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/tests/CellBridge.Storage.Tests/ExternalPublicationTests.cs) cover lost/delayed acknowledgements, competing publishers, remote changes, missing content and capacity rejection; [owner acceptance](https://github.com/PatrickMatthiesen/cellbridge/issues/44#issuecomment-5995881059). | Implemented and jointly validated; #44 is closed. Real destination CAS/deduplication adoption, WopiHost integration and reference/client qualification remain #53. Unconditional writes cannot satisfy this contract. |
-| EH02 | [MS-FSSHTTP 3.1.4.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/918c3440-7d05-4c3a-8d51-0bad627bdb23) MUST release expired unrefreshed locks; [MS-WOPI base lock](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-wopi/e46e1f59-5781-4a35-8d8d-9df253b7c58a) has 30-minute expiry. Common provider authority and commit fencing are host contracts enforcing those boundaries. | [SharedDocumentLocks](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/src/CellBridge.AspNetCore/SharedDocumentLocks.cs) and [CoordinationFencing](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/src/CellBridge.Storage.Abstractions/CoordinationFencing.cs) check subject/token, lifecycle generation, authority epoch and provider-time expiry. [SharedHostLockTests](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/tests/CellBridge.Storage.Tests/SharedHostLockTests.cs) exercise mutual exclusion, turnover, expiry and prepared-write rejection; [owner acceptance](https://github.com/PatrickMatthiesen/cellbridge/issues/45#issuecomment-5995881423). | Implemented and jointly validated; #45 is closed. Real host adoption/qualification remains #53. Extended/shared WOPI locks and cross-protocol conversion remain explicitly unsupported. |
-| EH03 | [MS-OCPROTO Web Servers 2.1.2.1.2](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-ocproto/2d268a23-420b-4339-8c56-9e4f8a924171) describes access/discovery; [MS-FSSHTTP Request ResourceID](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/91fb9fd5-ef2d-4484-b57c-f0aedf7d0f00) supplies protocol identity. Conditional tombstone/recreation and local eviction are separate host lifecycle contracts. | [DocumentLifecycle](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/src/CellBridge.Storage.Abstractions/DocumentLifecycle.cs) retains retired IDs and content, compares generation/state version, and requires a fresh ResourceId for explicit recreation. SOAP Cell/mutations on recreated paths require matching explicit identity. [HostLifecycleTests](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/tests/CellBridge.Storage.Tests/HostLifecycleTests.cs) cover deletion/recreation races and retained pins; [owner acceptance](https://github.com/PatrickMatthiesen/cellbridge/issues/46#issuecomment-5995881737). | Implemented and jointly validated; #46 is closed. JSON remains additive format 2; PostgreSQL explicitly migrates schema 3 to 4 with hosts stopped, and old writers fail closed. External deletion/adoption and reference/client qualification remain #53. |
-| EH04 | Provider namespace reservations and lock ordering are host implementation contracts, not new protocol fields. | [DocumentPathReservations](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/src/CellBridge.Storage.Abstractions/DocumentPathReservations.cs) preserves provider-owned `RetiredPathKeys` on tombstones and rejects supplied reservations on clean replacements. [PostgreSqlNamespaceLock](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/src/CellBridge.Storage.PostgreSql/PostgreSqlNamespaceLock.cs) precedes row/path locks; reservation checks use current snapshots after coordination and budget guards. [HostLifecycleTests](https://github.com/PatrickMatthiesen/cellbridge/blob/0284310d34cdd3d0b7be81da15b200231b656201/tests/CellBridge.Storage.Tests/HostLifecycleTests.cs) cover foreign retired aliases, namespace ordering and valid canonical generation-three recreation through ancestor tombstones. | Implemented with combined namespace/history/recreation validation; #46 is closed. Aliases cannot be stolen, callback-cleared or fabricated by replacement state. This is not a generic SharePoint namespace API. |
+| EH01 | [MS-FSSHTTPB 3.1.4.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/94a442bc-ce2f-4f25-a245-82976b0b063c) incorporates submitted changes and requires a reply. Optional external delivery requires destination revision compare-and-swap and durable operation receipts. | [External publication](../src/CellBridge/Storage/ExternalPublication.cs) journals changed saves in the document transition. [ExternalRevisionPublisher](../src/CellBridge/Execution/ExternalRevisionPublisher.cs) retries exact operations outside provider coordination. [ExternalPublicationTests](../tests/CellBridge.Storage.Tests/ExternalPublicationTests.cs) cover lost acknowledgements, competing publishers, remote changes, missing content and capacity rejection. | Real destination adoption and WopiHost qualification remain #53. Unconditional file writes cannot satisfy this contract. |
+| EH02 | [MS-FSSHTTP 3.1.4.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/918c3440-7d05-4c3a-8d51-0bad627bdb23) requires expired unrefreshed locks to release. Common provider authority and commit fencing enforce that boundary. | [SharedDocumentLocks](../src/CellBridge/Execution/SharedDocumentLocks.cs) and [CoordinationFencing](../src/CellBridge/Storage/CoordinationFencing.cs) check subject, token, lifecycle generation, authority epoch and provider-time expiry. [SharedHostLockTests](../tests/CellBridge.Storage.Tests/SharedHostLockTests.cs) cover exclusion, turnover, expiry and prepared-write rejection. | Extended/shared WOPI locks and cross-protocol conversion remain unsupported. Real host qualification remains #53. |
+| EH03 | [MS-OCPROTO Web Servers 2.1.2.1.2](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-ocproto/2d268a23-420b-4339-8c56-9e4f8a924171) describes discovery and access. [MS-FSSHTTP ResourceID](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/91fb9fd5-ef2d-4484-b57c-f0aedf7d0f00) supplies protocol identity. | [DocumentLifecycle](../src/CellBridge/Storage/DocumentLifecycle.cs) retains retired IDs and requires a fresh resource ID for explicit recreation. Recreated SOAP mutations require matching explicit identity. [HostLifecycleTests](../tests/CellBridge.Storage.Tests/HostLifecycleTests.cs) cover deletion and recreation races. | External deletion/adoption and reference-client qualification remain #53. |
+| EH04 | Namespace reservations and lock ordering are host persistence contracts. | [DocumentPathReservations](../src/CellBridge/Storage/DocumentPathReservations.cs) preserves retired path keys. PostgreSQL takes its namespace guard before row and path locks. [HostLifecycleTests](../tests/CellBridge.Storage.Tests/HostLifecycleTests.cs) cover retired aliases, ordering and recreation through ancestor tombstones. | This is not a generic SharePoint namespace API. Reserved aliases cannot be stolen or supplied by replacement state. |
 
-The owner reports native Astra design/material/final approval and an isolated run
-at this final commit with **all 19 checks passing: 698 .NET tests and 71 Python
-checks, with two platform skips**, under ignored
-`artifacts/host-reliability/full-5`. This is distinct from the pre-rebase audit's 683 .NET/71
-Python isolated run. Shared scoped-receipt contract `27e4135`, file preservation,
-original-fence and bounded-receipt changes `f7d7925`, and namespace/recreation
-integration `0284310` are present in the host head; historical/upload operation
-implementations were not imported. That owner snapshot preceded joint integration. The combined validation below
-records the landed publication/namespace work; #44/#45/#46 are now closed.
-Real external-host adoption and qualification remain #53. No run establishes
-OneNote, distinct-desktop or Office Online Server qualification.
+## Application metadata and applied indexes
 
-Complete metadata publication and requested applied-index responses are recorded
-separately in [PR #51](https://github.com/PatrickMatthiesen/cellbridge/pull/51),
-pinned at `d9634148b6f578fba399036b28e6025682e0fc07`. Its
-[feature guide](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/docs/application-metadata.md)
-and owner acceptance comments on
-[#27](https://github.com/PatrickMatthiesen/cellbridge/issues/27#issuecomment-5996082011)
-and [#28](https://github.com/PatrickMatthiesen/cellbridge/issues/28#issuecomment-5996094290)
-provide the following pinned implementation evidence. This work has landed;
-the combined validation below records integration. W07/G/Q rows describe the
-implemented complete-save subset and remaining reference/client gates.
-
-| ID | Normative condition / scope | Pinned implementation and evidence | Remaining gate |
+| ID | Normative condition or scope | Current implementation and evidence | Remaining acceptance |
 | --- | --- | --- | --- |
-| AM01 | [Additional Flags A 2.2.2.1.4.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/57ddba13-18da-452d-8cca-c43ddce28267) requests applied-index entries; [Put response 2.2.3.1.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/731e4906-b810-430d-8796-a5e1cc8144b4) carries their identifier and resultant knowledge. | [FilePartitionSaveHandler](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/src/CellBridge.AspNetCore/FilePartitionSaveHandler.cs) and [GenericPartitionSaveHandler](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/src/CellBridge.AspNetCore/GenericPartitionSaveHandler.cs) return the requested applied index in the package and persisted acknowledgement. Mandatory response identity/bytes and complete receipt sizes are checked before commit. [AppliedStorageIndexTests](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/tests/CellBridge.Storage.Tests/AppliedStorageIndexTests.cs) verify response/replay, closing W07's implementation gap in this owner PR. | Implemented in merged source and combined integration, W07/#27/#28. Independent SharePoint requested-index fixtures remain open. No historical metadata index or staged transaction is inferred from this bit. |
-| AM02 | [Put Changes 2.2.2.1.4](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/e4c224ca-0717-4b02-b713-e75d353904bb) checks expected affected mappings. [Storage Index 2.2.1.12.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/f5724986-bd0f-488d-9b85-7d5f954d8e9a) permits absent mappings; a present [Storage Manifest 2.2.1.12.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/a681199b-45f3-4378-b929-fb13e674ac5c) requires at least one declared root. | [StorageIndexPatch](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/src/CellBridge.FssHttpB/StorageIndexPatch.cs) merges untouched keys; [metadata service](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/src/CellBridge.AspNetCore/CellBridgeDocumentService.Metadata.cs) publishes complete noncoalescing opaque multi-cell graphs with inherited immutable BLOB closure. Conflicting identities and missing dependencies fail before publication. Empty indexes without manifests are valid; present rootless manifests are rejected. [StorageIndexPatchTests](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/tests/CellBridge.FssHttpB.Tests/StorageIndexPatchTests.cs) and [MetadataPublicationTests](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/tests/CellBridge.Storage.Tests/MetadataPublicationTests.cs) cover these boundaries. | Implemented in merged source and combined integration #20/#22/#27/#28. No SharePoint reference metadata notebook; generic opaque publication does not imply a OneNote file adapter. |
-| AM03 | [Query Changes request][Bquery], [processing][Bhash] and [response](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/ddc826d3-48b5-4634-8e48-88ba7721bbab) define scope, enumeration and knowledge. A stable partition waterline is not a version token. | [Metadata service](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/src/CellBridge.AspNetCore/CellBridgeDocumentService.Metadata.cs) returns full/scoped graph closures and mapping serial knowledge; [QueryChangesResponseAssembler](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/src/CellBridge.AspNetCore/QueryChangesResponseAssembler.cs) deduplicates mixed/repeated packages while preserving per-operation results. [GraphUploadInteropTests](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/tests/CellBridge.Interop.Tests/GraphUploadInteropTests.cs) independently decode requested indexes and metadata query results. | Implemented in merged source and combined integration #23/#28. Filter specializations, fragment delivery, higher version-token profiles and reference/client qualification remain separate gates. |
-| AM04 | [Put processing 3.1.4.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/94a442bc-ce2f-4f25-a245-82976b0b063c) incorporates changes; [common expiry rules](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/918c3440-7d05-4c3a-8d51-0bad627bdb23) govern lease authority. Scoped receipts and generation/epoch fences are host persistence contracts. | [CellBridgeDocumentService](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/src/CellBridge.AspNetCore/CellBridgeDocumentService.cs) preserves current file/metadata receipts and unrelated additive history/lifecycle/delivery state. Publication checks original generation/epoch and effective authority; replay rechecks the authoritative current scoped receipt/access after response I/O. Public beta constructors remain compatible, with additive contracts and legacy receipt defaults to file semantics. [MetadataPublicationTests](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/tests/CellBridge.Storage.Tests/MetadataPublicationTests.cs) cover provider recreation, revoked authority, expired leases and receipt races. | Implemented with jointly validated history/delivery/publication integration #27/#28. Metadata commits preserve file bytes/version, call the shared history hook, and emit neither a file AcceptedSave nor external file-byte delivery. Independent reference/client gates remain. |
+| AM01 | [Additional Flags A 2.2.2.1.4.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/57ddba13-18da-452d-8cca-c43ddce28267) requests applied-index entries. [Put response 2.2.3.1.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/731e4906-b810-430d-8796-a5e1cc8144b4) carries the identifier and resultant knowledge. | [FilePartitionSaveHandler](../src/CellBridge/Execution/FilePartitionSaveHandler.cs) and [GenericPartitionSaveHandler](../src/CellBridge/Execution/GenericPartitionSaveHandler.cs) return the requested applied index and persist the acknowledgement. [AppliedStorageIndexTests](../tests/CellBridge.Storage.Tests/AppliedStorageIndexTests.cs) cover response and replay. | Independent SharePoint requested-index fixtures remain open. No staged transaction or historical metadata index is inferred. |
+| AM02 | [Put Changes 2.2.2.1.4](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/e4c224ca-0717-4b02-b713-e75d353904bb) checks expected affected mappings. Storage indexes may omit mappings; a present storage manifest must declare a root. | [StorageIndexPatch](../src/CellBridge.FssHttpB/StorageIndexPatch.cs) merges untouched keys. [Metadata service](../src/CellBridge/Execution/CellBridgeDocumentService.Metadata.cs) publishes complete noncoalescing opaque graphs with inherited immutable BLOB closure. [MetadataPublicationTests](../tests/CellBridge.Storage.Tests/MetadataPublicationTests.cs) cover these boundaries. | No reviewed SharePoint metadata notebook exists. Opaque publication does not imply a OneNote file adapter. |
+| AM03 | [Query Changes processing](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/ddc826d3-48b5-4634-8e48-88ba7721bbab) defines scope, enumeration and knowledge. A partition waterline is not a version token. | [Metadata service](../src/CellBridge/Execution/CellBridgeDocumentService.Metadata.cs) returns full or scoped graph closure. [QueryChangesResponseAssembler](../src/CellBridge/Execution/QueryChangesResponseAssembler.cs) deduplicates packages while preserving operation results. [GraphUploadInteropTests](../tests/CellBridge.Interop.Tests/GraphUploadInteropTests.cs) independently decode responses. | Filter specializations, fragment delivery, higher token profiles and client qualification remain #23/#28. |
+| AM04 | [Put processing 3.1.4.3](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/94a442bc-ce2f-4f25-a245-82976b0b063c) incorporates changes. Lease expiry rules govern write authority. | [CellBridgeDocumentService](../src/CellBridge/Execution/CellBridgeDocumentService.cs) preserves scoped receipts and unrelated history, lifecycle and delivery state. [MetadataPublicationTests](../tests/CellBridge.Storage.Tests/MetadataPublicationTests.cs) cover recreation, revoked authority, expired leases and receipt races. | Metadata commits do not emit file accepted-saves or external file-byte delivery. Independent client acceptance remains #27/#28. |
 
-The owner reports native Astra original design/material approval plus rebase
-and exact-head approval, and **all 19 isolated checks passing: 736 .NET tests and
-71 Python checks, with two platform skips**, under ignored
-`artifacts/testing/upload-host-rebase/summary.json`. PR #51 is rebased onto merged
-PR #50/main `55ca2c2`. This owner run validates **uploads plus merged host behavior
-only**. It excludes historical restoration PR #52, whose rebase and combined
-provider/publication tests remain a merge gate. It is distinct from this audit's
-run; this documentation review does not independently certify those tests.
+Partial, PartialLast, alternate writer, buffered and coalescing metadata modes
+remain unsupported. Their retry identity, abort and retention rules need
+reference evidence before CellBridge defines staging state.
 
-[MetadataPublicationTests](https://github.com/PatrickMatthiesen/cellbridge/blob/d9634148b6f578fba399036b28e6025682e0fc07/tests/CellBridge.Storage.Tests/MetadataPublicationTests.cs)
-adds memory/PostgreSQL integration regressions for atomic file history/outbox
-hooks, metadata preservation of a full blocked delivery queue and shared lock,
-lifecycle/reservation and scoped-receipt state. Real deletion/recreation during
-preparation and PostgreSQL process interruptions are covered. These tests do not
-exercise PR #52 restoration or establish client qualification.
+## Revision history and outer operations
 
-Partial/PartialLast, alternate coherency modes, buffered and coalescing metadata
-writes remain explicit unsupported operations. Normative/reference association,
-retry identity, abort and retention evidence is still required before defining
-staging state or expiry. Issues #27/#28 remain open for those gates, SharePoint
-reference metadata traffic and native OneNote/two-desktop qualification.
-
-
-Final history/outer-operation evidence is pinned to
-[PR #52](https://github.com/PatrickMatthiesen/cellbridge/pull/52) at
-`de476bf460aef324911a45a95242a02957fae6f1`, with its
-[feature and upgrade guide](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/docs/revision-history.md)
-and owner acceptance comments on
-[#7](https://github.com/PatrickMatthiesen/cellbridge/issues/7#issuecomment-5996197610)
-and [#30](https://github.com/PatrickMatthiesen/cellbridge/issues/30#issuecomment-5996198076).
-These implementations have landed with combined validation below. The pinned
-owner commits preserve provenance; they do not describe unmerged work.
-History retention, namespace reservations, generation fences and reusable API
-retry keys are implementation contracts rather than invented protocol fields.
-
-| ID | Normative condition / scope | Pinned implementation and evidence | Remaining gate |
+| ID | Normative condition or scope | Current implementation and evidence | Remaining acceptance |
 | --- | --- | --- | --- |
-| RH01 | [Get Version List 3.1.4.11.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/025134f4-f3a9-48df-a90c-8e0e07b30ae6) returns recent versions, with count chosen by server; [FileVersionDataType 2.3.1.43](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/3b1395c6-5f4c-4125-9efa-f8fb8bf5cf74) defines version metadata. | [RevisionHistory](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/src/CellBridge.Storage/RevisionHistory.cs) retains immutable file/application-metadata graphs, actor/time, resource/generation and independent revision numbers; metadata-only publications need not change file ContentVersion. Creation/legacy state seeds only known current history. [DocumentHistoryOperations](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/src/CellBridge.AspNetCore/DocumentHistoryOperations.cs) supplies current-authorized listing and generation-bound historical downloads. [RevisionHistoryTests](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/tests/CellBridge.Storage.Tests/RevisionHistoryTests.cs) and [RevisionHistoryInteropTests](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/tests/CellBridge.Interop.Tests/RevisionHistoryInteropTests.cs) cover retention, provider recreation and two-host access. | Implemented and jointly validated #7/#30. Legacy `BuildGetVersions(StoredDocument, ...)` remains current-only with versioning disabled; durable history dispatch is separate. Default 1,000 history/restore-receipt caps reject admission without eviction. No invented pre-feature history or automatic pruning. Independent history/client acceptance remains. |
-| RH02 | [Restore Version 3.1.4.11.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/6e8d9f46-fa5a-46fc-a7e2-135c69c937f5) restores the specified version and returns VersionNotFound if unavailable; [revision manifest](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/eb3351db-8626-4804-a35b-f3eeda13c74d) defines revision/root references. | [HistoricalGraphRestorer](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/src/CellBridge.FssHttpB/HistoricalGraphRestorer.cs) validates retained graph identities and creates fresh wrappers, selected indexes and mapping serials, preserving original history. DocumentHistoryOperations verifies selected historical content and rechecks current access, effective leases, lifecycle, expected history and partition generations before atomic publication; live security/editors/coordination survive. The reusable API has subject/generation-scoped keyed durable retries; SOAP correlation tokens do not establish retry identity, so each SOAP restore is a new operation. [HistoricalGraphRestorerTests](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/tests/CellBridge.FssHttpB.Tests/HistoricalGraphRestorerTests.cs) and [RestoreFencingTests](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/tests/CellBridge.Storage.Tests/RestoreFencingTests.cs) cover inherited closure, races and lost replies. | Implemented with jointly validated history/metadata/delivery publication #7. Legacy inline-metadata restoration over a later opaque metadata graph remains explicitly unsupported. Independent SharePoint restore traces and desktop restore qualification remain open. |
-| RH03 | [Rename input 2.3.1.33](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/cac57311-5f4f-41c8-aba5-1847da504926) requires a valid filename without relative path; [Properties input 2.3.1.52](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/a1f4efe8-dc76-4539-88d8-e10cbc8a0447) restricts PropertyIds to PropertyGet. | [OuterDocumentOperations](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/src/CellBridge.AspNetCore/OuterDocumentOperations.cs) implements GetVersions/GetVersionList/RestoreVersion, identity-preserving Rename, and read-only PropertyEnumerate/PropertyGet. [MetadataVersioningResponseBuilder](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/src/CellBridge.AspNetCore/MetadataVersioningResponseBuilder.cs) emits version/property data. Released decoded path keys are permanently reserved to their resource; providers own the reservations and PostgreSQL takes the namespace guard before row/path locks. [OuterDocumentOperationTests](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/tests/CellBridge.Storage.Tests/OuterDocumentOperationTests.cs) and [PathRetirementTests](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/tests/CellBridge.Storage.Tests/PathRetirementTests.cs) cover wire schemas, authorization, escaping and namespace races. | Implemented with combined namespace/recreation tests #30. Default 128 reserved-name cap rejects admission without eviction. Other suboperations remain explicit unsupported; no lists/search/arbitrary property storage. Independent SharePoint version/rename/property traces and remaining applicability audit stay open. |
-| RH04 | [MS-FSSHTTPB Appendix B notes4/17][Bproducts] excludes Version Token Knowledge for SP2010/2013 and ignores QueryChangesVersioning. | [Query codec](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/src/CellBridge.FssHttpB/FsshttpbCellRequest.cs) bounds/skips the extension and records `IgnoredQueryChangesVersioning`. [HistoryProfileFallbackTests](https://github.com/PatrickMatthiesen/cellbridge/blob/de476bf460aef324911a45a95242a02957fae6f1/tests/CellBridge.Storage.Tests/HistoryProfileFallbackTests.cs) checks byte-equivalent current responses with and without the extension. Legacy Waterline version-selector serialization still rejects. | Implemented Q08/H06 fallback with regression evidence. Higher-profile Version Token Knowledge and historical binary selectors are unadvertised; independent token fixtures/profile decisions remain #7/#18. No Waterline-to-token substitution. |
+| RH01 | [Get Version List 3.1.4.11.1](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/025134f4-f3a9-48df-a90c-8e0e07b30ae6) returns recent versions. [FileVersionDataType 2.3.1.43](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/3b1395c6-5f4c-4125-9efa-f8fb8bf5cf74) defines their metadata. | [RevisionHistory](../src/CellBridge/Storage/RevisionHistory.cs) records immutable graphs, actor, time, identity and revision number. [DocumentHistoryOperations](../src/CellBridge/Execution/DocumentHistoryOperations.cs) authorizes listing and generation-bound downloads. [RevisionHistoryTests](../tests/CellBridge.Storage.Tests/RevisionHistoryTests.cs) cover retention and provider recreation. | The selected binary profile remains current-only. Automatic retention and independent desktop acceptance are not implemented. |
+| RH02 | [Restore Version 3.1.4.11.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/6e8d9f46-fa5a-46fc-a7e2-135c69c937f5) restores a selected version. The [revision manifest](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/eb3351db-8626-4804-a35b-f3eeda13c74d) defines root references. | [HistoricalGraphRestorer](../src/CellBridge.FssHttpB/HistoricalGraphRestorer.cs) validates identities and creates fresh wrappers and indexes. [DocumentHistoryOperations](../src/CellBridge/Execution/DocumentHistoryOperations.cs) rechecks access, leases, lifecycle, history and partition generations before publication. [RestoreFencingTests](../tests/CellBridge.Storage.Tests/RestoreFencingTests.cs) cover races and lost replies. | Legacy inline-metadata restoration over a later opaque graph is unsupported. SharePoint restore traces and desktop qualification remain open. |
+| RH03 | [Rename input 2.3.1.33](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/cac57311-5f4f-41c8-aba5-1847da504926) restricts filenames. [Properties input 2.3.1.52](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/a1f4efe8-dc76-4539-88d8-e10cbc8a0447) restricts PropertyIds. | [OuterDocumentOperations](../src/CellBridge/Execution/OuterDocumentOperations.cs) implements version list/restore, identity-preserving rename and read-only property operations. [OuterDocumentOperationTests](../tests/CellBridge.Storage.Tests/OuterDocumentOperationTests.cs) cover schemas, authorization and escaping. | Other suboperations remain unsupported. Independent SharePoint traces remain open. |
+| RH04 | [MS-FSSHTTPB Appendix B notes 4 and 17][Bproducts] exclude Version Token Knowledge for SharePoint 2010/2013 and ignore QueryChangesVersioning. | The query codec records the ignored extension. [HistoryProfileFallbackTests](../tests/CellBridge.Storage.Tests/HistoryProfileFallbackTests.cs) compare current responses with and without it. | Higher token profiles and historical binary selectors are unadvertised. Waterline is never substituted for a token. |
 
-The history owner reports native Astra design/material/final-head approval and an
-isolated **704 .NET tests and 71 Python checks passing, with two platform skips**,
-under ignored `artifacts/history/history-final-3/summary.json`. That owner snapshot
-excluded borrowed W07/application-metadata operation implementations and tests, retaining
-agreed additive contracts/helpers and the minimal empty-index reader. The additive
-format-2 codec reads old state, but all writers must upgrade together: older
-writers can discard unknown fields, so rolling downgrade is unsupported. Public
-beta constructors and legacy receipt defaults remain available. These features
-are absent from the immutable beta.1 packages and included in published beta.2
-from `4bce227`. See the [release notes](https://github.com/PatrickMatthiesen/cellbridge/releases/tag/v0.1.0-beta.2).
-
-At the pinned owner review above, PR #50 was merged, PR #51 had owner validation
-against that base, and PR #52 remained separate. The later combined validation
-below resolved their publication, scoped-receipt, content-reference, lifecycle,
-namespace and host-lock merge gates. Issues #7/#30 remain open, and no independent
-SharePoint history/property/rename or metadata traces, native OneNote,
-two-desktop coauthoring or Office Online Server qualification is established.
-
-
-### Historical audit validation on merged host base
-
-At this intermediate review, the audit PR was rebased onto merged PR #50/main
-`55ca2c2b5d4841c575697d8ec31ddd2e8f4739ce`. The four audit commits reapplied
-without conflicts and their bounded assertions remain unchanged. The full
-isolated runner passed **all 19 checks: 710 .NET tests and 71 Python checks,
-with two platform skips**, under ignored
-`artifacts/testing/audit-host-rebase/summary.json`; its own disposable AppHost
-stopped successfully. This run includes merged host behavior and the audit
-suites, but excludes pending PR #51 uploads and PR #52 historical restoration.
-It supplements the earlier release-base audit run and does not establish
-all-owner combined validation or new desktop qualification.
-
-
-### Combined implementation validation
-
-PRs [#50](https://github.com/PatrickMatthiesen/cellbridge/pull/50),
-[#51](https://github.com/PatrickMatthiesen/cellbridge/pull/51) and
-[#52](https://github.com/PatrickMatthiesen/cellbridge/pull/52) have completed
-combined implementation validation. The full isolated runner passed 789 .NET tests and 71 Python
-checks, with two Python platform skips. This includes PostgreSQL, provider
-recreation, process-death recovery and two-host HTTP checks. The reviewed tree
-includes the audit tests in PR #49; raw results remain ignored under
-`artifacts/testing/parallel-integration-final-3`.
-
-`CombinedPublicationTests` verifies complete metadata uploads, file saves, historical
-restoration and queued external publication share coherent publication boundaries. It checks
-partition-scoped exact retry acknowledgements, preservation of opaque metadata,
-history/outbox deduplication, content pins, quota rollback and deletion/recreation
-followed by saves and case-only rename on both providers.
-`HistoryLifecycleIntegrationTests` checks clean replacement history, retired aliases
-and matching resource identity for recreated SOAP mutations. These checks resolve
-the combined implementation merge gates recorded in the owner snapshots above.
-
-These changes were separate from the published `0.1.0-beta.1` packages and are
-now included in published beta.2. Provider portability/migration tooling has
-since landed and #32 is closed. True Partial/PartialLast staging, continuation
-#24, captured hash negotiation qualification and live graph pruning #3 remain open.
-Legacy inline-metadata restoration over a later opaque metadata graph remains
-explicitly unsupported. Independent SharePoint metadata/history/rename/property
-traces, real WopiHost destination-contract adoption, native OneNote, two-desktop
-coauthoring and Office Online Server qualification remain open.
+The maintained limits and open qualification work are documented in
+[revision history](revision-history.md) and [interoperability](interoperability.md).

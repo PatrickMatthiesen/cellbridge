@@ -122,14 +122,16 @@ public sealed class RestoreFencingTests
     {
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/expiry.docx", MinimalDocx.Create(), TestActor.Value))!;
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Coordination = current.Coordination with { Exclusive = new("11111111-1111-1111-1111-111111111111", null, now.AddMilliseconds(300), 0, null, TestActor.Value.Identity.Subject) } }, true));
+        var leaseExpires = DateTime.UtcNow.AddMilliseconds(300);
+        await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
+        { Coordination = current.Coordination with { Exclusive = new("11111111-1111-1111-1111-111111111111", null, leaseExpires, 0, null, TestActor.Value.Identity.Subject) } }, true));
         var gate = new PausedRead(provider.Content);
         var restoring = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
             "expires", TestActor.Value, new Dictionary<string, string>
             { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }).AsTask();
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await Task.Delay(350);
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+            while (DateTime.UtcNow < leaseExpires) await Task.Delay(10, timeout.Token);
         gate.Resume.TrySetResult();
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => restoring);
         Assert.Single((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Revisions);

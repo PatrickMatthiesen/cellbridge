@@ -1,21 +1,29 @@
 # Customer workspace lists
 
-The experimental `CellBridge.Lists`, `CellBridge.Lists.PostgreSql` and
+The experimental `CellBridge.Lists`, `CellBridge.Lists.PostgreSql`,
+`CellBridge.Lists.SqlServer` and
 `CellBridge.Lists.AspNetCore` packages add typed records to customer workspaces.
 They are optional and independent of Office document storage, SOAP and binary
-synchronization. They do not implement SharePoint list APIs. The
-[implementation plan](list-engine-implementation-plan.md) records the broader
-scope and qualification criteria; this guide describes the current libraries.
+synchronization. They do not implement SharePoint list APIs. The four Lists
+packages are independent of the seven document packages. They share the beta
+release version but keep their database dependencies separate. Each database provider can be
+used without the other provider or the document-storage packages.
+
+PostgreSQL and SQL Server use the same Lists operations. Each provider owns its
+database mappings, security settings and SQL. Filters, sorting and paging run in
+the database. Required locking cannot be disabled.
 
 ## Library and host responsibilities
 
 `CellBridge.Lists` defines schemas, templates, validation, bounded queries and
 three-way merge previews. `IListEngine` is the authorized operation contract.
-The PostgreSQL provider stores list state, receipts and audit events in its own
-`cellbridge_lists` schema. A workspace can use the built-in membership and grant
+Both providers store list state, receipts and audit events in a separate
+`cellbridge_lists` schema. A workspace can use built-in membership and grant
 tables or an [asynchronous host authority](host-list-authorization.md). The
 ASP.NET Core adapter maps native JSON endpoints, exports and a limited read-only
 OData feed.
+`SqlServerListEngine` supports paged queries, record changes, references, saved
+views and audit.
 
 The host authenticates callers and maps each validated identity to a stable,
 issuer-qualified `ListActor.Subject`. It owns workspace registration, account
@@ -183,7 +191,7 @@ null differ. An authorized identical retry returns the original ID, revision and
 number, even after edits, schema changes or deletion. It does not restore data or
 return current values. Changed payloads or actors conflict. Authorization occurs
 before receipt lookup. Replays validate field constraints against the retained
-original schema, and PostgreSQL's clock determines expiry. Expiry does not
+original schema, and the database clock determines expiry. Expiry does not
 permit ID reuse; lifetime tombstones retain
 every used record ID. Updates have conditional revisions, not create-style retry
 receipts.
@@ -225,7 +233,7 @@ Pages are not snapshots across requests. Concurrent edits can move records betwe
 pages; a deleted anchor or one no longer matching the filter rejects pagination,
 so restart the query.
 
-The PostgreSQL provider compiles filters, typed ordering and keyset pagination
+Both database providers compile filters, typed ordering and keyset pagination
 into parameterized SQL. Only one page and its look-ahead row cross the database
 connection. Queries preserve exact integer/decimal values, 100 ns timestamp
 precision and UTF-16 ordinal text comparison. Ordered text expressions have a
@@ -277,6 +285,8 @@ qualification; the library supplies no refresh credentials or connector service.
 
 ## Setup, operation and checks
 
+### PostgreSQL setup and runtime
+
 Provision separate PostgreSQL setup and runtime credentials. The setup role owns
 DDL and template/workspace provisioning. The runtime role must not own or inherit
 ownership of list objects, be a superuser, have `BYPASSRLS`, or have schema creation
@@ -315,7 +325,7 @@ supplied options. Use a non-retrying EF execution strategy. The provider rejects
 `EnableRetryOnFailure` because its explicit transactions and create receipts own
 retry behavior after uncertain outcomes.
 
-The current provider requires list schema version 4. Before upgrading an
+The PostgreSQL provider requires list schema version 4. Before upgrading an
 installation at version 1, 2 or 3, stop every old list host and integration
 worker, back up the list schema, and run `InitializeAsync` with operator credentials. Setup creates
 per-list counters and normalized reference links, then recalculates each
@@ -399,6 +409,82 @@ HTTP results are 400 for validation, 401 for missing authentication, 404 for abs
 or unauthorized resources, 409 for conflicts, 413 for limits and 503 for
 unavailability; detailed store messages are not returned.
 
+### SQL Server setup and runtime
+
+Install `CellBridge.Lists.SqlServer` independently of document storage. Use
+separate setup and runtime database users. Stop list hosts and workers before
+migrating. Run the public migrator and provision workspaces with setup credentials:
+
+```csharp
+using CellBridge.Lists;
+using CellBridge.Lists.SqlServer;
+using Microsoft.EntityFrameworkCore;
+
+var setupOptions = new DbContextOptionsBuilder<SqlServerListDbContext>()
+    .UseSqlServer(setupConnectionString).Options;
+await new SqlServerListMigrator(setupOptions).MigrateAsync();
+await SqlServerListSetup.RegisterWorkspaceAsync(
+    setupOptions, workspaceId, "Customer A", administratorSubject);
+await SqlServerListSetup.RegisterTemplateAsync(setupOptions,
+    new ListTemplate(templateId, "X", 1,
+        [new ListField(titleFieldId, "Title", ListFieldType.Text, Required: true)]));
+```
+
+For host authorization, use `RegisterHostWorkspaceAsync` and pass the host's
+`IListAuthorizationProvider` to the engine. A workspace's authorization mode,
+policy domain and scope cannot change after registration.
+
+The migrator creates the `cellbridge_lists` schema and migration history. It does
+not create users or grant runtime permissions. Grant the following permissions
+to a dedicated database user named `cellbridge_lists_runtime`:
+
+```sql
+GRANT VIEW DEFINITION ON SCHEMA::cellbridge_lists TO cellbridge_lists_runtime;
+GRANT SELECT ON OBJECT::cellbridge_lists.schema_version TO cellbridge_lists_runtime;
+GRANT SELECT ON OBJECT::cellbridge_lists.templates TO cellbridge_lists_runtime;
+GRANT SELECT ON OBJECT::cellbridge_lists.__CellBridgeListsMigrationsHistory TO cellbridge_lists_runtime;
+GRANT SELECT, UPDATE ON OBJECT::cellbridge_lists.workspaces TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OBJECT::cellbridge_lists.memberships TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, UPDATE ON OBJECT::cellbridge_lists.lists TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT ON OBJECT::cellbridge_lists.list_schemas TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, UPDATE ON OBJECT::cellbridge_lists.list_counters TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OBJECT::cellbridge_lists.list_grants TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OBJECT::cellbridge_lists.records TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OBJECT::cellbridge_lists.record_references TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, UPDATE ON OBJECT::cellbridge_lists.saved_views TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT ON OBJECT::cellbridge_lists.record_tombstones TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT, DELETE ON OBJECT::cellbridge_lists.create_receipts TO cellbridge_lists_runtime;
+GRANT SELECT, INSERT ON OBJECT::cellbridge_lists.audit_events TO cellbridge_lists_runtime;
+GRANT EXECUTE ON OBJECT::cellbridge_lists.scalar_key TO cellbridge_lists_runtime;
+GRANT EXECUTE ON OBJECT::cellbridge_lists.uuid_key TO cellbridge_lists_runtime;
+GRANT EXECUTE ON OBJECT::cellbridge_lists.key_compare TO cellbridge_lists_runtime;
+```
+
+Keep this user out of owner and DDL roles. Do not grant broad table writes or
+permission to change security policies. Runtime health checks verify these
+permissions. SQL Server requires `DELAYED_DURABILITY = DISABLED`. Row-level security
+uses `CONTEXT_INFO`; host authorization still decides whether an actor may operate.
+
+Register the engine with restricted runtime options, then use the same
+`AddCellBridgeLists` and endpoint mapping shown above:
+
+```csharp
+var runtimeOptions = new DbContextOptionsBuilder<SqlServerListDbContext>()
+    .UseSqlServer(runtimeConnectionString).Options;
+var limits = new ListLimits();
+var engine = new SqlServerListEngine(runtimeOptions, limits);
+await engine.CheckHealthAsync();
+builder.Services.AddSingleton<IListEngine>(engine);
+```
+
+Migration and provisioning are explicit setup steps. Registration, health checks
+and requests never migrate schemas. Do not enable `EnableRetryOnFailure`; the
+engine manages transactions and create retries. Required database locks stay
+enabled. SQL Server performance and live reporting-client compatibility have not
+been tested.
+
+### Shared limits and operation
+
 Record reads retain their stored schema version. For patches and merge previews,
 use the current `ListDefinition.SchemaVersion` while preserving the loaded
 record's original values and revision. Text must contain valid Unicode and cannot
@@ -411,8 +497,9 @@ statement/lock timeouts default to 10 seconds. Lifetime record identities,
 logical workspace bytes and ordinary audit-event quotas are optional host
 settings through `MaxRecordsPerList`, `MaxWorkspaceBytes` and `MaxAuditEvents`.
 Their defaults are null, which disables those volume quotas. Setting a positive
-value enforces the corresponding quota transactionally. Lists with 100,000 or
-more records are supported without loading the entire list into the host.
+value enforces the corresponding quota transactionally. Both providers query
+bounded pages without loading the entire list into the host. The
+[PostgreSQL measurements](list-performance.md) do not qualify SQL Server scale.
 
 The list adapter has no fixed concurrency admission cap. Configure host-level
 ASP.NET Core rate limiting, connection limits or integration queues for the
@@ -431,11 +518,13 @@ work ignores it, the adapter waits for that work to finish after aborting the
 transport, keeping request-scoped dependencies alive until that work ends.
 Deleting records frees their value bytes, not lifetime identity capacity.
 
-Logical accounting includes value bytes and defined charges for retained schemas,
-views, receipts, tombstones and ordinary audit metadata. It is not a PostgreSQL
+SQL Server counts UTF-8 bytes of compact JSON written by `System.Text.Json`.
+PostgreSQL counts UTF-8 bytes of its JSONB text representation.
+Logical accounting includes these value bytes and defined charges for retained schemas,
+views, receipts, tombstones and ordinary audit metadata. It is not a database
 physical-size estimate. Membership and grant removal releases their row charges,
 including grants cascaded by membership removal. Retained audits keep their charges.
-Monitor table/index/WAL growth and actual disk separately.
+Monitor tables, indexes, transaction logs and actual disk usage separately.
 Permission reductions use their separately bounded security-audit reserve rather
 than ordinary storage/audit capacity. Exhausting that reserve prevents further
 audited reductions and fails closed for subsequent workspace data operations.
@@ -455,13 +544,8 @@ Focused checks run independently of Office protocol tests:
 ```sh
 dotnet test tests/CellBridge.Lists.Tests/CellBridge.Lists.Tests.csproj
 dotnet test tests/CellBridge.Lists.AspNetCore.Tests/CellBridge.Lists.AspNetCore.Tests.csproj
-node tools/testing/test-list-example-ui.cjs
 dotnet test tests/CellBridge.Lists.PostgreSql.Tests
 ```
-
-The example regression script uses Node 24 and checks retained drafts, exact
-numeric values and workspace targeting across delayed or failed requests.
-Both Linux and Windows CI run it.
 
 The PostgreSQL tests reuse the application AppHost with disposable storage and
 require a working container runtime. They apply the current setup and clean up

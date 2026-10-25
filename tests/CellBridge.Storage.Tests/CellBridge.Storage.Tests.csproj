@@ -9,7 +9,6 @@
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
-    <ProjectReference Include="../../src/CellBridge.Storage.Conformance/CellBridge.Storage.Conformance.csproj" />
     <ProjectReference Include="../../tools/CellBridge.Storage.ProcessProbe/CellBridge.Storage.ProcessProbe.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../tools/CellBridge.Storage.Portability/CellBridge.Storage.Portability.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />

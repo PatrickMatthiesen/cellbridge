@@ -9,8 +9,7 @@
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
     <Compile Include="../BenchmarkMetadata.cs" Link="BenchmarkMetadata.cs" />
-    <ProjectReference Include="../../src/CellBridge.FssHttp/CellBridge.FssHttp.csproj" />
-    <ProjectReference Include="../../src/CellBridge.Storage/CellBridge.Storage.csproj" />
+    <ProjectReference Include="../../src/CellBridge/CellBridge.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
   </ItemGroup>

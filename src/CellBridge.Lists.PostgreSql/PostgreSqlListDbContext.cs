@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Metadata.Conventions;
-using System.Reflection;
 
 namespace CellBridge.Lists.PostgreSql;
 
@@ -10,6 +9,8 @@ namespace CellBridge.Lists.PostgreSql;
 /// </summary>
 public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbContext> options) : DbContext(options)
 {
+    internal static Guid UuidKey(Guid value) => throw new NotSupportedException();
+
     internal static string? JsonText(string json, string path) => throw new NotSupportedException();
     internal static byte[]? Utf16Key(string? value) => throw new NotSupportedException();
     internal static string? TimestampKey(string? value) => throw new NotSupportedException();
@@ -154,13 +155,23 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
         modelBuilder.Entity<AuditEventRow>().HasOne<WorkspaceRow>().WithMany()
             .HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade)
             .HasConstraintName("audit_events_workspace_id_fkey");
-        MapFunction(modelBuilder, nameof(JsonText), "jsonb_extract_path_text", schema: null, builtIn: true);
-        MapFunction(modelBuilder, nameof(Utf16Key), "utf16_key");
-        MapFunction(modelBuilder, nameof(TimestampKey), "timestamp_key");
-        MapFunction(modelBuilder, nameof(Utf16Compare), "utf16_compare");
-        MapFunction(modelBuilder, nameof(TimestampCompare), "timestamp_compare");
-        MapFunction(modelBuilder, nameof(CCompare), "c_compare");
-        MapFunction(modelBuilder, nameof(ClockTimestamp), "clock_timestamp", schema: null, builtIn: true);
+        modelBuilder.HasDbFunction(() => UuidKey(default))
+            .HasTranslation(arguments => arguments[0]);
+
+        modelBuilder.HasDbFunction(() => JsonText(default!, default!))
+            .HasName("jsonb_extract_path_text").IsBuiltIn();
+        modelBuilder.HasDbFunction(() => Utf16Key(default))
+            .HasName("utf16_key").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => TimestampKey(default))
+            .HasName("timestamp_key").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => Utf16Compare(default, default))
+            .HasName("utf16_compare").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => TimestampCompare(default, default))
+            .HasName("timestamp_compare").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => CCompare(default, default))
+            .HasName("c_compare").HasSchema("cellbridge_lists");
+        modelBuilder.HasDbFunction(() => ClockTimestamp())
+            .HasName("clock_timestamp").IsBuiltIn();
     }
 
     private static void Configure<TEntity>(EntityTypeBuilder<TEntity> entity, string table, string[] key)
@@ -172,97 +183,6 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
             property.SetColumnName(ToSnakeCase(property.Name));
     }
 
-    private static void MapFunction(ModelBuilder modelBuilder, string methodName, string databaseName,
-        string? schema = "cellbridge_lists", bool builtIn = false)
-    {
-        var method = typeof(PostgreSqlListDbContext).GetMethod(methodName,
-            BindingFlags.Static | BindingFlags.NonPublic) ?? throw new InvalidOperationException();
-        var function = modelBuilder.HasDbFunction(method).HasName(databaseName);
-        if (schema is not null) function.HasSchema(schema);
-        if (builtIn) function.IsBuiltIn();
-    }
-
     private static string ToSnakeCase(string value) => string.Concat(value.Select((character, index) =>
         index > 0 && char.IsUpper(character) ? "_" + char.ToLowerInvariant(character) : char.ToLowerInvariant(character).ToString()));
-}
-
-internal sealed class SchemaVersionRow { public bool Singleton { get; set; } = true; public int Version { get; set; } }
-internal sealed class TemplateRow { public Guid TemplateId { get; set; } public long Version { get; set; } public string Definition { get; set; } = null!; }
-internal sealed class WorkspaceRow
-{
-    public Guid WorkspaceId { get; set; }
-    public string Name { get; set; } = null!;
-    public string AuthorizationMode { get; set; } = "builtin";
-    public string? AuthorizationDomain { get; set; }
-    public string? AuthorizationScope { get; set; }
-    public long StoredBytes { get; set; }
-    public long AuditCount { get; set; }
-    public int SecurityAuditCount { get; set; }
-}
-internal sealed class MembershipRow { public Guid WorkspaceId { get; set; } public string Subject { get; set; } = null!; public bool CanCreateLists { get; set; } public bool CanManageGrants { get; set; } }
-internal sealed class ListRow
-{
-    public Guid WorkspaceId { get; set; }
-    public Guid ListId { get; set; }
-    public string Name { get; set; } = null!;
-    public long SchemaVersion { get; set; }
-    public Guid? TemplateId { get; set; }
-    public long? TemplateVersion { get; set; }
-    public string? NumberPrefix { get; set; }
-    public long NextNumber { get; set; } = 1;
-}
-internal sealed class ListSchemaRow { public Guid WorkspaceId { get; set; } public Guid ListId { get; set; } public long SchemaVersion { get; set; } public string Definition { get; set; } = null!; }
-internal sealed class ListCounterRow { public Guid WorkspaceId { get; set; } public Guid ListId { get; set; } public long IdentityCount { get; set; } public long NextNumber { get; set; } = 1; }
-internal sealed class ListGrantRow { public Guid WorkspaceId { get; set; } public Guid ListId { get; set; } public string Subject { get; set; } = null!; public int Access { get; set; } }
-internal sealed class RecordRow
-{
-    public Guid WorkspaceId { get; set; }
-    public Guid ListId { get; set; }
-    public Guid RecordId { get; set; }
-    public long SchemaVersion { get; set; }
-    public long Revision { get; set; }
-    public long Number { get; set; }
-    public string ValuesJson { get; set; } = null!;
-    public DateTimeOffset CreatedUtc { get; set; }
-    public DateTimeOffset ModifiedUtc { get; set; }
-    public string CreatedBy { get; set; } = null!;
-    public string ModifiedBy { get; set; } = null!;
-}
-internal sealed class RecordTombstoneRow { public Guid WorkspaceId { get; set; } public Guid ListId { get; set; } public Guid RecordId { get; set; } }
-internal sealed class CreateReceiptRow
-{
-    public Guid WorkspaceId { get; set; }
-    public Guid ListId { get; set; }
-    public Guid RecordId { get; set; }
-    public string Actor { get; set; } = null!;
-    public long SchemaVersion { get; set; }
-    public string RequestDigest { get; set; } = null!;
-    public long Revision { get; set; }
-    public long Number { get; set; }
-    public DateTimeOffset CreatedUtc { get; set; }
-    public DateTimeOffset ExpiresUtc { get; set; }
-}
-internal sealed class RecordReferenceRow
-{
-    public Guid WorkspaceId { get; set; }
-    public Guid SourceListId { get; set; }
-    public Guid SourceRecordId { get; set; }
-    public Guid FieldId { get; set; }
-    public Guid TargetListId { get; set; }
-    public Guid TargetRecordId { get; set; }
-}
-internal sealed class SavedViewRow { public Guid WorkspaceId { get; set; } public Guid ListId { get; set; } public Guid ViewId { get; set; } public string Definition { get; set; } = null!; }
-internal sealed class AuditEventRow
-{
-    public long Id { get; set; }
-    public Guid WorkspaceId { get; set; }
-    public DateTimeOffset Utc { get; set; }
-    public string Actor { get; set; } = null!;
-    public string Action { get; set; } = null!;
-    public Guid? ListId { get; set; }
-    public Guid? RecordId { get; set; }
-    public long? Revision { get; set; }
-    public Guid[] FieldIds { get; set; } = [];
-    public string? TargetSubject { get; set; }
-    public bool Security { get; set; }
 }

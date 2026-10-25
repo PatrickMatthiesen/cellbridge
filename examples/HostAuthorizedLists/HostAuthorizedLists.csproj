@@ -7,6 +7,7 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
+    <PackageReference Include="CellBridge.Lists" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Lists.PostgreSql" Version="$(CellBridgePackageVersion)" />
   </ItemGroup>
 </Project>

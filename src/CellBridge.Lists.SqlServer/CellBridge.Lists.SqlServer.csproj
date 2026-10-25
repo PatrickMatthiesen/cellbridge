@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <DefineConstants>$(DefineConstants);CELLBRIDGE_SQLSERVER</DefineConstants>
+    <Description>SQL Server runtime for native workspace Lists with built-in and host authorization, typed queries, list paging, views, audit and atomic schema and record operations.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Migrations/InitialListsStorage.sql" />
+    <ProjectReference Include="../CellBridge.Lists/CellBridge.Lists.csproj" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.13" PrivateAssets="all" />
+    <Compile Include="../SharedLists/**/*.cs" Link="Persistence/%(RecursiveDir)%(Filename)%(Extension)" />
+    <InternalsVisibleTo Include="CellBridge.SqlServer.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../docs/lists-package-readme.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+</Project>

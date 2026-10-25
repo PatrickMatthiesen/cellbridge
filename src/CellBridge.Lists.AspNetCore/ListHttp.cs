@@ -2,8 +2,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Reflection;
-using System.Collections;
 using CellBridge.Lists;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
@@ -227,7 +225,9 @@ internal sealed class HttpState(HttpContext context, ListActor actor, CellBridge
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         PropertyNameCaseInsensitive = false,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter() },
+        RespectNullableAnnotations = true,
+        RespectRequiredConstructorParameters = true,
     };
     public HttpContext Context { get; } = context;
     public ListActor Actor { get; } = actor;
@@ -256,34 +256,72 @@ internal sealed class HttpState(HttpContext context, ListActor actor, CellBridge
         using var doc = JsonDocument.Parse(buffer.ToArray(), new JsonDocumentOptions { MaxDepth = 32 });
         RejectDuplicates(doc.RootElement);
         var result = doc.RootElement.Deserialize<T>(Json) ?? throw Invalid();
-        ValidateEnvelope(result, new NullabilityInfoContext());
+        ValidateEnvelope(result);
         return result;
     }
 
-    private void ValidateEnvelope(object? value, NullabilityInfoContext nullability)
+    private void ValidateEnvelope<T>(T value)
     {
-        if (value is null) throw Invalid();
-        if (value is System.Text.Json.Nodes.JsonNode node)
+        switch (value)
         {
-            if (Encoding.UTF8.GetByteCount(node.ToJsonString()) > Options.Limits.MaxRecordBytes)
-                throw new ListException(ListFailure.Limit, "Record body limit exceeded.");
-            return;
+            case CreateListRequest request:
+                ValidateFields(request.Fields);
+                break;
+            case PublishSchemaRequest request:
+                ValidateFields(request.Fields);
+                break;
+            case CreateRecordRequest request:
+                ValidateJson(request.Values);
+                break;
+            case UpdateRecordRequest request:
+                ValidateChanges(request.Changes);
+                break;
+            case ListQueryRequest request:
+                ValidateQueryEnvelope(request.Query);
+                break;
+            case SaveViewRequest request:
+                ValidateQueryEnvelope(request.Query);
+                break;
+            case MergeRequest request:
+                ValidateJson(request.OriginalValues);
+                ValidateChanges(request.Changes);
+                break;
         }
-        if (value is string || value.GetType().IsValueType) return;
-        if (value is IEnumerable items)
+    }
+
+    private void ValidateFields(IReadOnlyList<ListField> fields)
+    {
+        foreach (var field in fields)
         {
-            foreach (var item in items) ValidateEnvelope(item, nullability);
-            return;
+            if (field is null) throw Invalid();
+            if (field.Choices is { } choices && choices.Any(choice => choice is null)) throw Invalid();
+            if (field.Display?.Tags is { } tags && tags.Any(tag => tag is null)) throw Invalid();
         }
-        foreach (var property in value.GetType().GetProperties())
+    }
+
+    private void ValidateChanges(IReadOnlyList<FieldChange> changes)
+    {
+        foreach (var change in changes)
         {
-            var item = property.GetValue(value);
-            if (item is null)
-            {
-                if (nullability.Create(property).ReadState == NullabilityState.NotNull) throw Invalid();
-            }
-            else ValidateEnvelope(item, nullability);
+            if (change is null) throw Invalid();
+            ValidateJson(change.Value);
         }
+    }
+
+    private void ValidateQueryEnvelope(ListQuery query)
+    {
+        if (query.Filters is not { } filters) return;
+        foreach (var filter in filters)
+        {
+            if (filter is null) throw Invalid();
+            ValidateJson(filter.Value);
+        }
+    }
+
+    private void ValidateJson(System.Text.Json.Nodes.JsonNode? node)
+    {
+        if (node is not null && Encoding.UTF8.GetByteCount(node.ToJsonString()) > Options.Limits.MaxRecordBytes)
+            throw new ListException(ListFailure.Limit, "Record body limit exceeded.");
     }
 
     private static void RejectDuplicates(JsonElement value)

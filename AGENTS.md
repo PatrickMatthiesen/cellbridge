@@ -30,11 +30,10 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 ## Repository map
 
 - `src/CellBridge.WebDemo`: non-packable development host, Razor Pages library and document catalog.
-- `src/CellBridge.AspNetCore`: reusable discovery, download and cellstorage endpoints.
-- `src/CellBridge.FssHttp`: SOAP and MTOM handling.
+- `src/CellBridge`: SOAP and MTOM handling, protocol execution, document state and persistence contracts.
+- `src/CellBridge.AspNetCore`: reusable discovery, download, authentication and cellstorage endpoints.
 - `src/CellBridge.FssHttpB`: binary serialization and object graphs.
-- `src/CellBridge.Storage`: protocol document state and persistence codecs.
-- `src/CellBridge.Storage.*`: provider contracts, backends and conformance checks.
+- `src/CellBridge.Storage.*`: document persistence backends.
 - `src/CellBridge.AppHost/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, PostgreSQL, initialization and optional capture.
 - `benchmark/`: isolated measurements using the shared disposable environment.
 - `tests/`: protocol, storage and interoperability tests.
