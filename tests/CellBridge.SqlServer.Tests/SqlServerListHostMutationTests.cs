@@ -124,6 +124,48 @@ public sealed partial class SqlServerListEngineTests
     }
 
     [Fact]
+    public async Task HostPatchPreservesUnchangedReferenceAfterTargetReadRevocation()
+    {
+        var env = await SetupAsync();
+        var workspace = Guid.NewGuid();
+        var actor = new ListActor("host", "tenant");
+        var policy = new HostPolicy("policy");
+        await SqlServerListSetup.RegisterHostWorkspaceAsync(env.AdminOptions, workspace, "Host", "policy", "tenant");
+        var engine = new SqlServerListEngine(env.RuntimeOptions, null, policy);
+        var target = await engine.CreateListAsync(actor, workspace, NewListRequest());
+        var targetRecord = Request(target);
+        await engine.CreateRecordAsync(actor, workspace, target.Id, targetRecord);
+        var text = new ListField(Guid.NewGuid(), "Text", ListFieldType.Text);
+        var reference = new ListField(Guid.NewGuid(), "Target", ListFieldType.Reference,
+            ReferenceListId: target.Id);
+        var source = await engine.CreateListAsync(actor, workspace,
+            new(Guid.NewGuid(), "Source", [text, reference]));
+        var sourceRecord = Guid.NewGuid();
+        await engine.CreateRecordAsync(actor, workspace, source.Id, new(sourceRecord, 1,
+            new JsonObject
+            {
+                [text.Id.ToString("D")] = "before",
+                [reference.Id.ToString("D")] = targetRecord.Id.ToString("D")
+            }));
+
+        policy.Allow = request => request.ListId != target.Id;
+        policy.Requests.Clear();
+        var updated = await engine.UpdateRecordAsync(actor, workspace, source.Id, sourceRecord,
+            new(1, 1, [new(text.Id, JsonValue.Create("after"))]));
+
+        Assert.Equal(2, updated.Revision);
+        Assert.Equal("after", updated.Values[text.Id.ToString("D")]!.GetValue<string>());
+        Assert.Equal(targetRecord.Id.ToString("D"),
+            updated.Values[reference.Id.ToString("D")]!.GetValue<string>());
+        Assert.DoesNotContain(policy.Requests, request => request.ListId == target.Id);
+        await using var check = await SqlServerListWorkspaceTransaction.OpenAsync(env.AdminOptions, workspace);
+        var edge = await check.Context.RecordReferences.SingleAsync(row =>
+            row.SourceListId == source.Id && row.SourceRecordId == sourceRecord);
+        Assert.Equal(target.Id, edge.TargetListId);
+        Assert.Equal(targetRecord.Id, edge.TargetRecordId);
+    }
+
+    [Fact]
     public async Task ConcurrentPatchesConflictAndPersistedInterceptorJsonControlsResponseAndCharge()
     {
         var env = await SetupAsync();

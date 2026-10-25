@@ -53,12 +53,21 @@ internal sealed partial class EfListEngine
             var values = ListJson.Object(record.ValuesJson);
             ListValidation.ValidateValues(definition, values, _limits);
             var references = ReferenceAssignments(definition, values);
-            if (references.Count != 0)
+            var referenceFieldIds = previousValues is null
+                ? definition.Fields.Where(field => field.Type == ListFieldType.Reference)
+                    .Select(field => field.Id).ToHashSet()
+                : ChangedFields(previousValues, values)
+                    .Where(fieldId => definition.Fields.Any(field =>
+                        field.Id == fieldId && field.Type == ListFieldType.Reference)).ToHashSet();
+            var changedReferences = references.Where(reference =>
+                referenceFieldIds.Contains(reference.FieldId)).ToArray();
+            if (changedReferences.Length != 0)
                 await ValidateReferenceAssignmentsAsync(db, connection, transaction, record.WorkspaceId,
-                    record.ModifiedBy, references, ct, authorization);
+                    record.ModifiedBy, changedReferences, ct, authorization);
             var existing = await db.RecordReferences.Where(row => row.WorkspaceId == record.WorkspaceId &&
-                row.SourceListId == record.ListId && row.SourceRecordId == record.RecordId).ToListAsync(ct);
-            var replacements = references.ToDictionary(reference => reference.FieldId);
+                row.SourceListId == record.ListId && row.SourceRecordId == record.RecordId &&
+                referenceFieldIds.Contains(row.FieldId)).ToListAsync(ct);
+            var replacements = changedReferences.ToDictionary(reference => reference.FieldId);
             foreach (var edge in existing)
             {
                 if (!replacements.Remove(edge.FieldId, out var replacement)) db.RecordReferences.Remove(edge);
