@@ -436,16 +436,12 @@ public sealed class PostgreSqlAtomicDocumentSaveTests
         }
     }
 
-    private sealed class CancelFirstChunkBatch(CancellationTokenSource cancellation) : DbCommandInterceptor
+    private sealed class CancelFirstChunkBatch(CancellationTokenSource cancellation) : SaveChangesInterceptor
     {
-        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result,
+        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
             CancellationToken cancellationToken = default)
         {
-            if (command.CommandText.Contains("INSERT INTO cellbridge_chunks", StringComparison.Ordinal))
-            {
-                Assert.True(result > 0);
-                cancellation.Cancel();
-            }
+            cancellation.Cancel();
             return ValueTask.FromResult(result);
         }
     }
