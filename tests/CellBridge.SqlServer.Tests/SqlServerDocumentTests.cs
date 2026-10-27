@@ -100,8 +100,8 @@ public sealed class SqlServerDocumentTests(SqlServerFixture fixture)
         var id = initial.ResourceId;
         await using var gate = new SqlServerDocumentDbContext(database.Options(admin: true));
         await using var transaction = await gate.Database.BeginTransactionAsync();
-        await SqlServerDocumentDatabase.LockAsync(gate, "CellBridge.Document." + id.ToString("N"), default);
-        var attempted = new ObserveDocumentLock(id);
+        await gate.Database.ExecuteSqlAsync($"UPDATE cellbridge_documents.documents SET StateVersion=StateVersion WHERE ResourceId={id}");
+        var attempted = new ObserveDocumentRow(id);
         var invoked = 0;
         var waiting = database.Provider(attempted).State.TransitionAsync(id, (state, now) =>
         { Interlocked.Increment(ref invoked); return new StateTransition<DateTime>(null, now); }).AsTask();
@@ -170,16 +170,101 @@ public sealed class SqlServerDocumentTests(SqlServerFixture fixture)
         { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = index, ExpectedStorageIndex = StorageIds.Restore(state.Partitions.Single(p => p.Kind == 0).StorageIndex!) } } } };
     }
 
-    private sealed class ObserveDocumentLock(Guid id) : DbCommandInterceptor
+    [Fact]
+    public async Task PreparedWritersReportOneConflictWithoutReplayingCallbacksAndPreserveSnapshotRetention()
+    {
+        var database = await SqlServerDocuments.CreateAsync(fixture, new() { MaxRetainedStateSnapshots = 1 });
+        var initial = (await new CellBridgeDocumentService(database.Provider()).CreateAsync(
+            "/token-collision.docx", MinimalDocx.Create(), SqlServerDocuments.Actor))!;
+        var barrier = new PreparedWritersBarrier();
+        var callbacks = new int[2];
+        var errors = await Task.WhenAll(Enumerable.Range(0, 2).Select(index => Record.ExceptionAsync(async () =>
+        {
+            var observed = await database.Provider(barrier).State.TransitionAsync(initial.ResourceId, (current, now) =>
+            {
+                Interlocked.Increment(ref callbacks[index]);
+                Assert.Equal(0, current.StateVersion);
+                return new StateTransition<long>(current with { ModifiedUtc = now }, current.StateVersion);
+            });
+            Assert.Equal(0, observed);
+        })));
+        Assert.Single(errors, error => error is null);
+        Assert.IsType<StorageConflictException>(Assert.Single(errors, error => error is not null));
+        Assert.Equal(new[] { 1, 1 }, callbacks);
+        var fresh = database.Provider();
+        Assert.Equal(1, (await fresh.State.FindByResourceIdAsync(initial.ResourceId))!.StateVersion);
+        await using var db = new SqlServerDocumentDbContext(database.Options(admin: true));
+        Assert.Single(await db.Snapshots.ToListAsync());
+        Assert.Equal(1, (await db.Metadata.SingleAsync()).StateVersion);
+        await database.AssertAccountingAsync();
+    }
+
+    [Fact]
+    public async Task SuppressedPointerUpdateAndFailedPublicationNeverReplayCallbacksOrPublishPartialState()
+    {
+        var database = await SqlServerDocuments.CreateAsync(fixture, new() { MaxRetainedStateSnapshots = 1 });
+        var initial = (await new CellBridgeDocumentService(database.Provider()).CreateAsync(
+            "/token-rollback.docx", MinimalDocx.Create(), SqlServerDocuments.Actor))!;
+        var callbacks = 0;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => database.Provider(new FailSave(suppressPointer: true)).State
+            .TransitionAsync(initial.ResourceId, (current, _) =>
+            { callbacks++; return new StateTransition<bool>(current, true); }).AsTask());
+        Assert.Equal(1, callbacks);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => database.Provider(new FailSave(suppressPointer: false)).State
+            .TransitionAsync(initial.ResourceId, (current, now) =>
+            { callbacks++; return new StateTransition<bool>(current with { ModifiedUtc = now }, true); }).AsTask());
+        Assert.Equal(2, callbacks);
+        Assert.Equal(0, (await database.Provider().State.FindByResourceIdAsync(initial.ResourceId))!.StateVersion);
+        await using var db = new SqlServerDocumentDbContext(database.Options(admin: true));
+        Assert.Equal(0, (await db.Snapshots.SingleAsync()).StateVersion);
+        Assert.Equal(0, (await db.Metadata.SingleAsync()).StateVersion);
+        await database.AssertAccountingAsync();
+    }
+
+    private sealed class ObserveDocumentRow(Guid id) : DbCommandInterceptor
     {
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData,
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData,
+            InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("[cellbridge_documents].[documents]", StringComparison.Ordinal) &&
+                command.Parameters.Cast<DbParameter>().Any(parameter => Equals(parameter.Value, id)))
+                Entered.TrySetResult();
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private static bool IsPublication(DbContext db) => db.ChangeTracker.Entries().Any(entry =>
+        entry.Metadata.GetTableName() == "documents" && entry.State == EntityState.Modified &&
+        entry.Property("StateVersion").IsModified && !Equals(entry.Property("StateVersion").CurrentValue,
+            entry.Property("StateVersion").OriginalValue));
+
+    private sealed class PreparedWritersBarrier : SaveChangesInterceptor
+    {
+        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int prepared;
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
             InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
-            if (command.CommandText.Contains("sp_getapplock", StringComparison.Ordinal) &&
-                command.Parameters.Cast<DbParameter>().Any(parameter => Equals(parameter.Value, "CellBridge.Document." + id.ToString("N"))))
-                Entered.TrySetResult();
-            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+            if (IsPublication(eventData.Context!))
+            {
+                if (Interlocked.Increment(ref prepared) == 2) release.TrySetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+            return result;
+        }
+    }
+
+    private sealed class FailSave(bool suppressPointer) : SaveChangesInterceptor
+    {
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData,
+            InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (suppressPointer && IsPublication(eventData.Context!)) return ValueTask.FromResult(InterceptionResult<int>.SuppressWithResult(1));
+            if (!suppressPointer && eventData.Context!.ChangeTracker.Entries().Any(entry =>
+                entry.Metadata.GetTableName() == "snapshots" && entry.State == EntityState.Added))
+                throw new InvalidOperationException("Injected publication failure after pruning.");
+            return ValueTask.FromResult(result);
         }
     }
 

@@ -148,31 +148,63 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                             await OuterDocumentOperations.ExecuteAsync(service, doc.TransitionId, subRequest, subResponse,
                                 publicBase, operationActor, cancellationToken);
                         else
-                            await service.Provider.State.TransitionAsync(doc.TransitionId, (current, now) =>
+                        {
+                            // Re-evaluate this deterministic metadata operation only after
+                            // a known rollback. Earlier accepted subrequests are not repeated.
+                            for (var attempt = 0; ; attempt++)
                             {
-                                var access = service.Access(operationActor, current);
-                                if (!access.HasFlag(CellBridgeAuthorization.RequiredAccess(subRequest)) || !OwnsSession(current, subRequest, operationActor, now))
+                                var attemptResponse = new FssHttpSubResponse
                                 {
-                                    subResponse.ErrorCode = "FileUnauthorizedAccess";
-                                    subResponse.HResult = CellBridgeAuthorization.AccessDeniedHResult.ToString();
-                                    return new StateTransition<bool>(null, false);
+                                    Type = subRequest.Type, SubRequestToken = subRequest.SubRequestToken,
+                                    ErrorCode = "Success", HResult = "0",
+                                };
+                                try
+                                {
+                                    await service.Provider.State.TransitionAsync(doc.TransitionId, (current, now) =>
+                                    {
+                                        var access = service.Access(operationActor, current);
+                                        if (!access.HasFlag(CellBridgeAuthorization.RequiredAccess(subRequest)) || !OwnsSession(current, subRequest, operationActor, now))
+                                        {
+                                            attemptResponse.ErrorCode = "FileUnauthorizedAccess";
+                                            attemptResponse.HResult = CellBridgeAuthorization.AccessDeniedHResult.ToString();
+                                            return new StateTransition<bool>(null, false);
+                                        }
+                                        var document = StoredDocument.RestoreMetadata(current, now);
+                                        var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, operationActor.Identity);
+                                        ApplyMetadata(document, subRequest, attemptResponse, log, publicBase, operationActor);
+                                        if (attemptResponse.ErrorCode == "FileUnauthorizedAccess") return new StateTransition<bool>(null, false);
+                                        // Invalid lock input cannot publish incidental editor expiry
+                                        // from restoring, inspecting or logging the detached document.
+                                        // Valid failed conversions may deliberately release membership.
+                                        if (attemptResponse.ErrorCode == "InvalidArgument" && subRequest.Type is
+                                            SubRequestType.SchemaLock or SubRequestType.ExclusiveLock or SubRequestType.Coauth)
+                                            return new StateTransition<bool>(null, false);
+                                        var next = document.CaptureCoordination(current, coordinator.Capture());
+                                        if (!CoordinationChanged(current, next))
+                                            return new StateTransition<bool>(null, true);
+                                        next = next with { Coordination = CoordinationFencing.Capture(current.Coordination, next.Coordination) };
+                                        return new StateTransition<bool>(next, true)
+                                            { ValidUntilUtc = MetadataLeaseDeadline(current, next, subRequest, now) };
+                                    }, cancellationToken);
+                                    subResponse = attemptResponse;
+                                    break;
                                 }
-                                var document = StoredDocument.RestoreMetadata(current, now);
-                                var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, operationActor.Identity);
-                                ApplyMetadata(document, subRequest, subResponse, log, publicBase, operationActor);
-                                if (subResponse.ErrorCode == "FileUnauthorizedAccess") return new StateTransition<bool>(null, false);
-                                // Invalid lock input cannot publish incidental editor expiry
-                                // from restoring, inspecting or logging the detached document.
-                                // Valid failed conversions may deliberately release membership.
-                                if (subResponse.ErrorCode == "InvalidArgument" && subRequest.Type is
-                                    SubRequestType.SchemaLock or SubRequestType.ExclusiveLock or SubRequestType.Coauth)
-                                    return new StateTransition<bool>(null, false);
-                                var next = document.CaptureCoordination(current, coordinator.Capture());
-                                if (!CoordinationChanged(current, next))
-                                    return new StateTransition<bool>(null, true);
-                                next = next with { Coordination = CoordinationFencing.Capture(current.Coordination, next.Coordination) };
-                                return new StateTransition<bool>(next, true);
-                            }, cancellationToken);
+                                catch (StorageConflictException) when (attempt < 3)
+                                {
+                                    cancellationToken.ThrowIfCancellationRequested();
+                                }
+                            }
+                        }
+                    }
+                    catch (StorageConflictException)
+                    {
+                        subResponse = new FssHttpSubResponse
+                        {
+                            Type = subRequest.Type,
+                            SubRequestToken = subRequest.SubRequestToken,
+                            ErrorCode = "CellRequestFail",
+                            ErrorMessage = "The document changed. Read its current state before retrying.",
+                        };
                     }
                     catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
                     {
@@ -318,6 +350,47 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
         var session = state.Editors.FirstOrDefault(e => e.ClientId == client && e.ExpiresUtc > now);
         return session is null || session.Owner?.Subject == actor.Identity.Subject;
     }
+
+    static DateTime? MetadataLeaseDeadline(DocumentState current, DocumentState next, FssHttpSubRequest request, DateTime now)
+    {
+        var attributes = request.SubRequestDataAttributes;
+        var deadlines = next.Coordination.SchemaOwners
+            .Where(lease => !current.Coordination.SchemaOwners.Contains(lease))
+            .Select(lease => lease.ExpiresUtc).ToList();
+        if (next.Coordination.Exclusive is { } exclusive && exclusive != current.Coordination.Exclusive)
+            deadlines.Add(exclusive.ExpiresUtc);
+        var operation = attributes.GetValueOrDefault(request.Type switch
+        {
+            SubRequestType.ExclusiveLock => "ExclusiveLockRequestType",
+            SubRequestType.SchemaLock => "SchemaLockRequestType",
+            _ => "CoauthRequestType",
+        });
+        if (operation is "RefreshLock" or "ReleaseLock" or "ConvertToSchema" or
+            "ConvertToSchemaJoinCoauth" or "ConvertToExclusive" or "RefreshCoauthoring" or
+            "ExitCoauthoring" or "MarkTransitionComplete")
+        {
+            if (request.Type == SubRequestType.ExclusiveLock && current.Coordination.Exclusive is { } ownedExclusive &&
+                ownedExclusive.ExpiresUtc > now && SameProtocolId(ownedExclusive.Id, attributes.GetValueOrDefault("ExclusiveLockID")))
+                deadlines.Add(ownedExclusive.ExpiresUtc);
+            else if (request.Type is SubRequestType.SchemaLock or SubRequestType.Coauth)
+                deadlines.AddRange(current.Coordination.SchemaOwners.Where(lease => lease.ExpiresUtc > now &&
+                    SameProtocolId(lease.Id, attributes.GetValueOrDefault("SchemaLockID")) &&
+                    SameProtocolId(lease.Client, attributes.GetValueOrDefault("ClientID"))).Select(lease => lease.ExpiresUtc));
+        }
+        if (Guid.TryParse(attributes.GetValueOrDefault("ClientID"), out var client))
+        {
+            if (request.Type is SubRequestType.EditorsTable or SubRequestType.Coauth &&
+                current.Editors.FirstOrDefault(editor => editor.ClientId == client && editor.ExpiresUtc > now) is { } owned)
+                deadlines.Add(owned.ExpiresUtc);
+            if (next.Editors.FirstOrDefault(editor => editor.ClientId == client) is { } updated &&
+                !current.Editors.Contains(updated)) deadlines.Add(updated.ExpiresUtc);
+        }
+        return deadlines.Count == 0 ? null : deadlines.Min();
+    }
+
+    static bool SameProtocolId(string? first, string? second) =>
+        Guid.TryParse(first, out var a) && Guid.TryParse(second, out var b)
+            ? a == b : first is not null && first.Equals(second, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Handles a Cell subrequest: decodes the FSSHTTPB binary payload from the

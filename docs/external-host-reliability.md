@@ -101,8 +101,10 @@ readers, publishers and preparation work to be stopped.
 `SharedDocumentLocks` implements the base WOPI exclusive lock shape in the same
 provider transitions that store FSSHTTP schema and exclusive leases. WOPI tokens
 are opaque and case-sensitive. Subject identity owns the token. Acquiring,
-refreshing, releasing or replacing a token runs under provider coordination;
-expiry uses provider time obtained after acquiring that coordination. The base
+refreshing, releasing or replacing a token uses a conditional state update.
+The operation checks its lease deadline with provider time when accepting the
+version change, including any wait. A known version conflict returns a failed
+lock result; database failures remain errors. The base
 lock expires after 30 minutes unless refreshed.
 
 An active WOPI lock blocks FSSHTTP acquisition, conversion and saves. Active
@@ -156,9 +158,10 @@ For custom prepared mutations, a host stages immutable package and graph handles
 before committing a write.
 `TryCommitAsync` requires the `HostWriteToken` returned by acquisition or refresh,
 the prepared state's version, an actor, a bounded deterministic state callback,
-and a stable operation GUID. Inside the provider transaction it rechecks current
-permission, subject, token, lifecycle generation, coordination generation and
-expiry, then commits the prepared state and journal entry together. The callback
+and a stable operation GUID. Its callback checks permission, subject, token,
+lifecycle generation, coordination generation and expiry against one snapshot.
+The provider conditionally updates that version and checks the lease deadline,
+then commits the prepared state and journal entry together. The callback
 must preserve independent current state fields and publish a coherent graph.
 It must perform no external I/O. Delivery follows through the same journal.
 Direct WOPI destination writes bypassing these rules are outside the guarantee.

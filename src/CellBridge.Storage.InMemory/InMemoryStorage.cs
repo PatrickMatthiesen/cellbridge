@@ -86,6 +86,8 @@ public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentR
                 Budget.Limits.CheckDocument(next);
                 lock (Budget.SyncRoot)
                 {
+                    if (result.ValidUntilUtc is { } deadline && DateTime.UtcNow >= deadline)
+                        throw new StorageConflictException("The write lease expired before publication.");
                     lock (_paths)
                     {
                         if (_paths.TryGetValue(next.PathKey, out var owner) && owner != id)

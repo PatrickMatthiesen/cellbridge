@@ -103,6 +103,7 @@ public sealed class PostgreSqlListDbContext(DbContextOptions<PostgreSqlListDbCon
             table.HasCheckConstraint("records_number_check", "number > 0");
         });
         modelBuilder.Entity<RecordRow>().Property(x => x.ValuesJson).HasColumnType("jsonb");
+        modelBuilder.Entity<RecordRow>().Property(x => x.Revision).IsConcurrencyToken();
         modelBuilder.Entity<SavedViewRow>().Property(x => x.Definition).HasColumnType("jsonb");
         modelBuilder.Entity<AuditEventRow>().Property(x => x.Id).UseIdentityAlwaysColumn();
         modelBuilder.Entity<AuditEventRow>().Property(x => x.FieldIds).HasColumnType("uuid[]")

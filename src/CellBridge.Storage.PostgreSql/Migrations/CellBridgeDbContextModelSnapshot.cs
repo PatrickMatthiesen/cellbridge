@@ -62,6 +62,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                         .UseCollation("C");
 
                     b.Property<long>("StateVersion")
+                        .IsConcurrencyToken()
                         .HasColumnType("bigint")
                         .HasColumnName("state_version");
 

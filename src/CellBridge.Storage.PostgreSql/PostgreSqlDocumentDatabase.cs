@@ -16,6 +16,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
         factory = PostgreSqlDatabase.CreateRuntimeFactory(options);
     }
     public CellBridgeDbContext CreateContext() => factory?.CreateDbContext() ?? new(options);
+    public bool ReadClockAfterStatement => false;
     public IDocumentLocking<CellBridgeDbContext> Locks => this;
     public Task<T> ReadAsync<T>(CellBridgeDbContext db, Func<Task<T>> action, bool coherent, CancellationToken ct) =>
         coherent ? ReadSnapshotAsync(db, action, ct) : action();
@@ -105,8 +106,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
 
     private static Task ConfigureSettingsAsync(CellBridgeDbContext context, CancellationToken cancellationToken)
     {
-        // Every caller owns the transaction and abandons it after a failed save.
-        // Savepoints add work but cannot make these transactions reusable.
+        // Every publication failure abandons the whole transaction.
         context.Database.AutoSavepointsEnabled = false;
         return context.Database.ExecuteSqlRawAsync("SET LOCAL synchronous_commit=on; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'", cancellationToken);
     }

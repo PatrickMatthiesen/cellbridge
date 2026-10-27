@@ -22,12 +22,15 @@ internal sealed partial class EfListEngine
             throw Limit("The workspace storage or audit limit has been reached.");
     }
 
+    private static bool HasPublicationInterceptors(ListDbContext db) =>
+        db.GetService<IInterceptors>().Aggregate<ISaveChangesInterceptor>() is not null;
+
     private static void StagePublicationAudit(ListDbContext db, AuditEventRow audit)
     {
         // Preserve PostgreSQL's batched save when no save interceptor can alter
         // the publication. Intercepted publications validate before inserting
         // their immutable audit event.
-        if (!RequiresPublicationReadback && db.GetService<IInterceptors>().Aggregate<ISaveChangesInterceptor>() is null)
+        if (!RequiresPublicationReadback && !HasPublicationInterceptors(db))
             db.AuditEvents.Add(audit);
     }
 
@@ -40,19 +43,26 @@ internal sealed partial class EfListEngine
 
     private async Task ValidatePublishedRecordAsync(ListDbContext db, DbConnection connection,
         DbTransaction transaction, ListDefinition definition, RecordRow record, ListRecord expected,
-        CreateReceiptRow? receipt, CreateReceiptRow? expectedReceipt, WorkspaceRow workspace,
+        CreateReceiptRow? receipt, CreateReceiptRow? expectedReceipt, WorkspaceRow? workspace,
         AuditEventRow audit, long preparedBytes, JsonObject? previousValues,
         IReadOnlySet<Guid> preparedReferenceFieldIds, OperationAuthorization? authorization,
-        CancellationToken ct)
+        CancellationToken ct, long previousBytes = 0)
     {
+        var deferredQuota = workspace is null;
+        var publishedBytes = preparedBytes;
+        var preparedFieldCount = audit.FieldIds.Length;
         var entities = receipt is null ? new object[] { record } : [record, receipt];
         await ReloadPublicationAsync(db, ct, entities);
         ValidateMetadata();
         var changed = !StringComparer.Ordinal.Equals(record.ValuesJson, ListJson.RecordValues(expected.Values));
-        if (RequiresPublicationReadback || changed || db.Entry(audit).State == EntityState.Detached)
+        var reconcile = RequiresPublicationReadback || changed ||
+            db.Entry(audit).State == EntityState.Detached && (!deferredQuota || HasPublicationInterceptors(db));
+        // PostgreSQL's initial save updates only the source record. Stage its
+        // edges after that conditional update owns the source row lock.
+        if (reconcile || deferredQuota && preparedReferenceFieldIds.Count != 0)
         {
             var values = ListJson.Object(record.ValuesJson);
-            ListValidation.ValidateValues(definition, values, _limits);
+            if (reconcile) ListValidation.ValidateValues(definition, values, _limits);
             var references = ReferenceAssignments(definition, values);
             var changedReferenceFieldIds = previousValues is null
                 ? definition.Fields.Where(field => field.Type == ListFieldType.Reference)
@@ -62,7 +72,7 @@ internal sealed partial class EfListEngine
                         field.Id == fieldId && field.Type == ListFieldType.Reference)).ToHashSet();
             var referencesToValidate = references.Where(reference =>
                 changedReferenceFieldIds.Contains(reference.FieldId)).ToArray();
-            if (referencesToValidate.Length != 0)
+            if (reconcile && referencesToValidate.Length != 0)
                 await ValidateReferenceAssignmentsAsync(db, connection, transaction, record.WorkspaceId,
                     record.ModifiedBy, referencesToValidate, ct, authorization);
             var referenceFieldIdsToReconcile = preparedReferenceFieldIds
@@ -81,20 +91,41 @@ internal sealed partial class EfListEngine
             db.RecordReferences.AddRange(replacements.Values.Select(reference => new RecordReferenceRow {
                 WorkspaceId = record.WorkspaceId, SourceListId = record.ListId, SourceRecordId = record.RecordId,
                 FieldId = reference.FieldId, TargetListId = reference.TargetListId, TargetRecordId = reference.TargetRecordId }));
-            var bytes = await CanonicalJsonBytesAsync(db, record.ValuesJson, ct);
-            if (bytes > _limits.MaxRecordBytes) throw Limit("The normalized record exceeds the configured byte limit.");
-            var fields = previousValues is null ? values.Select(pair => Guid.Parse(pair.Key)).ToArray()
-                : audit.FieldIds.Concat(ChangedFields(previousValues, values)).Distinct().Order().ToArray();
-            workspace.StoredBytes = checked(workspace.StoredBytes + bytes - preparedBytes + (fields.Length - audit.FieldIds.Length) * 16L);
-            audit.FieldIds = fields;
-            if (db.Entry(audit).State == EntityState.Detached) db.AuditEvents.Add(audit);
-            RequireWorkspaceQuota(workspace);
+            if (reconcile)
+            {
+                publishedBytes = await CanonicalJsonBytesAsync(db, record.ValuesJson, ct);
+                if (publishedBytes > _limits.MaxRecordBytes) throw Limit("The normalized record exceeds the configured byte limit.");
+                var fields = previousValues is null ? values.Select(pair => Guid.Parse(pair.Key)).ToArray()
+                    : audit.FieldIds.Concat(ChangedFields(previousValues, values)).Distinct().Order().ToArray();
+                audit.FieldIds = fields;
+            }
+        }
+        // Accepted values can introduce target locks. Acquire them above, before
+        // quota, so a target delete cannot hold that target while waiting on us.
+        if (workspace is null)
+        {
+            workspace = await _locks.LockedQuota(db, record.WorkspaceId).SingleOrDefaultAsync(ct)
+                ?? throw NotFound();
+            workspace.StoredBytes = checked(workspace.StoredBytes + publishedBytes - previousBytes +
+                AuditStorageBytes(record.ModifiedBy, audit.Action, audit.FieldIds.Length));
+            workspace.AuditCount = checked(workspace.AuditCount + 1);
+        }
+        else if (reconcile)
+            workspace.StoredBytes = checked(workspace.StoredBytes + publishedBytes - preparedBytes +
+                (audit.FieldIds.Length - preparedFieldCount) * 16L);
+        RequireWorkspaceQuota(workspace);
+        if (db.Entry(audit).State == EntityState.Detached) db.AuditEvents.Add(audit);
+        if (reconcile || deferredQuota)
+        {
             var publishedJson = record.ValuesJson;
             if (db.ChangeTracker.HasChanges()) await SaveRequiredAsync(db, ct);
             await ReloadPublicationAsync(db, ct, entities);
             ValidateMetadata();
+            // A second transformation cannot trigger another round of target
+            // validation now that quota is locked. Roll back instead.
             if (!StringComparer.Ordinal.Equals(record.ValuesJson, publishedJson)) throw InvalidPublication();
         }
+
         RequireWorkspaceQuota(workspace);
 
         void ValidateMetadata()

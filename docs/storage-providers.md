@@ -280,9 +280,8 @@ those options. Use
 Configure a non-retrying EF execution strategy. The provider rejects
 `EnableRetryOnFailure` because its explicit transactions and receipt checks own
 retries after uncertain outcomes.
-PostgreSQL row and advisory locks still coordinate document transitions,
-namespace changes and shared storage accounting. EF does not replace those
-database guarantees.
+EF conditional updates coordinate document version changes. Database locks still
+protect namespace publication and shared storage accounting.
 
 The host supplies authentication and maps validated principals to CellBridge
 subjects. Document grants deny access by default. See
@@ -334,10 +333,34 @@ created temporary file, checks every ZIP member against the limit on expanded
 bytes and rewinds the stream for storage. Graph payloads still load eagerly.
 The staging file is deleted on success, failure or cancellation.
 
-The service then locks the document row, reads the current state and database
-time, rechecks permission, coherency and leases, and saves a snapshot with a
-save receipt. File I/O happens outside the lock;
-different documents have independent locks.
+The PostgreSQL and SQL Server state providers read the document pointer, matching
+snapshot and database time as one coherent read. PostgreSQL uses one statement.
+SQL Server reads time after the row query, within its short serializable read
+transaction, because its clock expression can run before a blocked row read.
+The callback prepares a change once, without
+holding a document write lock. A no-op returns that snapshot and performs no write.
+
+For a change, EF updates the pointer using its original `StateVersion` as a
+concurrency token. Another committed change causes `StorageConflictException`.
+The provider rolls back the whole attempt and does not retry the callback.
+Snapshot pruning, read projections and accounting remain in the same transaction.
+The pointer update precedes those writes so competing snapshot inserts cannot hide
+the version conflict. Custom EF models must retain the token.
+
+Lease-dependent changes set `StateTransition.ValidUntilUtc` from the lease that
+authorized the operation. Providers check the deadline when accepting the version
+change. Database providers use database time after the conditional update, including
+any wait for that update. This checks authority at acceptance; it does not promise
+that the transaction finishes before the lease expires. Permission and coordination
+changes on the document also change its token. Namespace publication and shared
+quota accounting retain their separate database coordination.
+
+Provider deadlocks, serialization failures and an unknown commit outcome remain
+storage failures. They are not stale-version conflicts. Protocol saves return a
+coherency failure for a rejected version, or resolve an already accepted matching
+receipt. The service uses its existing bounded preparation loop to rebuild a graph after
+a known conflict. Deterministic SOAP metadata operations may re-evaluate against
+fresh state up to four times. Neither path retries unknown commit outcomes.
 
 Receipts bind the proposed storage index to the operation digest, accepted
 response and writer. An identical retry of the current content version returns
@@ -353,9 +376,11 @@ is a coalescing hint and is accepted for complete saves; it does not enable
 staged partial uploads. Explicit binary targets select the file, metadata or
 editors partition independently of the SOAP default. Unknown targets fail.
 
-Session and lease updates use the same transaction. Database time is read after
-lock acquisition, so waiting cannot preserve an expired lease. Restart does not
-extend leases; editor expiry and editor-partition knowledge advance together.
+Session and lease updates use the same transaction. The callback uses the
+snapshot's database time. A lease-dependent change also checks its original
+lease deadline after the conditional update has acquired the row, so waiting
+cannot preserve expired authority. Restart does not extend leases; editor
+expiry and editor-partition knowledge advance together.
 
 PostgreSQL requires `fsync=on`, forces `synchronous_commit=on`, uses five-second
 lock and 30-second statement timeouts, and reads from the primary. Replication
@@ -482,11 +507,13 @@ lifecycle metadata from one coherent view. Update any derived read records
 atomically with state changes, including recovery import. Without this optional
 capability, the service reads complete states.
 
-`TransitionAsync` acquires exclusive coordination for the resource, loads one
-coherent snapshot and supplies authoritative time. Invoke the callback once.
-Atomically publish `Next` and advance `StateVersion`, or publish nothing for
-null/exception. Do not retry callbacks after an unknown commit outcome.
-Callbacks perform no I/O; prepare content beforehand.
+`TransitionAsync` supplies one coherent snapshot and authoritative time. Invoke
+the callback once. Atomically publish `Next` and advance `StateVersion`, or publish
+nothing for null/exception. Providers may prepare changes concurrently and reject
+stale proposals with `StorageConflictException`. A null `Next` is a snapshot read,
+not a request to hold a lock through a later operation. Callbacks perform no I/O;
+prepare content beforehand. Do not retry callbacks after a conflict or unknown
+commit outcome. Enforce `ValidUntilUtc` when accepting a lease-dependent change.
 
 Return immutable detached records, enforce unique paths/resource IDs and forbid
 identity/path changes in transitions. Preserve unsigned protocol values, serials,

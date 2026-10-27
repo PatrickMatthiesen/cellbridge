@@ -534,32 +534,39 @@ internal sealed partial class EfListEngine
         OperationAuthorization? authorization, CancellationToken ct)
     {
         var auditFields = changes.Select(x => x.FieldId).ToArray();
-        var auditBytes = AuditStorageBytes(actor, "record.update", auditFields.Length);
         var revision = checked(current.Revision + 1);
+#if CELLBRIDGE_SQLSERVER
+        var auditBytes = AuditStorageBytes(actor, "record.update", auditFields.Length);
         var valueBytes = await CanonicalJsonBytesAsync(db, valuesJson, ct);
         if (valueBytes > _limits.MaxRecordBytes)
             throw Limit("The normalized record exceeds the configured byte limit.");
-        // Returning the locked row lets EF track its post-lock values without a second read.
         var state = await _locks.LockedQuota(db, workspaceId)
-            .Select(row => new
-            {
-                Workspace = row,
-                Now = ListDbContext.ClockTimestamp()
-            }).SingleOrDefaultAsync(ct) ?? throw NotFound();
-        var workspace = state.Workspace;
-        var storageDelta = checked(valueBytes - previousBytes + auditBytes);
-        var nextBytes = checked(workspace.StoredBytes + storageDelta);
-        db.Records.Attach(record);
-        workspace.StoredBytes = nextBytes;
+            .Select(row => new { Workspace = row, Now = ListDbContext.ClockTimestamp() })
+            .SingleOrDefaultAsync(ct) ?? throw NotFound();
+        WorkspaceRow? workspace = state.Workspace;
+        var now = state.Now;
+        workspace.StoredBytes = checked(workspace.StoredBytes + valueBytes - previousBytes + auditBytes);
         workspace.AuditCount = checked(workspace.AuditCount + 1);
         CheckPreparedPublication(workspace);
+#else
+        // Consumer models must retain the token before this path drops the source lock.
+        if (db.Model.FindEntityType(typeof(RecordRow))?.FindProperty(nameof(RecordRow.Revision))?.IsConcurrencyToken != true)
+            throw new ListException(ListFailure.Unavailable, "Record revision concurrency checking is required.");
+        var (valueBytes, now) = await ReadUpdatePublicationStateAsync(db, valuesJson, ct);
+        if (valueBytes > _limits.MaxRecordBytes)
+            throw Limit("The normalized record exceeds the configured byte limit.");
+        WorkspaceRow? workspace = null;
+#endif
+        // Attach the original revision before assigning the next revision.
+        db.Records.Attach(record);
         record.SchemaVersion = schemaVersion;
         record.Revision = revision;
         record.ValuesJson = valuesJson;
-        record.ModifiedUtc = state.Now;
+        record.ModifiedUtc = now;
         record.ModifiedBy = actor;
         var expected = ToListRecord(record, (JsonObject)responseValues.DeepClone());
 
+#if CELLBRIDGE_SQLSERVER
         var changed = changedReferenceIds.ToArray();
         List<RecordReferenceRow> existingReferences = changed.Length == 0
             ? []
@@ -582,13 +589,17 @@ internal sealed partial class EfListEngine
             WorkspaceId = workspaceId, SourceListId = listId, SourceRecordId = current.Id,
             FieldId = reference.FieldId, TargetListId = reference.TargetListId,
             TargetRecordId = reference.TargetRecordId }));
+#endif
         var audit = new AuditEventRow { WorkspaceId = workspaceId, Utc = record.ModifiedUtc,
             Actor = actor, Action = "record.update", ListId = listId, RecordId = current.Id,
             Revision = revision, FieldIds = auditFields };
+#if CELLBRIDGE_SQLSERVER
         StagePublicationAudit(db, audit);
+#endif
+        // PostgreSQL defers the audit FK's workspace KEY SHARE until quota is held.
         await SaveRequiredAsync(db, ct);
         await ValidatePublishedRecordAsync(db, connection, transaction, definition, record, expected, null, null,
-            workspace, audit, valueBytes, current.Values, changedReferenceIds, authorization, ct);
+            workspace, audit, valueBytes, current.Values, changedReferenceIds, authorization, ct, previousBytes);
         // Save interceptors may replace the tracked JSON before persistence.
         return StringComparer.Ordinal.Equals(record.ValuesJson, valuesJson)
             ? ToListRecord(record, responseValues)

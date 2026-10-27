@@ -64,6 +64,9 @@ internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlS
     private readonly DbContextOptions<SqlServerDocumentDbContext> options;
     internal SqlServerDocumentDatabase(DbContextOptions<SqlServerDocumentDbContext> options) => this.options = options;
     public SqlServerDocumentDbContext CreateContext() => new(options);
+    // SQL Server may evaluate SYSUTCDATETIME before a blocked table read.
+    // Read it afterward while the short serializable read still protects the rows.
+    public bool ReadClockAfterStatement => true;
     public IDocumentLocking<SqlServerDocumentDbContext> Locks => this;
     public async Task<T> ReadAsync<T>(SqlServerDocumentDbContext db, Func<Task<T>> action, bool coherent, CancellationToken ct)
     {

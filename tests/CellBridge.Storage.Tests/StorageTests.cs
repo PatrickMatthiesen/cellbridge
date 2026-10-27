@@ -42,11 +42,29 @@ public class StorageTests
         var service = new CellBridgeDocumentService(provider);
         var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => service.CreateAsync("/same.docx", MinimalDocx.Create(), TestActor.Value).AsTask()));
         var initial = Assert.Single(outcomes, x => x is not null)!;
-        await Task.WhenAll(Enumerable.Range(0, 32).Select(_ => provider.State.TransitionAsync(initial.ResourceId,
-            (current, _) => new StateTransition<bool>(current with { ContentVersion = current.ContentVersion + 1 }, true)).AsTask()));
+        var snapshot = (await provider.State.FindByResourceIdAsync(initial.ResourceId))!;
+        var callbacks = new int[32];
+        var accepted = await Task.WhenAll(Enumerable.Range(0, callbacks.Length).Select(async index =>
+        {
+            try
+            {
+                return await provider.State.TransitionAsync(initial.ResourceId, (current, _) =>
+                {
+                    Interlocked.Increment(ref callbacks[index]);
+                    return new StateTransition<bool>(current with { ContentVersion = current.ContentVersion + 1 }, true);
+                });
+            }
+            catch (StorageConflictException) { return false; }
+        }));
+        var committed = accepted.Count(result => result);
+        Assert.True(committed > 0);
+        Assert.All(callbacks, count => Assert.Equal(1, count));
         var final = await provider.State.FindByResourceIdAsync(initial.ResourceId);
-        Assert.Equal(initial.ContentVersion + 32, final!.ContentVersion);
-        Assert.Equal(32, final.StateVersion);
+        Assert.Equal(initial.ContentVersion + committed, final!.ContentVersion);
+        Assert.Equal(initial.StateVersion + committed, final.StateVersion);
+        Assert.Equal(initial.ContentVersion, snapshot.ContentVersion);
+        Assert.Equal(initial.StateVersion, snapshot.StateVersion);
+        Assert.Equal(initial.Content, snapshot.Content);
     }
 
     [Fact]

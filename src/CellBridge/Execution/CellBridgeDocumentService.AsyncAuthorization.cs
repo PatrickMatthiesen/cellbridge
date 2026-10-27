@@ -126,19 +126,23 @@ public sealed partial class CellBridgeDocumentService
         CancellationToken cancellationToken = default)
     {
         var next = ExternalBinding(scope, checked((expectedBinding?.Revision ?? 0) + 1));
-        return await provider.State.TransitionAsync(resourceId, (current, _) =>
+        try
         {
-            if (current.IsDeleted || current.StateVersion != expectedStateVersion || current.Security.AuthorizationPolicy != expectedBinding)
-                return new StateTransition<bool>(null, false);
-            var updated = current with
+            return await provider.State.TransitionAsync(resourceId, (current, _) =>
             {
-                Security = current.Security with { AuthorizationPolicy = next },
-                Editors = [],
-                Coordination = CoordinationState.Empty with { Generation = checked(current.Coordination.Generation + 1) },
-            };
-            provider.Limits.CheckDocument(updated);
-            return new StateTransition<bool>(updated, true);
-        }, cancellationToken);
+                if (current.IsDeleted || current.StateVersion != expectedStateVersion || current.Security.AuthorizationPolicy != expectedBinding)
+                    return new StateTransition<bool>(null, false);
+                var updated = current with
+                {
+                    Security = current.Security with { AuthorizationPolicy = next },
+                    Editors = [],
+                    Coordination = CoordinationState.Empty with { Generation = checked(current.Coordination.Generation + 1) },
+                };
+                provider.Limits.CheckDocument(updated);
+                return new StateTransition<bool>(updated, true);
+            }, cancellationToken);
+        }
+        catch (StorageConflictException) { return false; }
     }
 
     private DocumentAuthorizationBinding ExternalBinding(DocumentAuthorizationScope scope, long revision = 1)

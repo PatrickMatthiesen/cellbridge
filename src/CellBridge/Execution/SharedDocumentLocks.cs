@@ -18,26 +18,34 @@ public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
         if (operation == HostLockOperation.Replace && (string.IsNullOrWhiteSpace(replacementToken) || replacementToken.Length > 1024))
             throw new ArgumentException("A replacement lock token is required.", nameof(replacementToken));
         actor = await service.AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Write, cancellationToken);
-        return await service.Provider.State.TransitionAsync(resourceId, (current, now) =>
+        try
         {
-            if (!service.Access(actor, current).HasFlag(DocumentAccess.Write)) throw new UnauthorizedAccessException("Write access denied.");
-            var coordination = current.Coordination;
-            var active = coordination.HostLock is { } host && host.ExpiresUtc > now ? host : null;
-            if (coordination.Exclusive is { } exclusive && exclusive.ExpiresUtc > now || coordination.SchemaOwners.Any(l => l.ExpiresUtc > now))
-                return new StateTransition<HostLockResult>(null, new(false, null, coordination.Exclusive?.Id ?? coordination.SchemaId));
-            var owned = active is not null && active.Token == token && active.OwnerSubject == actor.Identity.Subject;
-            if (operation == HostLockOperation.Acquire ? active is not null && !owned : !owned)
-                return new StateTransition<HostLockResult>(null, new(false, null, active?.Token));
-            var epoch = checked(coordination.Generation + 1);
-            var nextHost = operation == HostLockOperation.Release ? null : new HostLease(
-                operation == HostLockOperation.Replace ? replacementToken! : token, actor.Identity.Subject, now.AddMinutes(30));
-            var next = current with { Coordination = coordination with
-            { HostLock = nextHost, Exclusive = null, SchemaOwners = [], SchemaId = null,
-                CoauthorClients = [], CoauthorTransitionPending = false, Generation = epoch } };
-            var writeToken = nextHost is null ? null : new HostWriteToken(resourceId, current.LifecycleGeneration,
-                epoch, nextHost.Token, actor.Identity.Subject);
-            return new StateTransition<HostLockResult>(next, new(true, writeToken, nextHost?.Token));
-        }, cancellationToken);
+            return await service.Provider.State.TransitionAsync(resourceId, (current, now) =>
+            {
+                if (!service.Access(actor, current).HasFlag(DocumentAccess.Write)) throw new UnauthorizedAccessException("Write access denied.");
+                var coordination = current.Coordination;
+                var active = coordination.HostLock is { } host && host.ExpiresUtc > now ? host : null;
+                if (coordination.Exclusive is { } exclusive && exclusive.ExpiresUtc > now || coordination.SchemaOwners.Any(l => l.ExpiresUtc > now))
+                    return new StateTransition<HostLockResult>(null, new(false, null, coordination.Exclusive?.Id ?? coordination.SchemaId));
+                var owned = active is not null && active.Token == token && active.OwnerSubject == actor.Identity.Subject;
+                if (operation == HostLockOperation.Acquire ? active is not null && !owned : !owned)
+                    return new StateTransition<HostLockResult>(null, new(false, null, active?.Token));
+                var epoch = checked(coordination.Generation + 1);
+                var nextHost = operation == HostLockOperation.Release ? null : new HostLease(
+                    operation == HostLockOperation.Replace ? replacementToken! : token, actor.Identity.Subject, now.AddMinutes(30));
+                var next = current with { Coordination = coordination with
+                { HostLock = nextHost, Exclusive = null, SchemaOwners = [], SchemaId = null,
+                    CoauthorClients = [], CoauthorTransitionPending = false, Generation = epoch } };
+                var writeToken = nextHost is null ? null : new HostWriteToken(resourceId, current.LifecycleGeneration,
+                    epoch, nextHost.Token, actor.Identity.Subject);
+                var deadline = nextHost?.ExpiresUtc;
+                if (operation != HostLockOperation.Acquire &&
+                    (deadline is null || active!.ExpiresUtc < deadline)) deadline = active!.ExpiresUtc;
+                return new StateTransition<HostLockResult>(next, new(true, writeToken, nextHost?.Token))
+                    { ValidUntilUtc = deadline };
+            }, cancellationToken);
+        }
+        catch (StorageConflictException) { return new(false, null, null); }
     }
 
     /// <summary>
@@ -49,18 +57,22 @@ public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
         Func<DocumentState, DateTime, DocumentState> commit, Guid operationId, CancellationToken cancellationToken = default)
     {
         actor = await service.AuthorizeResourceActorAsync(actor, token.ResourceId, DocumentAccess.Write, cancellationToken);
-        return await service.Provider.State.TransitionAsync(token.ResourceId, (current, now) =>
+        try
         {
-            if (!service.Access(actor, current).HasFlag(DocumentAccess.Write) || token.OwnerSubject != actor.Identity.Subject ||
-                current.LifecycleGeneration != token.LifecycleGeneration || current.StateVersion != expectedStateVersion ||
-                current.Coordination.Generation != token.CoordinationGeneration || current.Coordination.HostLock is not { } lease ||
-                lease.OwnerSubject != token.OwnerSubject || lease.Token != token.LockToken || lease.ExpiresUtc <= now)
-                return new StateTransition<bool>(null, false);
-            var next = commit(current, now);
-            DocumentLifecycle.ValidateTransition(current, next);
-            if (next.Coordination != current.Coordination) throw new InvalidOperationException("A prepared write cannot replace its authoritative lock state.");
-            next = ExternalPublication.Append(current, next, operationId, service.Provider.Limits);
-            return new StateTransition<bool>(next, true);
-        }, cancellationToken);
+            return await service.Provider.State.TransitionAsync(token.ResourceId, (current, now) =>
+            {
+                if (!service.Access(actor, current).HasFlag(DocumentAccess.Write) || token.OwnerSubject != actor.Identity.Subject ||
+                    current.LifecycleGeneration != token.LifecycleGeneration || current.StateVersion != expectedStateVersion ||
+                    current.Coordination.Generation != token.CoordinationGeneration || current.Coordination.HostLock is not { } lease ||
+                    lease.OwnerSubject != token.OwnerSubject || lease.Token != token.LockToken || lease.ExpiresUtc <= now)
+                    return new StateTransition<bool>(null, false);
+                var next = commit(current, now);
+                DocumentLifecycle.ValidateTransition(current, next);
+                if (next.Coordination != current.Coordination) throw new InvalidOperationException("A prepared write cannot replace its authoritative lock state.");
+                next = ExternalPublication.Append(current, next, operationId, service.Provider.Limits);
+                return new StateTransition<bool>(next, true) { ValidUntilUtc = lease.ExpiresUtc };
+            }, cancellationToken);
+        }
+        catch (StorageConflictException) { return false; }
     }
 }

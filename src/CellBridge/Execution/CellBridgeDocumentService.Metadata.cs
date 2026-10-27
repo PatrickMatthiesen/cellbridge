@@ -121,8 +121,13 @@ public sealed partial class CellBridgeDocumentService
                     };
                     next = RevisionHistory.Append(current, next, actor.Identity, now);
                     provider.Limits.CheckDocument(next);
-                    return new StateTransition<PublishResult>(next, new(next, null, null, false));
+                    return new StateTransition<PublishResult>(next, new(next, null, null, false))
+                        { ValidUntilUtc = coordinator.CellWriteDeadline };
                 }, cancellationToken);
+            }
+            catch (StorageConflictException)
+            {
+                continue;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

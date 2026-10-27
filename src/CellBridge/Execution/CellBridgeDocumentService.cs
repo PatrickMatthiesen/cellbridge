@@ -490,8 +490,15 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                         state = RevisionHistory.Append(current, state, actor.Identity, modifiedUtc);
                     state = ExternalPublication.Append(current, state, publicationOperationId, provider.Limits);
                     provider.Limits.CheckDocument(state);
-                    return new StateTransition<PublishResult>(state, new(state, null, null, false));
+                    return new StateTransition<PublishResult>(state, new(state, null, null, false))
+                        { ValidUntilUtc = coordinator.CellWriteDeadline };
                 }, cancellationToken);
+            }
+            catch (StorageConflictException)
+            {
+                // The existing bounded loop reads fresh authority and rebuilds the
+                // graph. It never submits this stale candidate a second time.
+                continue;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

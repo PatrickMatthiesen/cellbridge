@@ -343,7 +343,11 @@ during this migration can leave the new counters or links incomplete.
 
 Record mutations use shared schema locks, record row locks and foreign keys.
 Creates atomically allocate the next per-list number and lifetime identity count.
-Updates preserve conditional revisions. Number allocation and shared workspace
+PostgreSQL patches use an EF `Revision` concurrency token to check and update the
+record before changing quota counters. A stale revision returns a conflict.
+Reference changes and audit inserts follow the successful record update. Deletes
+still lock the record before quota work. Custom PostgreSQL models must retain the
+`Revision` concurrency token. Number allocation and shared workspace
 accounting still coordinate through their counter rows near commit; they do not
 take an exclusive workspace mutation lock for the whole operation. The separate
 authorization lock remains shared for data operations and exclusive for built-in

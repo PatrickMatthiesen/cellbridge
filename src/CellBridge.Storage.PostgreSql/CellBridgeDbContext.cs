@@ -41,7 +41,7 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
             entity.HasKey(row => row.ResourceId).HasName("cellbridge_documents_pkey");
             entity.Property(row => row.ResourceId).HasColumnName("resource_id").ValueGeneratedNever();
             entity.Property(row => row.PathKey).HasColumnName("path_key").UseCollation("C");
-            entity.Property(row => row.StateVersion).HasColumnName("state_version");
+            entity.Property(row => row.StateVersion).HasColumnName("state_version").IsConcurrencyToken();
             entity.Property(row => row.IsDeleted).HasColumnName("is_deleted").HasDefaultValue(false);
             entity.HasIndex(row => row.PathKey).IsUnique().HasDatabaseName("cellbridge_live_paths")
                 .HasFilter("NOT is_deleted");

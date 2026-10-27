@@ -140,8 +140,17 @@ public sealed partial class CellBridgeDocumentService
                 next = next with { WholeFileSaveReceipts = current.WholeFileSaveReceipts.Add(new(
                     current.LifecycleGeneration, actor.Identity.Subject, operationKey, digest, revision.RevisionNumber)) };
                 provider.Limits.CheckDocument(next);
-                return new StateTransition<WholeFileSaveResult>(next, new(revision, false));
+                return new StateTransition<WholeFileSaveResult>(next, new(revision, false))
+                    { ValidUntilUtc = hostLockToken is null ? null : current.Coordination.HostLock?.ExpiresUtc };
             }, cancellationToken);
+        }
+        catch (StorageConflictException)
+        {
+            var current = await CurrentAsync(resourceId, cancellationToken);
+            Demand(actor, current, DocumentAccess.Write);
+            DemandLifecycle(current);
+            if (Replay(current) is { } accepted) return accepted;
+            throw new WholeFileSaveConflictException("The document changed while preparing the whole-file save.");
         }
         catch (StorageUnavailableException)
         {

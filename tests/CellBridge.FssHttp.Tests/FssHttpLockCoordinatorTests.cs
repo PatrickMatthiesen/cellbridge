@@ -352,6 +352,55 @@ public sealed class FssHttpLockCoordinatorTests
         Assert.True(allowed);
         Assert.Equal("written", value);
         Assert.Null(errorCode);
+        Assert.Null(coordinator.CellWriteDeadline);
+    }
+
+    [Fact]
+    public void CellWriteReportsTheMatchingExclusiveLeaseDeadline()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var coordinator = FssHttpLockCoordinator.For(NewDocument(), TestActor.Value.Identity);
+        var lockId = Guid.NewGuid();
+        Assert.Equal(LockOperationResult.Granted, coordinator.ApplyExclusiveLock(Request(
+            ("ExclusiveLockID", lockId.ToString("D")), ("ExclusiveLockRequestType", "GetLock"),
+            ("Timeout", "60")), new(), now));
+
+        Assert.True(coordinator.ExecuteCellWrite(
+            new Dictionary<string, string> { ["ExclusiveLockID"] = lockId.ToString("N") },
+            () => coordinator.CellWriteDeadline, out DateTime? deadline, out string? errorCode, now));
+
+        Assert.Null(errorCode);
+        Assert.Equal(now.AddSeconds(60), deadline);
+        Assert.Equal(deadline, coordinator.CellWriteDeadline);
+    }
+
+    [Theory]
+    [InlineData(true, 120, 60, 120)]
+    [InlineData(true, 60, 120, 60)]
+    [InlineData(false, 120, 60, 120)]
+    public void CellWriteUsesTheMatchingSchemaOwnerLease(bool includeClient, int ownerSeconds, int peerSeconds, int expectedSeconds)
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var schema = Guid.NewGuid().ToString("D");
+        var owner = Guid.NewGuid().ToString("D");
+        var peer = Guid.NewGuid().ToString("D");
+        var foreign = Guid.NewGuid().ToString("D");
+        var state = new CoordinationState(schema,
+        [
+            new(schema, owner, now.AddSeconds(ownerSeconds), 0, schema, TestActor.Value.Identity.Subject),
+            new(schema, peer, now.AddSeconds(peerSeconds), 0, schema, TestActor.Value.Identity.Subject),
+            new(schema, foreign, now.AddSeconds(180), 0, schema, "other-subject"),
+        ], null, 0);
+        var coordinator = FssHttpLockCoordinator.Restore(NewDocument(), state, now, TestActor.Value.Identity);
+        var attributes = new Dictionary<string, string> { ["SchemaLockID"] = schema };
+        if (includeClient) attributes["ClientID"] = owner;
+
+        Assert.True(coordinator.ExecuteCellWrite(attributes, () => coordinator.CellWriteDeadline,
+            out DateTime? deadline, out string? errorCode, now));
+
+        Assert.Null(errorCode);
+        Assert.Equal(now.AddSeconds(expectedSeconds), deadline);
+        Assert.Equal(deadline, coordinator.CellWriteDeadline);
     }
 
     [Fact]
@@ -437,6 +486,7 @@ public sealed class FssHttpLockCoordinatorTests
         Assert.True(afterExpiry);
         Assert.Equal(2, value);
         Assert.Null(allowedCode);
+        Assert.Null(coordinator.CellWriteDeadline);
     }
 
     [Fact]

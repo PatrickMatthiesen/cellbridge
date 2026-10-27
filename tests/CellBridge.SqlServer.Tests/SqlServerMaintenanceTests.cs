@@ -194,7 +194,7 @@ public sealed class SqlServerMaintenanceTests(SqlServerFixture fixture)
         var pause = new PauseInventory();
         var collecting = new StorageMaintenance(database.Options(true, pause)).CollectOrphansAsync(true, true);
         await pause.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        var observed = new ObservePublishers(5);
+        var observed = new ObservePublishers(4);
         var writers = Enumerable.Range(1, 3).Select(async value =>
         {
             try
@@ -212,9 +212,11 @@ public sealed class SqlServerMaintenanceTests(SqlServerFixture fixture)
         {
             await observed.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.All(writers, task => Assert.False(task.IsCompleted));
-            Assert.False(mutation.IsCompleted);
+            // A no-op is a coherent snapshot read. It does not publish state and
+            // therefore does not wait for the maintenance publication gate.
+            Assert.True(await mutation.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.False(capture.IsCompleted);
-            Assert.Equal(0, Volatile.Read(ref invoked));
+            Assert.Equal(1, Volatile.Read(ref invoked));
         }
         finally
         {

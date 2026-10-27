@@ -101,13 +101,18 @@ public interface IContentStore
     ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default);
 }
 
-public sealed record StateTransition<T>(DocumentState? Next, T Result);
+public sealed record StateTransition<T>(DocumentState? Next, T Result)
+{
+    /// <summary>The lease must remain valid until the provider accepts the version change.</summary>
+    public DateTime? ValidUntilUtc { get; init; }
+}
 
 /// <summary>
 /// Atomic document state operations. Transition callbacks must be deterministic,
-/// bounded and perform no I/O. They run with exclusive per-document coordination
-/// and authoritative time obtained after acquiring it. Null Next is a read/no-op.
-/// Providers must not silently retry callbacks or fall back to volatile storage.
+/// bounded and perform no I/O. They receive one coherent snapshot and its database
+/// time. Providers may prepare changes concurrently and reject a stale write with
+/// StorageConflictException. Null Next is a snapshot read with no publication.
+/// Providers invoke callbacks once, and never silently retry or fall back to volatile storage.
 /// </summary>
 public interface IDocumentStateStore
 {
@@ -124,6 +129,8 @@ public interface IDocumentStateStore
 }
 
 public sealed class StorageUnavailableException(string message, Exception? inner = null) : IOException(message, inner);
+/// <summary>The prepared state was not published. Read fresh state before preparing another operation.</summary>
+public sealed class StorageConflictException(string message, Exception? inner = null) : IOException(message, inner);
 public sealed class StorageCorruptionException(string message, Exception? inner = null) : IOException(message, inner);
 
 /// <summary>The selected state and binary stores, with guarantees for their complete configuration.</summary>

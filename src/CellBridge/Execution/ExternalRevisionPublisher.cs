@@ -11,29 +11,40 @@ public enum PublicationAttempt { NoWork, Delivered, Superseded, Blocked, Conflic
 /// </summary>
 public sealed class ExternalRevisionPublisher(StorageProvider provider, IExternalRevisionDestination destination)
 {
-    public ValueTask<bool> BindAsync(Guid resourceId, long generation, long stateVersion, Guid bindingId,
+    public async ValueTask<bool> BindAsync(Guid resourceId, long generation, long stateVersion, Guid bindingId,
         string destinationId, string externalRevision, CancellationToken cancellationToken = default)
     {
         if (bindingId == Guid.Empty) throw new ArgumentException("A non-empty destination binding ID is required.", nameof(bindingId));
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationId);
         ArgumentException.ThrowIfNullOrWhiteSpace(externalRevision);
-        return provider.State.TransitionAsync(resourceId, (current, _) =>
+        try
         {
-            if (current.LifecycleGeneration != generation || current.StateVersion != stateVersion || current.Publication is not null)
-                return new StateTransition<bool>(null, false);
-            var next = current with { Publication = new(bindingId, destinationId, externalRevision, 1, []) };
-            return new StateTransition<bool>(next, true);
-        }, cancellationToken);
+            return await provider.State.TransitionAsync(resourceId, (current, _) =>
+            {
+                if (current.LifecycleGeneration != generation || current.StateVersion != stateVersion || current.Publication is not null)
+                    return new StateTransition<bool>(null, false);
+                var next = current with { Publication = new(bindingId, destinationId, externalRevision, 1, []) };
+                return new StateTransition<bool>(next, true);
+            }, cancellationToken);
+        }
+        catch (StorageConflictException) { return false; }
     }
 
     /// <summary>Retries the same immutable head and baseline; it never adopts a conflicting remote revision.</summary>
-    public ValueTask<bool> RetryAsync(Guid resourceId, Guid bindingId, Guid operationId,
-        CancellationToken cancellationToken = default) => provider.State.TransitionAsync(resourceId, (current, _) =>
+    public async ValueTask<bool> RetryAsync(Guid resourceId, Guid bindingId, Guid operationId,
+        CancellationToken cancellationToken = default)
     {
-        if (current.Publication is not { Pending.IsEmpty: false } publication || publication.BindingId != bindingId ||
-            publication.Pending[0].OperationId != operationId) return new StateTransition<bool>(null, false);
-        return new StateTransition<bool>(current with { Publication = publication with { BlockedReason = null } }, true);
-    }, cancellationToken);
+        try
+        {
+            return await provider.State.TransitionAsync(resourceId, (current, _) =>
+            {
+                if (current.Publication is not { Pending.IsEmpty: false } publication || publication.BindingId != bindingId ||
+                    publication.Pending[0].OperationId != operationId) return new StateTransition<bool>(null, false);
+                return new StateTransition<bool>(current with { Publication = publication with { BlockedReason = null } }, true);
+            }, cancellationToken);
+        }
+        catch (StorageConflictException) { return false; }
+    }
 
     /// <summary>Delivers at most one revision. Destination I/O is outside state coordination and bounded to 30 seconds.</summary>
     public async ValueTask<PublicationAttempt> PublishNextAsync(Guid resourceId, CancellationToken cancellationToken = default)
@@ -79,6 +90,7 @@ public sealed class ExternalRevisionPublisher(StorageProvider provider, IExterna
             }, CancellationToken.None);
         }
         catch (KeyNotFoundException) { return PublicationAttempt.Superseded; }
+        catch (StorageConflictException) { return PublicationAttempt.TransientFailure; }
     }
 
     private async ValueTask<bool> BlockAsync(Guid id, ExternalDeliveryRequest request, string reason)
@@ -90,6 +102,7 @@ public sealed class ExternalRevisionPublisher(StorageProvider provider, IExterna
                 : new StateTransition<bool>(null, false), CancellationToken.None);
         }
         catch (KeyNotFoundException) { return false; }
+        catch (StorageConflictException) { return false; }
     }
 
     private static bool Matches(DocumentState state, ExternalDeliveryRequest request) =>

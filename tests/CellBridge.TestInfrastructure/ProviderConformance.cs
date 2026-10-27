@@ -25,17 +25,33 @@ public static class ProviderConformance
         var snapshot = await provider.State.FindByResourceIdAsync(id, cancellationToken);
         Require(snapshot is not null && snapshot.ResourceId == id, "Resource lookup failed.");
         Require((await provider.State.FindByPathKeyAsync(initial.PathKey, cancellationToken))?.ResourceId == id, "Path lookup failed.");
-        await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => provider.State.TransitionAsync(id, (current, clock) =>
-            new StateTransition<bool>(current with
+        var callbacks = new int[8];
+        var accepted = await Task.WhenAll(Enumerable.Range(0, callbacks.Length).Select(async index =>
+        {
+            try
             {
-                ContentVersion = checked(current.ContentVersion + 1),
-                Coordination = new(null, [], new("conformance-lease", "client", clock.AddMinutes(1), 0, null),
-                    checked(current.Coordination.Generation + 1)),
-            }, true), cancellationToken).AsTask()));
+                return await provider.State.TransitionAsync(id, (current, clock) =>
+                {
+                    Interlocked.Increment(ref callbacks[index]);
+                    return new StateTransition<bool>(current with
+                    {
+                        ContentVersion = checked(current.ContentVersion + 1),
+                        Coordination = new(null, [], new("conformance-lease", "client", clock.AddMinutes(1), 0, null),
+                            checked(current.Coordination.Generation + 1)),
+                    }, true);
+                }, cancellationToken);
+            }
+            catch (StorageConflictException) { return false; }
+        }));
+        var committed = accepted.Count(result => result);
+        Require(committed > 0, "No concurrent transition committed.");
+        Require(callbacks.All(count => count == 1), "A transition callback was skipped or replayed.");
         var final = (await provider.State.FindByResourceIdAsync(id, cancellationToken))!;
-        Require(final.ContentVersion == 9 && final.StateVersion == 8 && final.Coordination.Generation == 8, "Concurrent transitions lost updates.");
+        Require(final.ContentVersion == initial.ContentVersion + committed && final.StateVersion == initial.StateVersion + committed &&
+            final.Coordination.Generation == initial.Coordination.Generation + committed, "Committed transitions lost updates.");
         Require(final.Coordination.Exclusive?.Id == "conformance-lease", "Lease state did not persist.");
-        Require(snapshot!.ContentVersion == 1 && snapshot.Coordination.Exclusive is null, "An acquired snapshot was mutated.");
+        Require(snapshot!.ContentVersion == 1 && snapshot.StateVersion == 0 && snapshot.Coordination.Generation == 0 &&
+            snapshot.Coordination.Exclusive is null && snapshot.Content == handle, "An acquired snapshot was mutated.");
         try
         {
             await provider.State.TransitionAsync<bool>(id, (_, _) => throw new ConformanceAbortException(), cancellationToken);

@@ -39,10 +39,11 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
             await transaction.CommitAsync(CancellationToken.None);
             return result;
         }
-        // Before COMMIT, cancellation has a known rollback even when the provider
-        // includes a database exception as its inner exception.
+        // Provider cancellation can carry an inner database exception. Before
+        // COMMIT, disposal rolls back the operation and its outcome is known.
         catch (OperationCanceledException) when (ct.IsCancellationRequested && !commitStarted)
         { throw; }
+        catch (StorageConflictException) { throw; }
         catch (Exception ex) when (rename && database.IsUniqueViolation(ex))
         { throw new InvalidOperationException("The destination filename already exists.", ex); }
         catch (Exception ex) when (database.IsDatabaseException(ex))
@@ -105,35 +106,68 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
         CancellationToken cancellationToken = default) => TransitionCoreAsync(resourceId, transition, true, false, cancellationToken);
 
     private async ValueTask<T> TransitionCoreAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
-        bool rename, bool lifecycle, CancellationToken ct) => await MutateAsync(async db =>
+        bool rename, bool lifecycle, CancellationToken ct)
     {
-        if (rename) await database.Locks.NamespaceAsync(db, ct);
-        await database.Locks.DocumentAsync(db, id, ct);
-        var pointer = await db.Set<DocumentRow>().SingleOrDefaultAsync(row => row.ResourceId == id, ct)
-            ?? throw new KeyNotFoundException("Document does not exist.");
-        var current = await LoadCurrentAsync(db, pointer, ct);
-        if (current.IsDeleted && !lifecycle) throw new KeyNotFoundException("Document is deleted.");
-        var now = await ReadClockAsync(db, ct);
-        var change = transition(current, now);
-        if (change.Next is { } proposed)
+        // Read the pointer and its snapshot together. A second read could race
+        // with another writer pruning the snapshot selected by the first read.
+        var observed = await ReadAsync(async db =>
         {
-            if (!lifecycle) DocumentPathReservations.ValidateTransition(current, proposed, rename);
-            var next = proposed with { StateVersion = checked(current.StateVersion + 1),
-                RetiredPathKeys = DocumentPathReservations.Capture(current, proposed, rename) };
-            limits.CheckDocument(next);
+            if (db.Model.FindEntityType(typeof(DocumentRow))?.FindProperty(nameof(DocumentRow.StateVersion))?.IsConcurrencyToken != true)
+                throw new InvalidOperationException("Document StateVersion must be configured as an EF concurrency token.");
+            var row = await (from pointer in db.Set<DocumentRow>().AsNoTracking()
+                where pointer.ResourceId == id
+                join snapshot in db.Set<StateRow>().AsNoTracking() on new { pointer.ResourceId, pointer.StateVersion }
+                    equals new { snapshot.ResourceId, snapshot.StateVersion } into snapshots
+                from snapshot in snapshots.DefaultIfEmpty()
+                select new { Pointer = pointer, Json = snapshot == null ? null : snapshot.StateJson,
+                    Now = DocumentSql.ClockUtc() }).SingleOrDefaultAsync(ct)
+                ?? throw new KeyNotFoundException("Document does not exist.");
+            var clock = database.ReadClockAfterStatement ? await database.ClockAsync(db, ct) : row.Now;
+            return (row.Pointer, row.Json, Now: clock);
+        }, ct);
+        var current = Decode(observed.Json ?? throw new StorageCorruptionException("The current snapshot is missing."), observed.Pointer);
+        var now = DateTime.SpecifyKind(observed.Now, DateTimeKind.Utc);
+        if (current.IsDeleted && !lifecycle) throw new KeyNotFoundException("Document is deleted.");
+        var change = transition(current, now);
+        if (change.Next is not { } proposed) return change.Result;
+        if (!lifecycle) DocumentPathReservations.ValidateTransition(current, proposed, rename);
+        var next = proposed with { StateVersion = checked(current.StateVersion + 1),
+            RetiredPathKeys = DocumentPathReservations.Capture(current, proposed, rename) };
+        limits.CheckDocument(next);
+        return await MutateAsync(async db =>
+        {
+            if (rename) await database.Locks.NamespaceAsync(db, ct);
             if (rename)
             {
                 var namespaceStates = await VerifyNamespaceRowsAsync(db, ct);
                 if (next.PathKey != current.PathKey && IsPathReserved(next.PathKey, [id], true, namespaceStates))
                     throw new InvalidOperationException("The destination filename is reserved.");
             }
+            var pointer = observed.Pointer;
+            var entry = db.Attach(pointer);
+            UpdatePointer(pointer, next);
+            try
+            {
+                // Publish the real version change before dependent inserts or
+                // accounting. EF checks the original version in this UPDATE.
+                var saved = await db.SaveChangesAsync(ct);
+                if (saved != 1 || entry.State != EntityState.Unchanged)
+                    throw new InvalidOperationException("The document update was suppressed by a save interceptor.");
+            }
+            catch (DbUpdateConcurrencyException ex) when (ex.InnerException is null &&
+                ex.Entries.Count == 1 && ReferenceEquals(ex.Entries[0].Entity, pointer))
+            {
+                throw new StorageConflictException("The document changed while preparing the operation.", ex);
+            }
+            if (change.ValidUntilUtc is { } deadline && await ReadClockAsync(db, ct) >= deadline)
+                throw new StorageConflictException("The write lease expired before publication.");
             await WriteSnapshotAsync(db, next, true, ct);
             await WriteSelectiveReadsAsync(db, next, ct);
-            UpdatePointer(pointer, next);
-            await db.SaveChangesAsync(ct);
-        }
-        return change.Result;
-    }, ct, exclusive: rename, rename: rename);
+            if (await db.SaveChangesAsync(ct) == 0 || db.ChangeTracker.HasChanges())
+                throw new InvalidOperationException("The document snapshot save was suppressed by a save interceptor.");
+            return change.Result;
+        }, ct, exclusive: rename, rename: rename);
+    }
 
     public async ValueTask<bool> TryDeleteAsync(Guid resourceId, long expectedGeneration, long expectedStateVersion,
         CancellationToken cancellationToken = default)
@@ -147,6 +181,14 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
             }, false, true, cancellationToken);
         }
         catch (KeyNotFoundException) { return false; }
+        catch (StorageConflictException)
+        {
+            // A competing identical delete may already have succeeded. Resolve
+            // that idempotent result without invoking the transition again.
+            var current = await FindLifecycleAsync(resourceId, cancellationToken);
+            return current is { IsDeleted: true } &&
+                current.LifecycleGeneration == expectedGeneration && current.DeletedFromStateVersion == expectedStateVersion;
+        }
     }
 
     public async ValueTask<bool> TryRecreateAsync(Guid retiredResourceId, long expectedGeneration, long expectedStateVersion,
@@ -212,7 +254,6 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
         EF.CompileAsyncQuery((TContext db, Guid id, long version, CancellationToken token) =>
             db.Set<StateRow>().AsNoTracking().Where(row => row.ResourceId == id && row.StateVersion == version)
                 .Select(row => row.StateJson).SingleOrDefault());
-
     private async Task<DocumentState> LoadCurrentAsync(TContext db, DocumentRow pointer, CancellationToken ct)
     {
         var model = db.Model;

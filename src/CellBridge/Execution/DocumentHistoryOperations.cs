@@ -128,7 +128,8 @@ public sealed partial class CellBridgeDocumentService
                 next = next with { RestoreReceipts = current.RestoreReceipts.Add(new(current.LifecycleGeneration,
                     actor.Identity.Subject, operationKey, digest, RevisionHistory.Latest(next))) };
                 provider.Limits.CheckDocument(next);
-                return new StateTransition<RestoreRevisionResult>(next, new(next.Revisions[^1], false));
+                return new StateTransition<RestoreRevisionResult>(next, new(next.Revisions[^1], false))
+                    { ValidUntilUtc = coordinator.CellWriteDeadline };
             }, cancellationToken);
         }
         catch (StorageUnavailableException)

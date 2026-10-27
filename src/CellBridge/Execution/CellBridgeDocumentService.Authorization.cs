@@ -83,18 +83,22 @@ public sealed partial class CellBridgeDocumentService
         // Resolve outside coordination too, so an unavailable snapshot cannot be mistaken for a successful update.
         var before = await CurrentAsync(resourceId, cancellationToken);
         _ = RequireNextSnapshot(before);
-        return await provider.State.TransitionAsync(resourceId, (current, now) =>
+        try
         {
-            if (current.IsDeleted || current.Security.AuthorizationPolicy != expected) return new StateTransition<bool>(null, false);
-            var snapshot = RequireNextSnapshot(current);
-            var security = current.Security with { AuthorizationPolicy = next };
-            var nextState = current with { Security = security };
-            // A throwing decision aborts the entire update. Missing subjects are explicit None decisions.
-            var updated = DocumentPermissionUpdates.ApplyPolicy(current, now, security,
-                subject => EvaluateBoundAccess(snapshot, subject, nextState));
-            provider.Limits.CheckDocument(updated);
-            return new StateTransition<bool>(updated, true);
-        }, cancellationToken);
+            return await provider.State.TransitionAsync(resourceId, (current, now) =>
+            {
+                if (current.IsDeleted || current.Security.AuthorizationPolicy != expected) return new StateTransition<bool>(null, false);
+                var snapshot = RequireNextSnapshot(current);
+                var security = current.Security with { AuthorizationPolicy = next };
+                var nextState = current with { Security = security };
+                // A throwing decision aborts the entire update. Missing subjects are explicit None decisions.
+                var updated = DocumentPermissionUpdates.ApplyPolicy(current, now, security,
+                    subject => EvaluateBoundAccess(snapshot, subject, nextState));
+                provider.Limits.CheckDocument(updated);
+                return new StateTransition<bool>(updated, true);
+            }, cancellationToken);
+        }
+        catch (StorageConflictException) { return false; }
 
         ICellBridgeAuthorizationSnapshot RequireNextSnapshot(DocumentState current)
         {

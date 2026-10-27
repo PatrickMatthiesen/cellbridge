@@ -15,8 +15,13 @@ internal sealed partial class EfListEngine
         try { return await operation(); }
         catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.QueryCanceled or PostgresErrorCodes.LockNotAvailable)
         { throw new ListException(ListFailure.Unavailable, "The list operation timed out."); }
+        catch (DbUpdateConcurrencyException ex) when (ex.InnerException is null &&
+            ex.Entries.Count != 0 && ex.Entries.All(entry => entry.Entity is RecordRow))
+        { throw Conflict("The record revision changed."); }
         catch (DbUpdateException ex) when (ex.InnerException is NpgsqlException npgsql)
         { throw new ListException(ListFailure.Unavailable, $"The list store is unavailable: {npgsql.Message}"); }
+        catch (DbUpdateConcurrencyException)
+        { throw new ListException(ListFailure.Unavailable, "The list publication could not be confirmed."); }
         catch (NpgsqlException ex)
         { throw new ListException(ListFailure.Unavailable, $"The list store is unavailable: {ex.Message}"); }
     }
@@ -192,6 +197,17 @@ internal sealed partial class EfListEngine
         string json, CancellationToken ct) => ScalarAsync<long>(connection, transaction,
             "SELECT octet_length(($1::jsonb)::text)::bigint", ct, json);
 
+    private static async Task<(long Bytes, DateTimeOffset Now)> ReadUpdatePublicationStateAsync(
+        PostgreSqlListDbContext db, string json, CancellationToken ct)
+    {
+        await using var command = Command(db.Database.GetDbConnection(),
+            db.Database.CurrentTransaction!.GetDbTransaction(),
+            "SELECT octet_length(($1::jsonb)::text)::bigint, clock_timestamp()", json);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) throw new InvalidOperationException("The update state is missing.");
+        return (reader.GetInt64(0), reader.GetFieldValue<DateTimeOffset>(1));
+    }
+
     private PostgreSqlListDbContext CreateContext() =>
         _contextFactory?.CreateDbContext() ?? new PostgreSqlListDbContext(_dbOptions);
 
@@ -207,12 +223,14 @@ internal sealed partial class EfListEngine
         list.Parameters.AddWithValue(workspaceId);
         list.Parameters.AddWithValue(listId);
         batch.BatchCommands.Add(list);
-        if (recordId != Guid.Empty)
+        if (recordId != Guid.Empty && deleteLock)
         {
-            var record = new NpgsqlBatchCommand($$"""
+            // Delete needs FOR UPDATE before quota so target KEY SHARE locks
+            // cannot force a later lock upgrade while quota is held.
+            var record = new NpgsqlBatchCommand("""
                 SELECT record_id FROM cellbridge_lists.records
                 WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3
-                {{(deleteLock ? "FOR UPDATE" : "FOR NO KEY UPDATE")}}
+                FOR UPDATE
                 """);
             record.Parameters.AddWithValue(workspaceId);
             record.Parameters.AddWithValue(listId);
@@ -221,7 +239,7 @@ internal sealed partial class EfListEngine
         }
         await using var reader = await batch.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) throw NotFound();
-        if (recordId != Guid.Empty) await reader.NextResultAsync(ct);
+        if (recordId != Guid.Empty && deleteLock) await reader.NextResultAsync(ct);
     }
 
     private static async Task LockCreateStateAsync(DbConnection connection,

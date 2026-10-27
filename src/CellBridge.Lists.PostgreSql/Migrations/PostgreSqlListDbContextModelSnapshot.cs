@@ -371,6 +371,7 @@ namespace CellBridge.Lists.PostgreSql.Migrations
                         .HasColumnName("number");
 
                     b.Property<long>("Revision")
+                        .IsConcurrencyToken()
                         .HasColumnType("bigint")
                         .HasColumnName("revision");
 

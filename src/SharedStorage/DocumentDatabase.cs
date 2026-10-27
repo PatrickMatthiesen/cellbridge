@@ -18,6 +18,7 @@ internal interface IDocumentLocking<TContext> where TContext : DbContext
 internal interface IDocumentDatabase<TContext> where TContext : DbContext
 {
     TContext CreateContext();
+    bool ReadClockAfterStatement { get; }
     IDocumentLocking<TContext> Locks { get; }
     Task<T> ReadAsync<T>(TContext db, Func<Task<T>> action, bool coherent, CancellationToken ct);
     IAsyncEnumerable<(DocumentRow Pointer, string? Json)> ReadNamespaceRowsAsync(TContext db, CancellationToken ct);

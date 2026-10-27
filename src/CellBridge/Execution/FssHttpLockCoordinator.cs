@@ -405,6 +405,8 @@ public sealed class FssHttpLockCoordinator
     /// cannot race the write decision or the write itself.
     /// </summary>
     /// <returns><see langword="true"/> when the callback ran.</returns>
+    internal DateTime? CellWriteDeadline { get; private set; }
+
     public bool ExecuteCellWrite<T>(
         IReadOnlyDictionary<string, string> attrs,
         Func<T> operation,
@@ -417,6 +419,7 @@ public sealed class FssHttpLockCoordinator
 
         lock (_gate)
         {
+            CellWriteDeadline = null;
             var instant = now ?? _authoritativeNow ?? DateTime.UtcNow;
             if (_actor is null || _exclusive is { } owned && owned.ExpiresUtc > instant && owned.OwnerSubject != _actor.Subject)
                 return RejectCellWrite(out result, out errorCode, "FileUnauthorizedAccess");
@@ -458,6 +461,11 @@ public sealed class FssHttpLockCoordinator
             if (_exclusive is null && _schemaLockId is null &&
                 (TryRead(attrs, "ExclusiveLockID", out _) || TryRead(attrs, "SchemaLockID", out _)))
                 return RejectCellWrite(out result, out errorCode, "InvalidCoauthSession");
+            var authorizedClient = ReadClient(attrs);
+            CellWriteDeadline = _exclusive?.ExpiresUtc ?? _schemaOwners.Values
+                .Where(lease => lease.OwnerSubject == _actor.Subject &&
+                    (authorizedClient is null || Same(lease.Client, authorizedClient)))
+                .Select(lease => (DateTime?)lease.ExpiresUtc).Max();
             result = operation();
             errorCode = null;
             return true;
