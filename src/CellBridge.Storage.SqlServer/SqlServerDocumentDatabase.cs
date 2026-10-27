@@ -1,4 +1,5 @@
 using CellBridge.Storage.Abstractions;
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Data.SqlClient;
@@ -137,8 +138,16 @@ internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlS
     public Task<UsageRow> UsageAsync(SqlServerDocumentDbContext db, CancellationToken ct) => LockUsageAsync(db, ct);
     public async Task<bool> InsertObjectAsync(SqlServerDocumentDbContext db, ContentHandle handle, CancellationToken ct)
     {
-        if (await db.Objects.AnyAsync(row => row.ObjectKey == handle.Key, ct)) return false;
-        db.Objects.Add(new ObjectRow { ObjectKey = handle.Key, Length = handle.Length, Sha256 = handle.Sha256 });
-        return true;
+        // The creation lock is already held. Persist metadata before the chunk
+        // INSERT instead of leaving an ObjectRow pending in EF's change tracker.
+        return await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO cellbridge_documents.objects ([Key],[Length],[Sha256])
+            SELECT @key,@length,@key
+            WHERE NOT EXISTS (SELECT 1 FROM cellbridge_documents.objects WHERE [Key]=@key)
+            """, new object[]
+            {
+                new SqlParameter("@key", SqlDbType.Char, 64) { Value = handle.Key },
+                new SqlParameter("@length", SqlDbType.BigInt) { Value = handle.Length },
+            }, ct) != 0;
     }
 }

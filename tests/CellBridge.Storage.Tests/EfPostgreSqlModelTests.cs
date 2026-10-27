@@ -163,7 +163,7 @@ public sealed class EfPostgreSqlModelTests
             var bytes = new byte[17 * chunkSize];
             await new PostgreSqlStorageMigrator(source,
                 new StorageLimits { MaxStoredBytes = bytes.LongLength - 1 }).MigrateAsync();
-            var interceptor = new CountSavesInterceptor();
+            var interceptor = new CountChunkWritesInterceptor();
             var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
                 .UseNpgsql(source)
                 .AddInterceptors(interceptor)
@@ -174,7 +174,7 @@ public sealed class EfPostgreSqlModelTests
                 content.WriteAsync(new MemoryStream(bytes, writable: false)).AsTask());
 
             Assert.Equal("total stored bytes", error.Budget);
-            Assert.Equal(2, interceptor.Saves);
+            Assert.Equal([16, 1], interceptor.Rows);
             await AssertContentAccountingAsync(source, objects: 0, chunks: 0, bytes: 0);
         });
 
@@ -442,25 +442,33 @@ public sealed class EfPostgreSqlModelTests
         Assert.Equal(0L, reader.GetInt64(3));
     }
 
-    private sealed class CountSavesInterceptor : SaveChangesInterceptor
+    private static bool IsChunkInsert(DbCommand command) =>
+        command.CommandText.Contains("INSERT INTO cellbridge_chunks", StringComparison.Ordinal);
+
+    private sealed class CountChunkWritesInterceptor : DbCommandInterceptor
     {
-        public int Saves { get; private set; }
-        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
+        public List<int> Rows { get; } = [];
+        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result,
             CancellationToken cancellationToken = default)
         {
-            Saves++;
+            if (IsChunkInsert(command))
+            {
+                Assert.Equal(1, command.CommandText.Split("INSERT INTO cellbridge_chunks", StringSplitOptions.None).Length - 1);
+                Rows.Add(result);
+            }
             return ValueTask.FromResult(result);
         }
     }
 
-    private sealed class FirstChunkBatchBarrier : SaveChangesInterceptor
+    private sealed class FirstChunkBatchBarrier : DbCommandInterceptor
     {
         private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int batches;
 
-        public override async ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
+        public override async ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result,
             CancellationToken cancellationToken = default)
         {
+            if (!IsChunkInsert(command)) return result;
             var batch = Interlocked.Increment(ref batches);
             if (batch == 2) ready.TrySetResult();
             if (batch <= 2) await ready.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
@@ -480,15 +488,19 @@ public sealed class EfPostgreSqlModelTests
         }
     }
 
-    private sealed class CancelAfterFirstSaveInterceptor(CancellationTokenSource cancellation) : SaveChangesInterceptor
+    private sealed class CancelAfterFirstSaveInterceptor(CancellationTokenSource cancellation) : DbCommandInterceptor
     {
         private int _triggered;
         public bool Triggered => Volatile.Read(ref _triggered) != 0;
 
-        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
+        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result,
             CancellationToken cancellationToken = default)
         {
-            if (Interlocked.Exchange(ref _triggered, 1) == 0) cancellation.Cancel();
+            if (IsChunkInsert(command) && Interlocked.Exchange(ref _triggered, 1) == 0)
+            {
+                Assert.True(result > 0);
+                cancellation.Cancel();
+            }
             return ValueTask.FromResult(result);
         }
     }

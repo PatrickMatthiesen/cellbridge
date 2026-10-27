@@ -36,6 +36,8 @@ internal interface IDocumentDatabase<TContext> where TContext : DbContext
     Task<bool> InsertObjectAsync(TContext db, ContentHandle handle, CancellationToken ct);
     IQueryable<ObjectRow> ObjectsAtKeys(TContext db, IReadOnlyList<string> keys);
     Task<IReadOnlySet<string>> CreateObjectsAsync(TContext db, IReadOnlyList<ContentHandle> handles, CancellationToken ct);
+    // The content writer supplies at most 16 nonempty chunks of at most 64 KiB each.
+    Task InsertChunksAsync(TContext db, IReadOnlyList<ChunkRow> chunks, CancellationToken ct);
     Task<UsageRow> UpdateAtomicSaveUsageAsync(TContext db, long snapshotBytes, long contentBytes, CancellationToken ct);
     Task<bool> HasReservationsAsync(TContext db, CancellationToken ct);
 }

@@ -145,12 +145,10 @@ internal sealed partial class DocumentContent<TContext> : IContentStore, IStorag
             throw new StorageCorruptionException("Existing content chunks failed integrity verification.");
     }
 
-    private static async Task SaveChunkBatchAsync(TContext context, List<ChunkRow> pending,
+    private async Task SaveChunkBatchAsync(TContext context, List<ChunkRow> pending,
         CancellationToken cancellationToken)
     {
-        context.Set<ChunkRow>().AddRange(pending);
-        await context.SaveChangesAsync(cancellationToken);
-        foreach (var chunk in pending) context.Entry(chunk).State = EntityState.Detached;
+        await database.InsertChunksAsync(context, pending, cancellationToken);
         pending.Clear();
     }
 

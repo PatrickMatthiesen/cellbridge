@@ -197,10 +197,17 @@ public sealed class SqlServerAtomicDocumentSaveTests(SqlServerFixture fixture)
         { Commits++; return Task.CompletedTask; }
     }
 
-    private sealed class CancelChunkBatch(CancellationTokenSource cancellation) : SaveChangesInterceptor
+    private sealed class CancelChunkBatch(CancellationTokenSource cancellation) : DbCommandInterceptor
     {
-        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
+        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result,
             CancellationToken cancellationToken = default)
-        { cancellation.Cancel(); return ValueTask.FromResult(result); }
+        {
+            if (command.CommandText.Contains("INSERT INTO [cellbridge_documents].[chunks]", StringComparison.Ordinal))
+            {
+                Assert.True(result > 0);
+                cancellation.Cancel();
+            }
+            return ValueTask.FromResult(result);
+        }
     }
 }

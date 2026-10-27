@@ -134,6 +134,19 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task ContentChunksUseBoundedMultiRowStatementsAndReadBackInOrder()
+    {
+        var chunks = new CountChunkWrites();
+        var options = new DbContextOptionsBuilder<SqlServerDocumentDbContext>(Options(await CreateRuntimeAsync()))
+            .AddInterceptors(chunks).Options;
+        var store = new SqlServerContentStore(options);
+        var bytes = RandomNumberGenerator.GetBytes(17 * 65536);
+        var handle = await store.WriteAsync(new MemoryStream(bytes));
+        Assert.Equal([16, 1], chunks.Rows);
+        Assert.Equal(bytes, await store.ReadVerifiedAsync(handle));
+    }
+
+    [Fact]
     public async Task RestrictedRuntimeCanReadContentButCannotChangeSchemaOrMigrate()
     {
         var options = Options(await CreateRuntimeAsync());
@@ -270,17 +283,32 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
     private sealed class CancelChunkInsert(CancellationTokenSource cancellation) : DbCommandInterceptor
     {
         public bool Triggered { get; private set; }
-        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
-            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result,
+            CancellationToken cancellationToken = default)
         {
             if (command.CommandText.Contains("[cellbridge_documents].[chunks]", StringComparison.Ordinal) &&
                 (command.CommandText.Contains("INSERT", StringComparison.Ordinal) || command.CommandText.Contains("MERGE", StringComparison.Ordinal)))
             {
                 Triggered = true;
+                Assert.True(result > 0);
                 cancellation.Cancel();
-                cancellationToken.ThrowIfCancellationRequested();
             }
-            return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    private sealed class CountChunkWrites : DbCommandInterceptor
+    {
+        public List<int> Rows { get; } = [];
+        public override ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("INSERT INTO [cellbridge_documents].[chunks]", StringComparison.Ordinal))
+            {
+                Assert.Equal(1, command.CommandText.Split("INSERT INTO [cellbridge_documents].[chunks]", StringSplitOptions.None).Length - 1);
+                Rows.Add(result);
+            }
+            return ValueTask.FromResult(result);
         }
     }
 }
