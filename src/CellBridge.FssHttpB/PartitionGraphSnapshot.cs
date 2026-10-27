@@ -180,7 +180,7 @@ public sealed partial class PartitionGraphSnapshot
         bool needsResolution = objects.Any(o => o.Declaration.BlobReference is not null || o.Declaration.PartitionId != 1) ||
             !local.Contains(_rootObject) || objects.Where(o => o.Declaration.PartitionId == 1)
                 .Any(o => o.ObjectReferences.Any(id => !local.Contains(id)));
-        if (!needsResolution) return ObjectGroupGraph.FromDataElements(groups);
+        if (!needsResolution) return ObjectGroupGraph.FromOpaqueObjects(objects);
         var resolved = GenericPartitionGraphSnapshot.Create(_elements.Values, _storageIndex);
         return ObjectGroupGraph.FromOpaqueObjects(resolved.GetObjects(_cell));
     }
