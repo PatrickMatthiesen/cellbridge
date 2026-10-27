@@ -7,12 +7,11 @@ internal sealed partial class EfListEngine
 {
     private sealed class DatabaseLocks(EfListEngine engine) : IListDatabaseLocks
     {
-        public bool BatchesRecordLocks(OperationAuthorization? authorization) => authorization is null;
         public IQueryable<WorkspaceRow> LockedQuota(ListDbContext db, Guid workspaceId) =>
             db.Workspaces.FromSql($"SELECT * FROM cellbridge_lists.workspaces WHERE workspace_id={workspaceId} FOR UPDATE");
         public Task AuthorizationAsync(ListDbContext db, Guid workspaceId, bool exclusive, bool mutation,
-            OperationAuthorization? authorization, CancellationToken ct, RecordLocks? recordLocks = null) =>
-            engine.LockAuthorizationAsync(db, workspaceId, exclusive, mutation, authorization, ct, recordLocks);
+            OperationAuthorization? authorization, CancellationToken ct) =>
+            engine.LockAuthorizationAsync(db, workspaceId, exclusive, mutation, authorization, ct);
         public Task QuotaAsync(ListDbContext db, Guid workspaceId, CancellationToken ct) =>
             LockQuotaAsync(db.Database.GetDbConnection(), db.Database.CurrentTransaction!.GetDbTransaction(), workspaceId, ct);
         public Task MutationAsync(ListDbContext db, Guid workspaceId, CancellationToken ct) =>

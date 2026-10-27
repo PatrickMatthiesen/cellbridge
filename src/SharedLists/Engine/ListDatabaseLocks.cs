@@ -12,13 +12,10 @@ internal sealed partial class EfListEngine
 {
     // The operation selects the lock and its order. Providers implement only the
     // database lock, including their existing workspace protection.
-    private sealed record RecordLocks(Guid ListId, Guid RecordId);
-
     private interface IListDatabaseLocks
     {
-        bool BatchesRecordLocks(OperationAuthorization? authorization);
         Task AuthorizationAsync(ListDbContext db, Guid workspaceId, bool exclusive, bool mutation,
-            OperationAuthorization? authorization, CancellationToken ct, RecordLocks? recordLocks = null);
+            OperationAuthorization? authorization, CancellationToken ct);
         IQueryable<WorkspaceRow> LockedQuota(ListDbContext db, Guid workspaceId);
         Task QuotaAsync(ListDbContext db, Guid workspaceId, CancellationToken ct);
         Task MutationAsync(ListDbContext db, Guid workspaceId, CancellationToken ct);

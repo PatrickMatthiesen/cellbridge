@@ -463,7 +463,7 @@ internal sealed partial class EfListEngine : IListEngine, IPagedListEngine
     private Task<T> InTransactionAsync<T>(Guid workspaceId, bool exclusiveAuthorization,
         OperationAuthorization? authorization,
         Func<ListDbContext, DbConnection, DbTransaction, Task<T>> operation,
-        CancellationToken ct, bool mutation = false, RecordLocks? recordLocks = null) =>
+        CancellationToken ct, bool mutation = false) =>
         MapStoreFailuresAsync(async () =>
         {
             if (workspaceId == Guid.Empty) throw Validation("A workspace ID is required.");
@@ -471,7 +471,7 @@ internal sealed partial class EfListEngine : IListEngine, IPagedListEngine
             var db = session.Context;
             var connection = db.Database.GetDbConnection();
             var transaction = db.Database.CurrentTransaction!.GetDbTransaction();
-            await _locks.AuthorizationAsync(db, workspaceId, exclusiveAuthorization, mutation, authorization, ct, recordLocks);
+            await _locks.AuthorizationAsync(db, workspaceId, exclusiveAuthorization, mutation, authorization, ct);
             authorization?.ValidateFreshness();
             var result = await operation(db, connection, transaction);
             authorization?.ValidateFreshness();
