@@ -162,6 +162,67 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task BatchWritesReadMetadataOnceAndStillVerifyExistingChunksAndMetadata()
+    {
+        var metadata = new CountBatchMetadataReads();
+        var options = new DbContextOptionsBuilder<SqlServerDocumentDbContext>(Options(await CreateRuntimeAsync()))
+            .AddInterceptors(metadata).Options;
+        var store = new SqlServerContentStore(options);
+        ReadOnlyMemory<byte>[] inputs = [new byte[] { 1, 2, 3 }, new byte[] { 4, 5 }, new byte[] { 1, 2, 3 }, ReadOnlyMemory<byte>.Empty];
+        var handles = await store.WriteManyAsync(inputs);
+        Assert.Equal(1, metadata.Reads);
+        Assert.Equal(handles[0], handles[2]);
+        for (var index = 0; index < handles.Count; index++)
+            Assert.Equal(inputs[index].ToArray(), await store.ReadVerifiedAsync(handles[index]));
+
+        metadata.Reads = 0;
+        Assert.Equal(handles, await store.WriteManyAsync(inputs));
+        Assert.Equal(1, metadata.Reads);
+        await using var admin = new SqlServerDocumentDbContext(Options());
+        await admin.Database.ExecuteSqlAsync($"UPDATE cellbridge_documents.chunks SET Bytes=0x030201 WHERE [Key]={handles[0].Key}");
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => store.WriteManyAsync(inputs).AsTask());
+        await admin.Database.ExecuteSqlAsync($"UPDATE cellbridge_documents.objects SET Length=1 WHERE [Key]={handles[3].Key}");
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => store.WriteManyAsync([ReadOnlyMemory<byte>.Empty]).AsTask());
+    }
+
+    private sealed class CountBatchMetadataReads : DbCommandInterceptor
+    {
+        public int Reads;
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.TrimStart().StartsWith("SELECT", StringComparison.Ordinal) &&
+                command.CommandText.Contains("[cellbridge_documents].[objects]", StringComparison.Ordinal) &&
+                command.CommandText.Contains("[Length]", StringComparison.Ordinal) &&
+                command.CommandText.Contains("[Sha256]", StringComparison.Ordinal)) Reads++;
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    [Fact]
+    public async Task ReversedOverlappingBatchesDeduplicateWithoutDeadlocksOrExtraQuotaCharges()
+    {
+        var runtime = await CreateRuntimeAsync();
+        var first = new SqlServerContentStore(Options(runtime));
+        var second = new SqlServerContentStore(Options(runtime));
+        var a = RandomNumberGenerator.GetBytes(65537);
+        var b = RandomNumberGenerator.GetBytes(65538);
+        var outcomes = await Task.WhenAll(
+            first.WriteManyAsync(new ReadOnlyMemory<byte>[] { a, b, ReadOnlyMemory<byte>.Empty }).AsTask(),
+            second.WriteManyAsync(new ReadOnlyMemory<byte>[] { b, ReadOnlyMemory<byte>.Empty, a }).AsTask())
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(outcomes[0][0], outcomes[1][2]);
+        Assert.Equal(outcomes[0][1], outcomes[1][0]);
+        Assert.Equal(outcomes[0][2], outcomes[1][1]);
+        Assert.Equal(a, await first.ReadVerifiedAsync(outcomes[0][0]));
+        Assert.Equal(b, await second.ReadVerifiedAsync(outcomes[0][1]));
+        Assert.Empty(await second.ReadVerifiedAsync(outcomes[0][2]));
+        Assert.Equal(3, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
+        Assert.Equal(4, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.chunks"));
+        Assert.Equal(a.LongLength + b.LongLength, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+    }
+
+    [Fact]
     public void RetryingExecutionStrategiesAreRejectedWithoutConnecting()
     {
         var options = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()

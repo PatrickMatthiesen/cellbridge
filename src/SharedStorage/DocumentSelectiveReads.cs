@@ -154,14 +154,7 @@ internal sealed partial class DocumentOperations<TContext> where TContext : DbCo
             ?? await context.Set<ReadHeadRow>().AsNoTracking()
                 .SingleOrDefaultAsync(row => row.ResourceId == state.ResourceId, cancellationToken);
         if (head is not null && head.StateVersion > state.StateVersion) return;
-        var metadata = DocumentReadModels.Metadata(state);
-        var revisions = DocumentReadModels.Revisions(state).ToArray();
-        if (revisions.Length == 0 || revisions.Length != metadata.RevisionCount ||
-            revisions.Any(revision => revision.ResourceId != state.ResourceId ||
-                revision.LifecycleGeneration != state.LifecycleGeneration || revision.RevisionNumber == 0) ||
-            revisions.Select(revision => revision.RevisionNumber).Distinct().Count() != revisions.Length ||
-            revisions.Max(revision => revision.RevisionNumber) != metadata.LatestRevisionNumber)
-            throw new StorageCorruptionException("Cannot index inconsistent revision history.");
+        var (metadata, revisions) = SelectiveReadValues(state);
 
         var databaseRows = await context.Set<RevisionSummaryRow>().AsNoTracking()
             .Where(row => row.ResourceId == state.ResourceId)
@@ -237,6 +230,45 @@ internal sealed partial class DocumentOperations<TContext> where TContext : DbCo
             head.RevisionCount = revisions.Length;
             head.MetadataJson = metadataJson;
         }
+    }
+
+    // Recovery holds the exclusive publication and namespace gates and has checked that
+    // both projection tables are empty. There are no existing rows to reconcile or track.
+    private async Task AddNewSelectiveReadsAsync(TContext context, DocumentState state,
+        CancellationToken cancellationToken)
+    {
+        var (metadata, revisions) = SelectiveReadValues(state);
+        foreach (var revision in revisions)
+            context.Set<RevisionSummaryRow>().Add(new RevisionSummaryRow
+            {
+                ResourceId = state.ResourceId,
+                LifecycleGeneration = revision.LifecycleGeneration,
+                RevisionNumber = (decimal)revision.RevisionNumber,
+                SummaryJson = JsonSerializer.Serialize(revision),
+            });
+        await database.WriteReservationsAsync(context, state, cancellationToken);
+        context.Set<ReadHeadRow>().Add(new ReadHeadRow
+        {
+            ResourceId = state.ResourceId,
+            StateVersion = state.StateVersion,
+            LifecycleGeneration = state.LifecycleGeneration,
+            RevisionCount = revisions.Length,
+            MetadataJson = JsonSerializer.Serialize(metadata),
+        });
+    }
+
+    private static (DocumentReadMetadata Metadata, DocumentRevisionSummary[] Revisions) SelectiveReadValues(
+        DocumentState state)
+    {
+        var metadata = DocumentReadModels.Metadata(state);
+        var revisions = DocumentReadModels.Revisions(state).ToArray();
+        if (revisions.Length == 0 || revisions.Length != metadata.RevisionCount ||
+            revisions.Any(revision => revision.ResourceId != state.ResourceId ||
+                revision.LifecycleGeneration != state.LifecycleGeneration || revision.RevisionNumber == 0) ||
+            revisions.Select(revision => revision.RevisionNumber).Distinct().Count() != revisions.Length ||
+            revisions.Max(revision => revision.RevisionNumber) != metadata.LatestRevisionNumber)
+            throw new StorageCorruptionException("Cannot index inconsistent revision history.");
+        return (metadata, revisions);
     }
 
     private static RevisionSummaryRow CreateRevisionSummaryRow(Guid resourceId,

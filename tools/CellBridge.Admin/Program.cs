@@ -44,17 +44,31 @@ if (commandName == "seed-test-user")
     // Operator create-user continues to accept its password only through stdin.
     var password = builder.Configuration["Seed:Password"]
         ?? throw new InvalidOperationException("Test account seeding requires Seed:Password.");
-    var user = await users.FindByIdAsync("integration-writer");
-    if (user is null)
+    var userCount = builder.Configuration.GetValue("Seed:UserCount", 1);
+    ArgumentOutOfRangeException.ThrowIfNegativeOrZero(userCount);
+    var template = new CellBridgeUser { UserName = "integration-writer" };
+    foreach (var validator in users.PasswordValidators)
+        Check(await validator.ValidateAsync(users, template, password));
+    // Only this Testing command shares a hash for its common ephemeral password.
+    // UserManager still creates independent IDs, security stamps and claims.
+    var passwordHash = users.PasswordHasher.HashPassword(template, password);
+    for (var userIndex = 0; userIndex < userCount; userIndex++)
     {
-        user = new() { Id = "integration-writer", UserName = "integration-writer",
-            DisplayName = "Integration writer", CanCreate = true };
-        Check(await users.CreateAsync(user, password));
+        var suffix = userIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var login = userIndex == 0 ? "integration-writer" : "integration-writer-" + suffix;
+        var user = await users.FindByIdAsync(login);
+        if (user is null)
+        {
+            user = new() { Id = login, UserName = login, Enabled = true, CanCreate = true,
+                DisplayName = userIndex == 0 ? "Integration writer" : "Integration writer " + suffix,
+                PasswordHash = passwordHash };
+            Check(await users.CreateAsync(user));
+        }
+        else if (!user.Enabled || !user.CanCreate || user.UserName != login ||
+            !await users.CheckPasswordAsync(user, password))
+            throw new InvalidOperationException("The existing test account does not match this run. Use a disposable database.");
     }
-    else if (!user.Enabled || !user.CanCreate || user.UserName != "integration-writer" ||
-        !await users.CheckPasswordAsync(user, password))
-        throw new InvalidOperationException("The existing test account does not match this run. Use a disposable database.");
-    Console.WriteLine($"Test subject {user.Subject} is ready.");
+    Console.WriteLine($"{userCount} test accounts are ready.");
 }
 else if (commandName == "create-user")
 {

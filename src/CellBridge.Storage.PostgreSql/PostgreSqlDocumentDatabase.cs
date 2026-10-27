@@ -91,7 +91,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
         return await command.ExecuteNonQueryAsync(ct) != 0;
     }
     public async Task<UsageRow> UsageAsync(CellBridgeDbContext db, CancellationToken ct) =>
-        db.Usage.Local.SingleOrDefault(row => row.Singleton) ??
+        DocumentBudget.FindTrackedUsage(db) ??
         await db.Usage.FromSqlRaw("SELECT * FROM cellbridge_usage WHERE singleton=true FOR UPDATE").SingleOrDefaultAsync(ct) ??
         throw new StorageCorruptionException("Missing storage usage ledger.");
 

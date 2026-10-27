@@ -5,6 +5,48 @@ namespace CellBridge.Storage.Abstractions;
 /// <summary>Reads an immutable content handle without trusting the provider's stream length.</summary>
 public static class ContentStoreReader
 {
+    /// <summary>Checks all aliases and admission limits before reading, then verifies each returned object.</summary>
+    public static async ValueTask<IReadOnlyDictionary<string, byte[]>> ReadManyVerifiedAsync(this IContentStore store,
+        IEnumerable<ContentHandle> handles, long maxBytes = int.MaxValue, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(handles);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        cancellationToken.ThrowIfCancellationRequested();
+        var unique = UniqueHandles(handles).ToArray();
+        foreach (var handle in unique)
+        {
+            if (handle.Length < 0 || handle.Length > Array.MaxLength)
+                throw new StorageCorruptionException("Referenced content length cannot be represented by a byte array.");
+            StorageLimits.Check("content read bytes", handle.Length, maxBytes);
+        }
+        var result = new Dictionary<string, byte[]>(unique.Length, StringComparer.Ordinal);
+        if (store is not IContentBatchReader batchReader)
+        {
+            foreach (var handle in unique)
+                result.Add(handle.Key, await store.ReadVerifiedAsync(handle, maxBytes, cancellationToken));
+            return result;
+        }
+        foreach (var batch in unique.Chunk(64))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var payloads = await batchReader.ReadManyAsync(batch, cancellationToken);
+            if (payloads.Count != batch.Length)
+                throw new StorageCorruptionException("Content batch did not return exactly the requested objects.");
+            foreach (var handle in batch)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!payloads.TryGetValue(handle.Key, out var bytes) || bytes is null || bytes.LongLength != handle.Length)
+                    throw new StorageCorruptionException("Referenced content is missing or has an invalid length.");
+                if (Convert.ToHexStringLower(SHA256.HashData(bytes)) != handle.Sha256)
+                    throw new StorageCorruptionException("Referenced content failed SHA-256 verification.");
+                result.Add(handle.Key, bytes);
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
     public static async ValueTask<byte[]> ReadVerifiedAsync(this IContentStore store, ContentHandle handle,
         long maxBytes = int.MaxValue, CancellationToken cancellationToken = default)
     {

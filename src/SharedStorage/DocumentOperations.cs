@@ -118,8 +118,12 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
         if (change.Next is { } proposed)
         {
             if (!lifecycle) DocumentPathReservations.ValidateTransition(current, proposed, rename);
-            var next = proposed with { StateVersion = checked(current.StateVersion + 1),
-                RetiredPathKeys = DocumentPathReservations.Capture(current, proposed, rename) };
+            var version = checked(current.StateVersion + 1);
+            var retiredPaths = DocumentPathReservations.Capture(current, proposed, rename);
+            // Normal save callbacks already set these provider-owned values.
+            // Keep that immutable instance and its encoded-size calculation.
+            var next = proposed.StateVersion == version && proposed.RetiredPathKeys == retiredPaths
+                ? proposed : proposed with { StateVersion = version, RetiredPathKeys = retiredPaths };
             limits.CheckDocument(next);
             if (rename)
             {
@@ -127,8 +131,9 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
                 if (next.PathKey != current.PathKey && IsPathReserved(next.PathKey, [id], true, namespaceStates))
                     throw new InvalidOperationException("The destination filename is reserved.");
             }
-            await WriteSnapshotAsync(db, next, true, ct);
             await WriteSelectiveReadsAsync(db, next, ct);
+            // Reconcile projections before taking the global budget lock.
+            await WriteSnapshotAsync(db, next, true, ct);
             UpdatePointer(pointer, next);
             await db.SaveChangesAsync(ct);
         }
@@ -226,6 +231,12 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
 
     private async Task WriteSnapshotAsync(TContext db, DocumentState state, bool prune, CancellationToken ct)
     {
+        var bytes = await StageSnapshotAsync(db, state, prune, ct);
+        await DocumentBudget.AdjustAsync(database, db, bytes, 0, ct);
+    }
+
+    private async Task<long> StageSnapshotAsync(TContext db, DocumentState state, bool prune, CancellationToken ct)
+    {
         long freed = 0;
         if (prune)
         {
@@ -234,8 +245,9 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
             if (freed != 0) await expired.ExecuteDeleteAsync(ct);
         }
         var data = DocumentStateJson.Serialize(state);
-        await DocumentBudget.AdjustAsync(database, db, checked(DocumentStateJson.GetSerializedSize(state) - freed), 0, ct);
+        var bytes = checked(DocumentStateJson.GetSerializedSize(state) - freed);
         db.Set<StateRow>().Add(new() { ResourceId = state.ResourceId, StateVersion = state.StateVersion, StateJson = data });
+        return bytes;
     }
 
     private DocumentRow Pointer(DocumentState state)

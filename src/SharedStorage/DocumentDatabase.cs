@@ -34,6 +34,9 @@ internal interface IDocumentDatabase<TContext> where TContext : DbContext
     Task VerifyReservationsAsync(TContext db, IReadOnlyDictionary<Guid, DocumentNamespaceState> states, CancellationToken ct);
     Task WriteReservationsAsync(TContext db, DocumentState state, CancellationToken ct);
     Task<bool> InsertObjectAsync(TContext db, ContentHandle handle, CancellationToken ct);
+    IQueryable<ObjectRow> ObjectsAtKeys(TContext db, IReadOnlyList<string> keys);
+    Task<IReadOnlySet<string>> CreateObjectsAsync(TContext db, IReadOnlyList<ContentHandle> handles, CancellationToken ct);
+    Task<UsageRow> UpdateAtomicSaveUsageAsync(TContext db, long snapshotBytes, long contentBytes, CancellationToken ct);
     Task<bool> HasReservationsAsync(TContext db, CancellationToken ct);
 }
 
@@ -56,6 +59,19 @@ internal static class DocumentEncoding
 
 internal static class DocumentBudget
 {
+    public static UsageRow? FindTrackedUsage(DbContext context)
+    {
+        var detectChanges = context.ChangeTracker.AutoDetectChangesEnabled;
+        try
+        {
+            // The ledger's singleton key never changes. Local lookup needs no scan
+            // of unrelated tracked entities; SaveChanges still detects budget edits.
+            context.ChangeTracker.AutoDetectChangesEnabled = false;
+            return context.Set<UsageRow>().Local.FindEntry(true)?.Entity;
+        }
+        finally { context.ChangeTracker.AutoDetectChangesEnabled = detectChanges; }
+    }
+
     public static async Task AdjustAsync<TContext>(IDocumentDatabase<TContext> database, TContext db,
         long bytes, long documents, CancellationToken ct) where TContext : DbContext
     {

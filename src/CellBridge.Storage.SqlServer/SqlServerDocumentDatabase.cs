@@ -39,7 +39,7 @@ internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlS
             """, ct);
 
     public static async Task<UsageRow> LockUsageAsync(SqlServerDocumentDbContext context, CancellationToken ct) =>
-        context.Usage.Local.SingleOrDefault() ?? await context.Usage.FromSqlRaw("SELECT * FROM cellbridge_documents.usage WITH (UPDLOCK,HOLDLOCK) WHERE Id=1")
+        DocumentBudget.FindTrackedUsage(context) ?? await context.Usage.FromSqlRaw("SELECT * FROM cellbridge_documents.usage WITH (UPDLOCK,HOLDLOCK) WHERE Id=1")
             .SingleOrDefaultAsync(ct) ?? throw new StorageCorruptionException("Missing content usage ledger.");
 
     public static async Task CheckConfigurationAsync(SqlServerDocumentDbContext db, CancellationToken ct)

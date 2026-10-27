@@ -16,7 +16,7 @@ using NBomber.Contracts;
 using NBomber.CSharp;
 using Npgsql;
 
-internal sealed class DocumentLoadScenario(string backend, LoadResources resources) : IAsyncDisposable
+internal sealed partial class DocumentLoadScenario(string backend, LoadResources resources) : IAsyncDisposable
 {
     private readonly ConcurrentBag<Session> sessions = [];
     private readonly CellBridgeActor actor = new(new SubjectIdentity("local:integration-writer", "integration-writer", "Integration writer"), CanCreate: true);
@@ -42,7 +42,7 @@ internal sealed class DocumentLoadScenario(string backend, LoadResources resourc
         resources.Observe(context);
         try
         {
-            if (backend == "http") return await RunHttpAsync(context);
+            if (backend == "http") return settings.UserModel ? await RunUsersAsync(context) : await RunHttpAsync(context);
             if (!context.ScenarioInstanceData.TryGetValue("document-session", out var stored))
             {
                 stored = new Session();
@@ -90,8 +90,11 @@ internal sealed class DocumentLoadScenario(string backend, LoadResources resourc
     {
         settings = context.CustomSettings.Get<DocumentLoadSettings>() ?? new();
         settings.Validate();
-        payload = StorageBenchmarkInputs.Package(settings.SizeMiB, settings.Seed);
-        var limits = new StorageLimits();
+        var documentLimit = Math.Max(10_000, checked(settings.Clients * settings.DocumentsPerClient));
+        if (backend == "http" && settings.UserModel)
+            resources.ConfigureDocumentUsers(settings.Clients, true, documentLimit);
+        payload = settings.UserModel ? [] : StorageBenchmarkInputs.Package(settings.SizeMiB, settings.Seed);
+        var limits = new StorageLimits { MaxDocuments = documentLimit };
         if (backend == "memory") provider = new(new InMemoryStateStore(), new InMemoryContentStore(), limits);
         else
         {
@@ -117,7 +120,11 @@ internal sealed class DocumentLoadScenario(string backend, LoadResources resourc
         }
         await provider.State.CheckHealthAsync();
         service = new(provider);
-        if (backend == "http") await InitializeHttpAsync();
+        if (backend == "http")
+        {
+            if (settings.UserModel) await InitializeUsersAsync();
+            else await InitializeHttpAsync();
+        }
         initialized = true;
     }));
 
@@ -159,6 +166,8 @@ internal sealed class DocumentLoadScenario(string backend, LoadResources resourc
             }
             httpSessions[client] = session;
         }
+        Console.WriteLine($"Document HTTP workload: sessions={settings.Clients}, authenticated-users={environment.UserCount}, " +
+            $"documents={documentCount}, writes={settings.WritePercent}%.");
     }
 
     private async Task<IResponse> RunHttpAsync(IScenarioContext context)
@@ -459,10 +468,27 @@ internal sealed class DocumentLoadScenario(string backend, LoadResources resourc
         if (!initialized) return;
         if (backend == "http")
         {
+            if (settings.UserModel) await CaptureUserDatabaseStatisticsAsync();
+            if (settings.UserModel && userSessions.Count(user => user.Started) != settings.Clients)
+                throw new InvalidDataException("The executed active-user count differs from the configured client count.");
+            if (settings.UserModel && httpDocuments.Count != 0)
+            {
+                // All user documents started from the same immutable corpus.
+                // Reverify those shared bytes once, then compare untouched states
+                // exactly rather than downloading the same corpus for every clone.
+                _ = await provider.Content.ReadManyVerifiedAsync(StorageReferences.Handles(httpDocuments[0].Initial),
+                    provider.Limits.MaxObjectBytes);
+            }
             foreach (var document in httpDocuments)
             {
                 var state = await provider.State.FindByResourceIdAsync(document.Initial.ResourceId)
                     ?? throw new InvalidDataException("Final HTTP document is missing.");
+                if (settings.UserModel && document.Committed.IsEmpty)
+                {
+                    if (DocumentStateJson.Serialize(state) != DocumentStateJson.Serialize(document.Initial))
+                        throw new InvalidDataException("An untouched user document changed during load.");
+                    continue;
+                }
                 var restored = await StoredDocument.RestoreAsync(state, provider.Content);
                 var bytes = restored.FilePartition.FileGraph.Materialize();
                 var committed = document.Committed;
@@ -483,6 +509,7 @@ internal sealed class DocumentLoadScenario(string backend, LoadResources resourc
             Console.WriteLine($"Document HTTP validation totals including warm-up: commits={commits}, conflicts={conflicts}, replays={replays}, replay-conflicts={replayConflicts}.");
             var uniqueCommittedPayloads = httpDocuments.SelectMany(document => document.Committed.Values).Distinct(StringComparer.OrdinalIgnoreCase).Count();
             Console.WriteLine($"Document HTTP committed payload hashes including warm-up: unique={uniqueCommittedPayloads}, commits={commits}.");
+            if (settings.UserModel) PrintUserMetrics();
         }
         else foreach (var entry in sessions.SelectMany(s => s.AllEntries)) await VerifyEntryAsync(entry);
     }
@@ -554,12 +581,24 @@ internal sealed class DocumentLoadSettings
     public int DocumentsPerClient { get; init; } = 1;
     public int WritePercent { get; init; } = 75;
     public int PayloadVariants { get; init; } = 2;
+    public bool UserModel { get; init; }
+    public int UserWarmUpMs { get; init; } = 30_000;
+    public int UserMeasurementMs { get; init; } = 60_000;
+    public int PackageKiB { get; init; } = 256;
+    public int ChangedPartKiB { get; init; } = 16;
+    public int SaveIntervalMs { get; init; } = 30_000;
+    public int QueryIntervalMs { get; init; } = 30_000;
+    public int OpenIntervalMs { get; init; } = 120_000;
     public void Validate()
     {
         // Bind into an empty array so a configured mode list replaces the defaults.
         if (Modes.Length == 0) Modes = ["full", "changed-full", "delta", "delta-chain", "captured"];
         if (Clients <= 0 || DocumentsPerClient <= 0 || WritePercent is < 0 or > 100 || PayloadVariants < 2 ||
-            Workload is not ("independent" or "contention") || SizeMiB < 0 || QueryEvery <= 0 || Modes.Length == 0 || Modes.Any(m => m is not ("full" or "changed-full" or "delta" or "delta-chain" or "captured")))
+            Workload is not ("independent" or "contention") ||
+            UserModel && (UserWarmUpMs < 0 || UserMeasurementMs <= 0 || Retry || Workload != "independent" || PackageKiB < 16 ||
+                ChangedPartKiB <= 0 || ChangedPartKiB > PackageKiB - 8 ||
+                SaveIntervalMs <= 0 || QueryIntervalMs <= 0 || OpenIntervalMs <= 0) ||
+            SizeMiB < 0 || QueryEvery <= 0 || Modes.Length == 0 || Modes.Any(m => m is not ("full" or "changed-full" or "delta" or "delta-chain" or "captured")))
             throw new ArgumentException("Invalid document load settings.");
     }
 }

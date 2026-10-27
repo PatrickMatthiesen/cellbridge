@@ -69,11 +69,12 @@ public sealed partial class InMemoryStateStore
                 throw new RecoveryConflictException("Recovery receipt identity collision or ledger limit.");
             long bytes = snapshot.Snapshots.Sum(s => DocumentStateJson.GetSerializedSize(s)) +
                 snapshot.Receipts.Append(receipt).Sum(r => JsonSerializer.SerializeToUtf8Bytes(r).LongLength);
+            var snapshotsByVersion = snapshot.Snapshots.ToDictionary(state => (state.ResourceId, state.StateVersion));
             Budget.Adjust(bytes, snapshot.Heads.Length);
             _importedSnapshots = snapshot.Snapshots;
             foreach (var head in snapshot.Heads)
             {
-                var state = snapshot.Snapshots.Single(s => s.ResourceId == head.ResourceId && s.StateVersion == head.StateVersion);
+                var state = snapshotsByVersion[(head.ResourceId, head.StateVersion)];
                 _documents[state.ResourceId] = state;
                 // Recreated ancestors share canonical names; the latest incarnation owns the namespace entry.
                 if (!_paths.TryGetValue(state.PathKey, out var owner) || _documents[owner].LifecycleGeneration < state.LifecycleGeneration)

@@ -5,7 +5,7 @@ namespace CellBridge.Storage.SqlServer;
 
 /// <summary>EF document persistence with required cross-host coordination.</summary>
 public sealed class SqlServerStateStore : IDocumentStateStore, IDocumentLifecycleStore,
-    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant
+    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant, IAtomicDocumentSaveStore
 {
     private readonly DocumentOperations<SqlServerDocumentDbContext> operations;
     public SqlServerStateStore(DbContextOptions<SqlServerDocumentDbContext> options, StorageLimits? limits = null)
@@ -20,6 +20,16 @@ public sealed class SqlServerStateStore : IDocumentStateStore, IDocumentLifecycl
     public bool Durable => operations.Durable;
     public bool Shared => operations.Shared;
     public object BudgetScope => operations.BudgetScope;
+    public bool SupportsContentStore(IContentStore content) => content is SqlServerContentStore writer &&
+        ReferenceEquals(BudgetScope, writer.BudgetScope);
+    public ValueTask<T> TransitionWithContentAsync<T>(Guid resourceId, IContentStore content,
+        IReadOnlyList<ReadOnlyMemory<byte>> pending, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default)
+    {
+        if (content is not SqlServerContentStore writer || !SupportsContentStore(content))
+            throw new ArgumentException("Atomic saves require the matching SQL Server content store and budget scope.", nameof(content));
+        return operations.TransitionWithContentAsync(resourceId, writer.Writer, pending, transition, cancellationToken);
+    }
 
     public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default) => operations.FindByResourceIdAsync(id, cancellationToken);
     public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken cancellationToken = default) => operations.FindByPathKeyAsync(key, cancellationToken);

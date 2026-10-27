@@ -177,7 +177,8 @@ Never stop another worktree's AppHost. Finish an active capture with
 
 Performance projects live under `benchmark/`. Correctness assertions live under
 `tests/`, while each benchmark still rejects failed operations and invalid results.
-See [list measurements](list-performance.md) and
+See [list measurements](list-performance.md),
+[active Office user capacity](office-performance.md) and
 [isolated allocation measurements](allocation-measurements.md).
 
 Use the standard BenchmarkDotNet entry point to list or run all maintained cases:

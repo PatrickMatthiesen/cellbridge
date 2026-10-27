@@ -488,6 +488,20 @@ Atomically publish `Next` and advance `StateVersion`, or publish nothing for
 null/exception. Do not retry callbacks after an unknown commit outcome.
 Callbacks perform no I/O; prepare content beforehand.
 
+`IAtomicDocumentSaveStore` optionally publishes prepared immutable content and a
+state transition in one transaction. Advertise support only for a content store
+that shares the same transaction and quota scope. Keep callback-once semantics,
+authoritative time, state validation and receipt recovery. Quota rejection or
+cancellation before commit must roll back both content and state. PostgreSQL and
+SQL Server use this path for bounded file saves; other pairings use the separate
+content-write path. A null next state can still commit staged content and its
+quota usage; orphan collection can reclaim content that no state references.
+
+Content stores can implement `IContentBatchReader` and `IContentBatchWriter` to
+reduce database round trips. Batch operations retain per-object length and hash
+checks, bounded admission and immutable-content verification. A batch write must
+roll back all newly inserted objects if quota admission or cancellation fails.
+
 Return immutable detached records, enforce unique paths/resource IDs and forbid
 identity/path changes in transitions. Preserve unsigned protocol values, serials,
 GUIDs, timestamps and format versions. Path keys use normalized invariant

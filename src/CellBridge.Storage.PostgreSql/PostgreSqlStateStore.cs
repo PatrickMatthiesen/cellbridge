@@ -5,7 +5,7 @@ namespace CellBridge.Storage.PostgreSql;
 
 /// <summary>EF document persistence with required cross-host coordination.</summary>
 public sealed class PostgreSqlStateStore : IDocumentStateStore, IDocumentLifecycleStore,
-    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant
+    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant, IAtomicDocumentSaveStore
 {
     private readonly DocumentOperations<CellBridgeDbContext> operations;
     private readonly DbContextOptions<CellBridgeDbContext> options;
@@ -27,6 +27,16 @@ public sealed class PostgreSqlStateStore : IDocumentStateStore, IDocumentLifecyc
     public bool Durable => operations.Durable;
     public bool Shared => operations.Shared;
     public object BudgetScope => operations.BudgetScope;
+    public bool SupportsContentStore(IContentStore content) => content is PostgreSqlContentStore writer &&
+        ReferenceEquals(BudgetScope, writer.BudgetScope);
+    public ValueTask<T> TransitionWithContentAsync<T>(Guid resourceId, IContentStore content,
+        IReadOnlyList<ReadOnlyMemory<byte>> pending, Func<DocumentState, DateTime, StateTransition<T>> transition,
+        CancellationToken cancellationToken = default)
+    {
+        if (content is not PostgreSqlContentStore writer || !SupportsContentStore(content))
+            throw new ArgumentException("Atomic saves require the matching PostgreSQL content store and budget scope.", nameof(content));
+        return operations.TransitionWithContentAsync(resourceId, writer.Writer, pending, transition, cancellationToken);
+    }
     public Task InitializeAsync(CancellationToken cancellationToken = default) => new PostgreSqlStorageMigrator(options, limits).MigrateAsync(cancellationToken);
     internal static Task ConfigureTransactionAsync(CellBridgeDbContext context, CancellationToken cancellationToken) => PostgreSqlDocumentDatabase.ConfigureTransactionAsync(context, cancellationToken);
 

@@ -83,7 +83,8 @@ internal sealed partial class DocumentOperations<TContext> where TContext : DbCo
         if (snapshot.Receipts.Any(row => row.OperationId == receipt.OperationId) || snapshot.Receipts.Length >= 1000)
             throw new RecoveryConflictException("Recovery receipt identity collision or ledger limit.");
         ProviderRecovery.CheckAdmission(snapshot with { Receipts = snapshot.Receipts.Add(receipt) }, limits, now);
-        var heads = snapshot.Heads.Select(head => snapshot.Snapshots.Single(state => state.ResourceId == head.ResourceId && state.StateVersion == head.StateVersion)).ToArray();
+        var snapshotsByVersion = snapshot.Snapshots.ToDictionary(state => (state.ResourceId, state.StateVersion));
+        var heads = snapshot.Heads.Select(head => snapshotsByVersion[(head.ResourceId, head.StateVersion)]).ToArray();
         if (heads.Where(state => !state.IsDeleted).GroupBy(state => state.PathKey, StringComparer.Ordinal).Any(group => group.Count() > 1))
             throw new StorageCorruptionException("Recovery contains duplicate live document paths.");
         await DocumentBudget.AdjustAsync(database, db, 0, heads.Length, cancellationToken);
@@ -92,7 +93,7 @@ internal sealed partial class DocumentOperations<TContext> where TContext : DbCo
         foreach (var state in heads)
         {
             db.Set<DocumentRow>().Add(Pointer(state));
-            await WriteSelectiveReadsAsync(db, state, cancellationToken);
+            await AddNewSelectiveReadsAsync(db, state, cancellationToken);
         }
         foreach (var retained in snapshot.Receipts.Append(receipt))
         {

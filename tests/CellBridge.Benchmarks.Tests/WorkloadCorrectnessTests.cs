@@ -80,7 +80,7 @@ public sealed class BenchmarkDatabaseCollection : ICollectionFixture<BenchmarkEn
 public sealed class BenchmarkEnvironment : IAsyncLifetime
 {
     public LoadTestEnvironment Environment { get; private set; } = null!;
-    public async Task InitializeAsync() => Environment = await LoadTestEnvironment.StartAsync();
+    public async Task InitializeAsync() => Environment = await LoadTestEnvironment.StartAsync(userCount: 3, useDefaultAdmissionLimits: true);
     public async Task DisposeAsync() { if (Environment is not null) await Environment.DisposeAsync(); }
 }
 

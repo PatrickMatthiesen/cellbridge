@@ -74,12 +74,7 @@ public sealed partial class StoredDocument
         _ = ContentStoreReader.UniqueHandles(StorageReferences.Handles(state));
         var handles = ContentStoreReader.UniqueHandles(state.Partitions.Where(p => p.Kind == 0)
             .SelectMany(p => p.Elements.Select(e => e.Payload).Append(p.Content)).Append(state.Content));
-        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-        foreach (var handle in handles)
-        {
-            var bytes = await content.ReadVerifiedAsync(handle, cancellationToken: cancellationToken);
-            payloads.Add(handle.Key, bytes);
-        }
+        var payloads = await content.ReadManyVerifiedAsync(handles, cancellationToken: cancellationToken);
         return new StoredDocument(state, payloads);
     }
 
@@ -136,16 +131,13 @@ public sealed partial class DocumentPartition
         StorageLimits.Check("graph bytes", partition.Elements.Sum(e => e.Payload.Length), limits.MaxGraphBytes);
         _ = ContentStoreReader.UniqueHandles(partition.Elements.Select(e => e.Payload));
         if (partition.StorageIndex is null) throw new StorageCorruptionException("Missing selected storage index.");
-        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var payloads = await content.ReadManyVerifiedAsync(partition.Elements.Select(e => e.Payload),
+            limits.MaxObjectBytes, cancellationToken);
         var elements = new List<DataElement>();
         foreach (var stored in partition.Elements)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!payloads.TryGetValue(stored.Payload.Key, out var bytes))
-            {
-                bytes = await content.ReadVerifiedAsync(stored.Payload, limits.MaxObjectBytes, cancellationToken);
-                payloads.Add(stored.Payload.Key, bytes);
-            }
+            var bytes = payloads[stored.Payload.Key];
             if (stored.Type == (uint)DataElementType.StorageIndexDataElementData &&
                 (stored.MappingSerials.IsDefault || !stored.MappingSerials.SequenceEqual(
                     StorageIndexMappingSerials.Read(bytes).Select(s => new SerialId(s.Guid, s.Value)))))
@@ -184,15 +176,13 @@ public sealed partial class DocumentPartition
             throw new StorageCorruptionException("Document and file partition content disagree.");
         if (partition.StorageIndex is null)
             throw new StorageCorruptionException("Missing selected file storage index.");
-        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var payloads = await content.ReadManyVerifiedAsync(partition.Elements.Select(e => e.Payload),
+            limits.MaxObjectBytes, cancellationToken);
         var elements = new List<DataElement>();
         foreach (var stored in partition.Elements)
         {
-            if (!payloads.TryGetValue(stored.Payload.Key, out var bytes))
-            {
-                bytes = await content.ReadVerifiedAsync(stored.Payload, limits.MaxObjectBytes, cancellationToken);
-                payloads.Add(stored.Payload.Key, bytes);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytes = payloads[stored.Payload.Key];
             elements.Add(new DataElement((DataElementType)stored.Type, StorageIds.Restore(stored.Id),
                 new SerialNumber(stored.Serial.Guid, stored.Serial.Value)) { Data = bytes });
         }
@@ -254,6 +244,22 @@ public sealed partial class DocumentPartition
     {
         var elements = ImmutableArray.CreateBuilder<GraphElementState>();
         var previous = source?.Elements.ToDictionary(e => e.Id);
+        var pending = new List<ReadOnlyMemory<byte>>();
+        var pendingIndexes = new List<int>();
+        long pendingBytes = 0;
+        async ValueTask FlushAsync()
+        {
+            if (pending.Count == 0) return;
+            var handles = await content.WriteManyAsync(pending, cancellationToken);
+            for (var i = 0; i < handles.Count; i++)
+            {
+                var index = pendingIndexes[i];
+                elements[index] = elements[index] with { Payload = handles[i] };
+            }
+            pending.Clear();
+            pendingIndexes.Clear();
+            pendingBytes = 0;
+        }
         await visit(async (element, stream) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -277,7 +283,21 @@ public sealed partial class DocumentPartition
                     if (rejectIdentityReuse && retained is not null)
                         throw new InvalidDataException("Conflicting immutable data-element payload.");
                     stream.Position = 0;
-                    handle = await content.WriteAsync(stream, cancellationToken);
+                    // The visitor owns the stream. Retain only a bounded batch of
+                    // new payloads, then publish their durable handles together.
+                    if (pendingBytes + stream.Length > 8L * 1024 * 1024) await FlushAsync();
+                    if (stream.Length > 8L * 1024 * 1024)
+                        handle = await content.WriteAsync(stream, cancellationToken);
+                    else
+                    {
+                        using var buffer = new MemoryStream();
+                        await stream.CopyToAsync(buffer, cancellationToken);
+                        var bytes = buffer.ToArray();
+                        pending.Add(bytes);
+                        pendingIndexes.Add(elements.Count);
+                        pendingBytes += bytes.Length;
+                        handle = null!; // Replaced by FlushAsync before returning the graph.
+                    }
                 }
                 var mappings = mappingSerials.TryGetValue(element.DataElementExtendedGuid, out var serials)
                     ? serials.Select(s => new SerialId(s.Guid, s.Value)).ToImmutableArray() : [];
@@ -285,7 +305,9 @@ public sealed partial class DocumentPartition
                 elements.Add(old is not null && old.Type == (uint)element.DataElementType &&
                     old.Serial == serial && old.Payload == handle && old.MappingSerials.AsSpan().SequenceEqual(mappings.AsSpan())
                     ? old : new GraphElementState(id, (uint)element.DataElementType, serial, handle) { MappingSerials = mappings });
+                if (pending.Count == 64 || pendingBytes >= 8L * 1024 * 1024) await FlushAsync();
             });
+        await FlushAsync();
         return elements.ToImmutable();
     }
 }

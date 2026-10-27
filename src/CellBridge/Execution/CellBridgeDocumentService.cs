@@ -350,6 +350,8 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         if ((put.Flags & ~0x79) != 0 || (put.AdditionalFlagsBits & 0x38) != 0)
             return await FailedAsync(id, operation.RequestId, CellErrorCode.RequestNotSupported, "This upload mode is unsupported.", cancellationToken);
         var publicationOperationId = Guid.NewGuid();
+        var atomicSave = provider.State as IAtomicDocumentSaveStore;
+        if (atomicSave?.SupportsContentStore(provider.Content) != true) atomicSave = null;
         string key = $"{put.StorageIndex.Value}:{put.StorageIndex.Guid:D}";
         string digest;
         try { digest = Digest(put, package); }
@@ -372,7 +374,9 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         if (preparation.Error is not null) return new(new FsshttpbResponse(), preparation.State, preparation.Error);
         for (int attempt = 0; attempt < 4; attempt++)
         {
-            var before = await CurrentAsync(id, cancellationToken);
+            // Preparation already read this state under document coordination.
+            // Publication below still rechecks the authority and state version.
+            var before = attempt == 0 ? preparation.State : await CurrentAsync(id, cancellationToken);
             if (!Access(actor, before).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), before);
             if (before.LifecycleGeneration != initial.LifecycleGeneration)
                 return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "The document incarnation changed."), before);
@@ -390,6 +394,13 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             if (!canAppend(prepared.ResponsePackage))
                 return Wrap(Failure(operation.RequestId, CellErrorCode.RequestNotSupported,
                     "The mandatory save payload exceeds the response budget or conflicts with earlier results."), before);
+            var receiptResponse = new FsshttpbResponse { DataElementPackage = prepared.ResponsePackage };
+            receiptResponse.SubResponses.Add(result);
+            var receiptBytes = receiptResponse.ToByteArray();
+            StorageLimits.Check("save receipt bytes", receiptBytes.LongLength, provider.Limits.MaxObjectBytes);
+            using var pending = atomicSave is null ? null : new PendingSaveContent(provider.Limits.MaxObjectBytes);
+            IContentStore contentTarget = provider.Content;
+            var useAtomicSave = false;
             DocumentState candidate;
             try
             {
@@ -400,14 +411,23 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 { throw new StorageQuotaExceededException("document bytes", provider.Limits.MaxDocumentBytes + 1, provider.Limits.MaxDocumentBytes); }
                 await FilePartitionSaveHandler.ValidateDocumentAsync(staging, document.Url,
                     provider.Limits.MaxDocumentBytes, cancellationToken);
+                if (pending is not null)
+                {
+                    var addedBytes = prepared.Graph!.PayloadBytes - currentGraph.PayloadBytes;
+                    var addedObjects = prepared.Graph.ElementCount - currentGraph.ElementCount;
+                    var pendingBytes = checked((prepared.Repeat ? 0 : staging.Length + addedBytes) + receiptBytes.LongLength);
+                    useAtomicSave = addedBytes >= 0 && addedObjects >= 0 && pendingBytes <= PendingSaveContent.MaxBytes &&
+                        (prepared.Repeat ? 1 : addedObjects + 2) <= IContentBatchWriter.MaxBatchObjects;
+                    if (useAtomicSave) contentTarget = pending;
+                }
                 if (prepared.Repeat)
                     candidate = before;
                 else
                 {
                     staging.Position = 0;
-                    var handle = await provider.Content.WriteAsync(staging, cancellationToken);
+                    var handle = await contentTarget.WriteAsync(staging, cancellationToken);
                     var file = await DocumentPartition.CaptureFileGraphAsync(before.Partitions.Single(p => p.Kind == 0),
-                        prepared.Graph!, prepared.KnowledgeSequence, handle, provider.Content, cancellationToken);
+                        prepared.Graph!, prepared.KnowledgeSequence, handle, contentTarget, cancellationToken);
                     candidate = before with
                     {
                         Content = handle,
@@ -421,18 +441,14 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             {
                 return Wrap(Failure(operation.RequestId, CellErrorCode.InvalidObject, ex.Message), before);
             }
-            var receiptResponse = new FsshttpbResponse { DataElementPackage = prepared.ResponsePackage };
-            receiptResponse.SubResponses.Add(result);
-            var receiptBytes = receiptResponse.ToByteArray();
-            StorageLimits.Check("save receipt bytes", receiptBytes.LongLength, provider.Limits.MaxObjectBytes);
             using var receiptStream = new MemoryStream(receiptBytes);
-            var responseHandle = await provider.Content.WriteAsync(receiptStream, cancellationToken);
+            var responseHandle = await contentTarget.WriteAsync(receiptStream, cancellationToken);
             var receipt = new SaveReceipt(key, digest, candidate.ContentVersion, responseHandle, actor.Identity.Subject)
                 { LifecycleGeneration = initial.LifecycleGeneration };
             PublishResult published;
             try
             {
-                published = await provider.State.TransitionAsync(id, (current, now) =>
+                StateTransition<PublishResult> Publish(DocumentState current, DateTime now)
                 {
                     if (!Access(actor, current).HasFlag(DocumentAccess.Write))
                         return new StateTransition<PublishResult>(null, new(current, null, "FileUnauthorizedAccess", false));
@@ -491,7 +507,10 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                     state = ExternalPublication.Append(current, state, publicationOperationId, provider.Limits);
                     provider.Limits.CheckDocument(state);
                     return new StateTransition<PublishResult>(state, new(state, null, null, false));
-                }, cancellationToken);
+                }
+                published = useAtomicSave
+                    ? await atomicSave!.TransitionWithContentAsync(id, provider.Content, pending!.Contents, Publish, cancellationToken)
+                    : await provider.State.TransitionAsync(id, Publish, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
