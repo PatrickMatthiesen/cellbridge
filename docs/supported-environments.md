@@ -36,8 +36,9 @@ checks on Windows. A runner label does not identify its backing filesystem or
 qualify physical power loss. Record a successful run's environment before adding
 a concrete configuration to a deployment's supported matrix.
 
-The repository selects stable .NET 10 SDKs through `global.json`; it permits
-newer .NET 10 feature bands and excludes prerelease SDKs. See Microsoft's
+The repository selects the .NET 11 SDK pinned in `global.json`, currently
+`11.0.100-rc.3.26522.148`. Prerelease SDKs are enabled while .NET 11 is a
+release candidate. See Microsoft's
 [SDK selection rules](https://learn.microsoft.com/en-us/dotnet/core/tools/global-json).
 Retain `dotnet --info`, the environment report and test results for each
 qualification run.
@@ -75,7 +76,7 @@ replica backups still need their own qualification. See [provider recovery](prov
 
 ## Controlled database interruption and logical restore
 
-On Linux with Docker, the pinned Aspire SDK and .NET 10 available, run:
+On Linux with Docker, the pinned Aspire SDK and .NET 11 available, run:
 
 ```sh
 dotnet test tests/CellBridge.Storage.Tests --filter FullyQualifiedName~DatabaseRecoveryTests --logger trx --results-directory artifacts/recovery

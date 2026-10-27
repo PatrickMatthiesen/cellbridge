@@ -154,7 +154,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         var bytes = RandomNumberGenerator.GetBytes(65536 + 19);
         var handle = await store.WriteAsync(new MemoryStream(bytes));
         await using var admin = new SqlServerDocumentDbContext(Options());
-        await admin.Database.ExecuteSqlInterpolatedAsync($"""
+        await admin.Database.ExecuteSqlAsync($"""
             UPDATE cellbridge_documents.chunks SET Bytes=0x00 WHERE [Key]={handle.Key} AND Ordinal=0
             """);
         await Assert.ThrowsAsync<StorageCorruptionException>(async () => await store.WriteAsync(new MemoryStream(bytes)));

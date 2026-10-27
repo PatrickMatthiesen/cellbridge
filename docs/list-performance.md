@@ -1,100 +1,142 @@
 # Measuring list performance
 
-`benchmark/CellBridge.Lists.Benchmark` measures durable list creates, independent-record
-patches and database-filtered pages. It uses the public provider APIs and an actual
-loopback HTTP host with a local benchmark bearer scheme. The HTTP credential exists
-only for this disposable runner; use a production authentication handler in a host.
-The repository's document-storage and allocation benchmarks measure different work.
-
-Each invocation creates its own PostgreSQL database and restricted runtime login,
-runs the normal setup and health checks, and drops only those generated resources.
-The administrative connection must permit database and role creation. Runtime
-operations retain authorization, forced workspace RLS, validation, conditional
-revisions, receipts, auditing, foreign keys and synchronous commits. Connection
-strings and credentials are excluded from the report.
-
-Focused BenchmarkDotNet cases measure provider paging and mutations. Paging prepares
-1,000 records and measures first and second pages with fresh or explicitly analyzed
-PostgreSQL statistics. Mutation cases measure batches of 16 record creates or patches.
-Schema reset, fixture preparation and result checks run outside the timed method.
+Run all maintained BenchmarkDotNet cases, including Lists, with:
 
 ```sh
-dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --filter '*PostgreSqlPaging*' --artifacts artifacts/provider-benchmarks/paging --exporters json
-dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --filter '*PostgreSqlListMutation*' --artifacts artifacts/provider-benchmarks/mutations --exporters json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks
 ```
 
-Each benchmark uses a disposable PostgreSQL environment. These method measurements
-are separate from the command-line saturation and loopback HTTP workloads below.
+Add `-- --list flat` to list methods without starting the database.
+BenchmarkDotNet owns warm-up, sampling and allocation measurements. See
+[measurement setup](allocation-measurements.md) for prerequisites and limits.
 
-## Run a local measurement
-
-Run the Release executable directly:
+Paging cases prepare 1,000 records and measure first and second pages with fresh
+or explicitly analyzed PostgreSQL statistics. Mutation cases measure batches of
+16 creates or patches. The unified parent process owns one Aspire PostgreSQL
+environment for the run. Measured child processes own connections and reset the
+schema before preparing each case. Aspire health checks and telemetry stay in the
+parent process. Schema reset, fixture preparation and result checks run outside
+the timed method. Select cases with standard BenchmarkDotNet arguments:
 
 ```sh
-dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --clients 1,8 --workspaces 1,16 --iterations 200 --output artifacts/lists-performance/report.json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --filter '*PostgreSqlPaging*' --artifacts artifacts/benchmarks/paging --exporters json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --filter '*PostgreSqlListMutation*' --artifacts artifacts/benchmarks/mutations --exporters json
 ```
 
-Without `ConnectionStrings__lists`, the executable uses the shared application
-AppHost fixture to start and dispose its own PostgreSQL environment. The fixture
-omits WebDemo, capture and persistent storage. An explicitly supplied connection
-must permit database and role creation. The benchmark creates and drops only its
-own generated database and runtime login.
+## Load tests
 
-The log ends with the report path. Check the executable exit code and JSON
-`successful` field. To offer 4,000 writes per minute in the loopback HTTP mode:
+NBomber replaces the custom Lists and document traffic runners. Both use the
+same entry point. Run the bounded check of every load workflow with:
 
 ```sh
-dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --clients 8 --workspaces 16 --iterations 500 --modes http --records-skip --target-per-minute 4000 --output artifacts/lists-performance/paced.json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --load-test --config benchmark/CellBridge.Benchmarks/load-smoke.json
 ```
 
-The create case offers 4,000 writes over one minute; the patch case does the same
-in its own interval. Staggered writer deadlines retain the full offered interval
-in the rate denominator. Late operations count toward latency and extend elapsed
-time. This is a paced workload with a bounded writer count.
+`lists-provider` calls the public provider APIs. `lists-http` calls WebDemo's
+actual Lists endpoints using cookie authentication and CSRF protection. Setup logs
+in and seeds data before measurement. HTTP scenarios use only HTTP during load;
+provider reads validate saved data after the run.
 
-The default arguments select 1/8/32 writers, 1/16 workspaces, 200 iterations per
-writer, both provider and HTTP modes, and 1,000 records for query measurements.
-Each writer cycles through the workspaces. Set `--target-per-minute 0`, the
-default, for saturation. Set `--records 100000` for larger query preparation,
-or `--records-skip` for writes alone. Record creation uses the public engine;
-its preparation time is reported separately. Query cases filter and sort an
-integer field and request first and second pages. They do not qualify arbitrary
-filters or text sorts.
+Lists supports these `Workload` settings:
 
-Startup, schema and role setup, list/record creation, connection/HTTP warm-up
-and final persistence probes are outside the measured write intervals. Each
-operation still checks successful creation or revision advancement, result page
-size and SQL instrumentation. Untimed final probes check persisted revisions,
-counters and payloads, and the final query page's values, order and identities.
-Detailed assertions also run in `tests/CellBridge.Benchmarks.Tests`. Workload tests use disposable
-PostgreSQL through `CellBridge.TestInfrastructure` and cover provider and HTTP paths.
+- `independent` distributes client records across `Workspaces`.
+- `same-workspace` gives each client a different record in one workspace.
+- `contention` sends clients to the same record. Each patch reads its revision
+  through HTTP first. Rejected revisions have status `revision_conflict` and do
+  not count as successful patches.
+- `smoke` creates and patches a record, then checks two query pages.
 
-Records have a title, integer counter and deterministic ASCII payload generated
-once before measurement. `--payload-bytes` defaults to 1,024 and accepts 0 through
-60,000. The report retains payload and serialized values sizes. Use external
-process/container limits when comparing constrained machines and record those
-settings with the results. The disposable environment does not apply machine-specific CPU IDs.
-These commands establish the measurement workflow; they are not a SQL baseline.
+`GetWeight`, `QueryWeight`, `PatchWeight` and `CreateWeight` select the operation
+mix. `Clients` bounds the prepared client records. `Records`, `PageSize` and
+`PayloadBytes` control the query fixture and record size. HTTP request steps are
+`get`, `query`, `create` and `patch`.
 
-## Interpret the report
+Document provider scenarios include `delta` and `delta-chain`. These change
+revision references while keeping file bytes unchanged. The `captured` mode uses
+fixed recorded save examples.
 
-Reports include successes, failures and their categories, attempted/offered and
-successful rates, p50/p95/p99 latency, SQL execution and commit distributions,
-application CPU/allocation/GC/memory data, PostgreSQL durability settings, runtime,
-CPU model, source commit/dirty status and loaded assembly hashes. HTTP
-measurements include the loopback client and server in one process. Memory and CPU
-are process measurements, not PostgreSQL-container measurements; peak memory is
-cumulative across cases. JSON-body byte counts are not network or WAL byte counts.
+The document HTTP scenario supports `Workload` values `independent` and
+`contention`. Clients query the current graph through SOAP, then upload an entire
+changed Office package as a full replacement through real SOAP/MTOM. `Clients`,
+`DocumentsPerClient`, `SizeMiB`, `Seed` and `WritePercent` control the workload. Payloads are prepared before load.
+`Retry` adds a separate identical-request replay. Steps report queries, downloads,
+new saves and replays separately. A protocol coherency failure has status
+`document_conflict`; it is not a successful save. This is an API client, not a
+desktop Office emulator.
 
-SQL executions count Npgsql commands or batches, not individual statements inside
-a batch. Durable commits use Npgsql's completed-transaction events and are reported
-separately. Successful measured creates and patches must observe one commit.
-Typical record mutations use two SQL executions, or three when assigning references,
-plus commit. A concurrent create that missed another caller's receipt can require
-a further recovery lookup. Provider queries use two executions plus commit; the
-native HTTP query also loads cursor/schema metadata, making three executions and
-two commits. Cold health checks are excluded through warm-up.
+`PayloadVariants` defaults to two different files per client. Saves alternate
+between them, so later writes can reuse stored content. This measures a warm
+working set. To measure new-content writes, prepare more variants than each
+client can save during warm-up and measurement. The final validation output
+reports committed saves and distinct payload hashes. Those counts must match
+for a run to qualify as a new-content test. Prepared payload memory grows with
+`Clients`, `PayloadVariants` and `SizeMiB`.
 
-Keep raw JSON under ignored `artifacts/`. Record hardware, storage and deployment
-network conditions when sharing results. A passing local run qualifies that
-declared workload and environment; it is not a general production capacity claim.
+Random small-edit HTTP load is not implemented. Maximum Office editing capacity
+remains unmeasured.
+
+Aspire starts the API and disposable databases, runs schema setup and seeds the
+account. Runtime requests use restricted database users. Add `--backend sqlserver`
+to test the SQL Server document and Lists providers. Authentication still uses
+PostgreSQL. Development volumes are excluded from test runs. Disposing the Aspire
+application owns resource cleanup. No running development host or second machine
+is required.
+
+The checked-in `load.json` selects Lists HTTP with eight clients, 30 seconds of
+warm-up and two minutes of measurement:
+
+```sh
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --load-test --config benchmark/CellBridge.Benchmarks/load.json
+```
+
+Use `load-rate.json` for fixed arrival traffic. It offers 200 Lists workflows per
+second or four document workflows per second, with HTTP requests measured as
+separate steps. These are workload examples, not capacity claims.
+
+Select document HTTP with `--target document-http`. Run one target at a time for
+comparisons. Change NBomber's `LoadSimulationsSettings` to compare client counts or
+fixed arrival rates. Keep the source, runtime, backend, workload and duration fixed
+between implementations. Prepare enough clients for the scenario's instance
+numbers. Do not queue requests in the scenario to hide a generator capacity limit.
+
+All clients use one seeded account. The load environment sets document admission
+limits to 16 global requests and 16 requests per subject, so it can exercise
+concurrent storage work. Override these through Aspire parameters
+`Parameters__LoadMaxConcurrentRequests` and
+`Parameters__LoadMaxConcurrentRequestsPerSubject`. Shipping defaults remain eight
+global requests and two per subject. Record the tested limits with the results.
+These runs do not establish distinct-user capacity or desktop Office coauthoring.
+
+NBomber's [license](https://nbomber.com/docs/getting-started/license/) permits free
+personal and academic use. Organizations need the appropriate paid license.
+The dependency belongs only to the non-shipping benchmark project.
+
+## Interpret results
+
+Reports go to ignored `artifacts/load-tests/`. Compare matching configurations
+on an otherwise idle machine. Keep runtime, hardware, source and backend details
+with results you need for a comparison. Remove results when that work ends.
+The bounded smoke configuration checks execution and produces no useful capacity
+estimate.
+
+NBomber reports counts, throughput and latency percentiles for each request step.
+The checked-in profiles set `MaxFailCount` explicitly because NBomber counts
+expected revision conflicts toward that limit too. Reject a run that stops before
+its configured duration, even if its exit code is zero.
+
+Compare successful `patch` or `save` throughput and response times at the same
+load. Report conflicts, replays, timeouts and server failures separately. The
+whole iteration includes client preparation and several requests, so its latency
+is not one API response time. Login and seeding happen before measurement.
+
+HTTP client and WebDemo run in separate processes on the same machine. Check
+client CPU, server CPU, memory and database waits before interpreting a limit as
+server capacity. Provider scenarios measure a different path. Use BenchmarkDotNet
+for allocation costs and database diagnostics for blocking and deadlocks.
+
+Requests check protocol/API success. Final probes check persisted record revisions,
+values and document state. Expected revision conflicts continue the run. Other request failures remain in
+the results and cause a nonzero exit code. Incorrect saved data stops the run.
+Detailed correctness assertions remain in `tests/CellBridge.Benchmarks.Tests` and
+the protocol, storage and Lists test projects. A passing load test qualifies its
+declared workload, not general production capacity.

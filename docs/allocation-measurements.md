@@ -1,5 +1,39 @@
 # Measuring request allocations
 
+Run every maintained BenchmarkDotNet case with one command:
+
+```sh
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks
+```
+
+List the benchmark methods without starting a database or collecting measurements:
+
+```sh
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --list flat
+```
+
+This entry point uses BenchmarkDotNet directly across the allocation, Lists and
+storage benchmark assemblies. It defaults to all cases and accepts normal
+BenchmarkDotNet arguments, including `--filter`, `--job`, `--artifacts` and
+`--exporters`. The parent process starts one disposable PostgreSQL environment
+through Aspire and disposes it after all cases finish. Generated benchmark child
+processes receive its connection strings and own only their data preparation and
+connections. Aspire health checks and telemetry run in the parent process, outside
+the process whose allocations BenchmarkDotNet measures. The unified entry point
+requires Docker and the repository's Aspire prerequisites for timed runs.
+Listing methods and displaying help start no environment. The standalone
+allocation project below remains database-free.
+No second machine, running development host or measurement wrapper is required.
+Setup and result checks remain outside measured invocations. A failed benchmark
+returns a nonzero exit code. Use an otherwise idle machine for timing comparisons.
+`--job Dry` checks execution with minimal sampling; its numbers are not useful
+performance measurements.
+
+Benchmarks use the runtime's normal GC configuration. .NET 11 includes the
+[allocation-counter fix](https://github.com/dotnet/runtime/pull/131069), so the
+runners no longer override heap adaptation. Record runtime and GC settings when
+comparing results.
+
 `benchmark/CellBridge.Allocations.Benchmark` measures preloaded inbound parsing,
 eager document and file-graph restoration, and nested binary builders.
 BenchmarkDotNet owns process isolation, warm-up, measurement and allocation
@@ -10,7 +44,7 @@ Build in Release and select the methods to measure:
 
 ```sh
 dotnet build benchmark/CellBridge.Allocations.Benchmark -c Release
-dotnet benchmark/CellBridge.Allocations.Benchmark/bin/Release/net10.0/CellBridge.Allocations.Benchmark.dll --filter '*' --artifacts artifacts/allocations/bdn --exporters json
+dotnet benchmark/CellBridge.Allocations.Benchmark/bin/Release/net11.0/CellBridge.Allocations.Benchmark.dll --filter '*' --artifacts artifacts/allocations/bdn --exporters json
 ```
 
 The default cases use deterministic seed-42 payloads of 1 KiB, 1 MiB and 8 MiB
@@ -22,14 +56,17 @@ runtime and timing settings in its output. Additional JSON files under
 `artifacts/allocations/metadata` record workload hashes, source commit, tracked
 diff hash, working-tree status and loaded assembly hashes. Set
 `CELLBRIDGE_BENCHMARK_METADATA` to keep these beside a particular run's report.
-Use a fresh output directory for each comparison and retain the exact source and
-build outputs. Other work on the machine can affect timing.
+Use a fresh output directory for each comparison and record the source and
+assembly identities. Other work on the machine can affect timing.
 
 ## Current PostgreSQL provider cases
 
 The storage benchmark also measures complete 1 MiB content reads, batches of
 eight new content objects, and batches of eight document saves. Save cases use
-`changed-full` and `delta` requests with four prior saves per document. Database
+`changed-full` and `delta` requests with four prior saves per document.
+`changed-full` replaces the package bytes. `delta` changes revision references
+while keeping file bytes unchanged. The provider load mode `delta-chain` also
+keeps file bytes unchanged; it adds references to preceding revisions. Database
 creation, content preparation and save-history construction happen outside the
 timed method. Iteration cleanup checks stored content, restored documents, save
 receipts and revision counts.
@@ -37,14 +74,17 @@ receipts and revision counts.
 Run these cases with standard BenchmarkDotNet jobs:
 
 ```sh
-dotnet run -c Release --project benchmark/CellBridge.Storage.Benchmark -- --filter '*PostgreSqlContent*' --artifacts artifacts/provider-benchmarks/content --exporters json
-dotnet run -c Release --project benchmark/CellBridge.Storage.Benchmark -- --filter '*PostgreSqlServiceSave*' --artifacts artifacts/provider-benchmarks/saves --exporters json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --filter '*PostgreSqlContent*' --artifacts artifacts/provider-benchmarks/content --exporters json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --filter '*PostgreSqlServiceSave*' --artifacts artifacts/provider-benchmarks/saves --exporters json
 ```
 
-Each case starts a disposable PostgreSQL environment through the shared test
-infrastructure and removes its generated database afterward. It does not use the
-local AppHost or persistent volume. BenchmarkDotNet records runtime, job, timing
-and allocation results. Keep reports under ignored `artifacts/`.
+The unified parent process owns the disposable PostgreSQL environment through
+the shared Aspire test infrastructure. Cases reset their dataset outside measured
+invocations and do not start Aspire in a measured child process. They do not use a
+running development AppHost or its persistent volume. The Lists and storage
+benchmark projects are libraries loaded by the unified entry point.
+BenchmarkDotNet records runtime, job, timing and allocation results. Keep reports
+under ignored `artifacts/`.
 
 ## Reviewed captures and provider diagnostics
 
@@ -52,12 +92,13 @@ The `--diagnostics` mode retains reviewed SharePoint requests, logical provider
 read counts and stage reports for comparisons that need those details:
 
 ```sh
-dotnet benchmark/CellBridge.Allocations.Benchmark/bin/Release/net10.0/CellBridge.Allocations.Benchmark.dll --diagnostics --workload save-second --stage restore --content filesystem --iterations 30 --output artifacts/allocations/capture/restore.json
+dotnet benchmark/CellBridge.Allocations.Benchmark/bin/Release/net11.0/CellBridge.Allocations.Benchmark.dll --diagnostics --workload save-second --stage restore --content filesystem --iterations 30 --output artifacts/allocations/capture/restore.json
 ```
 
 Use `--workload synthetic --bytes 1048576` for synthetic diagnostic input, or
 `save-first` and `save-second` for the reviewed fixtures. The second save merges
-the first save's graph before restoration. Setup verifies the fixture hashes.
+the first save's graph before restoration. These are fixed recorded examples,
+not generated random edits. Setup verifies the fixture hashes.
 For repetition, invoke the executable again with a new output path. The native
 benchmark process owns its content directory and cleanup. There is no Python
 lifecycle runner.
@@ -116,6 +157,9 @@ The [reviewed fixture provenance](../testdata/sharepoint/fixtures/save_reopen/RE
 identifies the selected SharePoint exchanges and sanitization. Exact historical
 Office and SharePoint builds are absent from those fixtures. They are offline
 selected exchanges, not complete reference sessions or new desktop evidence.
-Target deployment load tests with explicit server, backend and client versions,
-and correlated desktop/reference checks remain external prerequisites for
-broader compatibility or production-scale claims.
+The [NBomber load scenarios](list-performance.md#load-tests) measure provider and
+HTTP workflows. The document HTTP workload sends full replacements through real
+SOAP/MTOM. Random small-edit HTTP load is not implemented, and maximum Office
+editing capacity remains unmeasured. Target deployment tests with explicit server,
+backend and client versions, and correlated desktop/reference checks remain
+external prerequisites for broader compatibility or production-scale claims.

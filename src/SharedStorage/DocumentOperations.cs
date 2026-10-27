@@ -24,6 +24,7 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
     private async Task<T> MutateAsync<T>(Func<TContext, Task<T>> action,
         CancellationToken ct, bool exclusive = false, bool rename = false)
     {
+        var commitStarted = false;
         try
         {
             await using var db = database.CreateContext();
@@ -34,9 +35,14 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
             var result = await action(db);
             // All writes and derived records are accepted together. Never rerun a
             // callback or replace a known commit with caller cancellation.
+            commitStarted = true;
             await transaction.CommitAsync(CancellationToken.None);
             return result;
         }
+        // Before COMMIT, cancellation has a known rollback even when the provider
+        // includes a database exception as its inner exception.
+        catch (OperationCanceledException) when (ct.IsCancellationRequested && !commitStarted)
+        { throw; }
         catch (Exception ex) when (rename && database.IsUniqueViolation(ex))
         { throw new InvalidOperationException("The destination filename already exists.", ex); }
         catch (Exception ex) when (database.IsDatabaseException(ex))

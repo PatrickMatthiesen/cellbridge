@@ -1,7 +1,7 @@
 # CellBridge
 
 [![Build and tests](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml/badge.svg?branch=main)](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml)
-[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](src/CellBridge/CellBridge.csproj)
+[![.NET 11](https://img.shields.io/badge/.NET-11-512BD4?logo=dotnet&logoColor=white)](src/CellBridge/CellBridge.csproj)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Edit Microsoft Office documents in their desktop apps and save them to your own
@@ -57,8 +57,9 @@ The development application `src/CellBridge.WebDemo` hosts the protocol endpoint
 and a Razor Pages library at `/library`. It creates blank documents and uses
 the sample Identity accounts.
 
-Install the .NET 10 SDK, an Aspire CLI compatible with the preview packages pinned
-in `src/CellBridge.AppHost/CellBridge.AppHost.csproj`, Docker and Python 3.12 or newer.
+Install the .NET 11 SDK pinned in `global.json`, Docker and Python 3.12 or newer.
+Use an Aspire CLI compatible with the preview packages pinned in
+`src/CellBridge.AppHost/CellBridge.AppHost.csproj`.
 Desktop editing requires Office on Windows.
 
 From the repository root:

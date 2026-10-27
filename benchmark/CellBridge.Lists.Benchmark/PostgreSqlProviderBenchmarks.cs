@@ -2,13 +2,11 @@ using System.Text.Json.Nodes;
 using BenchmarkDotNet.Attributes;
 using CellBridge.Lists;
 using CellBridge.Lists.PostgreSql;
-using CellBridge.TestInfrastructure;
 
 [MemoryDiagnoser]
 public class PostgreSqlPagingBenchmarks
 {
     [Params(false, true)] public bool Analyzed { get; set; }
-    private PostgreSqlEnvironment environment = null!;
     private BenchmarkDatabase database = null!;
     private PostgreSqlListEngine engine = null!;
     private ListQuery first = null!, second = null!;
@@ -16,8 +14,10 @@ public class PostgreSqlPagingBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
-        environment = await PostgreSqlEnvironment.StartAsync();
-        database = await BenchmarkDatabase.OpenAsync(environment.ListsConnectionString);
+        database = await BenchmarkDatabase.OpenAsync(
+            BenchmarkConnections.Require(BenchmarkConnections.ListsAdmin),
+            BenchmarkConnections.Require(BenchmarkConnections.ListsRuntime));
+        await database.ResetListsAsync();
         engine = new(database.Runtime);
         await using (var control = database.Admin.CreateCommand(
             "ALTER TABLE cellbridge_lists.records SET (autovacuum_analyze_threshold=2147483647, autovacuum_analyze_scale_factor=0)"))
@@ -61,7 +61,6 @@ public class PostgreSqlPagingBenchmarks
                 ListBenchmarkInputs.Workspace, ListBenchmarkInputs.List, second), 600);
             await database.DisposeAsync();
         }
-        if (environment is not null) await environment.DisposeAsync();
     }
 }
 
@@ -70,7 +69,6 @@ public class PostgreSqlListMutationBenchmarks
 {
     private const int BatchSize = 16;
     [Params("create", "patch")] public string Operation { get; set; } = "";
-    private PostgreSqlEnvironment environment = null!;
     private BenchmarkDatabase? database;
     private PostgreSqlListEngine engine = null!;
     private readonly CreateRecordRequest[] creates = new CreateRecordRequest[BatchSize];
@@ -82,8 +80,10 @@ public class PostgreSqlListMutationBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
-        environment = await PostgreSqlEnvironment.StartAsync();
-        database = await BenchmarkDatabase.OpenAsync(environment.ListsConnectionString);
+        database = await BenchmarkDatabase.OpenAsync(
+            BenchmarkConnections.Require(BenchmarkConnections.ListsAdmin),
+            BenchmarkConnections.Require(BenchmarkConnections.ListsRuntime));
+        await database.ResetListsAsync();
         engine = new(database.Runtime);
         await PrepareFixtureAsync();
         before = await database.CountsAsync();
@@ -93,7 +93,9 @@ public class PostgreSqlListMutationBenchmarks
     }
 
     [IterationSetup]
-    public async Task Prepare()
+    public void Prepare() => PrepareAsync().GetAwaiter().GetResult();
+
+    private async Task PrepareAsync()
     {
         await database!.ResetListsAsync();
         await PrepareFixtureAsync();
@@ -126,7 +128,7 @@ public class PostgreSqlListMutationBenchmarks
     }
 
     [IterationCleanup]
-    public Task Verify() => VerifyAsync();
+    public void Verify() => VerifyAsync().GetAwaiter().GetResult();
 
     private async Task VerifyAsync()
     {
@@ -155,7 +157,6 @@ public class PostgreSqlListMutationBenchmarks
     public async Task Cleanup()
     {
         if (database is not null) await database.DisposeAsync();
-        if (environment is not null) await environment.DisposeAsync();
     }
 }
 

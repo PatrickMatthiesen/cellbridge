@@ -37,7 +37,7 @@ public sealed class PortabilityToolTests
     {
         var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
         var configuration = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar)).Parent!.Name;
-        var executable = Path.Combine(root, "tools/CellBridge.Storage.Portability/bin", configuration, "net10.0/CellBridge.Storage.Portability.dll");
+        var executable = Path.Combine(root, "tools/CellBridge.Storage.Portability/bin", configuration, "net11.0/CellBridge.Storage.Portability.dll");
         var start = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         start.ArgumentList.Add(executable); start.ArgumentList.Add(command);
         foreach (var argument in arguments) start.ArgumentList.Add(argument);

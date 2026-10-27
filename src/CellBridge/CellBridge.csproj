@@ -1,13 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageDescription>Core CellBridge protocol execution, document operations and storage contracts.</PackageDescription>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../CellBridge.FssHttpB/CellBridge.FssHttpB.csproj" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.13" />
     <Compile Include="../SharedAuthorization/BoundedAuthorizationCache.cs" Link="Authorization/BoundedAuthorizationCache.cs" />
   </ItemGroup>
   <ItemGroup>

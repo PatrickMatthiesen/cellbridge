@@ -1,60 +1,38 @@
-using CellBridge.Storage.PostgreSql;
 using CellBridge.Storage.Abstractions;
 using Npgsql;
 
-/// <summary>Each provider benchmark owns its database; host data and backends never mix.</summary>
-internal sealed class BenchmarkDatabase(NpgsqlDataSource admin, string name, NpgsqlDataSource source) : IAsyncDisposable
+// Aspire owns the database. Reset document data between measurements so repeat
+// input bytes do not turn content writes into deduplication lookups.
+internal sealed class BenchmarkDatabase(NpgsqlDataSource source) : IAsyncDisposable
 {
     public NpgsqlDataSource Source { get; } = source;
 
-    public static async Task<BenchmarkDatabase?> OpenAsync(string? connectionString, StorageLimits limits)
+    public static async Task<BenchmarkDatabase> OpenAsync(string connectionString, StorageLimits limits)
     {
-        if (connectionString is null) return null;
-        var admin = NpgsqlDataSource.Create(connectionString);
-        string name = "cellbridge_bench_" + Guid.NewGuid().ToString("N");
-        bool created = false;
-        NpgsqlDataSource? source = null;
+        var source = NpgsqlDataSource.Create(connectionString);
         try
         {
-            await using (var create = admin.CreateCommand($"CREATE DATABASE {name}")) await create.ExecuteNonQueryAsync();
-            created = true;
-            var settings = new NpgsqlConnectionStringBuilder(connectionString) { Database = name };
-            source = NpgsqlDataSource.Create(settings.ConnectionString);
-            await new PostgreSqlStateStore(source, limits).InitializeAsync();
-            return new(admin, name, source);
+            await using (var reset = source.CreateCommand("""
+                TRUNCATE cellbridge_documents, cellbridge_states, cellbridge_read_heads,
+                    cellbridge_revision_summaries, cellbridge_chunks, cellbridge_objects,
+                    cellbridge_recovery_receipts;
+                """))
+                await reset.ExecuteNonQueryAsync();
+            await using var quota = source.CreateCommand("""
+                UPDATE cellbridge_usage SET stored_bytes=0, document_count=0,
+                    max_stored_bytes=$1, max_documents=$2 WHERE singleton=true;
+                """);
+            quota.Parameters.AddWithValue(limits.MaxStoredBytes);
+            quota.Parameters.AddWithValue(limits.MaxDocuments);
+            await quota.ExecuteNonQueryAsync();
+            return new(source);
         }
         catch
         {
-            if (source is not null) await source.DisposeAsync();
-            if (created)
-            {
-                await using var drop = admin.CreateCommand($"DROP DATABASE {name} WITH (FORCE)");
-                await drop.ExecuteNonQueryAsync();
-            }
-            await admin.DisposeAsync();
+            await source.DisposeAsync();
             throw;
         }
     }
 
-    public async Task<object> MetadataAsync()
-    {
-        var settings = new Dictionary<string, string>();
-        await using (var command = Source.CreateCommand("SELECT name,setting FROM pg_settings WHERE name IN ('synchronous_commit','fsync','full_page_writes','wal_level','shared_buffers','max_connections','statement_timeout','checkpoint_timeout','max_wal_size') ORDER BY name"))
-        await using (var reader = await command.ExecuteReaderAsync())
-            while (await reader.ReadAsync()) settings.Add(reader.GetString(0), reader.GetString(1));
-        await using var version = Source.CreateCommand("SELECT version()");
-        return new { postgresVersion = (string)(await version.ExecuteScalarAsync())!, postgresSettings = settings,
-            ownership = "A generated database owned and dropped only by this invocation." };
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        await Source.DisposeAsync();
-        try
-        {
-            await using var drop = admin.CreateCommand($"DROP DATABASE {name} WITH (FORCE)");
-            await drop.ExecuteNonQueryAsync();
-        }
-        finally { await admin.DisposeAsync(); }
-    }
+    public ValueTask DisposeAsync() => Source.DisposeAsync();
 }

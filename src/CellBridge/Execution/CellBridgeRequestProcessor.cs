@@ -168,7 +168,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                                     SubRequestType.SchemaLock or SubRequestType.ExclusiveLock or SubRequestType.Coauth)
                                     return new StateTransition<bool>(null, false);
                                 var next = document.CaptureCoordination(current, coordinator.Capture());
-                                if (System.Text.Json.JsonSerializer.Serialize(next) == System.Text.Json.JsonSerializer.Serialize(current))
+                                if (!CoordinationChanged(current, next))
                                     return new StateTransition<bool>(null, true);
                                 next = next with { Coordination = CoordinationFencing.Capture(current.Coordination, next.Coordination) };
                                 return new StateTransition<bool>(next, true);
@@ -218,6 +218,35 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             }
             return new(response, accepted.ToImmutable()) { IsCancelled = true };
         }
+    }
+
+    // CaptureCoordination changes only locks, editors and the editors partition.
+    // Do not inspect file graphs or revision history for a lock operation.
+    internal static bool CoordinationChanged(DocumentState current, DocumentState next)
+    {
+        var before = current.Coordination;
+        var after = next.Coordination;
+        if (before != (after with { SchemaOwners = before.SchemaOwners, CoauthorClients = before.CoauthorClients }) ||
+            !before.SchemaOwners.AsSpan().SequenceEqual(after.SchemaOwners.AsSpan()) ||
+            !before.CoauthorClients.AsSpan().SequenceEqual(after.CoauthorClients.AsSpan()))
+            return true;
+
+        if (current.Editors.Length != next.Editors.Length) return true;
+        for (var index = 0; index < current.Editors.Length; index++)
+        {
+            var left = current.Editors[index];
+            var right = next.Editors[index];
+            if (left != (right with { Metadata = left.Metadata }) || left.Metadata.Count != right.Metadata.Count)
+                return true;
+            foreach (var (key, value) in left.Metadata)
+                if (!right.Metadata.TryGetValue(key, out var other) || !value.AsSpan().SequenceEqual(other.AsSpan()))
+                    return true;
+        }
+
+        var leftPartition = current.Partitions.Single(partition => partition.Kind == 2);
+        var rightPartition = next.Partitions.Single(partition => partition.Kind == 2);
+        return leftPartition.Knowledge != rightPartition.Knowledge ||
+            !leftPartition.InlineContent.AsSpan().SequenceEqual(rightPartition.InlineContent.AsSpan());
     }
 
     private static FssHttpResponse RequestError(FssHttpRequest request, string code, string message)

@@ -12,6 +12,25 @@ namespace CellBridge.Lists.PostgreSql.Tests;
 public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
 {
     [PostgreSqlFact]
+    public async Task ConsumerRelationalNullsCannotChangeFiltersOrPagination()
+    {
+        var (definition, records) = await TypedRecordsAsync();
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(database.RuntimeSource!, provider => provider.UseRelationalNulls())
+            .Options;
+        var engine = new PostgreSqlListEngine(options);
+        foreach (var field in definition.Fields)
+        foreach (var descending in new[] { false, true })
+        {
+            await AssertPagesAsync(definition, records,
+                new(SortFieldId: field.Id, Descending: descending, Limit: 1), engine);
+            await AssertPagesAsync(definition, records, new(
+                Filters: [new(field.Id, FilterOperator.NotEqual, records[3].Values[field.Id.ToString("D")]!.DeepClone())],
+                SortFieldId: field.Id, Descending: descending, Limit: 1), engine);
+        }
+    }
+
+    [PostgreSqlFact]
     public async Task SqlSortAndPaginationMatchCoreForEveryTypeNullAndUnicode()
     {
         var (definition, records) = await TypedRecordsAsync();
@@ -233,14 +252,15 @@ public sealed class PostgreSqlListQueryTests(ListDatabaseFixture database)
         Assert.Equal(small.Records[^1].Id, small.NextRecordId);
     }
 
-    private async Task AssertPagesAsync(ListDefinition definition, IReadOnlyList<ListRecord> records, ListQuery query)
+    private async Task AssertPagesAsync(ListDefinition definition, IReadOnlyList<ListRecord> records, ListQuery query,
+        IListEngine? engine = null)
     {
         var limits = new ListLimits();
         var visited = new List<Guid>();
         for (var page = 0; page <= records.Count; page++)
         {
             var expected = ListQueryEvaluator.Query(definition, records, query, limits);
-            var actual = await database.Engine.QueryAsync(database.AdminActor, definition.WorkspaceId, definition.Id, query);
+            var actual = await (engine ?? database.Engine).QueryAsync(database.AdminActor, definition.WorkspaceId, definition.Id, query);
             Assert.Equal(expected.SchemaVersion, actual.SchemaVersion);
             Assert.Equal(expected.Records.Select(record => record.Id), actual.Records.Select(record => record.Id));
             Assert.Equal(expected.NextRecordId, actual.NextRecordId);

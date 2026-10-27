@@ -94,9 +94,9 @@ Set `ConnectionStrings__cellbridge` privately and use the selected provider's
 existing database to simulate migration.
 
 ```sh
-dotnet tools/CellBridge.Storage.Portability/bin/Release/net10.0/CellBridge.Storage.Portability.dll export --archive /backups/cellbridge.zip --context /private/source-context.json
-dotnet tools/CellBridge.Storage.Portability/bin/Release/net10.0/CellBridge.Storage.Portability.dll validate --archive /backups/cellbridge.zip --context /private/destination-context.json
-dotnet tools/CellBridge.Storage.Portability/bin/Release/net10.0/CellBridge.Storage.Portability.dll import --archive /backups/cellbridge.zip --context /private/destination-context.json
+dotnet tools/CellBridge.Storage.Portability/bin/Release/net11.0/CellBridge.Storage.Portability.dll export --archive /backups/cellbridge.zip --context /private/source-context.json
+dotnet tools/CellBridge.Storage.Portability/bin/Release/net11.0/CellBridge.Storage.Portability.dll validate --archive /backups/cellbridge.zip --context /private/destination-context.json
+dotnet tools/CellBridge.Storage.Portability/bin/Release/net11.0/CellBridge.Storage.Portability.dll import --archive /backups/cellbridge.zip --context /private/destination-context.json
 ```
 
 `validate` uses disposable local staging and needs no database or content provider.
@@ -111,7 +111,7 @@ For a provider copy in one invocation, configure `ConnectionStrings__source` and
 `destination__Storage__...` for each provider's settings:
 
 ```sh
-dotnet tools/CellBridge.Storage.Portability/bin/Release/net10.0/CellBridge.Storage.Portability.dll migrate --archive /backups/migration.zip --context /private/context.json
+dotnet tools/CellBridge.Storage.Portability/bin/Release/net11.0/CellBridge.Storage.Portability.dll migrate --archive /backups/migration.zip --context /private/context.json
 ```
 
 This exports a fresh archive and imports it. The archive path must be new. If the
@@ -122,7 +122,7 @@ operation and cannot overwrite a previous destination.
 After recovering the provider, an authorized actor can restore a retained version:
 
 ```sh
-dotnet tools/CellBridge.Storage.Portability/bin/Release/net10.0/CellBridge.Storage.Portability.dll restore-version --resource-id GUID --revision 3 --expected-revision 8 --operation-key stable-recovery-key --subject stable-writer-subject
+dotnet tools/CellBridge.Storage.Portability/bin/Release/net11.0/CellBridge.Storage.Portability.dll restore-version --resource-id GUID --revision 3 --expected-revision 8 --operation-key stable-recovery-key --subject stable-writer-subject
 ```
 
 The operator supplies the actor's stable subject. The regular document service

@@ -1,6 +1,6 @@
 # CellBridge customer workspace lists
 
-Optional .NET 10 libraries for typed customer-workspace lists. These libraries
+Optional .NET 11 libraries for typed customer-workspace lists. These libraries
 use a native list API and are independent of CellBridge's Office synchronization
 protocols.
 

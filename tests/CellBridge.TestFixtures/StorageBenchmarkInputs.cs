@@ -1,7 +1,8 @@
 using System.IO.Compression;
-using CellBridge.TestFixtures;
 
-internal static class StorageBenchmarkInputs
+namespace CellBridge.TestFixtures;
+
+public static class StorageBenchmarkInputs
 {
     public static byte[] Package(int sizeMiB, int seed)
     {

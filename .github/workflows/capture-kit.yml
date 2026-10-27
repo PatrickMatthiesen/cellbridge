@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.100-rc.3.26522.148'
       - run: dotnet test tests/CellBridge.FssHttp.Tests --nologo --verbosity minimal
       - run: dotnet test tests/CellBridge.FssHttpB.Tests --nologo --verbosity minimal
       - run: dotnet test tests/OfficeInspectors.Adapter --nologo --verbosity minimal
@@ -102,9 +102,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '11.0.100-rc.3.26522.148'
       - run: dotnet build tools/CellBridge.Storage.Setup --nologo
-      - run: dotnet tools/CellBridge.Storage.Setup/bin/Debug/net10.0/CellBridge.Storage.Setup.dll
+      - run: dotnet tools/CellBridge.Storage.Setup/bin/Debug/net11.0/CellBridge.Storage.Setup.dll
       - run: dotnet test CellBridge.slnx -m:1 --nologo --verbosity minimal --logger trx --results-directory artifacts/test-results
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:

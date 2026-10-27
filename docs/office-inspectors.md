@@ -1,6 +1,6 @@
 # Office Inspectors parser
 
-`CellBridge.OfficeInspectors` is the in-repo .NET 10 port of the binary parser
+`CellBridge.OfficeInspectors` is the in-repo .NET 11 port of the binary parser
 from Microsoft's Office Inspectors for Fiddler. It runs on Linux and Windows
 without Fiddler, WinForms, desktop Office or a sibling source checkout.
 The [source notice](../src/CellBridge.OfficeInspectors/NOTICE.md) records the

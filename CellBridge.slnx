@@ -41,6 +41,7 @@
     <Project Path="tools/CellBridge.Storage.Portability/CellBridge.Storage.Portability.csproj" />
   </Folder>
   <Folder Name="/benchmark/">
+    <Project Path="benchmark/CellBridge.Benchmarks/CellBridge.Benchmarks.csproj" />
     <Project Path="benchmark/CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />
     <Project Path="benchmark/CellBridge.Lists.Benchmark/CellBridge.Lists.Benchmark.csproj" />
     <Project Path="benchmark/CellBridge.Allocations.Benchmark/CellBridge.Allocations.Benchmark.csproj" />

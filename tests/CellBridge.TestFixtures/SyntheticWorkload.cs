@@ -2,7 +2,9 @@ using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 
-internal static class SyntheticWorkload
+namespace CellBridge.TestFixtures;
+
+public static class SyntheticWorkload
 {
     public static FsshttpbCellRequest Save(StoredDocument current, byte[] payload, string mode, int iteration, Random random)
     {

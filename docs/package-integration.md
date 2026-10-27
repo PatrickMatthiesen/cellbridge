@@ -20,7 +20,7 @@ Binary PutChanges accepts at most 1,024 author logins with 65,536 cumulative
 UTF-16 characters. Configure `CellBridgeOptions` for HTTP admission limits and
 keep host/proxy upload and response limits aligned with them.
 
-The beta targets .NET 10. Use `CellBridge.AspNetCore` with a storage provider.
+The beta targets .NET 11. Use `CellBridge.AspNetCore` with a storage provider.
 Direct integrations can use `CellBridge` without the HTTP adapter, and
 `CellBridge.FssHttpB` remains standalone. See
 [provider composition](storage-providers.md#consume-the-packages) and the

@@ -14,7 +14,8 @@ public sealed class RevisionHistoryInteropTests
     {
         var endpoint = new Uri(Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_ENDPOINT")!);
         var peerSetting = Environment.GetEnvironmentVariable("OFFICECOLLABSERVER_INTEROP_PEER");
-        if (string.IsNullOrWhiteSpace(peerSetting)) return;
+        Assert.False(string.IsNullOrWhiteSpace(peerSetting),
+            "The local fixture must start both WebDemo processes. If using an external endpoint override, supply its peer or remove the override.");
         var peer = new Uri(peerSetting);
         using var first = LiveInteropHttp.Create(endpoint); using var second = LiveInteropHttp.Create(peer);
         var name = "History " + Guid.NewGuid().ToString("N")[..12];

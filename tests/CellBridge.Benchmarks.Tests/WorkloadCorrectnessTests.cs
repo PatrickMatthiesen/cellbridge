@@ -1,4 +1,5 @@
 using System.Net.Http;
+using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
@@ -78,8 +79,8 @@ public sealed class BenchmarkDatabaseCollection : ICollectionFixture<BenchmarkEn
 
 public sealed class BenchmarkEnvironment : IAsyncLifetime
 {
-    public PostgreSqlEnvironment Environment { get; private set; } = null!;
-    public async Task InitializeAsync() => Environment = await PostgreSqlEnvironment.StartAsync();
+    public LoadTestEnvironment Environment { get; private set; } = null!;
+    public async Task InitializeAsync() => Environment = await LoadTestEnvironment.StartAsync();
     public async Task DisposeAsync() { if (Environment is not null) await Environment.DisposeAsync(); }
 }
 
@@ -93,7 +94,7 @@ public sealed class DatabaseWorkloadTests(BenchmarkEnvironment fixture)
     [InlineData("delta-chain")]
     public async Task RepeatedSavesAlsoRoundTripThroughRealPostgreSql(string workload)
     {
-        await using var source = NpgsqlDataSource.Create(fixture.Environment.ConnectionString);
+        await using var source = NpgsqlDataSource.Create(fixture.Environment.DocumentConnectionString);
         var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
         await SyntheticWorkloadTests.CheckRepeatedSavesAsync(provider, workload);
     }
@@ -103,12 +104,12 @@ public sealed class DatabaseWorkloadTests(BenchmarkEnvironment fixture)
     [InlineData(true)]
     public async Task ListMutationsAndPagesPreserveRevisionsValuesAndOrdering(bool useHttp)
     {
-        using var listener = SqlMeasurements.Listen();
-        await using var database = await BenchmarkDatabase.OpenAsync(fixture.Environment.ListsConnectionString);
-        var actor = new ListActor("benchmark:test");
+        await using var database = await BenchmarkDatabase.OpenAsync(fixture.Environment.ListsConnectionString,
+            fixture.Environment.ListsRuntimeConnectionString);
+        var actor = new ListActor("local:integration-writer");
         var engine = new PostgreSqlListEngine(database.Runtime);
         await engine.CheckHealthAsync();
-        await using var http = useHttp ? await BenchmarkHttpHost.StartAsync(engine, actor) : null;
+        using var http = useHttp ? await fixture.Environment.CreateClientAsync() : null;
         var counter = Guid.NewGuid();
         var payload = Guid.NewGuid();
         var workspace = Guid.NewGuid();
@@ -117,19 +118,27 @@ public sealed class DatabaseWorkloadTests(BenchmarkEnvironment fixture)
             [new(counter, "Counter", ListFieldType.Integer, Required: true), new(payload, "Payload", ListFieldType.Text, Required: true)]));
         var path = $"/api/workspaces/{workspace:D}/lists/{list.Id:D}/records";
         const string text = "fixed-payload";
+        async Task<T> SendAsync<T>(string url, HttpMethod method, object body)
+        {
+            using var message = new HttpRequestMessage(method, url) { Content = JsonContent.Create(body) };
+            using var response = await http!.SendAsync(message);
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<T>()
+                ?? throw new InvalidDataException("The HTTP response was empty.");
+        }
         var expected = new List<(Guid Id, long Revision)>();
         for (var i = 0; i < 12; i++)
         {
             var request = new CreateRecordRequest(Guid.NewGuid(), list.SchemaVersion, new JsonObject
             { [counter.ToString("D")] = i, [payload.ToString("D")] = text });
-            var created = useHttp ? await http!.SendAsync<CreateRecordResult>(path, HttpMethod.Post, request, new())
+            var created = useHttp ? await SendAsync<CreateRecordResult>(path, HttpMethod.Post, request)
                 : await engine.CreateRecordAsync(actor, workspace, list.Id, request);
             Assert.Equal(request.Id, created.Id);
             Assert.Equal(1, created.Revision);
             Assert.True(created.Number > 0);
             Assert.False(created.Replayed);
             var patch = new UpdateRecordRequest(created.Revision, list.SchemaVersion, [new(counter, JsonValue.Create(i + 20))]);
-            var updated = useHttp ? await http!.SendAsync<ListRecord>($"{path}/{created.Id:D}", HttpMethod.Patch, patch, new())
+            var updated = useHttp ? await SendAsync<ListRecord>($"{path}/{created.Id:D}", HttpMethod.Patch, patch)
                 : await engine.UpdateRecordAsync(actor, workspace, list.Id, created.Id, patch);
             Assert.Equal(workspace, updated.WorkspaceId);
             Assert.Equal(list.Id, updated.ListId);
@@ -146,11 +155,11 @@ public sealed class DatabaseWorkloadTests(BenchmarkEnvironment fixture)
         IReadOnlyList<ListRecord> second;
         if (useHttp)
         {
-            var page = await http!.SendAsync<ListQueryResponse>($"{path}/query", HttpMethod.Post, new ListQueryRequest(query), new());
+            var page = await SendAsync<ListQueryResponse>($"{path}/query", HttpMethod.Post, new ListQueryRequest(query));
             Assert.NotNull(page.NextCursor);
             first = page.Records;
-            second = (await http.SendAsync<ListQueryResponse>($"{path}/query", HttpMethod.Post,
-                new ListQueryRequest(query, page.NextCursor), new())).Records;
+            second = (await SendAsync<ListQueryResponse>($"{path}/query", HttpMethod.Post,
+                new ListQueryRequest(query, page.NextCursor))).Records;
         }
         else
         {
@@ -171,11 +180,12 @@ public sealed class DatabaseWorkloadTests(BenchmarkEnvironment fixture)
     }
 
     [Fact]
-    public async Task BenchmarkDatabaseDisposalDropsOnlyItsGeneratedDatabaseAndRole()
+    public async Task DisposingBenchmarkConnectionsLeavesAspireResourcesUsable()
     {
         string databaseName;
         string username;
-        await using (var database = await BenchmarkDatabase.OpenAsync(fixture.Environment.ListsConnectionString))
+        await using (var database = await BenchmarkDatabase.OpenAsync(fixture.Environment.ListsConnectionString,
+            fixture.Environment.ListsRuntimeConnectionString))
         {
             var settings = new NpgsqlConnectionStringBuilder(database.Runtime.ConnectionString);
             databaseName = settings.Database!;
@@ -187,7 +197,7 @@ public sealed class DatabaseWorkloadTests(BenchmarkEnvironment fixture)
         command.Parameters.AddWithValue(username);
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        Assert.Equal(0, reader.GetInt64(0));
-        Assert.Equal(0, reader.GetInt64(1));
+        Assert.Equal(1, reader.GetInt64(0));
+        Assert.Equal(1, reader.GetInt64(1));
     }
 }

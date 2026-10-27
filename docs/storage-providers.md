@@ -18,7 +18,7 @@ PostgreSQL and SQL Server use the same document operations. Each provider owns
 its database mappings and migration history. Required database locks stay enabled.
 
 `CellBridge.Storage.SqlServer` and `CellBridge.Lists.SqlServer` are independent
-.NET 10 packages. Use the same version for every CellBridge package. Each
+.NET 11 packages. Use the same version for every CellBridge package. Each
 package has its own schema and explicit migrator. Neither depends on PostgreSQL
 or on the other SQL Server package. The demo does not use these providers. Live
 Office editing against SQL Server has not been validated. See [Lists setup](lists.md#sql-server-setup-and-runtime)
@@ -179,6 +179,39 @@ files. `SharedContent` does not broaden permissions. On Windows, files inherit
 the parent directory ACL, so restrict the content, recovery output and service
 temporary directories to the service identity and trusted administrators.
 
+Request bodies larger than 256 KiB, save staging, PostgreSQL content writes and
+external file delivery use the system temporary directory. Aspire sets `TMPDIR`,
+`TMP` and `TEMP` for its .NET resources to the checkout's `artifacts/tmp` directory.
+Set `Parameters__TemporaryDirectory` to override this location. Relative paths
+resolve against the checkout root. The HTTP test peer uses the same setting.
+
+Other hosts can set `TMPDIR` on Linux, or `TMP` and `TEMP` on Windows, before
+starting the process to select a private, disk-backed directory. A temporary
+directory on `tmpfs` uses RAM and counts against the host's memory limit. Writing
+to a temporary file does not reduce RAM use on that filesystem. These request,
+save and content files close and delete when their operation finishes.
+
+Both a disk-backed `/tmp` and a repo directory store files on disk. The location
+also determines who removes files left by interrupted tools. Operating-system
+cleanup may remove old files in `/tmp`; `artifacts/tmp` needs explicit cleanup.
+Keep reports and saved documents outside both temporary locations.
+
+Before publishing an Office save, CellBridge checks the proposed ZIP package for
+`[Content_Types].xml` and the main document entry for its file extension. It reads
+each entry and limits the total expanded size. These checks reject some broken
+uploads and oversized compressed packages before they replace the current file.
+They do not validate the Office XML or prove that Office can open the document.
+The current implementation rewinds the stream to check and then store the same
+bytes. A temporary file provides that seekable stream without keeping another
+full document in RAM. The file itself adds no crash recovery guarantee.
+
+Request parsing still allocates an array for the full body after staging it.
+The default eight active requests and 128 MiB body limit therefore allow up to
+1 GiB of body arrays alone. Parsing and document graphs need more memory.
+`MaxConcurrentRequests` limits request count, not total bytes, and direct document
+service calls do not use that HTTP limit. Set request sizes and concurrency for
+the host's available memory. Storage quotas do not set a process memory limit.
+
 Use one content configuration for each database. Changing providers requires
 an explicit data migration; changing settings alone does not move objects.
 Use the [provider portability workflow](provider-portability.md) for validated exports
@@ -187,7 +220,7 @@ publishes an older retained version through the regular document service.
 
 ## Consume the packages
 
-The eleven shipping packages target .NET 10 and share one version. Install
+The eleven shipping packages target .NET 11 and share one version. Install
 `CellBridge` for protocol execution and storage contracts, `CellBridge.AspNetCore`
 for HTTP endpoints, login integration and dependency registration, and the
 provider packages you use. `CellBridge.FssHttpB` remains standalone. Choose state and content
@@ -361,7 +394,7 @@ Age and the current materialized file are insufficient grounds for deleting
 Report objects unreferenced by every retained snapshot:
 
 ```sh
-dotnet tools/CellBridge.Storage.Setup/bin/Release/net10.0/CellBridge.Storage.Setup.dll --collect-orphans
+dotnet tools/CellBridge.Storage.Setup/bin/Release/net11.0/CellBridge.Storage.Setup.dll --collect-orphans
 ```
 
 Supply the database connection and filesystem root through configuration.
