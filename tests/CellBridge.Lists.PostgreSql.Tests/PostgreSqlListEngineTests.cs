@@ -634,7 +634,6 @@ public sealed class ListDatabaseFixture : IAsyncLifetime
     public bool Available { get; private set; }
     public NpgsqlDataSource? AdminSource { get; private set; }
     public NpgsqlDataSource? RuntimeSource { get; private set; }
-    internal string RuntimeConnectionString { get; private set; } = "";
     public PostgreSqlListEngine Engine { get; private set; } = null!;
     public ListActor AdminActor { get; } = new("test:administrator");
 
@@ -661,8 +660,7 @@ public sealed class ListDatabaseFixture : IAsyncLifetime
             Password = password,
             ApplicationName = "CellBridge.Lists.PostgreSql.Tests"
         };
-        RuntimeConnectionString = runtimeConnection.ConnectionString;
-        RuntimeSource = NpgsqlDataSource.Create(RuntimeConnectionString);
+        RuntimeSource = NpgsqlDataSource.Create(runtimeConnection.ConnectionString);
         Engine = new PostgreSqlListEngine(RuntimeSource);
         await Engine.CheckHealthAsync();
         Available = true;

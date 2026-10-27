@@ -426,61 +426,40 @@ internal sealed partial class EfListEngine
     {
         var receiptBytes = Encoding.UTF8.GetByteCount(digest) + Encoding.UTF8.GetByteCount(actor) + 192L;
         var auditBytes = AuditStorageBytes(actor, "record.create", auditFields.Length);
-        long valueBytes;
-        long number;
-        DateTimeOffset now;
-        WorkspaceRow workspace;
-#if !CELLBRIDGE_SQLSERVER
-        if (_useWriteReservations)
-        {
-            var reservation = await ReserveCreateAsync(connection, transaction, workspaceId, listId,
-                request.Id, valuesJson, receiptBytes, auditBytes, ct);
-            if (!reservation.Claimed)
-                return await ReplayConcurrentCreateAsync(db, workspaceId, listId, request, actor, digest, ct);
-            valueBytes = reservation.ValueBytes;
-            number = reservation.Number;
-            now = reservation.Now;
-            workspace = reservation.Workspace;
-        }
-        else
-#endif
-        {
-            var (canonicalBytes, claimed) = await ClaimIdentityAsync(db, workspaceId,
-                listId, request.Id, valuesJson, ct);
-            valueBytes = canonicalBytes;
-            if (valueBytes > _limits.MaxRecordBytes)
-                throw Limit("The normalized record exceeds the configured byte limit.");
-            if (!claimed)
-                return await ReplayConcurrentCreateAsync(db, workspaceId, listId, request,
-                    actor, digest, ct);
+        var (valueBytes, claimed) = await ClaimIdentityAsync(db, workspaceId,
+            listId, request.Id, valuesJson, ct);
+        if (valueBytes > _limits.MaxRecordBytes)
+            throw Limit("The normalized record exceeds the configured byte limit.");
+        if (!claimed)
+            return await ReplayConcurrentCreateAsync(db, workspaceId, listId, request,
+                actor, digest, ct);
 
-            await _locks.CreateStateAsync(db, workspaceId, listId, ct);
-            var state = CanUseCompiledContextQueries(db)
-                ? await _compiledCreateState(db, workspaceId, listId, ct)
-                : await (from workspaceRow in db.Workspaces
-                join counterRow in db.ListCounters
-                    on workspaceRow.WorkspaceId equals counterRow.WorkspaceId
-                where workspaceRow.WorkspaceId == workspaceId && counterRow.ListId == listId
-                select new CreateStateProjection
-                {
-                    Workspace = workspaceRow,
-                    Counter = counterRow,
-                    Now = ListDbContext.ClockTimestamp()
-                }).SingleAsync(ct);
-            var counter = state.Counter;
-            if (_limits.MaxRecordsPerList is { } maxRecords && counter.IdentityCount >= maxRecords)
-                throw Limit("The record identity limit has been reached.");
-            number = counter.NextNumber;
-            counter.IdentityCount = checked(counter.IdentityCount + 1);
-            counter.NextNumber = checked(counter.NextNumber + 1);
+        await _locks.CreateStateAsync(db, workspaceId, listId, ct);
+        var state = CanUseCompiledContextQueries(db)
+            ? await _compiledCreateState(db, workspaceId, listId, ct)
+            : await (from workspaceRow in db.Workspaces
+            join counterRow in db.ListCounters
+                on workspaceRow.WorkspaceId equals counterRow.WorkspaceId
+            where workspaceRow.WorkspaceId == workspaceId && counterRow.ListId == listId
+            select new CreateStateProjection
+            {
+                Workspace = workspaceRow,
+                Counter = counterRow,
+                Now = ListDbContext.ClockTimestamp()
+            }).SingleAsync(ct);
+        var counter = state.Counter;
+        if (_limits.MaxRecordsPerList is { } maxRecords && counter.IdentityCount >= maxRecords)
+            throw Limit("The record identity limit has been reached.");
+        var number = counter.NextNumber;
+        counter.IdentityCount = checked(counter.IdentityCount + 1);
+        counter.NextNumber = checked(counter.NextNumber + 1);
 
-            workspace = state.Workspace;
-            var storageDelta = checked(valueBytes + receiptBytes + 128 + auditBytes);
-            workspace.StoredBytes = checked(workspace.StoredBytes + storageDelta);
-            workspace.AuditCount = checked(workspace.AuditCount + 1);
-            now = state.Now;
-        }
+        var workspace = state.Workspace;
+        var storageDelta = checked(valueBytes + receiptBytes + 128 + auditBytes);
+        workspace.StoredBytes = checked(workspace.StoredBytes + storageDelta);
+        workspace.AuditCount = checked(workspace.AuditCount + 1);
         CheckPreparedPublication(workspace);
+        var now = state.Now;
         var record = new RecordRow { WorkspaceId = workspaceId, ListId = listId, RecordId = request.Id,
             SchemaVersion = request.SchemaVersion, Revision = 1, Number = number, ValuesJson = valuesJson,
             CreatedUtc = now, ModifiedUtc = now, CreatedBy = actor, ModifiedBy = actor };
@@ -557,45 +536,27 @@ internal sealed partial class EfListEngine
         var auditFields = changes.Select(x => x.FieldId).ToArray();
         var auditBytes = AuditStorageBytes(actor, "record.update", auditFields.Length);
         var revision = checked(current.Revision + 1);
-        long valueBytes;
-        DateTimeOffset now;
-        WorkspaceRow workspace;
-#if !CELLBRIDGE_SQLSERVER
-        if (_useWriteReservations)
-        {
-            var reservation = await ReservePatchAsync(connection, transaction, workspaceId,
-                valuesJson, previousBytes, auditBytes, ct);
-            valueBytes = reservation.ValueBytes;
-            now = reservation.Now;
-            workspace = reservation.Workspace;
-            db.Records.Attach(record);
-        }
-        else
-#endif
-        {
-            valueBytes = await CanonicalJsonBytesAsync(db, valuesJson, ct);
-            if (valueBytes > _limits.MaxRecordBytes)
-                throw Limit("The normalized record exceeds the configured byte limit.");
-            // Returning the locked row lets EF track its post-lock values without a second read.
-            var state = await _locks.LockedQuota(db, workspaceId)
-                .Select(row => new
-                {
-                    Workspace = row,
-                    Now = ListDbContext.ClockTimestamp()
-                }).SingleOrDefaultAsync(ct) ?? throw NotFound();
-            workspace = state.Workspace;
-            now = state.Now;
-            var storageDelta = checked(valueBytes - previousBytes + auditBytes);
-            var nextBytes = checked(workspace.StoredBytes + storageDelta);
-            db.Records.Attach(record);
-            workspace.StoredBytes = nextBytes;
-            workspace.AuditCount = checked(workspace.AuditCount + 1);
-        }
+        var valueBytes = await CanonicalJsonBytesAsync(db, valuesJson, ct);
+        if (valueBytes > _limits.MaxRecordBytes)
+            throw Limit("The normalized record exceeds the configured byte limit.");
+        // Returning the locked row lets EF track its post-lock values without a second read.
+        var state = await _locks.LockedQuota(db, workspaceId)
+            .Select(row => new
+            {
+                Workspace = row,
+                Now = ListDbContext.ClockTimestamp()
+            }).SingleOrDefaultAsync(ct) ?? throw NotFound();
+        var workspace = state.Workspace;
+        var storageDelta = checked(valueBytes - previousBytes + auditBytes);
+        var nextBytes = checked(workspace.StoredBytes + storageDelta);
+        db.Records.Attach(record);
+        workspace.StoredBytes = nextBytes;
+        workspace.AuditCount = checked(workspace.AuditCount + 1);
         CheckPreparedPublication(workspace);
         record.SchemaVersion = schemaVersion;
         record.Revision = revision;
         record.ValuesJson = valuesJson;
-        record.ModifiedUtc = now;
+        record.ModifiedUtc = state.Now;
         record.ModifiedBy = actor;
         var expected = ToListRecord(record, (JsonObject)responseValues.DeepClone());
 

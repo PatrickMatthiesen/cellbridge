@@ -179,7 +179,7 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
                     """))
                 {
                     metadata.Parameters.AddWithValue(productVersion);
-                    Assert.Equal(3, await metadata.ExecuteNonQueryAsync());
+                    Assert.Equal(2, await metadata.ExecuteNonQueryAsync());
                 }
                 await PostgreSqlListSetup.InitializeAsync(ownerSource, runtimeRole);
                 await AssertVersionThreeRowsAsync(ownerSource, fixture);
@@ -188,7 +188,7 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
                     WHERE "ProductVersion"=$1
                     """);
                 preserved.Parameters.AddWithValue(productVersion);
-                Assert.Equal(3L, await preserved.ExecuteScalarAsync());
+                Assert.Equal(2L, await preserved.ExecuteScalarAsync());
                 await AssertVersionAndHistoryAsync(ownerSource, 4, expectHistory: true);
             }
 
@@ -202,7 +202,7 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
             Assert.Contains("does not match schema version 4", currentHistoryError.Message,
                 StringComparison.Ordinal);
             await AssertVersionAndHistoryRowsAsync(ownerSource, 4,
-                ["20261022033144_ListsSchemaV3", "20261027090000_WriteReservations"]);
+                ["20261022033144_ListsSchemaV3"]);
         }
         finally
         {
@@ -373,7 +373,7 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
             SELECT array_agg("MigrationId" ORDER BY "MigrationId")
             FROM cellbridge_lists."__CellBridgeListsMigrationsHistory"
             """);
-        Assert.Equal(new[] { "20261022033144_ListsSchemaV3", "20261022040000_EfQueryFunctions", "20261027090000_WriteReservations" },
+        Assert.Equal(new[] { "20261022033144_ListsSchemaV3", "20261022040000_EfQueryFunctions" },
             (string[])(await history.ExecuteScalarAsync())!);
     }
 
@@ -672,8 +672,6 @@ public sealed class MigrationRegressionTests(ListDatabaseFixture database)
             Assert.Equal("20261022033144_ListsSchemaV3", historyReader.GetString(0));
             Assert.True(await historyReader.ReadAsync());
             Assert.Equal("20261022040000_EfQueryFunctions", historyReader.GetString(0));
-            Assert.True(await historyReader.ReadAsync());
-            Assert.Equal("20261027090000_WriteReservations", historyReader.GetString(0));
             Assert.False(await historyReader.ReadAsync());
         }
         await using var connection = await ownerSource.OpenConnectionAsync();
