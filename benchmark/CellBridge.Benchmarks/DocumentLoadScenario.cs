@@ -105,7 +105,7 @@ internal sealed class DocumentLoadScenario(string backend, LoadResources resourc
             }
             else
             {
-                source = NpgsqlDataSource.Create(backend == "filesystem" ? environment.FileSystemConnectionString : environment.DocumentConnectionString);
+                source = NpgsqlDataSource.Create(backend == "filesystem" ? environment.FileSystemConnectionString : environment.PostgreSqlDocumentConnectionString);
                 if (backend == "filesystem")
                 {
                     scratch = Path.Combine(Path.GetTempPath(), "cellbridge-load-" + Guid.NewGuid().ToString("N"));

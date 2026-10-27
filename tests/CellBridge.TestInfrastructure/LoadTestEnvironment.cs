@@ -16,12 +16,13 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
     public string Backend { get; }
     public Uri HttpEndpoint { get; }
     public string DocumentConnectionString { get; }
+    public string PostgreSqlDocumentConnectionString { get; }
     public string FileSystemConnectionString { get; }
     public string ListsConnectionString { get; }
     public string ListsRuntimeConnectionString { get; }
 
     private LoadTestEnvironment(DistributedApplication application,
-        IDistributedApplicationTestingBuilder builder, Uri endpoint, string documents, string filesystem,
+        IDistributedApplicationTestingBuilder builder, Uri endpoint, string documents, string postgreSqlDocuments, string filesystem,
         string lists, string runtime, string password, string backend)
     {
         this.application = application;
@@ -30,6 +31,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
         Backend = backend;
         HttpEndpoint = endpoint;
         DocumentConnectionString = documents;
+        PostgreSqlDocumentConnectionString = postgreSqlDocuments;
         FileSystemConnectionString = filesystem;
         ListsConnectionString = lists;
         ListsRuntimeConnectionString = runtime;
@@ -156,6 +158,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
             await application.ResourceNotifications.WaitForResourceHealthyAsync("webdemo", timeout.Token);
             return new(application, builder, application.GetEndpoint("webdemo", "https"),
                 (await application.GetConnectionStringAsync(documentConnectionName, timeout.Token))!,
+                (await application.GetConnectionStringAsync("cellbridge", timeout.Token))!,
                 (await application.GetConnectionStringAsync("filesystem", timeout.Token))!,
                 (await application.GetConnectionStringAsync("lists", timeout.Token))!,
                 (await application.GetConnectionStringAsync("lists-runtime", timeout.Token))!,
