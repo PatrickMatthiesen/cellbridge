@@ -22,7 +22,9 @@ internal sealed partial class DocumentOperations<TContext> where TContext : DbCo
             {
                 var added = await content.WriteManyInTransactionAsync(db, prepared, cancellationToken);
                 await database.Locks.DocumentAsync(db, id, cancellationToken);
-                var (pointer, current) = await LoadCoordinatedAsync(db, id, cancellationToken);
+                var pointer = await db.Set<DocumentRow>().SingleOrDefaultAsync(row => row.ResourceId == id, cancellationToken)
+                    ?? throw new KeyNotFoundException("Document does not exist.");
+                var current = await LoadCurrentAsync(db, pointer, cancellationToken);
                 if (current.IsDeleted) throw new KeyNotFoundException("Document is deleted.");
                 var now = await ReadClockAsync(db, cancellationToken);
                 var change = transition(current, now);

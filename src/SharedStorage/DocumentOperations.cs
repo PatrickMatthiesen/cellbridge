@@ -109,7 +109,9 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
     {
         if (rename) await database.Locks.NamespaceAsync(db, ct);
         await database.Locks.DocumentAsync(db, id, ct);
-        var (pointer, current) = await LoadCoordinatedAsync(db, id, ct);
+        var pointer = await db.Set<DocumentRow>().SingleOrDefaultAsync(row => row.ResourceId == id, ct)
+            ?? throw new KeyNotFoundException("Document does not exist.");
+        var current = await LoadCurrentAsync(db, pointer, ct);
         if (current.IsDeleted && !lifecycle) throw new KeyNotFoundException("Document is deleted.");
         var now = await ReadClockAsync(db, ct);
         var change = transition(current, now);
@@ -215,22 +217,6 @@ internal sealed partial class DocumentOperations<TContext> : IDocumentStateStore
         EF.CompileAsyncQuery((TContext db, Guid id, long version, CancellationToken token) =>
             db.Set<StateRow>().AsNoTracking().Where(row => row.ResourceId == id && row.StateVersion == version)
                 .Select(row => row.StateJson).SingleOrDefault());
-
-    private async Task<(DocumentRow Pointer, DocumentState State)> LoadCoordinatedAsync(TContext db,
-        Guid id, CancellationToken ct)
-    {
-        // The caller already holds document coordination. Keep this statement
-        // after that lock, and keep the authoritative clock read after decoding.
-        var row = await (from pointer in db.Set<DocumentRow>()
-            where pointer.ResourceId == id
-            join snapshot in db.Set<StateRow>() on new { pointer.ResourceId, pointer.StateVersion }
-                equals new { snapshot.ResourceId, snapshot.StateVersion } into snapshots
-            from snapshot in snapshots.DefaultIfEmpty()
-            select new { Pointer = pointer, Data = snapshot == null ? null : snapshot.StateJson })
-            .AsTracking().SingleOrDefaultAsync(ct)
-            ?? throw new KeyNotFoundException("Document does not exist.");
-        return (row.Pointer, Decode(row.Data ?? throw new StorageCorruptionException("The current snapshot is missing."), row.Pointer));
-    }
 
     private async Task<DocumentState> LoadCurrentAsync(TContext db, DocumentRow pointer, CancellationToken ct)
     {
