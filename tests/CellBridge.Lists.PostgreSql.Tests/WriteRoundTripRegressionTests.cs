@@ -10,6 +10,60 @@ namespace CellBridge.Lists.PostgreSql.Tests;
 [Collection("lists-postgresql")]
 public sealed class WriteRoundTripRegressionTests(ListDatabaseFixture database)
 {
+    [PostgreSqlTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CanonicalOversizedPatchRejectsBeforeContendedWorkspace(bool consumerOptions)
+    {
+        var workspace = await database.NewWorkspaceAsync("canonical-patch-workspace");
+        var title = new ListField(Guid.NewGuid(), "Title", ListFieldType.Text);
+        var list = await database.Engine.CreateListAsync(database.AdminActor, workspace,
+            new(Guid.NewGuid(), "Patch boundary", [title]));
+        var record = await database.Engine.CreateRecordAsync(database.AdminActor, workspace, list.Id,
+            new(Guid.NewGuid(), 1, Values(title, "ok")));
+        var values = Values(title, "canonical boundary");
+        var rawBytes = Encoding.UTF8.GetByteCount(values.ToJsonString());
+        Assert.True(await database.GetCanonicalJsonBytesAsync(values.ToJsonString()) > rawBytes);
+        var limits = new ListLimits { MaxRecordBytes = rawBytes };
+        var engine = consumerOptions
+            ? new PostgreSqlListEngine(new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+                .UseNpgsql(database.RuntimeSource!)
+                .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking).Options, limits)
+            : new PostgreSqlListEngine(database.RuntimeSource!, limits);
+        await engine.CheckHealthAsync();
+        var before = await ReadStateAsync(workspace, list.Id);
+
+        await using var connection = await database.RuntimeSource!.OpenConnectionAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await SetContextAsync(connection, transaction, workspace);
+        await using (var locked = new NpgsqlCommand("""
+            SELECT workspace_id FROM cellbridge_lists.workspaces WHERE workspace_id=$1 FOR UPDATE
+            """, connection, transaction))
+        {
+            locked.Parameters.AddWithValue(workspace);
+            Assert.Equal(workspace, await locked.ExecuteScalarAsync());
+        }
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var attempt = engine.UpdateRecordAsync(database.AdminActor, workspace, list.Id, record.Id,
+            new(1, 1, [new(title.Id, JsonValue.Create("canonical boundary"))]), cancellation.Token);
+        try
+        {
+            var failure = await Assert.ThrowsAsync<ListException>(() => attempt.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal(ListFailure.Limit, failure.Failure);
+        }
+        finally
+        {
+            await transaction.RollbackAsync();
+            await CancelAndDrainAsync(cancellation, attempt);
+        }
+        Assert.Equal(before, await ReadStateAsync(workspace, list.Id));
+        Assert.Equal(1, (await database.Engine.GetRecordAsync(database.AdminActor, workspace, list.Id, record.Id)).Revision);
+        var saved = await engine.UpdateRecordAsync(database.AdminActor, workspace, list.Id, record.Id,
+            new(1, 1, [new(title.Id, JsonValue.Create("ok2"))]));
+        Assert.Equal(2, saved.Revision);
+        Assert.Equal("ok2", saved.Values[title.Id.ToString("D")]!.GetValue<string>());
+    }
+
     [PostgreSqlFact]
     public async Task CanonicalOversizeFailsBeforeContendedIdentityAndLeavesItReusable()
     {
