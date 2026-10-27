@@ -105,7 +105,7 @@ internal sealed partial class EfListEngine
 
     private async Task ConfigureAndLockAuthorizationAsync(DbConnection connection,
         DbTransaction transaction, Guid workspaceId, bool exclusive,
-        OperationAuthorization? authorization, CancellationToken ct)
+        OperationAuthorization? authorization, CancellationToken ct, RecordLocks? recordLocks = null)
     {
         var milliseconds = Math.Clamp((long)_limits.StatementTimeout.TotalMilliseconds, 1, int.MaxValue);
         await using var batch = new NpgsqlBatch((NpgsqlConnection)connection, (NpgsqlTransaction)transaction);
@@ -136,9 +136,17 @@ internal sealed partial class EfListEngine
             authorize.Parameters.AddWithValue(authorization.Anchor.Scope!);
         }
         batch.BatchCommands.Add(authorize);
+        if (recordLocks is not null)
+            AppendRecordLocks(batch, workspaceId, recordLocks.ListId, recordLocks.RecordId,
+                deleteLock: false, guardAnchor: true);
 
         await using var reader = await batch.ExecuteReaderAsync(ct);
         if (!await reader.NextResultAsync(ct) || !await reader.ReadAsync(ct)) throw NotFound();
+        if (recordLocks is not null)
+        {
+            if (!await reader.NextResultAsync(ct) || !await reader.ReadAsync(ct)) throw NotFound();
+            if (recordLocks.RecordId != Guid.Empty) await reader.NextResultAsync(ct);
+        }
     }
 
     private async Task ConfigureWorkspaceAsync(DbConnection connection,
@@ -200,9 +208,23 @@ internal sealed partial class EfListEngine
         bool deleteLock, CancellationToken ct)
     {
         await using var batch = new NpgsqlBatch((NpgsqlConnection)connection, (NpgsqlTransaction)transaction);
-        var list = new NpgsqlBatchCommand("""
+        AppendRecordLocks(batch, workspaceId, listId, recordId, deleteLock, guardAnchor: false);
+        await using var reader = await batch.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) throw NotFound();
+        if (recordId != Guid.Empty) await reader.NextResultAsync(ct);
+    }
+
+    private static void AppendRecordLocks(NpgsqlBatch batch, Guid workspaceId, Guid listId,
+        Guid recordId, bool deleteLock, bool guardAnchor)
+    {
+        // Batch statements can execute before C# checks an earlier result.
+        // Guard each later lock so a mismatched anchor cannot acquire it.
+        var guard = guardAnchor
+            ? $"AND EXISTS (SELECT 1 FROM cellbridge_lists.workspaces w WHERE w.workspace_id=$1 AND w.authorization_mode='builtin')"
+            : "";
+        var list = new NpgsqlBatchCommand($$"""
             SELECT list_id FROM cellbridge_lists.lists
-            WHERE workspace_id=$1 AND list_id=$2 FOR SHARE
+            WHERE workspace_id=$1 AND list_id=$2 {{guard}} FOR SHARE
             """);
         list.Parameters.AddWithValue(workspaceId);
         list.Parameters.AddWithValue(listId);
@@ -211,7 +233,7 @@ internal sealed partial class EfListEngine
         {
             var record = new NpgsqlBatchCommand($$"""
                 SELECT record_id FROM cellbridge_lists.records
-                WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3
+                WHERE workspace_id=$1 AND list_id=$2 AND record_id=$3 {{guard}}
                 {{(deleteLock ? "FOR UPDATE" : "FOR NO KEY UPDATE")}}
                 """);
             record.Parameters.AddWithValue(workspaceId);
@@ -219,9 +241,6 @@ internal sealed partial class EfListEngine
             record.Parameters.AddWithValue(recordId);
             batch.BatchCommands.Add(record);
         }
-        await using var reader = await batch.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct)) throw NotFound();
-        if (recordId != Guid.Empty) await reader.NextResultAsync(ct);
     }
 
     private static async Task LockCreateStateAsync(DbConnection connection,
@@ -349,9 +368,10 @@ internal sealed partial class EfListEngine
         catch { await db.DisposeAsync(); throw; }
     }
     private Task LockAuthorizationAsync(PostgreSqlListDbContext db, Guid workspaceId, bool exclusive, bool mutation,
-        OperationAuthorization? authorization, CancellationToken ct) =>
+        OperationAuthorization? authorization, CancellationToken ct, RecordLocks? recordLocks = null) =>
         ConfigureAndLockAuthorizationAsync(db.Database.GetDbConnection(), db.Database.CurrentTransaction!.GetDbTransaction(),
-            workspaceId, exclusive, authorization, ct);
+            // Keep host freshness validation between authorization and record lock waits.
+            workspaceId, exclusive, authorization, ct, authorization is null ? recordLocks : null);
 
     private static Task LockListExclusiveAsync(DbConnection connection, DbTransaction transaction,
         Guid workspaceId, Guid listId, CancellationToken ct) => ExecuteAsync(connection, transaction,

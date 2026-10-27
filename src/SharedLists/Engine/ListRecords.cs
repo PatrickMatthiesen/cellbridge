@@ -87,7 +87,7 @@ internal sealed partial class EfListEngine
             }
             catch (Exception ex) when (IsReferenceViolation(ex))
             { throw Validation("The reference target does not exist."); }
-        }, ct, mutation: true);
+        }, ct, mutation: true, recordLocks: new RecordLocks(listId, request.Id));
         if (result.Revision == 0) throw Conflict("That record ID was used by an expired create receipt.");
         return result;
     }
@@ -142,7 +142,7 @@ internal sealed partial class EfListEngine
             }
             catch (Exception ex) when (IsReferenceViolation(ex))
             { throw Validation("The reference target does not exist."); }
-        }, ct, mutation: true);
+        }, ct, mutation: true, recordLocks: new RecordLocks(listId, recordId));
     }
 
     public async Task DeleteRecordAsync(ListActor actor, Guid workspaceId, Guid listId, Guid recordId,
@@ -272,7 +272,8 @@ internal sealed partial class EfListEngine
     {
         if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
         await CheckContextAdmissionAsync(db, workspaceId, listId, subject, requiredAccess, authorization, ct);
-        await _locks.RecordAsync(db, workspaceId, listId, recordId, deleteLock, ct);
+        if (!_locks.BatchesRecordLocks(authorization))
+            await _locks.RecordAsync(db, workspaceId, listId, recordId, deleteLock, ct);
         var projection = (CanUseCompiledContextQueries(db)
             ? await _compiledCreateContext(db, workspaceId, listId, recordId, subject,
                 (int)requiredAccess, authorization is not null, ct)
@@ -323,7 +324,8 @@ internal sealed partial class EfListEngine
     {
         if (authorization is not null && !authorization.Allows(listId, requiredAccess)) throw NotFound();
         await CheckContextAdmissionAsync(db, workspaceId, listId, subject, requiredAccess, authorization, ct);
-        await _locks.RecordAsync(db, workspaceId, listId, recordId, deleteLock, ct);
+        if (deleteLock || !_locks.BatchesRecordLocks(authorization))
+            await _locks.RecordAsync(db, workspaceId, listId, recordId, deleteLock, ct);
         var projection = (CanUseCompiledContextQueries(db)
             ? await _compiledMutationContext(db, workspaceId, listId, recordId, subject,
                 (int)requiredAccess, authorization is not null, ct)
