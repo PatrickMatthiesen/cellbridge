@@ -536,7 +536,6 @@ internal sealed partial class EfListEngine
         var auditFields = changes.Select(x => x.FieldId).ToArray();
         var auditBytes = AuditStorageBytes(actor, "record.update", auditFields.Length);
         var revision = checked(current.Revision + 1);
-#if CELLBRIDGE_SQLSERVER
         var valueBytes = await CanonicalJsonBytesAsync(db, valuesJson, ct);
         if (valueBytes > _limits.MaxRecordBytes)
             throw Limit("The normalized record exceeds the configured byte limit.");
@@ -548,27 +547,6 @@ internal sealed partial class EfListEngine
                 Now = ListDbContext.ClockTimestamp()
             }).SingleOrDefaultAsync(ct) ?? throw NotFound();
         var workspace = state.Workspace;
-#else
-        var state = await (from canonicalBytes in db.Database.SqlQuery<long>($"""
-                SELECT octet_length(({valuesJson}::jsonb)::text)::bigint AS "Value"
-                """)
-            from workspaceRow in db.Workspaces.FromSqlInterpolated($"""
-                SELECT * FROM cellbridge_lists.workspaces
-                WHERE workspace_id={workspaceId}
-                  AND octet_length(({valuesJson}::jsonb)::text)::bigint <= {_limits.MaxRecordBytes}
-                FOR UPDATE
-                """).DefaultIfEmpty()
-            select new
-            {
-                ValueBytes = canonicalBytes,
-                Workspace = workspaceRow,
-                Now = ListDbContext.ClockTimestamp()
-            }).SingleAsync(ct);
-        var valueBytes = state.ValueBytes;
-        if (valueBytes > _limits.MaxRecordBytes)
-            throw Limit("The normalized record exceeds the configured byte limit.");
-        var workspace = state.Workspace ?? throw NotFound();
-#endif
         var storageDelta = checked(valueBytes - previousBytes + auditBytes);
         var nextBytes = checked(workspace.StoredBytes + storageDelta);
         db.Records.Attach(record);
