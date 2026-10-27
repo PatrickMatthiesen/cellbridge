@@ -1,112 +1,141 @@
 # Measuring active Office user capacity
 
-The maintained [primary profile](../benchmark/CellBridge.Benchmarks/load-office-users.json)
-models 1,500 distinct authenticated users and the
-[stretch profile](../benchmark/CellBridge.Benchmarks/load-office-users-stretch.json)
-models 5,000. These are target workloads, not achieved capacity or desktop Office
-validation. Both use ten documents per user, nominal 256 KiB packages, 30 seconds
-of warm-up and 60 seconds of measurement. User clocks run continuously through
-both periods in one 90-second simulation. Keep NBomber's separate `WarmUpDuration`
-at zero for this model; warm-up requests have `warmup-` step names.
+The 10,000 successful commits/minute target was not met on the tested shared host.
+The 1,500-user primary workload completed 2,998 commits inside its measured minute
+without HTTP failures. The larger and faster workloads had HTTP admission failures.
+These measurements describe synthetic workloads and do not validate desktop Office capacity.
+
+Maintained profiles use distinct authenticated users and ten documents per user:
+
+| Profile | Users | Package | Save interval per user |
+| --- | ---: | ---: | ---: |
+| [Primary](../benchmark/CellBridge.Benchmarks/load-office-users.json) | 1,500 | 256 KiB | 30 seconds |
+| [Larger documents](../benchmark/CellBridge.Benchmarks/load-office-users-large.json) | 1,500 | 1.5 MiB | 30 seconds |
+| [Frequent AutoSave](../benchmark/CellBridge.Benchmarks/load-office-users-autosave.json) | 1,500 | 256 KiB | 8 seconds |
+| [Stretch](../benchmark/CellBridge.Benchmarks/load-office-users-stretch.json) | 5,000 | 256 KiB | 30 seconds |
+
+Each capacity profile has 30 seconds of warm-up and 60 seconds of measurement.
+User clocks run continuously through one 90-second simulation. Keep NBomber's
+separate `WarmUpDuration` at zero; warm-up requests have `warmup-` step names.
+The bounded [smoke profile](../benchmark/CellBridge.Benchmarks/load-office-users-smoke.json)
+checks the same workflow with ten users. It checks correctness, not capacity,
+and the performance workflow runs it for both SQL backends.
 
 Run from the repository root with the prerequisites and NBomber license described
 in [load test setup](list-performance.md#load-tests):
 
 ```sh
+Parameters__LoadMaxConcurrentRequests=128 \
+Parameters__LoadMaxConcurrentRequestsPerSubject=2 \
+Parameters__LoadPostgreSqlPoolSize=24 \
+Parameters__LoadPostgreSqlMaxWalSizeMiB=4096 \
+Parameters__LoadQueryStatistics=true \
 dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --load-test --config benchmark/CellBridge.Benchmarks/load-office-users.json
-dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --load-test --config benchmark/CellBridge.Benchmarks/load-office-users-stretch.json
 ```
 
-The bounded `load-office-users-smoke.json` profile checks the same session,
-clock and incremental-save workflow with ten users. It checks correctness,
-not capacity, and the performance workflow runs it for both SQL backends.
+Select another profile by changing the config path. The command reproduces the
+measured admission, pool and WAL settings; it overrides the shipping defaults.
 
-The runner owns disposable Aspire PostgreSQL and WebDemo resources. It retains
-the shipping document admission defaults of eight concurrent requests globally
-and two per subject. Experiments can override these through
-`Parameters__LoadMaxConcurrentRequests` and
-`Parameters__LoadMaxConcurrentRequestsPerSubject`; report the exact limits.
+The runner owns disposable Aspire PostgreSQL and WebDemo resources. Without
+overrides, admission defaults to eight requests globally and two per subject.
 `Parameters__LoadPostgreSqlMaxWalSizeMiB` optionally changes the disposable
-PostgreSQL server's WAL allowance. It retains durable commit, fsync and full-page
-writes. Record the database settings printed during setup. PostgreSQL explains
+server's WAL allowance while retaining durable commit settings. PostgreSQL explains
 [how frequent checkpoints increase I/O](https://www.postgresql.org/docs/18/wal-configuration.html).
 `Parameters__LoadPostgreSqlPoolSize` bounds each WebDemo document and Identity
-connection pool separately. Account for both pools and other clients when setting
-PostgreSQL's connection limit. `Parameters__LoadQueryStatistics=true` enables
-`pg_stat_statements` and I/O timing in the disposable PostgreSQL server. The runner
-captures normalized statement totals, WAL and I/O counter deltas, durability
-settings and connection samples in `artifacts/load-tests/*.pgstats.json`.
-These diagnostics cover warm-up and measurement together, before final validation.
+pool separately. Account for both pools and other clients in the server connection
+budget. `Parameters__LoadQueryStatistics=true` captures normalized statement totals,
+I/O and WAL deltas, durability settings and connection samples in
+`artifacts/load-tests/*.pgstats.json`, covering warm-up and measurement before validation.
 
-Each user has independent clocks for saving every 30 seconds, querying changes
-every 30 seconds and opening another document every 120 seconds. Initial phases
-are random within each interval. One document is active per user; an open switches
-to the next document, downloads it and queries its graph. Actions never overlap
-for a user. Response time does not extend the scheduled intervals; blocked users
-skip elapsed slots rather than issue catch-up bursts. Metrics report missed slots
-and action-start lateness.
+Independent clocks schedule saves at the profile's interval, queries every
+30 seconds and opens every 120 seconds, with random initial phases. Each user
+edits one active document; an open selects the next, downloads it and queries its
+graph. User actions never overlap. Response time does not extend intervals:
+blocked users skip elapsed slots.
+Metrics report missed slots and action-start lateness.
 
 The primary workload offers 50 saves/second, or 3,000/minute, over 15,000 documents.
 The stretch offers about 166.67 saves/second, or 10,000/minute, over 50,000 documents.
-The save interval applies per user across their documents. Ten documents does not
-multiply saves tenfold. Separate queries and opens add requests to those totals.
-Thirty seconds is our workload assumption: Microsoft describes cloud Office
+The frequent-AutoSave profile offers 187.5 saves/second, or 11,250/minute.
+Intervals apply per user across their documents; ten documents does not multiply
+saves tenfold. Queries and opens add requests. Thirty seconds is our assumption:
+Microsoft describes cloud Office
 AutoSave as saving [every few seconds while working](https://support.microsoft.com/en-us/office/collab-files/what-is-autosave).
 
-There is no established universal average document or save size. Microsoft's
+These sizes are planning choices, not universal averages. Microsoft's
 [SharePoint storage planning example](https://learn.microsoft.com/en-us/SharePoint/administration/storage-and-sql-server-capacity-planning-and-configuration)
-uses 250 KB documents and advises estimating the intended collection; its
+uses 250 KB documents and advises estimating the intended collection. Its
 [migration guide](https://learn.microsoft.com/en-us/sharepointmigration/sharepoint-online-and-onedrive-migration-speed)
-uses Office files around 1.5 MB as another example. Neither is an empirical average.
+uses Office files around 1.5 MB. Neither is an empirical average.
 An [older empirical study](https://www.cs.toronto.edu/~delara/papers/usenix_win2000/html/node9.html)
-found broad, long-tailed size distributions, but its 2000-era formats do not
-represent current Office packages. Our nominal 256 KiB case is a planning choice.
-Run 1.5 MiB and larger package sensitivity cases separately. `PackageKiB` and
-`ChangedPartKiB` vary the complete package and edited part independently; the
-fixture also covers 4 KiB and 64 KiB edited parts. None is an empirical average
-change size.
+found long-tailed distributions in 2000-era formats, not current Office packages.
+`PackageKiB` and `ChangedPartKiB` vary package and edited-part sizes independently;
+the fixture also covers 4 KiB and 64 KiB edits. None is a measured average change size.
 
 Saves make a synthetic small edit to a 16 KiB `word/document.xml` part stored at
 the ZIP tail, reuse unchanged chunks and produce globally unique content.
 The [protocol's ZIP chunking](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpd/1cb2efd5-db6f-40fe-aae6-6957666c4e42)
 uses package-entry boundaries; this is different from sending only typed characters.
-The runner reports actual serialized FSSHTTPB save bytes and changed-chunk bytes,
-not an assumed average upload size. Binary byte totals exclude SOAP/MTOM, HTTP
-and TLS overhead. This warm immutable-content workload does not qualify full-package
-replacement, cold reads, arbitrary edits, Excel or PowerPoint traffic.
+Reported FSSHTTPB save bytes exclude SOAP/MTOM, HTTP and TLS overhead. This warm
+workload does not qualify full-package replacement, cold reads, arbitrary edits,
+Excel or PowerPoint traffic.
 
-Setup creates accounts and valid Identity sessions before timing. Preissued cookies
-avoid measuring the login endpoint's limiter; runtime requests still use normal
-authentication, CSRF protection and document ownership checks. This is not a login
-throughput test. Shared immutable corpus data avoids retaining whole-package arrays
-for every user. Catalog documents start with identical template bytes and graph
-identifiers scoped by their separate document identities. Every edit produces
-different file bytes. This does not qualify a cold, fully distinct 50,000-file
-collection.
-Bulk seeding uses the existing recovery API in an empty owned namespace. The
-fixture explicitly raises the document quota to 15,000 or 50,000 in both the
-migration ledger and runtime; shipping defaults stay unchanged. Report setup
-duration separately and monitor generator memory, server resources and database waits.
+Setup creates accounts and preissued Identity sessions before timing; this does
+not measure login throughput. Runtime requests retain authentication, CSRF and
+ownership checks. Documents have separate identities but share initial template
+bytes and graph identifiers. Each edit produces different bytes. Shared data avoids
+retaining whole packages per user; it does not qualify a cold, distinct 50,000-file
+collection. Recovery bulk-seeds an empty owned namespace with document quotas
+explicitly raised to 15,000 or 50,000 in migration and runtime. Shipping defaults
+stay unchanged. Report setup separately and monitor generator, server and database resources.
 
-Use the bounded measurement counter for commit capacity. It counts saves started
-and acknowledged within the exact measurement window and reports late
-acknowledgements separately. NBomber can include retiring invocations beyond its
-nominal duration, and step rates use the full 90-second simulation rather than
-our 60-second measurement. Its step RPS alone does not prove the target. Count only
-successful `save` steps with status `document_commit`. Report save,
-query and open p50/p95/p99 latency, achieved cadence, missed slots, HTTP 429/503,
-timeouts and other failures. Replays and conflicts are not new commits. Reject
-shortened runs. Final graph, receipt, version and content-hash validation occurs
-outside timing; console totals include warm-up. Keep per-document state within
-[storage limits](storage-providers.md#limits-and-qualification). Save reports from
-`artifacts/load-tests/` with source, runtime, hardware, backend and admission limits.
-Longer runs must establish sustained behavior. Saturation diagnostics can locate
-bottlenecks but do not establish active-user capacity or coauthoring support.
+Use the strict counter for saves started and acknowledged inside the measured
+minute. Late acknowledgements are separate. NBomber step RPS divides counts by
+90 seconds and can include retiring invocations; it does not establish the target.
+Report successful `document_commit` saves, step p50/p95/p99 latency, cadence and
+HTTP failures separately. Replays and conflicts are not new commits. Reject shortened
+runs. Final graph, receipt, version and hash checks run outside timing; console
+totals include warm-up. Keep state within [storage limits](storage-providers.md#limits-and-qualification)
+and retain local reports with source, hardware, runtime, backend and admission settings.
 
-For matching PostgreSQL or SQL Server content and state stores, bounded saves
-publish new immutable content, the graph, package and receipt in one transaction.
-Other providers and larger saves retain the separate content-write path. Batch
-reads and writes retain length, hash, quota and corruption checks. Existing
-immutable objects are fully verified without taking exclusive creation locks;
-new objects still take those locks. This lets unrelated documents reuse common
-template parts without serializing their saves on those parts.
+## Measured results
+
+These runs used the final core changes represented by `d239141` on 2026-10-27 UTC.
+NBomber, WebDemo and PostgreSQL 18.3 shared a host with four logical CPUs and
+approximately 13 GiB memory. The SDK was `11.0.100-rc.3.26522.148`. Admission was
+128 requests globally and two per subject; WebDemo's document and Identity pools
+each allowed 24 connections. PostgreSQL used a 4,096 MiB WAL allowance with
+`fsync`, synchronous commit and full-page writes enabled. The document quotas
+were explicitly 15,000 for the 1,500-user profiles and 50,000 for stretch.
+
+CSV files below are local generated reports under `artifacts/load-tests/`.
+
+| Profile | Commits inside measured minute | Save starts | Late acknowledgements | Failed HTTP steps, including warm-up | CSV filename |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Primary | 2,998 | 3,000 | 2 | 0 | `nbomber_report_2026-10-27--23-40-21.csv` |
+| Larger documents | 2,966 | 2,998 | 23 | 33 | `nbomber_report_2026-10-27--23-43-50.csv` |
+| Frequent AutoSave | 6,569 | 11,244 | 117 | 9,529 | `nbomber_report_2026-10-27--23-23-19.csv` |
+| Stretch | 5,690 | 9,997 | 79 | 14,677 | `nbomber_report_2026-10-27--23-18-09.csv` |
+
+Only primary passed the check requiring no HTTP failures. All reported failures
+in these runs were HTTP 503 admission rejections. Late acknowledgements are
+successful commits outside the strict time window, counted separately from
+failures. All four runs reported zero missed cadence slots, and every acknowledged
+commit had a distinct verified payload hash. Primary's maximum action-start
+lateness was 22 ms. Mean serialized save sizes were 17,732 bytes for primary and
+stretch, 17,733 for frequent AutoSave and 17,770 for larger documents. All changed
+ZIP byte totals were 16,700 per save. The common unchanged package parts remained warm.
+
+Primary's successful save p50/p95/p99 latencies were 23.44/46.17/69.06 ms; query
+latencies were 7.11/17.41/24.54 ms and open-download latencies were
+4.27/12.09/18.41 ms. These CSV step measurements exclude scheduled waits and can
+include late completions. Use the strict counter above for commits/minute.
+
+A separate eight-client, 1 MiB full-replacement diagnostic improved from 297 to
+377 saves in 30 seconds, or 9.90 to 12.57 saves/second, without HTTP failures in
+the final run (`nbomber_report_2026-10-27--23-46-41.csv`).
+It reused a fixed 16-file palette: 488 commits including warm-up produced only
+16 distinct payload hashes. It measures a different workload from unique paced
+incremental saves and does not establish active-user capacity. Longer runs and
+separate generator hardware still need qualification; these measurements do not
+predict that another host configuration will meet the target.

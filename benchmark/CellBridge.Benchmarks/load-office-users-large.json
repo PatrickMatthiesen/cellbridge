@@ -1,0 +1,39 @@
+{
+  "TestSuite": "CellBridge",
+  "TestName": "1500 active Office users with 1.5 MiB packages",
+  "TargetScenarios": [
+    "document-http"
+  ],
+  "GlobalSettings": {
+    "ScenariosSettings": [
+      {
+        "ScenarioName": "document-http",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "Clients": 1500,
+          "DocumentsPerClient": 10,
+          "Workload": "independent",
+          "UserModel": true,
+          "PackageKiB": 1536,
+          "Seed": 42,
+          "Retry": false,
+          "SaveIntervalMs": 30000,
+          "QueryIntervalMs": 30000,
+          "OpenIntervalMs": 120000,
+          "UserWarmUpMs": 30000,
+          "UserMeasurementMs": 60000,
+          "ChangedPartKiB": 16
+        },
+        "LoadSimulationsSettings": [
+          {
+            "KeepConstant": [
+              1500,
+              "00:01:30"
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      }
+    ]
+  }
+}
