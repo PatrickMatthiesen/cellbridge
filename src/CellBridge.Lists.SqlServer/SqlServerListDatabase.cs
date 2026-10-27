@@ -25,7 +25,7 @@ internal static class SqlServerListDatabase
     // All participants take the workspace lock first. Reads hold Shared; registration
     // and mutations hold Exclusive until commit. Record identity locks come second.
     internal static Task LockAsync(SqlServerListDbContext db, string resource, bool exclusive,
-        ListLimits limits, CancellationToken ct) => db.Database.ExecuteSqlInterpolatedAsync($"""
+        ListLimits limits, CancellationToken ct) => db.Database.ExecuteSqlAsync($"""
             DECLARE @result int;
             EXEC @result=sys.sp_getapplock @Resource={resource},
                 @LockMode={(exclusive ? "Exclusive" : "Shared")}, @LockOwner='Transaction',

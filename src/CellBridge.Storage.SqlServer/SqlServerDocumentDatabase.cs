@@ -31,7 +31,7 @@ internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlS
     }
 
     public static Task LockAsync(SqlServerDocumentDbContext context, string resource, CancellationToken ct, string mode = "Exclusive") =>
-        context.Database.ExecuteSqlInterpolatedAsync($"""
+        context.Database.ExecuteSqlAsync($"""
             DECLARE @result int;
             EXEC @result = sys.sp_getapplock @Resource={resource}, @LockMode={mode},
                 @LockOwner='Transaction', @LockTimeout=10000;
