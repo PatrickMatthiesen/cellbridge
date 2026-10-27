@@ -1,8 +1,53 @@
 # Automated testing
 
+## Generated files and worktree cleanup
+
+Report routine results in the conversation. A successful check or cleanup does
+not need a separate report file. The agent that creates temporary task files must
+remove them when the task finishes.
+
+Preserve only files still needed for ongoing work, such as uncommitted patches,
+captures for an open issue, or raw benchmark results awaiting comparison. Keep
+them under the primary checkout's ignored `artifacts/<task>/` before removing a
+task worktree. Remove them when that work finishes or replaces them. Do not
+archive all ignored files or copy package caches and full build trees by default.
+`artifacts/` has no automatic cleanup and must not be force-added to Git.
+
+| Files | Location and cleanup |
+| --- | --- |
+| Request bodies and proposed save files | A private temporary directory. Each operation deletes its files when it closes them. A disk-backed `/tmp` is suitable on Linux. |
+| Disposable tools and scratch output | `artifacts/tmp/<task>/`, or a private task directory under disk-backed `/tmp`. Remove the directory when the task finishes. |
+| Requested reports, uncommitted patches, captures and raw results still needed | `artifacts/<task>/` in the primary checkout. The agent completing the work removes files no longer needed. |
+| Build output | Normal `bin` and `obj` directories in the checkout. Rebuild them when needed and remove them with the worktree. |
+| Saved documents and databases | The configured storage directory or volume. Never put these in a temporary directory. |
+
+Aspire's .NET resources use `artifacts/tmp` as their system temporary directory.
+`Parameters__TemporaryDirectory` selects another location, including a path
+relative to the checkout root. Packages used outside Aspire follow the host's
+normal `TMPDIR`, `TMP` and `TEMP` settings. Stop the resource before clearing its
+temporary folder. A temporary folder must not hold the database or saved content.
+For example, set `Parameters__TemporaryDirectory=/tmp/cellbridge-<user>` to use a
+private directory on a disk-backed `/tmp`. Check the filesystem first; `/tmp` can
+also use RAM. The operating system's cleanup rules vary. The repo's
+`artifacts/tmp` directory has no automatic age-based cleanup, and tools must
+remove their task files in either location.
+
+Reuse a suitable existing checkout for continued work. Read-only reviews usually
+need no separate worktree. An isolated delegated task creates a new worktree;
+retries can therefore leave more than one. Reuse one task checkout for its related
+experiments rather than creating a checkout for each experiment.
+
+T3 worktrees can remain after their threads finish or are deleted. Before removing
+one, check that no thread or process still uses it, preserve uncommitted work and
+any ignored files still needed, and confirm that its commits are saved or merged. A clean
+`git status` does not show ignored reports, captures or databases. Use
+`git worktree remove <path>` after those checks. `git worktree prune` removes stale
+Git metadata; it does not remove old checkout directories. Do not use forced
+removal as a substitute for checking their contents.
+
 ## Routine Linux checks
 
-Install .NET 10, Docker and an Aspire CLI compatible with the pinned Aspire packages.
+Install .NET 11, Docker and an Aspire CLI compatible with the pinned Aspire packages.
 Build and run the main solution from the repository root:
 
 ```sh
@@ -53,7 +98,7 @@ tools/capture/.venv/bin/python -m pytest tools/capture tools/testing -q
 
 ## SQL Server engine checks
 
-Run the SQL Server tests with .NET 10, Docker on Linux x86-64 and an Aspire CLI
+Run the SQL Server tests with .NET 11, Docker on Linux x86-64 and an Aspire CLI
 compatible with the pinned hosting packages:
 
 ```sh
@@ -135,39 +180,50 @@ Performance projects live under `benchmark/`. Correctness assertions live under
 See [list measurements](list-performance.md) and
 [isolated allocation measurements](allocation-measurements.md).
 
-Run the benchmark executables directly. A PostgreSQL run without a supplied
-connection string starts a disposable database through the shared AppHost fixture:
+Use the standard BenchmarkDotNet entry point to list or run all maintained cases:
 
 ```sh
-dotnet run -c Release --project benchmark/CellBridge.Storage.Benchmark -- --content postgresql --sizes 1 --clients 1,8 --iterations 64 --workload delta-chain --output artifacts/storage-growth.json
-dotnet run -c Release --project benchmark/CellBridge.Lists.Benchmark -- --clients 1,8 --workspaces 1,16 --iterations 200 --output artifacts/lists-performance/report.json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --list flat
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks
 ```
 
-Explicit `ConnectionStrings__cellbridge` or `ConnectionStrings__lists` values
-select an external administrative connection. The benchmark creates a new
-database there and removes only that database when it finishes. The Lists
-benchmark also creates and removes its own database role. The memory storage
-workload needs no database.
+The unified parent process starts one disposable PostgreSQL environment through
+Aspire, passes connections to BenchmarkDotNet's child processes, and disposes it
+after the run. Measured child processes do not host Aspire health checks or
+telemetry. Each case resets its test data before use. Preparation and result
+checks run outside the measured method. A Dry job checks
+setup and cleanup but does not provide reliable performance numbers.
+The performance workflow runs the BenchmarkDotNet suite weekly and on manual
+request. Its benchmark artifacts expire after 14 days.
 
-Each run retains workload, setup, warm-up and measured-interval metadata.
-Storage reports retain retry mode and initial/final file hashes. After timing,
-the runner reloads final state and checks receipts, graph materialization and
-expected file bytes. These probes do not count toward workload allocations.
-Steady-state timings exclude environment startup/schema setup and warm-up;
-process peak memory remains cumulative. Preserve raw reports with runtime,
-hardware, source and backend details when comparing runs. These measurements
-do not establish a final SQL baseline.
-
-For a small repeated-save/state-growth check without PostgreSQL:
+NBomber runs all provider and HTTP load scenarios through the same entry point:
 
 ```sh
-dotnet run -c Release --project benchmark/CellBridge.Storage.Benchmark -- --content memory --sizes 0 --clients 1 --iterations 64 --workload delta-chain --retry --output artifacts/delta-chain.json
+dotnet run -c Release --project benchmark/CellBridge.Benchmarks -- --load-test --config benchmark/CellBridge.Benchmarks/load-smoke.json
 ```
 
-Use current supported workload limits and do not interpret quota rejection as a
-successful save. Larger retained graphs and multiple clients need separate
-qualification. The [storage guide](storage-providers.md#limits-and-qualification)
-describes supported limits.
+This bounded configuration covers Lists provider/HTTP and document memory,
+PostgreSQL, filesystem and HTTP workflows. It checks execution, not capacity.
+NBomber owns load scheduling, warm-up, statistics and thresholds. Aspire owns
+PostgreSQL, disposable databases, setup, test account and WebDemo. Scenario initialization prepares test data. HTTP scenarios
+use normal cookie authentication and CSRF protection. No separate machine,
+manual database or running development app is needed.
+
+The performance workflow runs both BenchmarkDotNet and this load check weekly
+and on manual request. Reports expire after 14 days. See
+[list measurements](list-performance.md#load-tests) for configuration, license
+requirements and result limits.
+
+Document load scenarios retain full, changed-full, delta, delta-chain and reviewed
+capture requests, identical retries, change queries, graph retention and download
+checks. HTTP request construction uses owned-provider reads in a separate step.
+It is not a complete Office client emulator. Final probes run outside load timing;
+preparation, retry and inspection steps remain visible in workflow timing.
+Detailed correctness assertions remain in the test projects.
+
+Use supported storage limits and do not interpret quota rejection as a successful
+save. Larger retained graphs and multiple clients need separate qualification.
+The [storage guide](storage-providers.md#limits-and-qualification) describes limits.
 
 ## Connect the Windows laptop through Tailscale
 

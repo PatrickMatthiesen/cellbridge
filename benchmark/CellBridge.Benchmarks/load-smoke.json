@@ -1,0 +1,128 @@
+{
+  "TestSuite": "CellBridge",
+  "TestName": "All load workflows smoke",
+  "TargetScenarios": [
+    "document-memory",
+    "document-postgresql",
+    "document-filesystem",
+    "document-http",
+    "lists-provider",
+    "lists-http"
+  ],
+  "GlobalSettings": {
+    "ScenariosSettings": [
+      {
+        "ScenarioName": "document-memory",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "SizeMiB": 0,
+          "QueryEvery": 1
+        },
+        "LoadSimulationsSettings": [
+          {
+            "IterationsForConstant": [
+              1,
+              10
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      },
+      {
+        "ScenarioName": "document-postgresql",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "SizeMiB": 0,
+          "QueryEvery": 1
+        },
+        "LoadSimulationsSettings": [
+          {
+            "IterationsForConstant": [
+              1,
+              10
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      },
+      {
+        "ScenarioName": "document-filesystem",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "SizeMiB": 0,
+          "QueryEvery": 1
+        },
+        "LoadSimulationsSettings": [
+          {
+            "IterationsForConstant": [
+              1,
+              10
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      },
+      {
+        "ScenarioName": "document-http",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "SizeMiB": 0,
+          "QueryEvery": 1,
+          "Clients": 1,
+          "WritePercent": 100
+        },
+        "LoadSimulationsSettings": [
+          {
+            "IterationsForConstant": [
+              1,
+              10
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      },
+      {
+        "ScenarioName": "lists-provider",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "Records": 16,
+          "PageSize": 4,
+          "PayloadBytes": 64,
+          "Workspaces": 2,
+          "Workload": "smoke",
+          "Clients": 1
+        },
+        "LoadSimulationsSettings": [
+          {
+            "IterationsForConstant": [
+              1,
+              2
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      },
+      {
+        "ScenarioName": "lists-http",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "Records": 16,
+          "PageSize": 4,
+          "PayloadBytes": 64,
+          "Workspaces": 2,
+          "Workload": "smoke",
+          "Clients": 1
+        },
+        "LoadSimulationsSettings": [
+          {
+            "IterationsForConstant": [
+              1,
+              2
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      }
+    ]
+  }
+}

@@ -164,7 +164,10 @@ public static class PostgreSqlListSetup
         DbContextOptions<PostgreSqlListDbContext> options)
     {
         var normalized = new DbContextOptionsBuilder<PostgreSqlListDbContext>(options)
-            .UseNpgsql(provider => provider.MigrationsHistoryTable(MigrationsHistoryTable, SchemaName))
+            .UseNpgsql(provider => provider
+                .MigrationsHistoryTable(MigrationsHistoryTable, SchemaName)
+                // List filters and cursors use C# equality, including missing values.
+                .UseRelationalNulls(false))
             .UseQueryTrackingBehavior(QueryTrackingBehavior.TrackAll)
             .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.MigrationsUserTransactionWarning))
             .Options;

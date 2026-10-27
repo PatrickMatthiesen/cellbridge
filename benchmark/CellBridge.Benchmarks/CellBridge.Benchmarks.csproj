@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.16.0-preview.2" />
+    <PackageReference Include="NBomber" Version="6.7.1" />
+    <Compile Include="../BenchmarkConnections.cs" Link="BenchmarkConnections.cs" />
+    <ProjectReference Include="../../src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Lists.SqlServer/CellBridge.Lists.SqlServer.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.SqlServer/CellBridge.Storage.SqlServer.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
+    <ProjectReference Include="../../tests/CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
+    <ProjectReference Include="../../tests/CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
+    <ProjectReference Include="../CellBridge.Allocations.Benchmark/CellBridge.Allocations.Benchmark.csproj" />
+    <ProjectReference Include="../CellBridge.Lists.Benchmark/CellBridge.Lists.Benchmark.csproj" />
+    <ProjectReference Include="../CellBridge.Storage.Benchmark/CellBridge.Storage.Benchmark.csproj" />
+  </ItemGroup>
+  <ItemGroup><None Update="load*.json" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+</Project>

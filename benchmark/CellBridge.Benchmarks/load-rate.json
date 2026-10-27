@@ -1,0 +1,54 @@
+{
+  "TestSuite": "CellBridge",
+  "TestName": "HTTP API fixed arrival load",
+  "TargetScenarios": [
+    "lists-http"
+  ],
+  "GlobalSettings": {
+    "ScenariosSettings": [
+      {
+        "ScenarioName": "lists-http",
+        "WarmUpDuration": "00:00:30",
+        "CustomSettings": {
+          "Clients": 16,
+          "Workload": "same-workspace",
+          "Workspaces": 1,
+          "Records": 128,
+          "PageSize": 16,
+          "PayloadBytes": 1024
+        },
+        "LoadSimulationsSettings": [
+          {
+            "Inject": [
+              1,
+              "00:00:00.005",
+              "00:02:00"
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      },
+      {
+        "ScenarioName": "document-http",
+        "WarmUpDuration": "00:00:30",
+        "CustomSettings": {
+          "Clients": 64,
+          "Workload": "independent",
+          "SizeMiB": 1,
+          "WritePercent": 75,
+          "Retry": false
+        },
+        "LoadSimulationsSettings": [
+          {
+            "Inject": [
+              1,
+              "00:00:00.25",
+              "00:02:00"
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      }
+    ]
+  }
+}

@@ -81,10 +81,21 @@ aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-int
 
 ## Documentation
 
-Keep maintained user and contributor guides in `docs/`. Keep raw captures,
-benchmark JSON, run reports and task journals in ignored `artifacts/` or local
-capture output. Keep AGENTS.md limited to current instructions and links. Retain
-only reviewed fixtures required by automated tests under `testdata/`.
+Keep maintained user and contributor guides in `docs/`. Report routine task and
+test results in the conversation. Do not create task journals, cleanup reports or
+other standalone reports unless requested or needed for ongoing work. Keep
+AGENTS.md limited to current instructions and links. Retain only reviewed fixtures
+required by automated tests under `testdata/`.
+
+Use `artifacts/tmp/<task>/` or a private directory under disk-backed system temp
+for disposable tooling. The agent that creates task files must remove them when
+finished. Preserve only files still needed, such as uncommitted patches, captures
+needed to reproduce an open issue, or raw results for an unfinished benchmark.
+Keep those in the primary checkout's ignored `artifacts/<task>/` before removing
+a task worktree. Remove them when that work finishes or replaces them. Do not
+archive all ignored files as a default cleanup step, or force-add artifacts to Git.
+Reuse suitable checkouts and avoid worktrees for read-only reviews. Follow the
+[worktree cleanup instructions](docs/automated-testing.md#generated-files-and-worktree-cleanup).
 
 - [Architecture](docs/architecture.md)
 - [Demo library and desktop validation](docs/demo-library.md)

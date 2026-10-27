@@ -10,7 +10,7 @@ Upstream's `BaseStructure.cs`, `FSSHTTPB.cs`, `FSSHTTPD.cs` and `ONESTORE.cs`
 are split into one file per top-level type, grouped by protocol area. The port
 retains the original type names, namespace and declaration comments.
 
-CellBridge maintains this .NET 10 port. It includes the binary request/response,
+CellBridge maintains this .NET 11 port. It includes the binary request/response,
 FSSHTTPD node/ZIP and OneStore property grammars used by the FSSHTTP inspector.
 WinForms rendering and hex-view helpers were removed. Parser state belongs to
 each input stream. No Fiddler assemblies or external checkout are required.

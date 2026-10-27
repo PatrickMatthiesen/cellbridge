@@ -5,12 +5,22 @@ builder.Configuration.AddUserSecrets<Program>()
     .AddJsonFile(Path.Combine(builder.AppHostDirectory, "apphost.settings.json"), optional: true)
     .AddEnvironmentVariables();
 
+var repositoryDirectory = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../.."));
+var temporaryDirectory = Path.GetFullPath(
+    builder.Configuration["Parameters:TemporaryDirectory"] ?? "artifacts/tmp", repositoryDirectory);
+if (OperatingSystem.IsWindows()) Directory.CreateDirectory(temporaryDirectory);
+else Directory.CreateDirectory(temporaryDirectory,
+    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
 // Keep the existing development database when changing AppHost project paths.
 // Concurrent checkouts can select their own volume; tests remove this mount.
 var postgres = builder.AddPostgres("storage")
     .WithDataVolume(builder.Configuration["Parameters:StorageVolume"] ?? "cellbridge-storage-data");
 var database = postgres.AddDatabase("cellbridge");
 var initialization = builder.AddDotnetProject("storage-init", "../../tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj")
+    .WithEnvironment("TMPDIR", temporaryDirectory)
+    .WithEnvironment("TMP", temporaryDirectory)
+    .WithEnvironment("TEMP", temporaryDirectory)
     .WithReference(database)
     .WaitFor(database);
 
@@ -21,6 +31,9 @@ var webdemo = builder.AddDotnetProject("webdemo", "../CellBridge.WebDemo/CellBri
     .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
     .WithReference(database)
     .WithEnvironment("Storage__Provider", "PostgreSql")
+    .WithEnvironment("TMPDIR", temporaryDirectory)
+    .WithEnvironment("TMP", temporaryDirectory)
+    .WithEnvironment("TEMP", temporaryDirectory)
     .WaitForCompletion(initialization)
     .WithHttpHealthCheck("/health", endpointName: "http")
     .WithExternalHttpEndpoints();

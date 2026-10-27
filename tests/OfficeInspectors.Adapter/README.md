@@ -1,6 +1,6 @@
 # Office Inspectors parser tests
 
-This suite compares the in-repo `CellBridge.OfficeInspectors` .NET 10 parser
+This suite compares the in-repo `CellBridge.OfficeInspectors` .NET 11 parser
 against reviewed SharePoint fixtures and CellBridge-generated responses.
 All checks run on Linux and Windows, without a sibling checkout or WinForms.
 

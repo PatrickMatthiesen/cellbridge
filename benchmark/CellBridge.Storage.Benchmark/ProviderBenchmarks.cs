@@ -5,12 +5,12 @@ using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
-using CellBridge.TestInfrastructure;
+using CellBridge.TestFixtures;
 
 [MemoryDiagnoser]
 public class PostgreSqlContentReadBenchmarks
 {
-    private PostgreSqlEnvironment environment = null!;
+    private string connectionString = null!;
     private BenchmarkDatabase database = null!;
     private PostgreSqlContentStore content = null!;
     private ContentHandle handle = null!;
@@ -20,8 +20,8 @@ public class PostgreSqlContentReadBenchmarks
     public async Task Setup()
     {
         payload = ProviderBenchmarkInputs.Content(0);
-        environment = await PostgreSqlEnvironment.StartAsync();
-        database = (await BenchmarkDatabase.OpenAsync(environment.ConnectionString, new StorageLimits()))!;
+        connectionString = BenchmarkConnections.Require(BenchmarkConnections.Documents);
+        database = await BenchmarkDatabase.OpenAsync(connectionString, new StorageLimits());
         content = new(database.Source, new StorageLimits().MaxObjectBytes);
         using var input = new MemoryStream(payload, writable: false);
         handle = await content.WriteAsync(input);
@@ -43,7 +43,6 @@ public class PostgreSqlContentReadBenchmarks
             await ProviderBenchmarkInputs.VerifyContentAsync(content, handle, payload);
             await database.DisposeAsync();
         }
-        if (environment is not null) await environment.DisposeAsync();
     }
 }
 
@@ -51,7 +50,7 @@ public class PostgreSqlContentReadBenchmarks
 public class PostgreSqlContentWriteBenchmarks
 {
     private const int BatchSize = 8;
-    private PostgreSqlEnvironment environment = null!;
+    private string connectionString = null!;
     private BenchmarkDatabase? database;
     private PostgreSqlContentStore content = null!;
     private readonly byte[][] payloads = Enumerable.Range(0, BatchSize).Select(ProviderBenchmarkInputs.Content).ToArray();
@@ -59,13 +58,15 @@ public class PostgreSqlContentWriteBenchmarks
     private readonly ContentHandle[] handles = new ContentHandle[BatchSize];
 
     [GlobalSetup]
-    public async Task Setup() => environment = await PostgreSqlEnvironment.StartAsync();
+    public void Setup() => connectionString = BenchmarkConnections.Require(BenchmarkConnections.Documents);
 
     [IterationSetup]
-    public async Task Prepare()
+    public void Prepare() => PrepareAsync().GetAwaiter().GetResult();
+
+    private async Task PrepareAsync()
     {
         if (database is not null) await database.DisposeAsync();
-        database = (await BenchmarkDatabase.OpenAsync(environment.ConnectionString, new StorageLimits()))!;
+        database = await BenchmarkDatabase.OpenAsync(connectionString, new StorageLimits());
         content = new(database.Source, new StorageLimits().MaxObjectBytes);
         for (var i = 0; i < BatchSize; i++)
         {
@@ -81,7 +82,9 @@ public class PostgreSqlContentWriteBenchmarks
     }
 
     [IterationCleanup]
-    public async Task Verify()
+    public void Verify() => VerifyAsync().GetAwaiter().GetResult();
+
+    private async Task VerifyAsync()
     {
         for (var i = 0; i < BatchSize; i++)
             await ProviderBenchmarkInputs.VerifyContentAsync(content, handles[i], payloads[i]);
@@ -92,7 +95,6 @@ public class PostgreSqlContentWriteBenchmarks
     {
         foreach (var input in inputs) input?.Dispose();
         if (database is not null) await database.DisposeAsync();
-        if (environment is not null) await environment.DisposeAsync();
     }
 }
 
@@ -102,7 +104,7 @@ public class PostgreSqlServiceSaveBenchmarks
     private const int BatchSize = 8;
     private const int PriorSaves = 4;
     [Params("changed-full", "delta")] public string Mode { get; set; } = "";
-    private PostgreSqlEnvironment environment = null!;
+    private string connectionString = null!;
     private BenchmarkDatabase? database;
     private StorageProvider provider = null!;
     private CellBridgeDocumentService service = null!;
@@ -115,13 +117,15 @@ public class PostgreSqlServiceSaveBenchmarks
         .Select(seed => StorageBenchmarkInputs.Package(1, seed + 42)).ToArray();
 
     [GlobalSetup]
-    public async Task Setup() => environment = await PostgreSqlEnvironment.StartAsync();
+    public void Setup() => connectionString = BenchmarkConnections.Require(BenchmarkConnections.Documents);
 
     [IterationSetup]
-    public async Task Prepare()
+    public void Prepare() => PrepareAsync().GetAwaiter().GetResult();
+
+    private async Task PrepareAsync()
     {
         if (database is not null) await database.DisposeAsync();
-        database = (await BenchmarkDatabase.OpenAsync(environment.ConnectionString, new StorageLimits()))!;
+        database = await BenchmarkDatabase.OpenAsync(connectionString, new StorageLimits());
         var limits = new StorageLimits();
         provider = new(new PostgreSqlStateStore(database.Source, limits),
             new PostgreSqlContentStore(database.Source, limits.MaxObjectBytes), limits);
@@ -161,7 +165,9 @@ public class PostgreSqlServiceSaveBenchmarks
     }
 
     [IterationCleanup]
-    public async Task Verify()
+    public void Verify() => VerifyAsync().GetAwaiter().GetResult();
+
+    private async Task VerifyAsync()
     {
         for (var doc = 0; doc < BatchSize; doc++)
         {
@@ -182,7 +188,6 @@ public class PostgreSqlServiceSaveBenchmarks
     public async Task Cleanup()
     {
         if (database is not null) await database.DisposeAsync();
-        if (environment is not null) await environment.DisposeAsync();
     }
 
     private static void VerifyExecution(CellExecution result, DocumentState previous)

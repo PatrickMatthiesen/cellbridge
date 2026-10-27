@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- Vendored 2015 Interop-TestSuites sources predate nullable annotations. -->
     <Nullable>disable</Nullable>
@@ -18,30 +18,10 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Compile Include="*.cs" />
     <None Include="../../testdata/api/excel-save-20260928.bin" Link="Fixtures/excel-save-20260928.bin" CopyToOutputDirectory="PreserveNewest" />
-    <Compile Include="CellStorageClient.cs" />
-    <Compile Include="LiveInteropHttp.cs" />
-    <Compile Include="LibraryAuthenticationTests.cs" />
-    <Compile Include="LiveInteropFactAttribute.cs" />
-    <Compile Include="CapturedWordOpenTests.cs" />
-    <Compile Include="CapturedSaveTests.cs" />
-    <Compile Include="DocumentLibraryTests.cs" />
-    <Compile Include="IdentityRoutingTests.cs" />
-    <Compile Include="MultiInstanceTests.cs" />
-    <Compile Include="ProxyOriginTests.cs" />
-    <Compile Include="DependencyTests.cs" />
     <None Include="../../testdata/api/word-enable-editing.xml" Link="Fixtures/word-enable-editing.xml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../testdata/sharepoint/fixtures/save_reopen/*.json" Link="Fixtures/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
-    <Compile Include="QueryAccessTests.cs" />
-    <Compile Include="QueryChangesTests.cs" />
-    <Compile Include="NestedSerializationInteropTests.cs" />
-    <Compile Include="NegotiatedHashInteropTests.cs" />
-    <Compile Include="PartitionResponseTests.cs" />
-    <Compile Include="GuidAllocationInteropTests.cs" />
-    <Compile Include="GraphUploadInteropTests.cs" />
-    <Compile Include="BoundedDifferentialGraphTests.cs" />
-    <Compile Include="BoundedServerProcessingTests.cs" />
-    <Compile Include="BoundedDifferentialHeaderTests.cs" />
     <Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" />
     <Compile Include="MicrosoftProtocol\**\*.cs" />
     <Compile Remove="MicrosoftProtocol\FssHttpD\**\*.cs" />
@@ -51,8 +31,8 @@
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="WebDemoFixture.cs" />
     <PackageReference Include="Aspire.Hosting.Dotnet" Version="17.0.0-preview.1.26520.1" />
     <ProjectReference Include="../CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
+    <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
   </ItemGroup>
 </Project>

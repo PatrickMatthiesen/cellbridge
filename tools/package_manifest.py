@@ -41,8 +41,8 @@ def build_manifest(output, version, source_commit, source_dirty):
                 if (dependency.get("id") == "CellBridge" or dependency.get("id", "").startswith("CellBridge.")) and \
                         dependency.get("version") != version:
                     raise RuntimeError(f"Inconsistent internal dependency version in {path.name}.")
-            if not any(n.startswith("lib/net10.0/") and n.endswith(".dll") for n in package.namelist()):
-                raise RuntimeError(f"Missing .NET 10 assembly in {path.name}.")
+            if not any(n.startswith("lib/net11.0/") and n.endswith(".dll") for n in package.namelist()):
+                raise RuntimeError(f"Missing .NET 11 assembly in {path.name}.")
             symbols = path.with_suffix(".snupkg")
             with zipfile.ZipFile(symbols) as symbol_package:
                 symbol_nuspec = next(n for n in symbol_package.namelist() if n.endswith(".nuspec"))
@@ -51,7 +51,7 @@ def build_manifest(output, version, source_commit, source_dirty):
                 if symbol_metadata.findtext(".//{*}id") != package_id or symbol_metadata.findtext(".//{*}version") != version or \
                         symbol_repository is None or symbol_repository.get("commit") != source_commit:
                     raise RuntimeError(f"Symbol package identity/version/commit mismatch in {symbols.name}.")
-                if not any(n.startswith("lib/net10.0/") and n.endswith(".pdb") for n in symbol_package.namelist()):
+                if not any(n.startswith("lib/net11.0/") and n.endswith(".pdb") for n in symbol_package.namelist()):
                     raise RuntimeError(f"Missing portable symbols in {symbols.name}.")
             manifest["packages"].append({"id": field("id").text, "file": path.name,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

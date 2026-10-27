@@ -23,7 +23,7 @@ Configure `Authentication__Authority`, `Authentication__Audience` and
 Base64 UTF-8 issuer, a colon and the token subject. Run the built example:
 
 ```sh
-dotnet examples/NuGetConsumer/bin/Release/net10.0/NuGetConsumer.dll --urls http://localhost:5080
+dotnet examples/NuGetConsumer/bin/Release/net11.0/NuGetConsumer.dll --urls http://localhost:5080
 ```
 
 Download `http://localhost:5080/shared/example.txt` with an Authorization bearer

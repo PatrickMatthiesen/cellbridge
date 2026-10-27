@@ -14,7 +14,7 @@ namespace CellBridge.Interop.Tests;
 [CollectionDefinition("WebDemo integration", DisableParallelization = true)]
 public sealed class WebDemoCollection : ICollectionFixture<WebDemoFixture>;
 
-/// <summary>Exercises real login, HTTP protocol routing and a second host over an owned database.</summary>
+/// <summary>Starts two local WebDemo processes and a disposable database for HTTP tests.</summary>
 public sealed class WebDemoFixture : IAsyncLifetime
 {
     private DistributedApplication? application;
@@ -33,6 +33,9 @@ public sealed class WebDemoFixture : IAsyncLifetime
         var database = builder.CreateResourceBuilder<PostgresDatabaseResource>("cellbridge");
         var initialization = builder.CreateResourceBuilder<DotnetProjectResource>("storage-init");
         var primary = builder.CreateResourceBuilder<DotnetProjectResource>("webdemo");
+        var temporaryDirectory = Path.GetFullPath(
+            builder.Configuration["Parameters:TemporaryDirectory"] ?? "artifacts/tmp",
+            Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../..")));
         // Add path-based projects through the original builder so they share
         // the AppHost's coordinated build with its existing projects.
         var appHost = primary.ApplicationBuilder;
@@ -42,6 +45,9 @@ public sealed class WebDemoFixture : IAsyncLifetime
             .WithArgs("seed-test-user")
             .WithEnvironment("DOTNET_ENVIRONMENT", "Testing")
             .WithEnvironment("Seed__Password", builder.AddParameter("TestPassword", secret: true))
+            .WithEnvironment("TMPDIR", temporaryDirectory)
+            .WithEnvironment("TMP", temporaryDirectory)
+            .WithEnvironment("TEMP", temporaryDirectory)
             .WithReference(database)
             .WaitForCompletion(initialization);
         var peer = appHost.AddDotnetProject("webdemo-peer",
@@ -51,6 +57,9 @@ public sealed class WebDemoFixture : IAsyncLifetime
             .WithHttpsEndpoint(name: "https")
             .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
             .WithEnvironment("Storage__Provider", "PostgreSql")
+            .WithEnvironment("TMPDIR", temporaryDirectory)
+            .WithEnvironment("TMP", temporaryDirectory)
+            .WithEnvironment("TEMP", temporaryDirectory)
             .WithHttpHealthCheck("/health", endpointName: "http")
             .WithReference(database);
         foreach (var host in new[] { primary, peer })

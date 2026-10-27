@@ -82,7 +82,7 @@ for project, results in ((tests, "test-results"), (library_tests, "document-libr
          "--logger", "trx", "--results-directory", str(output / results)])
 
 core_assets = json.loads((core_consumer.parent / "obj" / "project.assets.json").read_text())
-framework_references = core_assets["project"]["frameworks"]["net10.0"].get("frameworkReferences", {})
+framework_references = core_assets["project"]["frameworks"]["net11.0"].get("frameworkReferences", {})
 if "Microsoft.AspNetCore.App" in framework_references:
     raise RuntimeError("The CellBridge core package requires the ASP.NET Core shared framework.")
 core_libraries = core_assets["libraries"]
@@ -117,18 +117,18 @@ for project in sql_consumers:
         package_id = name.split("/")[0]
         with zipfile.ZipFile(output / f"{package_id}.{version}.nupkg") as package:
             for member in package.namelist():
-                if member.startswith("lib/net10.0/") and member.endswith(".dll"):
+                if member.startswith("lib/net11.0/") and member.endswith(".dll"):
                     filename = pathlib.Path(member).name
-                    copied = project.parent / "bin" / "Release" / "net10.0" / filename
+                    copied = project.parent / "bin" / "Release" / "net11.0" / filename
                     sha256 = hashlib.sha256(package.read(member)).hexdigest()
                     if not copied.is_file() or hashlib.sha256(copied.read_bytes()).hexdigest() != sha256:
                         raise RuntimeError(f"Consumer assembly differs from packed assembly: {copied}")
                     binaries.append({"package": package_id, "assembly": filename, "sha256": sha256})
-    actual = {p.name for p in (project.parent / "bin" / "Release" / "net10.0").glob("CellBridge*.dll")
+    actual = {p.name for p in (project.parent / "bin" / "Release" / "net11.0").glob("CellBridge*.dll")
               if p.stem != project.stem}
     if actual != {entry["assembly"] for entry in binaries}:
         raise RuntimeError(f"Consumer contains unexpected CellBridge assemblies: {project.name}")
-    assembly = project.parent / "bin" / "Release" / "net10.0" / f"{project.stem}.dll"
+    assembly = project.parent / "bin" / "Release" / "net11.0" / f"{project.stem}.dll"
     identities.append({"name": project.stem, "assembly": str(assembly),
                        "sha256": hashlib.sha256(assembly.read_bytes()).hexdigest(),
                        "sourceCommit": source_commit, "sourceDirty": bool(source_status.strip()),

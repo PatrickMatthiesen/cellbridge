@@ -17,12 +17,12 @@ def artifacts(path):
           <metadata><id>{package_id}</id><version>{VERSION}</version>
           <license type="expression">MIT</license><readme>README.md</readme>
           <repository type="git" url="https://github.com/PatrickMatthiesen/cellbridge" commit="{COMMIT}"/>
-          <dependencies><group targetFramework="net10.0"><dependency id="CellBridge" version="{VERSION}"/></group></dependencies>
+          <dependencies><group targetFramework="net11.0"><dependency id="CellBridge" version="{VERSION}"/></group></dependencies>
           </metadata></package>'''
         for extension, binary in (("nupkg", "dll"), ("snupkg", "pdb")):
             with zipfile.ZipFile(path / f"{package_id}.{VERSION}.{extension}", "w") as z:
                 z.writestr(package_id + ".nuspec", metadata)
-                z.writestr(f"lib/net10.0/{package_id}.{binary}", b"fixture")
+                z.writestr(f"lib/net11.0/{package_id}.{binary}", b"fixture")
                 if extension == "nupkg":
                     z.writestr("README.md", "fixture package")
     (path / "manifest.json").write_text(json.dumps(build_manifest(path, VERSION, COMMIT, False)))

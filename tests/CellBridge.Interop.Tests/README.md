@@ -1,6 +1,6 @@
 # Protocol replay and live HTTP checks
 
-This SDK-style .NET 10 xUnit project runs the S11 QueryAccess and S12
+This SDK-style .NET 11 xUnit project runs the S11 QueryAccess and S12
 QueryChanges request/response checks without the legacy Protocol Test
 Framework. The `MicrosoftProtocol/FssHttpB` folder contains the minimal
 Interop-TestSuites stack, with the original `Microsoft.Protocols.TestSuites`
@@ -20,14 +20,20 @@ dotnet test tests/CellBridge.Interop.Tests
 The HTTP collection reuses `src/CellBridge.AppHost` through Hosting.Testing.
 Its fixture removes the persistent PostgreSQL mount and capture resources, runs
 the current schema initialization, seeds a temporary Identity account, and starts
-two WebDemo instances against that
-same database. The fixture uses real login and antiforgery flows and creates its
+two local WebDemo processes against that same database. Both run on the machine
+running `dotnet test`; no second machine or manually started server is needed.
+The fixture uses real login and antiforgery flows and creates its
 documents through the authenticated API. It disposes only its own resources.
-.NET 10, the repository's Aspire packages and a Docker-compatible container runtime
+.NET 11, the repository's Aspire packages and a Docker-compatible container runtime
 are required. No Windows desktop or continuously running development app is needed.
 See [automated testing](../../docs/automated-testing.md) for other checks.
 
-To test an already running Aspire app, set the full SOAP endpoint. Supply both hosts when running the complete suite:
+The command above needs no endpoint settings. The history test checks listing,
+download, restore and rename through both local processes.
+
+To explicitly test an already running Aspire app instead, set the full SOAP
+endpoint. This optional override bypasses local startup. Supply both hosts when
+running the complete suite:
 
 ```powershell
 $env:OFFICECOLLABSERVER_INTEROP_ENDPOINT = 'https://localhost:7292/_vti_bin/cellstorage.svc'

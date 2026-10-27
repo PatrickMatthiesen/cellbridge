@@ -1,0 +1,52 @@
+{
+  "TestSuite": "CellBridge",
+  "TestName": "HTTP API load",
+  "TargetScenarios": [
+    "lists-http"
+  ],
+  "GlobalSettings": {
+    "ScenariosSettings": [
+      {
+        "ScenarioName": "lists-http",
+        "WarmUpDuration": "00:00:30",
+        "CustomSettings": {
+          "Clients": 16,
+          "Workload": "same-workspace",
+          "Workspaces": 1,
+          "Records": 128,
+          "PageSize": 16,
+          "PayloadBytes": 1024
+        },
+        "LoadSimulationsSettings": [
+          {
+            "KeepConstant": [
+              8,
+              "00:02:00"
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      },
+      {
+        "ScenarioName": "document-http",
+        "WarmUpDuration": "00:00:30",
+        "CustomSettings": {
+          "Clients": 16,
+          "Workload": "independent",
+          "SizeMiB": 1,
+          "WritePercent": 75,
+          "Retry": false
+        },
+        "LoadSimulationsSettings": [
+          {
+            "KeepConstant": [
+              8,
+              "00:02:00"
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      }
+    ]
+  }
+}
