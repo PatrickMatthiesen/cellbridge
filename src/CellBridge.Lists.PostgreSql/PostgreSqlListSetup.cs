@@ -113,6 +113,8 @@ public static class PostgreSqlListSetup
         // The shared advisory lock prevents another initializer from observing the legacy baseline.
         // EF is enlisted in this transaction so schema changes, data transforms and history commit together.
         await db.Database.MigrateAsync(cancellationToken);
+        if (!await HasExactCurrentHistoryAsync(connection, transaction, cancellationToken, requireReservations: true))
+            throw new InvalidOperationException("The Lists reservation migration history is incomplete.");
         if (await db.SchemaVersions.AsNoTracking().Where(row => row.Singleton)
                 .Select(row => row.Version).SingleAsync(cancellationToken) != 4)
             throw new InvalidOperationException("The list schema migration did not reach version 4.");
@@ -151,10 +153,14 @@ public static class PostgreSqlListSetup
             GRANT USAGE, SELECT ON SEQUENCE cellbridge_lists.audit_events_id_seq TO {quotedRole};
             REVOKE ALL ON FUNCTION cellbridge_lists.utf16_key(text),
               cellbridge_lists.timestamp_key(text),cellbridge_lists.utf16_compare(text,text),
-              cellbridge_lists.timestamp_compare(text,text),cellbridge_lists.c_compare(text,text) FROM PUBLIC;
+              cellbridge_lists.timestamp_compare(text,text),cellbridge_lists.c_compare(text,text),
+              cellbridge_lists.reserve_create(uuid,uuid,uuid,text,bigint,bigint,bigint,bigint,bigint,bigint),
+              cellbridge_lists.reserve_patch(uuid,text,bigint,bigint,bigint,bigint,bigint) FROM PUBLIC;
             GRANT EXECUTE ON FUNCTION cellbridge_lists.utf16_key(text),
               cellbridge_lists.timestamp_key(text),cellbridge_lists.utf16_compare(text,text),
-              cellbridge_lists.timestamp_compare(text,text),cellbridge_lists.c_compare(text,text) TO {quotedRole};
+              cellbridge_lists.timestamp_compare(text,text),cellbridge_lists.c_compare(text,text),
+              cellbridge_lists.reserve_create(uuid,uuid,uuid,text,bigint,bigint,bigint,bigint,bigint,bigint),
+              cellbridge_lists.reserve_patch(uuid,text,bigint,bigint,bigint,bigint,bigint) TO {quotedRole};
             """;
         await ExecuteAsync(connection, transaction, grants, cancellationToken);
         await efTransaction.CommitAsync(cancellationToken);
@@ -233,13 +239,16 @@ public static class PostgreSqlListSetup
     }
 
     private static async Task<bool> HasExactCurrentHistoryAsync(NpgsqlConnection connection,
-        NpgsqlTransaction transaction, CancellationToken cancellationToken)
+        NpgsqlTransaction transaction, CancellationToken cancellationToken, bool requireReservations = false)
     {
         // Migration IDs identify this schema. ProductVersion records the EF tool version.
         await using var command = new NpgsqlCommand($"""
-            SELECT count(*)=2 AND count(DISTINCT "MigrationId")=2 AND count(*) FILTER (WHERE "MigrationId" IN
-              ('{PostgreSqlListMigrationSql.CurrentMigrationId}',
-               '{PostgreSqlListMigrationSql.QueryFunctionsMigrationId}'))=2
+            SELECT count(*) IN (2,3) AND count(DISTINCT "MigrationId")=count(*)
+              AND count(*) FILTER (WHERE "MigrationId" IN
+                ('{PostgreSqlListMigrationSql.CurrentMigrationId}',
+                 '{PostgreSqlListMigrationSql.QueryFunctionsMigrationId}'))=2
+              AND count(*) FILTER (WHERE "MigrationId"='20261027090000_WriteReservations') = count(*)-2
+              AND (NOT {requireReservations} OR count(*)=3)
             FROM {SchemaName}."{MigrationsHistoryTable}"
             """, connection, transaction);
         return (bool)(await command.ExecuteScalarAsync(cancellationToken)

@@ -14,10 +14,10 @@ public sealed class PostgreSqlListEngine : IListEngine, IPagedListEngine
 
     /// <summary>Creates a native engine with an optional shared 32-byte continuation key.</summary>
     public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits, byte[]? continuationKey)
-        : this(new DbContextOptionsBuilder<PostgreSqlListDbContext>()
-            .UseNpgsql(runtimeSource ?? throw new ArgumentNullException(nameof(runtimeSource))).Options,
-            limits, continuationKey)
     {
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(runtimeSource ?? throw new ArgumentNullException(nameof(runtimeSource))).Options;
+        _engine = new(options, limits, continuationKey, authorizationProvider: null, useWriteReservations: true);
     }
 
     /// <summary>Creates a list engine with consumer-supplied PostgreSQL EF provider configuration.</summary>
@@ -26,7 +26,13 @@ public sealed class PostgreSqlListEngine : IListEngine, IPagedListEngine
     { _engine = new(options, limits, continuationKey); }
 
     public PostgreSqlListEngine(NpgsqlDataSource runtimeSource, ListLimits? limits, IListAuthorizationProvider authorizationProvider,
-        byte[]? continuationKey = null) : this(new DbContextOptionsBuilder<PostgreSqlListDbContext>().UseNpgsql(runtimeSource ?? throw new ArgumentNullException(nameof(runtimeSource))).Options, limits, authorizationProvider, continuationKey) { }
+        byte[]? continuationKey = null)
+    {
+        var options = new DbContextOptionsBuilder<PostgreSqlListDbContext>()
+            .UseNpgsql(runtimeSource ?? throw new ArgumentNullException(nameof(runtimeSource))).Options;
+        _engine = new(options, limits, continuationKey,
+            authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider)), useWriteReservations: true);
+    }
     public PostgreSqlListEngine(DbContextOptions<PostgreSqlListDbContext> options, ListLimits? limits,
         IListAuthorizationProvider authorizationProvider, byte[]? continuationKey = null)
     { _engine = new(options, limits, continuationKey, authorizationProvider ?? throw new ArgumentNullException(nameof(authorizationProvider))); }

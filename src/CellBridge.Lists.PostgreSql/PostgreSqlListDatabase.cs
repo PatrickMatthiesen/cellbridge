@@ -64,7 +64,13 @@ internal sealed partial class EfListEngine
                   has_function_privilege(current_user,'cellbridge_lists.timestamp_key(text)','EXECUTE') AND
                   has_function_privilege(current_user,'cellbridge_lists.utf16_compare(text,text)','EXECUTE') AND
                   has_function_privilege(current_user,'cellbridge_lists.timestamp_compare(text,text)','EXECUTE') AND
-                  has_function_privilege(current_user,'cellbridge_lists.c_compare(text,text)','EXECUTE'),
+                  has_function_privilege(current_user,'cellbridge_lists.c_compare(text,text)','EXECUTE') AND
+                  has_function_privilege(current_user,'cellbridge_lists.reserve_create(uuid,uuid,uuid,text,bigint,bigint,bigint,bigint,bigint,bigint)','EXECUTE') AND
+                  has_function_privilege(current_user,'cellbridge_lists.reserve_patch(uuid,text,bigint,bigint,bigint,bigint,bigint)','EXECUTE') AND
+                  (SELECT count(*)=2 AND bool_and(NOT prosecdef AND proconfig @> ARRAY['search_path=pg_catalog, pg_temp'])
+                    FROM pg_proc WHERE oid IN (
+                      'cellbridge_lists.reserve_create(uuid,uuid,uuid,text,bigint,bigint,bigint,bigint,bigint,bigint)'::regprocedure,
+                      'cellbridge_lists.reserve_patch(uuid,text,bigint,bigint,bigint,bigint,bigint)'::regprocedure)),
                   EXISTS (
                     SELECT 1 FROM expected e
                     JOIN pg_class tbl ON tbl.oid=to_regclass('cellbridge_lists.' || e.table_name)
