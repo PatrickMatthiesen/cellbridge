@@ -191,6 +191,346 @@ namespace CellBridge.Storage.SqlServer.Migrations
                         });
                 });
 
+            modelBuilder.Entity("CellBridge.Storage.Shared.UsageAllowanceRow", b =>
+                {
+                    b.Property<int>("BucketId")
+                        .HasColumnType("int");
+
+                    b.Property<long>("AvailableBytes")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("BucketId");
+
+                    b.ToTable("usage_buckets", "cellbridge_documents", t =>
+                        {
+                            t.HasCheckConstraint("usage_buckets_available", "[AvailableBytes] >= 0");
+
+                            t.HasCheckConstraint("usage_buckets_id", "[BucketId] BETWEEN 0 AND 63");
+                        });
+
+                    b.HasData(
+                        new
+                        {
+                            BucketId = 0,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 1,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 2,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 3,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 4,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 5,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 6,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 7,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 8,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 9,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 10,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 11,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 12,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 13,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 14,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 15,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 16,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 17,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 18,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 19,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 20,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 21,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 22,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 23,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 24,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 25,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 26,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 27,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 28,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 29,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 30,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 31,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 32,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 33,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 34,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 35,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 36,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 37,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 38,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 39,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 40,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 41,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 42,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 43,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 44,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 45,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 46,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 47,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 48,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 49,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 50,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 51,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 52,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 53,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 54,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 55,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 56,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 57,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 58,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 59,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 60,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 61,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 62,
+                            AvailableBytes = 0L
+                        },
+                        new
+                        {
+                            BucketId = 63,
+                            AvailableBytes = 0L
+                        });
+                });
+
             modelBuilder.Entity("CellBridge.Storage.Shared.UsageRow", b =>
                 {
                     b.Property<int>("Singleton")
@@ -210,8 +550,9 @@ namespace CellBridge.Storage.SqlServer.Migrations
                     b.Property<long>("MaxStoredBytes")
                         .HasColumnType("bigint");
 
-                    b.Property<long>("StoredBytes")
-                        .HasColumnType("bigint");
+                    b.Property<long>("ChargedBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("StoredBytes");
 
                     b.HasKey("Singleton");
 
@@ -231,7 +572,7 @@ namespace CellBridge.Storage.SqlServer.Migrations
                             DocumentCount = 0L,
                             MaxDocuments = 10000L,
                             MaxStoredBytes = 10737418240L,
-                            StoredBytes = 0L
+                            ChargedBytes = 0L
                         });
                 });
 
@@ -254,7 +595,7 @@ namespace CellBridge.Storage.SqlServer.Migrations
                         new
                         {
                             Id = 1,
-                            Version = 1
+                            Version = 2
                         });
                 });
 

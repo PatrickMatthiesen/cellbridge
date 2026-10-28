@@ -78,12 +78,13 @@ public sealed class PostgreSqlStorageMigrator
                 ? "Missing storage schema version."
                 : "Multiple storage schema versions.");
         var previousSchema = versions[0];
-        if (previousSchema is not (3 or 4 or 5 or 6))
+        if (previousSchema is not (3 or 4 or 5 or 6 or 7))
             throw new StorageUnavailableException(
-                "Unsupported storage schema. Only schema 3, 4 or 5 to 6 migration is supported; persisted data was not changed.");
+                "Unsupported storage schema. Only schema 3 through 7 initialization is supported; persisted data was not changed.");
 
         await CreateHistoryTableAsync(connection, npgsqlTransaction, cancellationToken);
-        await ValidateHistoryAsync(connection, npgsqlTransaction, previousSchema == 6, cancellationToken);
+        await ValidateHistoryAsync(connection, npgsqlTransaction, previousSchema >= 6, cancellationToken,
+            allowAllowances: previousSchema == 7);
 
         await using var source = typeof(PostgreSqlStateStore).Assembly
             .GetManifestResourceStream("CellBridge.Storage.PostgreSql.Schema.sql")!;
@@ -118,14 +119,22 @@ public sealed class PostgreSqlStorageMigrator
             cancellationToken);
 
     private static async Task ValidateHistoryAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        bool allowBaseline, CancellationToken cancellationToken)
+        bool allowBaseline, CancellationToken cancellationToken, bool allowAllowances = false)
     {
         await using var command = new NpgsqlCommand(
             $"SELECT \"MigrationId\" FROM \"{CellBridgeDbContext.MigrationsHistoryTable}\"", connection, transaction);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var applied = new HashSet<string>(StringComparer.Ordinal);
         while (await reader.ReadAsync(cancellationToken))
-            if (!allowBaseline || reader.GetString(0) != BaselineSchema6.MigrationId)
+        {
+            var migration = reader.GetString(0);
+            applied.Add(migration);
+            if (!(allowBaseline && migration == BaselineSchema6.MigrationId) &&
+                !(allowAllowances && migration == UsageAllowanceMigration.MigrationId))
                 throw new StorageUnavailableException("Unsupported or inconsistent document migration history; persisted data was not changed.");
+        }
+        if (allowAllowances && (!applied.Contains(BaselineSchema6.MigrationId) || !applied.Contains(UsageAllowanceMigration.MigrationId)))
+            throw new StorageUnavailableException("The storage allowance schema is missing its migration history.");
     }
 
     private static async Task CreateHistoryTableAsync(NpgsqlConnection connection,
@@ -151,9 +160,8 @@ public sealed class PostgreSqlStorageMigrator
             (await context.RecoveryReceipts.SumAsync(row =>
                 (long?)CellBridgeDbContext.OctetLength(row.ReceiptJson), cancellationToken) ?? 0));
         var documentCount = await context.Documents.LongCountAsync(cancellationToken);
-        var usage = await context.Usage.SingleOrDefaultAsync(cancellationToken)
-            ?? throw new StorageCorruptionException("Missing storage usage ledger.");
-        usage.StoredBytes = storedBytes;
+        var usage = await PostgreSqlStorageBudget.LockUsageAsync(context, cancellationToken);
+        usage.ChargedBytes = storedBytes;
         usage.DocumentCount = documentCount;
         usage.MaxStoredBytes = _limits.MaxStoredBytes;
         usage.MaxDocuments = _limits.MaxDocuments;

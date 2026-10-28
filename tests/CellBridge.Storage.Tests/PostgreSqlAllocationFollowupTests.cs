@@ -65,7 +65,8 @@ public sealed class PostgreSqlAllocationFollowupTests
 
             await using var accounting = source.CreateCommand("""
                 SELECT (SELECT count(*) FROM cellbridge_states) = 2,
-                    stored_bytes = (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)
+                    stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets) =
+                        (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)
                         + (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)
                 FROM cellbridge_usage
                 """);

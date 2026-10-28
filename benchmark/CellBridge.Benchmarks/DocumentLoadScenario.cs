@@ -516,6 +516,7 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
 
     public async ValueTask DisposeAsync()
     {
+        await StopUserDatabaseSamplingAsync();
         foreach (var session in sessions) session.Http?.Dispose();
         if (source is not null) await source.DisposeAsync();
         if (scratch is not null && Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);

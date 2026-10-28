@@ -129,7 +129,8 @@ public sealed class EfPostgreSqlModelTests
             Assert.True(interceptor.Triggered);
             await using (var empty = source.CreateCommand("""
                 SELECT (SELECT count(*) FROM cellbridge_objects),
-                    (SELECT count(*) FROM cellbridge_chunks), stored_bytes
+                    (SELECT count(*) FROM cellbridge_chunks),
+                    stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint
                 FROM cellbridge_usage
                 """))
             await using (var reader = await empty.ExecuteReaderAsync())
@@ -151,7 +152,7 @@ public sealed class EfPostgreSqlModelTests
             Assert.Equal(bytes, await content.ReadVerifiedAsync(handle));
             var emptyHandle = await content.WriteAsync(Stream.Null);
             Assert.Empty(await content.ReadVerifiedAsync(emptyHandle));
-            await using var usage = source.CreateCommand("SELECT stored_bytes FROM cellbridge_usage");
+            await using var usage = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint FROM cellbridge_usage");
             Assert.Equal(bytes.LongLength, (long)(await usage.ExecuteScalarAsync())!);
         });
 
@@ -431,7 +432,8 @@ public sealed class EfPostgreSqlModelTests
     {
         await using var command = source.CreateCommand("""
             SELECT (SELECT count(*) FROM cellbridge_objects),
-                (SELECT count(*) FROM cellbridge_chunks), stored_bytes, document_count
+                (SELECT count(*) FROM cellbridge_chunks),
+                stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint, document_count
             FROM cellbridge_usage
             """);
         await using var reader = await command.ExecuteReaderAsync();

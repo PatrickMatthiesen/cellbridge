@@ -22,6 +22,18 @@ namespace CellBridge.Storage.PostgreSql.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("CellBridge.Storage.Shared.UsageAllowanceRow", b =>
+                {
+                    b.Property<int>("BucketId").ValueGeneratedNever().HasColumnType("integer").HasColumnName("bucket_id");
+                    b.Property<long>("AvailableBytes").HasColumnType("bigint").HasColumnName("available_bytes");
+                    b.HasKey("BucketId").HasName("cellbridge_usage_buckets_pkey");
+                    b.ToTable("cellbridge_usage_buckets", t =>
+                        {
+                            t.HasCheckConstraint("cellbridge_usage_bucket_id_check", "bucket_id BETWEEN 0 AND 63");
+                            t.HasCheckConstraint("cellbridge_usage_bucket_bytes_check", "available_bytes >= 0");
+                        });
+                });
+
             modelBuilder.Entity("CellBridge.Storage.Shared.ChunkRow", b =>
                 {
                     b.Property<string>("ObjectKey")
@@ -241,7 +253,7 @@ namespace CellBridge.Storage.PostgreSql.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("max_stored_bytes");
 
-                    b.Property<long>("StoredBytes")
+                    b.Property<long>("ChargedBytes")
                         .HasColumnType("bigint")
                         .HasColumnName("stored_bytes");
 

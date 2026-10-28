@@ -20,6 +20,7 @@ public sealed class GraphMetadataMigrationTests
             var service = new CellBridgeDocumentService(provider);
             var state = (await service.CreateAsync("/graph-migration.docx", MinimalDocx.Create("original"), TestActor.Value))!;
             for (var i = 0; i < 10; i++) state = await RevisionHistoryTests.Save(service, state, "revision " + i);
+            await store.InitializeAsync();
             var snapshot = await store.CaptureRecoveryAsync();
             foreach (var old in snapshot.Snapshots)
             {
@@ -29,7 +30,7 @@ public sealed class GraphMetadataMigrationTests
                 expand.Parameters.AddWithValue(JsonSerializer.Serialize(old));
                 await expand.ExecuteNonQueryAsync();
             }
-            await using (var oldVersion = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=4"))
+            await using (var oldVersion = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; UPDATE cellbridge_schema SET version=4"))
                 await oldVersion.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.TransitionAsync(state.ResourceId,
                 (current, _) => new StateTransition<bool>(current, true)).AsTask());
@@ -42,7 +43,7 @@ public sealed class GraphMetadataMigrationTests
                 Assert.Equal(await content.ReadVerifiedAsync(revision.Content),
                     CellBridge.FssHttpB.PartitionGraphSnapshot.Create(graph.Elements, graph.StorageIndex).Materialize());
             }
-            await using (var ledger = source.CreateCommand("SELECT stored_bytes=(SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)+(SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)+(SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts) FROM cellbridge_usage"))
+            await using (var ledger = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)=(SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)+(SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)+(SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts) FROM cellbridge_usage"))
                 Assert.Equal(true, await ledger.ExecuteScalarAsync());
             await using (var compact = source.CreateCommand("SELECT bool_and(state_json::jsonb ? 'GraphMetadata') FROM cellbridge_states"))
                 Assert.Equal(true, await compact.ExecuteScalarAsync());
@@ -56,7 +57,7 @@ public sealed class GraphMetadataMigrationTests
             var state = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
                 .CreateAsync("/migration-rollback.docx", MinimalDocx.Create(), TestActor.Value))!;
             var original = JsonSerializer.Serialize(state);
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=4"))
+            await using (var version = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; UPDATE cellbridge_schema SET version=4"))
                 await version.ExecuteNonQueryAsync();
             await using (var setup = source.CreateCommand("UPDATE cellbridge_states SET state_json=$1"))
             {

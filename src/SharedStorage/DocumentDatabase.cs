@@ -34,9 +34,13 @@ internal interface IDocumentDatabase<TContext> where TContext : DbContext
     Task VerifyReservationsAsync(TContext db, IReadOnlyDictionary<Guid, DocumentNamespaceState> states, CancellationToken ct);
     Task WriteReservationsAsync(TContext db, DocumentState state, CancellationToken ct);
     Task<bool> InsertObjectAsync(TContext db, ContentHandle handle, CancellationToken ct);
+    Task<bool> TryInsertChunksAsync(TContext db, IReadOnlyList<ChunkRow> chunks, CancellationToken ct) =>
+        Task.FromResult(false);
     IQueryable<ObjectRow> ObjectsAtKeys(TContext db, IReadOnlyList<string> keys);
     Task<IReadOnlySet<string>> CreateObjectsAsync(TContext db, IReadOnlyList<ContentHandle> handles, CancellationToken ct);
-    Task<UsageRow> UpdateAtomicSaveUsageAsync(TContext db, long snapshotBytes, long contentBytes, CancellationToken ct);
+    Task<bool> TryConsumeUsageAllowanceAsync(TContext db, int bucket, long bytes, CancellationToken ct);
+    Task<(UsageRow Usage, IReadOnlyList<UsageAllowanceRow> Allowances)> LockUsageAllowancePoolAsync(
+        TContext db, CancellationToken ct);
     Task<bool> HasReservationsAsync(TContext db, CancellationToken ct);
 }
 
@@ -80,11 +84,11 @@ internal static class DocumentBudget
 
     public static void Adjust(UsageRow usage, long bytes, long documents)
     {
-        var total = checked(usage.StoredBytes + bytes);
+        var total = checked(usage.ChargedBytes + bytes);
         var count = checked(usage.DocumentCount + documents);
         StorageLimits.Check("total stored bytes", total, bytes > 0 ? usage.MaxStoredBytes : long.MaxValue);
         StorageLimits.Check("document count", count, documents > 0 ? usage.MaxDocuments : long.MaxValue);
-        usage.StoredBytes = total;
+        usage.ChargedBytes = total;
         usage.DocumentCount = count;
     }
 }

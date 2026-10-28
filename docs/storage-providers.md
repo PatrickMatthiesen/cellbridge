@@ -58,7 +58,8 @@ replay an accepted save.
 
 SQL Server requires `DELAYED_DURABILITY = DISABLED`. Runtime credentials need
 data access to the document tables, read access to `schema_version` and `usage`,
-and update access to `usage.StoredBytes` and `usage.DocumentCount`. They do not
+and update access to `usage.StoredBytes`, `usage.DocumentCount` and
+`usage_buckets.AvailableBytes`. The bucket table also requires read access. They do not
 need schema, migration-history or quota-limit write permissions. Host
 authorization still controls document operations. The provider uses database
 locks to coordinate hosts; these locks cannot be disabled.
@@ -67,7 +68,8 @@ SQL Server provides explicit quiescent collection through
 `CellBridge.Storage.SqlServer.StorageMaintenance`. Stop every host, reader, writer
 and publisher before applying it. Use maintenance credentials with delete access
 to the owned content objects and chunks, read access to the document inventory and
-usage ledger, and update access to `usage.StoredBytes`. The normal runtime login
+usage ledger and allowance buckets, and update access to `usage.StoredBytes` and
+`usage_buckets.AvailableBytes`. The normal runtime login
 used by the engine tests cannot delete content.
 
 ```csharp
@@ -100,7 +102,7 @@ to use the library. Removing the volume removes its persisted data.
 
 Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
 `ConnectionStrings__cellbridge` before starting the host. Setup accepts fresh
-or schema-6 databases and upgrades schemas 3, 4 and 5 while preserving documents
+or schema-7 databases and upgrades schemas 3 through 6 while preserving documents
 and retained snapshots. Stop all hosts and workers using the database first.
 Unsupported schemas, corruption or exceeded limits abort the upgrade without
 changing persisted data. Follow the [upgrade procedure](#updating-a-host)
@@ -478,16 +480,17 @@ power-loss and shared-filesystem behavior need deployment-specific qualification
    Test restoration in a separate environment.
 3. Update all CellBridge package references together. Build the application and
    the repository's `CellBridge.Storage.Setup` tool from matching source.
-4. Run setup against the stopped database. It migrates storage schema 3, 4 or 5 to 6,
+4. Run setup against the stopped database. PostgreSQL initialization migrates storage schema 3 through 6 to 7,
    preserves documents and all retained snapshots, builds the selective read indexes,
    initializes recovery schema 1 and records the document EF migration history.
+   SQL Server initialization upgrades document schema 1 to 2 and preserves stored data.
    Older development schemas need a separate migration or recreation; setup rejects them.
 5. Start one upgraded host. Check provider health, document identities,
    permissions, downloads and a save/reopen cycle before enabling other writers.
    Verify publication workers' destination bindings and stored receipts
    before restarting them.
 
-There is no schema-6 downgrade. For rollback, stop upgraded writers and
+Setup does not perform downgrades. For rollback, stop upgraded writers and
 restore the previous database, matching content objects, binaries and
 configuration. This loses changes made after the backup unless you reconcile
 them separately. Do not run older writers against the migrated database.
@@ -572,6 +575,22 @@ For atomic budgets, both stores implement `IStorageBudgetParticipant` and expose
 one scope object. Charge state JSON, unique content/reservations and document
 identities under one atomic admission mechanism. Wrappers preserve this
 coordination; the marker alone does not implement accounting.
+
+SQL atomic saves use 64 durable allowance buckets selected by document identity.
+A funded save consumes only its bucket's allowance. Refills reserve capacity
+under the global ledger lock, up to a 4 MiB target per bucket. Before rejecting a save, the provider can reclaim
+unused allowances from other buckets. Document locks still coordinate competing
+edits to the same document. All allowance changes commit or roll back with the
+content and state transaction.
+
+The physical `usage.StoredBytes` column (`cellbridge_usage.stored_bytes` in
+PostgreSQL) records charged capacity, including unused allowances. Exact stored
+bytes equal charged capacity minus the sum of `AvailableBytes`
+(`available_bytes`) in the bucket table. Maintenance reports return that exact
+inventory total. Ordinary content writers, recovery and maintenance reconcile
+allowances before changing the global ledger. Initialization reconciles unused
+allowances before applying quota limits; it rejects a limit below actual usage.
+Change limits with hosts stopped through explicit initialization.
 
 Repository provider tests cover save, lease, crash and replay behavior. Hardware
 flushes and distributed locking still require qualification in the intended

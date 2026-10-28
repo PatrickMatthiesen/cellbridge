@@ -70,7 +70,7 @@ public sealed class SqlServerLifecycleRecoveryTests(SqlServerFixture fixture)
         Assert.Equal(3, await admin.Revisions.CountAsync());
         var before = JsonSerializer.Serialize(await ((IProviderRecoveryStore)provider.State).CaptureRecoveryAsync());
         var usage = await admin.Usage.SingleAsync();
-        var bytes = usage.StoredBytes;
+        var bytes = usage.ChargedBytes - await admin.UsageBuckets.SumAsync(row => row.AvailableBytes);
         await Assert.ThrowsAsync<StorageQuotaExceededException>(async () => await provider.State.TransitionAsync(state.ResourceId,
             (row, _) => new StateTransition<bool>(row with { Revisions = row.Revisions.Add(row.Revisions[^1] with { RevisionNumber = 4 }) }, true)));
         var restricted = new SqlServerStateStore(database.Options(), database.Limits with
@@ -84,7 +84,8 @@ public sealed class SqlServerLifecycleRecoveryTests(SqlServerFixture fixture)
             (row, _) => new StateTransition<bool>(row with { Coordination = row.Coordination with { SchemaId = new string('x', 8192) } }, true)));
         Assert.Equal(before, JsonSerializer.Serialize(await ((IProviderRecoveryStore)provider.State).CaptureRecoveryAsync()));
         await database.AssertAccountingAsync();
-        Assert.Equal(bytes, (await admin.Usage.AsNoTracking().SingleAsync()).StoredBytes);
+        Assert.Equal(bytes, (await admin.Usage.AsNoTracking().SingleAsync()).ChargedBytes -
+            await admin.UsageBuckets.SumAsync(row => row.AvailableBytes));
         usage.MaxStoredBytes = database.Limits.MaxStoredBytes;
         await admin.SaveChangesAsync();
         await provider.State.TransitionAsync(state.ResourceId, (row, _) => new StateTransition<bool>(row with { ModifiedUtc = row.ModifiedUtc.AddSeconds(1) }, true));

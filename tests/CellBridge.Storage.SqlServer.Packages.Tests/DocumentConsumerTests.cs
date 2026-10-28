@@ -61,6 +61,8 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
             GRANT SELECT,INSERT ON cellbridge_documents.chunks TO [runtime];
             GRANT SELECT ON cellbridge_documents.usage TO [runtime];
             GRANT UPDATE (StoredBytes,DocumentCount) ON cellbridge_documents.usage TO [runtime];
+            GRANT SELECT ON cellbridge_documents.usage_buckets TO [runtime];
+            GRANT UPDATE (AvailableBytes) ON cellbridge_documents.usage_buckets TO [runtime];
             GRANT SELECT ON cellbridge_documents.schema_version TO [runtime];
             """);
         var options = Options(runtime);

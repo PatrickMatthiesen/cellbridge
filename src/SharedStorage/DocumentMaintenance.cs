@@ -68,7 +68,7 @@ internal sealed class DocumentMaintenance<TContext>(IDocumentDatabase<TContext> 
             // Recovery receipts have no content handles. Preserve their rows and
             // charge their bytes together with every retained snapshot and object.
             var receiptBytes = await db.Set<RecoveryReceiptRow>().SumAsync(row => (long?)DocumentSql.ByteLength(row.ReceiptJson), cancellationToken) ?? 0;
-            if (usage.StoredBytes != checked(objectBytes + snapshotBytes + receiptBytes) || usage.DocumentCount != pointers.Count)
+            if (usage.ChargedBytes != checked(objectBytes + snapshotBytes + receiptBytes) || usage.DocumentCount != pointers.Count)
                 throw new StorageCorruptionException("The usage ledger disagrees with the maintenance inventory.");
             var orphanBytes = orphans.Sum(handle => handle.Length);
             if (apply)
@@ -83,7 +83,7 @@ internal sealed class DocumentMaintenance<TContext>(IDocumentDatabase<TContext> 
                 await db.SaveChangesAsync(cancellationToken);
             }
             await transaction.CommitAsync(CancellationToken.None);
-            return new(usage.StoredBytes, usage.DocumentCount, snapshots, objectCount - orphans.Count,
+            return new(usage.ChargedBytes, usage.DocumentCount, snapshots, objectCount - orphans.Count,
                 orphans.Count, orphanBytes, apply);
         }
         catch (Exception ex) when (database.IsDatabaseException(ex))

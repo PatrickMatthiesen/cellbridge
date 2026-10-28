@@ -181,7 +181,8 @@ public sealed class SqlServerAtomicDocumentSaveTests(SqlServerFixture fixture)
         await using var command = new SqlCommand("""
             SELECT (SELECT count_big(*) FROM cellbridge_documents.objects),
                 (SELECT count_big(*) FROM cellbridge_documents.chunks),
-                (SELECT count_big(*) FROM cellbridge_documents.snapshots), StoredBytes, DocumentCount
+                (SELECT count_big(*) FROM cellbridge_documents.snapshots),
+                StoredBytes - (SELECT SUM(AvailableBytes) FROM cellbridge_documents.usage_buckets), DocumentCount
             FROM cellbridge_documents.usage
             """, connection);
         await using var reader = await command.ExecuteReaderAsync();

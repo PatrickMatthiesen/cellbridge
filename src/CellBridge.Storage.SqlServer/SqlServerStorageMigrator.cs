@@ -33,7 +33,7 @@ public sealed class SqlServerStorageMigrator
         actual = checked(actual + (await db.Snapshots.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.StateJson), cancellationToken) ?? 0));
         actual = checked(actual + (await db.RecoveryReceipts.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.ReceiptJson), cancellationToken) ?? 0));
         var documents = await db.Documents.LongCountAsync(cancellationToken);
-        if (actual != usage.StoredBytes) throw new StorageCorruptionException("Content usage ledger does not match stored objects.");
+        if (actual != usage.ChargedBytes) throw new StorageCorruptionException("Content usage ledger does not match stored objects.");
         if (documents != usage.DocumentCount) throw new StorageCorruptionException("Document usage ledger does not match stored identities.");
         StorageLimits.Check("total stored bytes", actual, limits.MaxStoredBytes);
         usage.MaxStoredBytes = limits.MaxStoredBytes;

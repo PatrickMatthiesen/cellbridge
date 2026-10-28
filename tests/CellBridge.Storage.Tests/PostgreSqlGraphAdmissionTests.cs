@@ -21,6 +21,7 @@ public sealed class PostgreSqlGraphAdmissionTests
             var state = (await service.CreateAsync("/membership-migration.docx", MinimalDocx.Create("original"), TestActor.Value))!;
             for (var index = 0; index < 3; index++)
                 state = await RevisionHistoryTests.Save(service, state, "changed revision " + index);
+            await store.InitializeAsync();
             var originalRecovery = await store.CaptureRecoveryAsync();
             var originalRows = await AuthoritativeRows(source);
             var originalBytes = new List<byte[]>();
@@ -30,14 +31,14 @@ public sealed class PostgreSqlGraphAdmissionTests
 
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
 
             var restricted = new PostgreSqlStateStore(source, new() { MaxDecodedGraphMembershipBytes = exactBytes - 1 });
             var exception = await Assert.ThrowsAsync<StorageQuotaExceededException>(() => restricted.InitializeAsync());
             Assert.Equal("decoded graph membership bytes", exception.Budget);
             Assert.Equal(exactBytes, exception.Used);
-            Assert.Equal(originalRows, await AuthoritativeRows(source));
+            Assert.Equal(originalRows, await AuthoritativeRows(source, hasAllowances: false));
             await using (var check = source.CreateCommand("SELECT version,to_regclass('cellbridge_read_heads') IS NULL,to_regclass('cellbridge_revision_summaries') IS NULL FROM cellbridge_schema"))
             await using (var reader = await check.ExecuteReaderAsync())
             {
@@ -107,13 +108,16 @@ public sealed class PostgreSqlGraphAdmissionTests
             Assert.Equal(before, await PublicationRows(source));
         });
 
-    private static async Task<string> AuthoritativeRows(NpgsqlDataSource source)
+    private static async Task<string> AuthoritativeRows(NpgsqlDataSource source, bool hasAllowances = true)
     {
-        await using var command = source.CreateCommand("""
+        var exactBytes = hasAllowances
+            ? "stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint"
+            : "stored_bytes";
+        await using var command = source.CreateCommand($$"""
             SELECT jsonb_build_object(
                 'documents',(SELECT jsonb_agg(to_jsonb(d) ORDER BY resource_id) FROM cellbridge_documents d),
                 'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY resource_id,state_version) FROM cellbridge_states s),
-                'usage',(SELECT to_jsonb(u) FROM cellbridge_usage u))::text
+                'usage',(SELECT jsonb_set(to_jsonb(u),'{stored_bytes}',to_jsonb({{exactBytes}})) FROM cellbridge_usage u))::text
             """);
         return (string)(await command.ExecuteScalarAsync())!;
     }

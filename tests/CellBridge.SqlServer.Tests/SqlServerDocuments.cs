@@ -44,6 +44,8 @@ internal sealed record SqlServerDocuments(string Admin, string Runtime, StorageL
             GRANT SELECT,INSERT ON cellbridge_documents.chunks TO [{name}];
             GRANT SELECT ON cellbridge_documents.usage TO [{name}];
             GRANT UPDATE (StoredBytes,DocumentCount) ON cellbridge_documents.usage TO [{name}];
+            GRANT SELECT ON cellbridge_documents.usage_buckets TO [{name}];
+            GRANT UPDATE (AvailableBytes) ON cellbridge_documents.usage_buckets TO [{name}];
             GRANT SELECT ON cellbridge_documents.schema_version TO [{name}];
             """, connection)) await grant.ExecuteNonQueryAsync();
         var runtime = new SqlConnectionStringBuilder(admin) { UserID = name, Password = password }.ConnectionString;
@@ -57,7 +59,7 @@ internal sealed record SqlServerDocuments(string Admin, string Runtime, StorageL
         bytes += await db.Snapshots.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.StateJson)) ?? 0;
         bytes += await db.RecoveryReceipts.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.ReceiptJson)) ?? 0;
         var usage = await db.Usage.SingleAsync();
-        Assert.Equal(bytes, usage.StoredBytes);
+        Assert.Equal(bytes, usage.ChargedBytes - await db.UsageBuckets.SumAsync(row => row.AvailableBytes));
         Assert.Equal(await db.Documents.LongCountAsync(), usage.DocumentCount);
     }
 }

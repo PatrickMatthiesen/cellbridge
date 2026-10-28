@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore;
 
 var flags = new HashSet<string>(["--collect-orphans", "--apply", "--quiescent", "--initialize-lists"], StringComparer.Ordinal);
 if (args.Any(argument => !flags.Contains(argument)))
-    throw new ArgumentException("Supported options: --initialize-lists or --collect-orphans [--apply --quiescent]. Document initialization migrates storage schema 3, 4 or 5 to 6; older development schemas require recreation.");
+    throw new ArgumentException("Supported options: --initialize-lists or --collect-orphans [--apply --quiescent]. Document initialization migrates PostgreSQL storage schema 3 through 6 to 7; older development schemas require recreation.");
 var initializeLists = args.Contains("--initialize-lists", StringComparer.Ordinal);
 if (initializeLists && args.Length != 1)
     throw new ArgumentException("--initialize-lists cannot be combined with other options.");
@@ -89,6 +89,8 @@ if (sqlServer)
         GRANT SELECT,INSERT ON cellbridge_documents.chunks TO {{identifier}};
         GRANT SELECT ON cellbridge_documents.usage TO {{identifier}};
         GRANT UPDATE (StoredBytes,DocumentCount) ON cellbridge_documents.usage TO {{identifier}};
+        GRANT SELECT ON cellbridge_documents.usage_buckets TO {{identifier}};
+        GRANT UPDATE (AvailableBytes) ON cellbridge_documents.usage_buckets TO {{identifier}};
         GRANT SELECT ON cellbridge_documents.schema_version TO {{identifier}};
         """;
     await using (var grant = new SqlCommand(grants, connection)) await grant.ExecuteNonQueryAsync();
@@ -142,5 +144,5 @@ else
 {
     await new PostgreSqlStorageMigrator(source, limits).MigrateAsync();
     await AuthenticationDatabase.InitializeAsync(connectionString);
-    Console.WriteLine("CellBridge storage schema version 6 and authentication schema version 1 are ready.");
+    Console.WriteLine("CellBridge storage schema version 7 and authentication schema version 1 are ready.");
 }

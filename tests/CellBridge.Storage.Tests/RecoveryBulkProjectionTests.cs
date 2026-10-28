@@ -107,7 +107,7 @@ public sealed class RecoveryBulkProjectionTests
             var snapshot = await PrepareAsync(new PostgreSqlContentStore(source), 2);
             var before = await UsageAsync(source);
             // Allow the document-count adjustment, but reject the following state bytes.
-            await using (var quota = source.CreateCommand("UPDATE cellbridge_usage SET max_stored_bytes=stored_bytes+1"))
+            await using (var quota = source.CreateCommand("UPDATE cellbridge_usage SET max_stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint+1"))
                 await quota.ExecuteNonQueryAsync();
             var store = new PostgreSqlStateStore(source);
 
@@ -122,7 +122,7 @@ public sealed class RecoveryBulkProjectionTests
 
     private static async Task<(long Bytes, long Documents)> UsageAsync(NpgsqlDataSource source)
     {
-        await using var command = source.CreateCommand("SELECT stored_bytes,document_count FROM cellbridge_usage WHERE singleton=true");
+        await using var command = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint,document_count FROM cellbridge_usage WHERE singleton=true");
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
         return (reader.GetInt64(0), reader.GetInt64(1));

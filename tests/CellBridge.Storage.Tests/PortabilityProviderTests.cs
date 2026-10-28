@@ -56,7 +56,7 @@ public sealed class PortabilityProviderTests
             Assert.True(collected.OrphanObjects > 0);
             Assert.Equal(receipt, await portable.ImportAsync(reopened, files.Path("filesystem.zip"), context));
             await using var usage = restoredDb.CreateCommand("""
-                SELECT (SELECT stored_bytes FROM cellbridge_usage) =
+                SELECT (SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets) FROM cellbridge_usage) =
                     (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
                     (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
                     (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts)
@@ -240,7 +240,7 @@ public sealed class PortabilityProviderTests
                 files.Path("export.zip"), PortabilityTests.Context).AsTask()));
             Assert.All(receipts, r => Assert.Equal(receipts[0], r));
             Assert.Single(await destination.State.ListAsync(0, 100));
-            await using var usage = db.CreateCommand("SELECT stored_bytes FROM cellbridge_usage");
+            await using var usage = db.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint FROM cellbridge_usage");
             var required = (long)(await usage.ExecuteScalarAsync())!;
             await BudgetAndQueryTests.WithDatabase(new() { MaxStoredBytes = required - 1 }, async quotaDb =>
             {

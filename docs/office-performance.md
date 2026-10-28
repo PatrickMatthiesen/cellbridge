@@ -1,8 +1,9 @@
 # Measuring active Office user capacity
 
 The 10,000 successful commits/minute target was not met on the tested shared host.
-The 1,500-user primary workload completed 2,998 commits inside its measured minute
-without HTTP failures. The larger and faster workloads had HTTP admission failures.
+The final 1,500-user overload run completed 8,151 commits inside its measured
+minute, with HTTP failures. Saving every fifteen seconds completed 5,995 inside
+the minute, plus two late acknowledgements, without HTTP failures.
 These measurements describe synthetic workloads and do not validate desktop Office capacity.
 
 Maintained profiles use distinct authenticated users and ten documents per user:
@@ -272,3 +273,132 @@ time was 39.86 ms versus 9.32 ms. Tests independently check shared backing slots
 logical quota boundaries and allocation growth through 1,000 revisions. These
 results support the normal append-history improvement; they do not remove the
 linear metadata work or the arbitrary-membership fallback described above.
+
+## Durable quota allowances and chunk inserts
+
+The next experiment reduced contention on the global storage quota row. PostgreSQL
+and SQL Server now keep 64 durable allowance buckets, selected by hashing all bytes
+of the document ID. A normal positive atomic save consumes its bucket's allowance
+in the same transaction as publication. The slow path locks the global ledger and
+then the buckets in a fixed order, admits the save and tops its bucket up toward
+4 MiB. Failed claims release their bucket locks before entering that path.
+
+If `C` is globally charged capacity and `R` is each bucket's unused allowance,
+exact retained usage is `C - SUM(R)`. Reservations consume quota headroom rather
+than permitting an overshoot. Near the limit, the slow path reclaims unused
+allowances before checking admission. Deletion, pruning and other ordinary quota
+writers also reclaim allowances under the same lock order. Durable rows and
+transaction rollback preserve accounting across restart and failed publication.
+Both SQL providers use this accounting; the throughput measurements below used
+PostgreSQL only.
+
+This changes the frequency of global quota writes, not the history complexity
+above. With available headroom and positive saves, global refills depend mainly
+on newly charged bytes divided by the 4 MiB allowance, rather than every save.
+Saves in the same bucket still serialize. Refills, low-headroom reclamation and
+ordinary quota mutations still share the global lock. Increasing user count does
+not increase the fixed number of buckets, and larger snapshots consume allowances
+sooner. Full state serialization, retained metadata traversal, content insertion
+and WAL durability remain costs that this change does not remove.
+
+PostgreSQL also inserts each bounded batch of up to sixteen 64 KiB chunks with
+`UNNEST` and three typed array parameters. This reduces command and parameter work
+without changing chunk size or stored bytes. Consumer EF customizations and
+`SaveChanges` hooks retain the tracked insert path.
+
+The exploratory comparison on 2026-10-28 used the same shared four-CPU,
+approximately 13 GiB host, durable database settings and admission configuration
+as above. Each run had 1,500 users, 15,000 documents, 30 seconds of warm-up and
+60 seconds of measurement. The eight-second cadence offered 11,250 saves/minute.
+Packages were synthetic 256 KiB DOCX files with shared padding and a fixed-size
+16 KiB XML part at the tail of an uncompressed ZIP. These are single local runs,
+not representative average Office files or statistically established gains.
+
+| Eight-second experiment | Strict commits/minute | Failed HTTP steps including warm-up | Quota lock blocked backend observations |
+| --- | ---: | ---: | ---: |
+| Fresh baseline | 7,960 | 6,697 | Not sampled |
+| Baseline with activity sampling | 7,977 | 6,628 | 786 |
+| 64 buckets, 4 MiB target | 8,146 | 6,293 | 143 |
+| Plus array inserts | 8,690 | 5,489 | 134 |
+| Plus complete-document-ID hash | 8,472 | 6,033 | 132 |
+
+The last two runs used the retained array-insert design. Every run overloaded;
+the 10,000 strict commits/minute target remains unmet. Activity was sampled every
+250 ms, with 378 samples per sampled run. The last column sums blocked backend
+observations only when the query class is `quota` and `waitEventType` is `Lock`.
+The classifier recognizes queries mentioning `cellbridge_usage`; it does not
+identify every quota transaction or prove which relation caused a wait. These
+point-in-time observations are neither unique waits nor lock-hold durations.
+Other observed waits included WAL synchronization and relation extension.
+
+A 16 MiB target reduced quota lock observations to 55 but completed only 8,243
+strict commits/minute. Binary COPY completed 8,425. Both experiments were reverted
+in favor of the 4 MiB target and array inserts. A twelve-second cadence with that
+design completed 7,492 strict commits and seven late acknowledgements, but had
+68 warm-up HTTP failures. It did not pass the no-failures gate despite zero
+measurement-period HTTP failures. Startup allowance funding then completed 7,453
+strict commits with 188 HTTP failures, including 19 during measurement, and was
+also reverted. Raw comparisons and report filenames are in the local generated
+`artifacts/office-performance/quota-experiment-comparison.json`.
+
+A final control rebuilt commit `07db700` with the same activity sampler and
+pre/post inventory checks as the final implementation. It completed 7,974 strict
+commits/minute; the final implementation completed 8,151, a 2.2% difference in
+these single runs. Failed HTTP steps including warm-up were 6,349 and 6,334,
+respectively. Save p95 was 1,084.41 ms and 1,122.30 ms. The earlier exploratory
+high of 8,690 is not the final build's qualified result. Both final runs failed
+the overload gate. Quota-class lock blocked backend observations fell from 780
+to 121 across 378 samples per run. Raw results are listed in
+`artifacts/office-performance/quota-final-comparison.json`.
+
+At a thirteen-second cadence, all 6,923 measurement-period saves succeeded;
+6,913 acknowledgements arrived inside the minute and ten arrived late. Queries
+and downloads also had no measurement-period failures. The run still failed its
+gate because 58 HTTP steps failed during warm-up. It qualifies warmed behavior
+for this short run, not a fully passing capacity result.
+
+The final fifteen-second cadence passed with no HTTP failures, including warm-up.
+It started 5,997 measured saves, acknowledged 5,995 inside the minute and received
+two acknowledgements afterward. All 8,962 saves including warm-up had distinct,
+verified committed payloads. Queries and downloads also passed. This run offered
+6,000 saves/minute; it does not establish the boundary between this cadence and
+the failing thirteen-second run. To reproduce either paced profile, copy the
+frequent-AutoSave JSON and change only `SaveIntervalMs` to `15000` or `13000`,
+retaining its warm-up, measurement, query and open settings.
+
+The final build issued 12,048 chunk-array inserts averaging 5.02 ms, 12,048
+bucket claims averaging 1.49 ms and 958 global ledger locks averaging 13.21 ms.
+These database execution times include waiting and are not CPU profiles.
+The control acquired the global ledger 12,013 times, averaging 17.59 ms.
+The final run wrote 3.63 GB of WAL over warm-up, measurement and drain. Payload
+insertion and durability remain substantial work after reducing quota contention.
+
+One-second WebDemo process samples from the 64-bucket run observed a peak RSS of
+798.50 MiB and peak PSS of 727.54 MiB. Sampling can miss peaks. These are process
+memory observations, not managed heap or GC measurements. The shared host and
+remaining waits limit what this comparison says about another deployment; it
+does not establish a production SLA or show that other optimizations are exhausted.
+Separate one-second samples during the final workload observed peak RSS of
+796.55 MiB, peak PSS of 729.93 MiB and mean WebDemo CPU use of 1.35 cores.
+Thirty-two one-second host samples near the end of that load averaged 95% CPU
+busy, about 17 runnable tasks and 0.03% I/O wait. This includes the generator,
+database and Aspire processes on the same host. It supports qualifying with an
+independent generator before attributing the plateau to the server alone.
+
+An offline fixed-chunk reuse check used sixteen synthetic documents with twelve
+edits each and SHA-256 plus exact chunk length. Distinct padding per document
+still allowed 75% within-document byte reuse when fixed-size XML stayed at the
+ZIP tail. Moving XML before padding and growing it by seventeen bytes per edit
+reduced that reuse to zero as later chunk boundaries shifted. This check split
+whole ZIP bytes into 64 KiB chunks; it did not measure HTTP, database storage or
+throughput, and excluded protocol graph metadata. The local raw result is
+`artifacts/office-performance/quota-chunk-reuse.json`. It supports further
+qualification of package layouts, not a large storage-format rewrite or claims
+about ordinary Office files.
+
+Final validation passed 2,236 solution tests, with three opt-in tests skipped.
+PostgreSQL and SQL Server user HTTP smoke runs each acknowledged all fifty
+measured saves and verified fifty-nine distinct committed payloads including
+warm-up. All six combined legacy smoke scenarios passed, including ten HTTP
+commits and ten replays. These checks establish the exercised behavior, not
+SQL Server capacity or live desktop Office compatibility.

@@ -34,7 +34,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
     public async Task CheckConfigurationAsync(CellBridgeDbContext db, CancellationToken ct)
     {
         if (!await ValidateDatabaseConfigurationAsync(db, ct))
-            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 6.");
+            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 7.");
     }
     public Task CheckRecoveryAsync(CellBridgeDbContext db, CancellationToken ct) => CheckRecoverySchemaAsync(db, ct);
     public Task<DateTime> ClockAsync(CellBridgeDbContext db, CancellationToken ct) =>
@@ -90,16 +90,14 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
         command.Parameters.AddWithValue(handle.Length);
         return await command.ExecuteNonQueryAsync(ct) != 0;
     }
-    public async Task<UsageRow> UsageAsync(CellBridgeDbContext db, CancellationToken ct) =>
-        DocumentBudget.FindTrackedUsage(db) ??
-        await db.Usage.FromSqlRaw("SELECT * FROM cellbridge_usage WHERE singleton=true FOR UPDATE").SingleOrDefaultAsync(ct) ??
-        throw new StorageCorruptionException("Missing storage usage ledger.");
+    public Task<UsageRow> UsageAsync(CellBridgeDbContext db, CancellationToken ct) =>
+        PostgreSqlStorageBudget.LockUsageAsync(db, ct);
 
     internal static async Task ConfigureTransactionAsync(CellBridgeDbContext context, CancellationToken cancellationToken)
     {
         var valid = await ValidateDatabaseConfigurationAsync(context, cancellationToken);
         if (!valid)
-            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 6.");
+            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 7.");
         await ConfigureSettingsAsync(context, cancellationToken);
     }
 
@@ -113,7 +111,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
 
     private static Task<bool> ValidateDatabaseConfigurationAsync(CellBridgeDbContext context,
         CancellationToken cancellationToken) => context.Database.SqlQueryRaw<bool>("""
-            SELECT count(*) = 1 AND min(version) = 6 AND max(version) = 6
+            SELECT count(*) = 1 AND min(version) = 7 AND max(version) = 7
                 AND current_setting('fsync') = 'on' AS "Value"
             FROM cellbridge_schema
             """).SingleAsync(cancellationToken);

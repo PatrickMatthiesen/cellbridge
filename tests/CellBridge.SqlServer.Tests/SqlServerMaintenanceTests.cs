@@ -145,15 +145,15 @@ public sealed class SqlServerMaintenanceTests(SqlServerFixture fixture)
                 break;
             case "reference-metadata": await admin.Objects.Where(row => row.ObjectKey == state.Content.Key)
                 .ExecuteUpdateAsync(set => set.SetProperty(row => row.Length, row => row.Length + 1)); break;
-            case "ledger": await admin.Usage.ExecuteUpdateAsync(set => set.SetProperty(row => row.StoredBytes, row => row.StoredBytes + 1)); break;
+            case "ledger": await admin.Usage.ExecuteUpdateAsync(set => set.SetProperty(row => row.ChargedBytes, row => row.ChargedBytes + 1)); break;
         }
         var keys = await admin.Objects.OrderBy(row => row.ObjectKey).Select(row => row.ObjectKey).ToArrayAsync();
-        var usage = (await admin.Usage.AsNoTracking().SingleAsync()).StoredBytes;
+        var usage = (await admin.Usage.AsNoTracking().SingleAsync()).ChargedBytes;
         var maintenance = new StorageMaintenance(database.Options(admin: true));
         await Assert.ThrowsAsync<StorageCorruptionException>(() => maintenance.CollectOrphansAsync());
         await Assert.ThrowsAsync<StorageCorruptionException>(() => maintenance.CollectOrphansAsync(apply: true, quiescent: true));
         Assert.Equal(keys, await admin.Objects.OrderBy(row => row.ObjectKey).Select(row => row.ObjectKey).ToArrayAsync());
-        Assert.Equal(usage, (await admin.Usage.AsNoTracking().SingleAsync()).StoredBytes);
+        Assert.Equal(usage, (await admin.Usage.AsNoTracking().SingleAsync()).ChargedBytes);
         Assert.Equal(new byte[] { 17, 18 }, await provider.Content.ReadVerifiedAsync(orphan));
     }
 
@@ -190,7 +190,11 @@ public sealed class SqlServerMaintenanceTests(SqlServerFixture fixture)
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/quota.docx", MinimalDocx.Create(), SqlServerDocuments.Actor))!;
         await provider.Content.WriteAsync(new MemoryStream(Enumerable.Repeat((byte)77, 200).ToArray()));
         await using (var admin = new SqlServerDocumentDbContext(database.Options(admin: true)))
-            await admin.Usage.ExecuteUpdateAsync(set => set.SetProperty(row => row.MaxStoredBytes, row => row.StoredBytes + 50));
+        {
+            var actual = await admin.Usage.Select(row => row.ChargedBytes).SingleAsync() -
+                await admin.UsageBuckets.SumAsync(row => row.AvailableBytes);
+            await admin.Usage.ExecuteUpdateAsync(set => set.SetProperty(row => row.MaxStoredBytes, actual + 50));
+        }
         var pause = new PauseInventory();
         var collecting = new StorageMaintenance(database.Options(true, pause)).CollectOrphansAsync(true, true);
         await pause.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));

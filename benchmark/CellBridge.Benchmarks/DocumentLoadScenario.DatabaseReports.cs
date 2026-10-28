@@ -7,6 +7,46 @@ using Npgsql;
 internal sealed partial class DocumentLoadScenario
 {
     private JsonObject? userDatabaseBefore;
+    private readonly object userDatabaseSamplingGate = new();
+    private DatabaseActivitySampler? userDatabaseSampler;
+
+    private void StartUserDatabaseSampling()
+    {
+        if (userDatabaseBefore is null) return;
+        lock (userDatabaseSamplingGate)
+        {
+            if (userDatabaseSampler is not null) return;
+            NpgsqlConnection? connection = null;
+            userDatabaseSampler = new DatabaseActivitySampler(async token =>
+            {
+                connection ??= await OpenStatisticsConnectionAsync(await resources.EnvironmentAsync(), token);
+                await using var command = new NpgsqlCommand("""
+                    SELECT COALESCE(jsonb_agg(to_jsonb(s)), '[]'::jsonb)::text FROM (
+                        SELECT state, wait_event_type, wait_event,
+                            CASE WHEN state='active' AND query ILIKE '%cellbridge_usage%'
+                                THEN 'quota' ELSE 'other' END AS query_class,
+                            count(*) AS backends,
+                            count(*) FILTER (WHERE cardinality(pg_blocking_pids(pid)) > 0) AS blocked_backends,
+                            sum(cardinality(pg_blocking_pids(pid))) AS blocking_pids
+                        FROM pg_stat_activity
+                        WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database())
+                            AND backend_type='client backend' AND pid <> pg_backend_pid()
+                        GROUP BY state,wait_event_type,wait_event,query_class
+                    ) s
+                    """, connection) { CommandTimeout = 5 };
+                var json = await command.ExecuteScalarAsync(token) as string
+                    ?? throw new InvalidDataException("Missing activity sample.");
+                return JsonNode.Parse(json)?.AsArray() ?? throw new InvalidDataException("Invalid activity sample.");
+            }, async () => { if (connection is not null) await connection.DisposeAsync(); }, resources.CancellationToken);
+        }
+    }
+
+    private async Task StopUserDatabaseSamplingAsync()
+    {
+        DatabaseActivitySampler? sampler;
+        lock (userDatabaseSamplingGate) sampler = userDatabaseSampler;
+        if (sampler is not null) await sampler.StopAsync();
+    }
 
     private async Task ResetUserDatabaseStatisticsAsync()
     {
@@ -24,6 +64,7 @@ internal sealed partial class DocumentLoadScenario
 
     private async Task CaptureUserDatabaseStatisticsAsync()
     {
+        await StopUserDatabaseSamplingAsync();
         if (userDatabaseBefore is null) return;
         var environment = await resources.EnvironmentAsync();
         // Preserve requested diagnostics even when a load failure cancelled its requests.
@@ -74,6 +115,12 @@ internal sealed partial class DocumentLoadScenario
             ["walDelta"] = walDelta,
             ["databaseDelta"] = databaseDelta,
             ["topStatementsByTotalExecutionTime"] = statements,
+            ["activitySampling"] = userDatabaseSampler?.Report(),
+            ["webDemoProcessMetrics"] = new JsonObject
+            {
+                ["status"] = "notCollected",
+                ["reason"] = "The load fixture exposes no owned WebDemo process ID or runtime metrics API. RSS, CPU and GC cannot be attributed safely; benchmark-runner metrics would describe a different process.",
+            },
         };
         var directory = Path.Combine(CellBridgeLoadTests.RepositoryRoot(), "artifacts", "load-tests");
         Directory.CreateDirectory(directory);
@@ -111,8 +158,9 @@ internal sealed partial class DocumentLoadScenario
     // https://www.postgresql.org/docs/18/monitoring-stats.html
     // https://www.postgresql.org/docs/18/pgstatstatements.html
     private static async Task<JsonObject> ReadDatabaseCountersAsync(NpgsqlConnection connection,
-        CancellationToken cancellationToken) =>
-        (await ReadStatisticsJsonAsync(connection, """
+        CancellationToken cancellationToken)
+    {
+        var counters = (await ReadStatisticsJsonAsync(connection, """
             SELECT jsonb_build_object(
                 'capturedUtc', clock_timestamp(),
                 'io', (SELECT jsonb_agg(to_jsonb(i) ORDER BY backend_type,object,context) FROM pg_stat_io i),
@@ -132,9 +180,45 @@ internal sealed partial class DocumentLoadScenario
                     FROM pg_stat_user_tables ORDER BY relname
                 ) t),
                 'usageLedger', (SELECT jsonb_build_object('documentCount',document_count,'storedBytes',stored_bytes,
-                    'maxDocuments',max_documents,'maxStoredBytes',max_stored_bytes) FROM cellbridge_usage WHERE singleton=true)
+                    'maxDocuments',max_documents,'maxStoredBytes',max_stored_bytes) FROM cellbridge_usage WHERE singleton=true),
+                'usageAllowancesPresent', to_regclass('cellbridge_usage_buckets') IS NOT NULL
             )::text
             """, cancellationToken)).AsObject();
+        if (counters["usageAllowancesPresent"]!.GetValue<bool>())
+        {
+            // One statement gives a coherent charged-minus-unused inventory,
+            // including concurrent bucket debits and global refills.
+            counters["usageLedger"] = await ReadStatisticsJsonAsync(connection, """
+                SELECT jsonb_build_object('documentCount',document_count,'chargedBytes',stored_bytes,
+                    'unusedAllowanceBytes',r.available,'storedBytes',stored_bytes-r.available,
+                    'inventoryBytes',
+                        (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
+                        (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
+                        (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts),
+                    'maxDocuments',max_documents,'maxStoredBytes',max_stored_bytes)
+                FROM cellbridge_usage CROSS JOIN
+                    (SELECT COALESCE(SUM(available_bytes),0) AS available FROM cellbridge_usage_buckets) r
+                WHERE singleton=true
+                """, cancellationToken);
+        }
+        else
+        {
+            // Use the same inventory validation for the pre-allowance control.
+            counters["usageLedger"] = await ReadStatisticsJsonAsync(connection, """
+                SELECT jsonb_build_object('documentCount',document_count,'storedBytes',stored_bytes,
+                    'inventoryBytes',
+                        (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
+                        (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
+                        (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts),
+                    'maxDocuments',max_documents,'maxStoredBytes',max_stored_bytes)
+                FROM cellbridge_usage WHERE singleton=true
+                """, cancellationToken);
+        }
+        var ledger = counters["usageLedger"]!;
+        if (ledger["storedBytes"]!.GetValue<long>() != ledger["inventoryBytes"]!.GetValue<long>())
+            throw new InvalidDataException("Storage accounting disagrees with the persisted inventory.");
+        return counters;
+    }
 
     private static async Task<JsonNode> ReadStatisticsJsonAsync(NpgsqlConnection connection, string sql,
         CancellationToken cancellationToken)

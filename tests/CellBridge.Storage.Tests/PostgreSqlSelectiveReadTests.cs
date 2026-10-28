@@ -88,13 +88,14 @@ public sealed class PostgreSqlSelectiveReadTests
             var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
             var state = (await service.CreateAsync("/projection-migration.docx", MinimalDocx.Create(), TestActor.Value))!;
             for (var index = 0; index < 4; index++) state = await RevisionHistoryTests.Save(service, state, "revision " + index);
+            await store.InitializeAsync();
             var before = await SnapshotJson(source);
             long usage;
-            await using (var ledger = source.CreateCommand("SELECT stored_bytes FROM cellbridge_usage"))
+            await using (var ledger = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint FROM cellbridge_usage"))
                 usage = (long)(await ledger.ExecuteScalarAsync())!;
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
             await store.InitializeAsync();
@@ -103,7 +104,7 @@ public sealed class PostgreSqlSelectiveReadTests
             var page = (await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!;
             Assert.Equal(state.Revisions.Select(revision => revision.RevisionNumber).Reverse(),
                 page.Revisions.Select(revision => revision.RevisionNumber));
-            await using (var ledger = source.CreateCommand("SELECT stored_bytes FROM cellbridge_usage"))
+            await using (var ledger = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint FROM cellbridge_usage"))
                 Assert.Equal(usage, await ledger.ExecuteScalarAsync());
             await using (var physical = source.CreateCommand("SELECT pg_total_relation_size('cellbridge_read_heads')+pg_total_relation_size('cellbridge_revision_summaries')"))
                 Assert.True((long)(await physical.ExecuteScalarAsync())! > 0);
@@ -173,7 +174,7 @@ public sealed class PostgreSqlSelectiveReadTests
             var before = await SnapshotJson(source);
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await store.InitializeAsync();
             Assert.Equal(before, await SnapshotJson(source));
@@ -232,7 +233,7 @@ public sealed class PostgreSqlSelectiveReadTests
                 .CreateAsync("/projection-rollback.docx", MinimalDocx.Create(), TestActor.Value))!;
             await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
                 await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
+            await using (var version = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; UPDATE cellbridge_schema SET version=5"))
                 await version.ExecuteNonQueryAsync();
             await using (var corrupt = source.CreateCommand("UPDATE cellbridge_states SET state_json='not JSON'"))
                 await corrupt.ExecuteNonQueryAsync();

@@ -17,7 +17,7 @@ public sealed class StorageInitializationTests
     public Task Version2IsRejectedWithoutChangingDocuments() => RejectSchemaAsync(2);
 
     [PostgreSqlFact]
-    public Task FutureVersionIsRejectedWithoutChangingDocuments() => RejectSchemaAsync(7);
+    public Task FutureVersionIsRejectedWithoutChangingDocuments() => RejectSchemaAsync(8);
 
     private static Task RejectSchemaAsync(int schemaVersion) =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
@@ -51,7 +51,7 @@ public sealed class StorageInitializationTests
             var after = await states.FindByResourceIdAsync(document.ResourceId);
             Assert.Equal(JsonSerializer.Serialize(document), JsonSerializer.Serialize(after));
             await using var version = source.CreateCommand("SELECT version FROM cellbridge_schema");
-            Assert.Equal(6, await version.ExecuteScalarAsync());
+            Assert.Equal(7, await version.ExecuteScalarAsync());
         });
 
     [PostgreSqlFact]
@@ -61,7 +61,7 @@ public sealed class StorageInitializationTests
             var store = new PostgreSqlStateStore(source);
             var document = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
                 .CreateAsync("/migration.docx", MinimalDocx.Create(), TestActor.Value))!;
-            await using (var oldSchema = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; DROP INDEX cellbridge_live_paths; ALTER TABLE cellbridge_documents DROP COLUMN is_deleted; ALTER TABLE cellbridge_documents ADD CONSTRAINT cellbridge_documents_path_key_key UNIQUE(path_key); UPDATE cellbridge_schema SET version=3"))
+            await using (var oldSchema = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; DROP INDEX cellbridge_live_paths; ALTER TABLE cellbridge_documents DROP COLUMN is_deleted; ALTER TABLE cellbridge_documents ADD CONSTRAINT cellbridge_documents_path_key_key UNIQUE(path_key); UPDATE cellbridge_schema SET version=3"))
                 await oldSchema.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
             await store.InitializeAsync();

@@ -147,11 +147,7 @@ public sealed class PostgreSqlAtomicDocumentSaveTests
         var initial = await SeedAsync(source);
         var before = await InventoryAsync(source);
         var bytes = RandomNumberGenerator.GetBytes(17 * 65536);
-        await using (var quota = source.CreateCommand("UPDATE cellbridge_usage SET max_stored_bytes=$1"))
-        {
-            quota.Parameters.AddWithValue(before.StoredBytes + bytes.LongLength - 1);
-            await quota.ExecuteNonQueryAsync();
-        }
+        await ConfigureQuotaAsync(source, before.StoredBytes + bytes.LongLength - 1);
         var states = new PostgreSqlStateStore(source);
         var content = new PostgreSqlContentStore(source);
         var error = await Assert.ThrowsAsync<StorageQuotaExceededException>(() => states.TransitionWithContentAsync(
@@ -179,11 +175,7 @@ public sealed class PostgreSqlAtomicDocumentSaveTests
         var firstState = AddReceipt(initial, Handle(firstBytes)) with { StateVersion = initial.StateVersion + 1 };
         var secondState = AddReceipt(other, Handle(secondBytes)) with { StateVersion = other.StateVersion + 1 };
         var largestSnapshot = Math.Max(DocumentStateJson.GetSerializedSize(firstState), DocumentStateJson.GetSerializedSize(secondState));
-        await using (var quota = source.CreateCommand("UPDATE cellbridge_usage SET max_stored_bytes=$1"))
-        {
-            quota.Parameters.AddWithValue(before.StoredBytes + firstBytes.LongLength + largestSnapshot);
-            await quota.ExecuteNonQueryAsync();
-        }
+        await ConfigureQuotaAsync(source, before.StoredBytes + firstBytes.LongLength + largestSnapshot);
         var options = new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source)
             .AddInterceptors(new ConcurrentStateWrites()).Options;
         var states = new PostgreSqlStateStore(options);
@@ -227,6 +219,8 @@ public sealed class PostgreSqlAtomicDocumentSaveTests
     public Task LedgerArithmeticOverflowKeepsTheCheckedExceptionAndRollsBack() => WithDatabase(async source =>
     {
         var initial = await SeedAsync(source);
+        await using (var emptyAllowances = source.CreateCommand("UPDATE cellbridge_usage_buckets SET available_bytes=0"))
+            await emptyAllowances.ExecuteNonQueryAsync();
         await using (var full = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=$1, max_stored_bytes=$1"))
         {
             full.Parameters.AddWithValue(long.MaxValue);
@@ -393,11 +387,16 @@ public sealed class PostgreSqlAtomicDocumentSaveTests
 
     private sealed record Inventory(long Objects, long Chunks, long States, long StoredBytes, long Documents);
 
+    private static Task ConfigureQuotaAsync(NpgsqlDataSource source, long bytes) =>
+        new PostgreSqlStorageMigrator(source, new StorageLimits { MaxStoredBytes = bytes }).MigrateAsync();
+
     private static async Task<Inventory> InventoryAsync(NpgsqlDataSource source)
     {
         await using var command = source.CreateCommand("""
             SELECT (SELECT count(*) FROM cellbridge_objects), (SELECT count(*) FROM cellbridge_chunks),
-                (SELECT count(*) FROM cellbridge_states), stored_bytes, document_count FROM cellbridge_usage
+                (SELECT count(*) FROM cellbridge_states),
+                stored_bytes-COALESCE((SELECT SUM(available_bytes) FROM cellbridge_usage_buckets),0)::bigint,
+                document_count FROM cellbridge_usage
             """);
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());

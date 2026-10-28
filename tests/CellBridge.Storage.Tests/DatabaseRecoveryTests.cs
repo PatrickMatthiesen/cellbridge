@@ -352,7 +352,7 @@ public sealed class DatabaseRecoveryTests
     private static async Task VerifyAccounting(NpgsqlDataSource db)
     {
         await using var command = db.CreateCommand("""
-            SELECT stored_bytes =
+            SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets) =
                 (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
                 (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
                 (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts),

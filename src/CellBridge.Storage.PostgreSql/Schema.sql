@@ -1,4 +1,5 @@
--- Current development schema. Initialize a fresh database with the setup tool.
+-- Legacy schema-6 bootstrap. Explicit EF migrations advance this to the current
+-- schema; initialize databases with the setup tool rather than this file alone.
 CREATE TABLE IF NOT EXISTS cellbridge_schema (version integer PRIMARY KEY);
 INSERT INTO cellbridge_schema SELECT 6 WHERE NOT EXISTS (SELECT 1 FROM cellbridge_schema);
 CREATE TABLE IF NOT EXISTS cellbridge_documents (

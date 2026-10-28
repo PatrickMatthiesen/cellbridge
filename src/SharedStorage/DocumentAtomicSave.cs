@@ -46,16 +46,12 @@ internal sealed partial class DocumentOperations<TContext> where TContext : DbCo
                     // Flush state and projections while they are still private
                     // to this transaction, before serializing quota admission.
                     await db.SaveChangesAsync(cancellationToken);
-                    // Update the ledger and return its locked prior values in
-                    // one command. Validation still applies snapshot-before-
-                    // content admission, including zero deltas. Any rejection
-                    // rolls back that update and every earlier state write.
-                    var usage = await database.UpdateAtomicSaveUsageAsync(db,
-                        snapshotBytes, added.Bytes, cancellationToken);
-                    if (change.Next is not null)
-                        DocumentBudget.Adjust(usage, snapshotBytes, 0);
-                    if (added.InsertedAny)
-                        DocumentBudget.Adjust(usage, added.Bytes, 0);
+                    // Spend this document's durable allowance or refill under
+                    // the global lock. Signed and near-limit admission preserves
+                    // snapshot-before-content checks. Rejection rolls back
+                    // accounting and every earlier state write together.
+                    await UsageAllowances.AdmitAsync(database, db, id, snapshotBytes, added.Bytes,
+                        cancellationToken);
                 }
                 // Cancellation before COMMIT still has a known rollback,
                 // including a callback that deliberately cancelled its request.

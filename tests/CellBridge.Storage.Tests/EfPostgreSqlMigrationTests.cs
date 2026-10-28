@@ -28,6 +28,8 @@ public sealed class EfPostgreSqlMigrationTests
         Assert.False(context.Database.HasPendingModelChanges());
         Assert.Equal("20261022000100_BaselineSchema6",
             context.GetService<IMigrationsAssembly>().FindMigrationId("BaselineSchema6"));
+        Assert.Equal("20261028000100_UsageAllowances",
+            context.GetService<IMigrationsAssembly>().FindMigrationId("UsageAllowances"));
     }
 
     [Fact]
@@ -53,7 +55,7 @@ public sealed class EfPostgreSqlMigrationTests
             await future.ExecuteNonQueryAsync();
         await Assert.ThrowsAsync<StorageUnavailableException>(() => migrator.MigrateAsync());
         await using var count = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\"");
-        Assert.Equal(2L, await count.ExecuteScalarAsync());
+        Assert.Equal(3L, await count.ExecuteScalarAsync());
     });
 
     [PostgreSqlFact]
@@ -68,7 +70,7 @@ public sealed class EfPostgreSqlMigrationTests
         await store.InitializeAsync();
         await store.CheckHealthAsync();
         await using (var history = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\""))
-            Assert.True((long)(await history.ExecuteScalarAsync())! > 0);
+            Assert.Equal(2L, await history.ExecuteScalarAsync());
         var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
         var created = (await service.CreateAsync("/empty-ef.docx", MinimalDocx.Create("EF"), TestActor.Value))!;
         await store.InitializeAsync();
@@ -125,7 +127,8 @@ public sealed class EfPostgreSqlMigrationTests
         var graph = await DocumentPartition.RestoreFileGraphAsync(persisted, content, limits);
         Assert.Equal(savedBytes, graph.Materialize());
         await using (var accounting = source.CreateCommand("""
-            SELECT document_count = 1 AND max_documents = 2 AND stored_bytes =
+            SELECT document_count = 1 AND max_documents = 2 AND
+                stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets) =
                 (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)
                 + (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)
                 + (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts)
@@ -402,7 +405,18 @@ public sealed class EfPostgreSqlMigrationTests
         var store = new PostgreSqlStateStore(source);
         await store.InitializeAsync();
         await store.InitializeAsync();
-        Assert.Equal(before, await Rows(source));
+        Assert.Equal(before, await Rows(source, hasAllowances: true));
+        await using (var schema = source.CreateCommand("SELECT version FROM cellbridge_schema"))
+            Assert.Equal(7, await schema.ExecuteScalarAsync());
+        await using (var history = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\""))
+            Assert.Equal(2L, await history.ExecuteScalarAsync());
+        await using (var allowances = source.CreateCommand("SELECT count(*),SUM(available_bytes)::bigint FROM cellbridge_usage_buckets"))
+        await using (var reader = await allowances.ExecuteReaderAsync())
+        {
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(64L, reader.GetInt64(0));
+            Assert.Equal(0L, reader.GetInt64(1));
+        }
         Assert.Equal(recoveryReceipt, await store.FindRecoveryReceiptAsync(recoveryReceipt.OperationId));
         Assert.Equal(DocumentStateJson.Serialize(saved), DocumentStateJson.Serialize((await store.FindByResourceIdAsync(saved.ResourceId))!));
         Assert.Null(await store.FindByResourceIdAsync(retired.ResourceId));
@@ -431,10 +445,13 @@ public sealed class EfPostgreSqlMigrationTests
         Assert.Equal("keep consumer tables", await consumer.ExecuteScalarAsync());
     });
 
-    private static async Task<string> Rows(NpgsqlDataSource source)
+    private static async Task<string> Rows(NpgsqlDataSource source, bool hasAllowances = false)
     {
         // A deterministic digest covers every pre-existing library data row.
-        await using var command = source.CreateCommand("""
+        var exactBytes = hasAllowances
+            ? "stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint"
+            : "stored_bytes";
+        await using var command = source.CreateCommand($$"""
             SELECT jsonb_build_object(
               'documents',(SELECT jsonb_agg(to_jsonb(t) ORDER BY resource_id) FROM cellbridge_documents t),
               'states',(SELECT jsonb_agg(to_jsonb(t) ORDER BY resource_id,state_version) FROM cellbridge_states t),
@@ -443,7 +460,7 @@ public sealed class EfPostgreSqlMigrationTests
               'heads',(SELECT jsonb_agg(to_jsonb(t) ORDER BY resource_id) FROM cellbridge_read_heads t),
               'summaries',(SELECT jsonb_agg(to_jsonb(t) ORDER BY resource_id,lifecycle_generation,revision_number) FROM cellbridge_revision_summaries t),
               'receipts',(SELECT jsonb_agg(to_jsonb(t) ORDER BY operation_id) FROM cellbridge_recovery_receipts t),
-              'usage',(SELECT jsonb_agg(to_jsonb(t)) FROM cellbridge_usage t))::text
+              'usage',(SELECT jsonb_agg(jsonb_set(to_jsonb(t),'{stored_bytes}',to_jsonb({{exactBytes}}))) FROM cellbridge_usage t))::text
             """);
         return (string)(await command.ExecuteScalarAsync())!;
     }

@@ -125,6 +125,7 @@ internal sealed partial class DocumentLoadScenario
             throw new ArgumentException("UserModel uses its own warm-up. Set NBomber WarmUpDuration to zero.");
         if (context.ScenarioInfo.ScenarioDuration.TotalMilliseconds < (long)settings.UserWarmUpMs + settings.UserMeasurementMs)
             throw new ArgumentException("The user simulation must cover its warm-up and measurement durations.");
+        StartUserDatabaseSampling();
         Interlocked.CompareExchange(ref userMeasurementMilliseconds, settings.UserMeasurementMs, 0);
         Interlocked.CompareExchange(ref userMeasurementStart, Environment.TickCount64 + settings.UserWarmUpMs, 0);
         if (Interlocked.CompareExchange(ref user.Busy, 1, 0) != 0)

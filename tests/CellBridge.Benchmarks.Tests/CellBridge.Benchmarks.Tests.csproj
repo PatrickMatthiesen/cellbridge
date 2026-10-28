@@ -17,6 +17,7 @@
     <ProjectReference Include="../../src/CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
     <ProjectReference Include="../../src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
     <Compile Include="../../benchmark/CellBridge.Lists.Benchmark/BenchmarkDatabase.cs" Link="Workloads/BenchmarkDatabase.cs" />
+    <Compile Include="../../benchmark/CellBridge.Benchmarks/DatabaseActivitySampler.cs" Link="Workloads/DatabaseActivitySampler.cs" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>

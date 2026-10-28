@@ -108,10 +108,21 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
             });
             entity.HasKey(row => row.Singleton).HasName("cellbridge_usage_pkey");
             entity.Property(row => row.Singleton).HasColumnName("singleton");
-            entity.Property(row => row.StoredBytes).HasColumnName("stored_bytes");
+            entity.Property(row => row.ChargedBytes).HasColumnName("stored_bytes");
             entity.Property(row => row.DocumentCount).HasColumnName("document_count");
             entity.Property(row => row.MaxStoredBytes).HasColumnName("max_stored_bytes");
             entity.Property(row => row.MaxDocuments).HasColumnName("max_documents");
+        });
+        modelBuilder.Entity<UsageAllowanceRow>(entity =>
+        {
+            entity.ToTable("cellbridge_usage_buckets", table =>
+            {
+                table.HasCheckConstraint("cellbridge_usage_bucket_id_check", "bucket_id BETWEEN 0 AND 63");
+                table.HasCheckConstraint("cellbridge_usage_bucket_bytes_check", "available_bytes >= 0");
+            });
+            entity.HasKey(row => row.BucketId).HasName("cellbridge_usage_buckets_pkey");
+            entity.Property(row => row.BucketId).HasColumnName("bucket_id").ValueGeneratedNever();
+            entity.Property(row => row.AvailableBytes).HasColumnName("available_bytes");
         });
         modelBuilder.Entity<RecoverySchemaRow>(entity =>
         {

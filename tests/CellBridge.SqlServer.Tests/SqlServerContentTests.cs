@@ -11,6 +11,10 @@ namespace CellBridge.SqlServer.Tests;
 [Collection("SQL Server")]
 public sealed class SqlServerContentTests(SqlServerFixture fixture)
 {
+    private const string ExactUsageSql = """
+        SELECT StoredBytes - (SELECT SUM(AvailableBytes) FROM cellbridge_documents.usage_buckets)
+        FROM cellbridge_documents.usage
+        """;
     private string database = null!;
 
     private DbContextOptions<SqlServerDocumentDbContext> Options(string? connection = null) =>
@@ -53,7 +57,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
             await (index % 2 == 0 ? first : second).WriteAsync(new MemoryStream(bytes))));
         Assert.All(writes, handle => Assert.Equal(writes[0], handle));
         Assert.Equal(1, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
-        Assert.Equal(bytes.LongLength, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+        Assert.Equal(bytes.LongLength, await ScalarAsync<long>(database, ExactUsageSql));
         Assert.Equal(bytes, await second.ReadVerifiedAsync(writes[0]));
         var singleConnection = new SqlServerContentStore(Options(new SqlConnectionStringBuilder(runtime) { MaxPoolSize = 1 }.ConnectionString));
         await using (var stream = await singleConnection.OpenReadAsync(writes[0]))
@@ -88,7 +92,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         await Assert.ThrowsAsync<StorageQuotaExceededException>(async () =>
             await new SqlServerContentStore(options, 3).WriteAsync(new MemoryStream([1, 2, 3, 4])));
         Assert.Equal(0, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
-        Assert.Equal(0, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+        Assert.Equal(0, await ScalarAsync<long>(database, ExactUsageSql));
     }
 
     [Fact]
@@ -111,10 +115,10 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         }));
         Assert.Equal(2, admitted.Count(value => value));
         Assert.Equal(bytes.LongLength + 20, await ScalarAsync<long>(database,
-            "SELECT StoredBytes FROM cellbridge_documents.usage"));
+            ExactUsageSql));
         Assert.Equal(handle, await second.WriteAsync(new MemoryStream(bytes)));
         Assert.Equal(bytes.LongLength + 20, await ScalarAsync<long>(database,
-            "SELECT StoredBytes FROM cellbridge_documents.usage"));
+            ExactUsageSql));
     }
 
     [Fact]
@@ -130,7 +134,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         Assert.True(interceptor.Triggered);
         Assert.Equal(0, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
         Assert.Equal(0, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.chunks"));
-        Assert.Equal(0, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+        Assert.Equal(0, await ScalarAsync<long>(database, ExactUsageSql));
     }
 
     [Fact]
@@ -219,7 +223,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         Assert.Empty(await second.ReadVerifiedAsync(outcomes[0][2]));
         Assert.Equal(3, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
         Assert.Equal(4, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.chunks"));
-        Assert.Equal(a.LongLength + b.LongLength, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+        Assert.Equal(a.LongLength + b.LongLength, await ScalarAsync<long>(database, ExactUsageSql));
     }
 
     [Fact]
@@ -250,6 +254,8 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
             GRANT SELECT ON cellbridge_documents.usage TO [{name}];
             GRANT SELECT ON cellbridge_documents.schema_version TO [{name}];
             GRANT UPDATE (StoredBytes) ON cellbridge_documents.usage TO [{name}];
+            GRANT SELECT ON cellbridge_documents.usage_buckets TO [{name}];
+            GRANT UPDATE (AvailableBytes) ON cellbridge_documents.usage_buckets TO [{name}];
             """, connection);
         await command.ExecuteNonQueryAsync();
         var result = new SqlConnectionStringBuilder(database)

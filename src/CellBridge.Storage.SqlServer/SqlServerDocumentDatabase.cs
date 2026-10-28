@@ -38,15 +38,21 @@ internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlS
             IF @result < 0 THROW 51000, 'CellBridge storage coordination timed out.', 1;
             """, ct);
 
-    public static async Task<UsageRow> LockUsageAsync(SqlServerDocumentDbContext context, CancellationToken ct) =>
-        DocumentBudget.FindTrackedUsage(context) ?? await context.Usage.FromSqlRaw("SELECT * FROM cellbridge_documents.usage WITH (UPDLOCK,HOLDLOCK) WHERE Id=1")
-            .SingleOrDefaultAsync(ct) ?? throw new StorageCorruptionException("Missing content usage ledger.");
+    public static async Task<UsageRow> LockUsageAsync(SqlServerDocumentDbContext context, CancellationToken ct)
+    {
+        var previouslyTracked = DocumentBudget.FindTrackedUsage(context) is not null;
+        var pool = await LockUsageAllowancePoolCoreAsync(context, ct);
+        if (!previouslyTracked || pool.Allowances.Count != UsageAllowances.BucketCount ||
+            pool.Allowances.Any(row => row.AvailableBytes != 0))
+            UsageAllowances.Reclaim(pool.Usage, pool.Allowances);
+        return pool.Usage;
+    }
 
     public static async Task CheckConfigurationAsync(SqlServerDocumentDbContext db, CancellationToken ct)
     {
         var versions = await db.SchemaVersions.AsNoTracking().Select(row => row.Version).ToListAsync(ct);
-        if (versions.Count != 1 || versions[0] != 1)
-            throw new StorageUnavailableException("Document schema version 1 is required. Run explicit storage initialization.");
+        if (versions.Count != 1 || versions[0] != 2)
+            throw new StorageUnavailableException("Document schema version 2 is required. Run explicit storage initialization.");
         await CheckDurabilityAsync(db, ct);
     }
 

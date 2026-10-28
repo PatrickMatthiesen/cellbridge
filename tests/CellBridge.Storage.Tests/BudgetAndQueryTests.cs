@@ -345,7 +345,7 @@ public class BudgetAndQueryTests
             await using var read = await content.OpenReadAsync(document.Content);
             Assert.Equal(document.Content.Length, read.Length);
             await Assert.ThrowsAsync<StorageCorruptionException>(() => content.OpenReadAsync(orphan).AsTask());
-            await using var total = source.CreateCommand("SELECT (SELECT stored_bytes FROM cellbridge_usage) = (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) + (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)");
+            await using var total = source.CreateCommand("SELECT (SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets) FROM cellbridge_usage) = (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) + (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)");
             Assert.Equal(true, await total.ExecuteScalarAsync());
         });
 
@@ -485,7 +485,7 @@ public class BudgetAndQueryTests
             Assert.Single(results, x => x);
             byte accepted = results[0] ? (byte)1 : (byte)2;
             await second.WriteAsync(new MemoryStream(new byte[] { accepted, accepted, accepted }));
-            await using var count = source.CreateCommand("SELECT stored_bytes FROM cellbridge_usage");
+            await using var count = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint FROM cellbridge_usage");
             Assert.Equal(3L, await count.ExecuteScalarAsync());
         });
 
