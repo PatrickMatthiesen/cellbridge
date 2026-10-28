@@ -139,17 +139,40 @@ public sealed class StreamedSaveTests
     }
 
     [Fact]
-    public async Task CorruptRetainedGraphIsRejectedBeforeStaging()
+    public async Task CorruptRetainedIndexIsRejectedBeforeStaging()
     {
         var tracking = new TrackingContent(new InMemoryContentStore());
         var provider = new StorageProvider(new InMemoryStateStore(), tracking);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/corrupt-graph.docx", MinimalDocx.Create(), TestActor.Value))!;
-        tracking.DamagedReadKey = state.Partitions.Single(p => p.Kind == 0).Elements[0].Payload.Key;
+        tracking.DamagedReadKey = state.Partitions.Single(p => p.Kind == 0).Elements
+            .Single(element => element.Type == (uint)DataElementType.StorageIndexDataElementData).Payload.Key;
         await Assert.ThrowsAsync<StorageCorruptionException>(() => service.ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, Fixture(state), new Dictionary<string, string>(), TestActor.Value).AsTask());
         Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
         Assert.Equal(0, tracking.StagedWrites);
+    }
+
+    [Fact]
+    public async Task UnselectedHistoricalManifestIsVerifiedWhenItsGraphIsRead()
+    {
+        var tracking = new TrackingContent(new InMemoryContentStore());
+        var provider = new StorageProvider(new InMemoryStateStore(), tracking);
+        var service = new CellBridgeDocumentService(provider);
+        var initial = (await service.CreateAsync("/old-manifest.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var historical = initial.Partitions.Single(p => p.Kind == 0);
+        tracking.DamagedReadKey = historical.Elements
+            .Single(element => element.Type == (uint)DataElementType.StorageManifestDataElementData).Payload.Key;
+
+        var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
+            Fixture(initial), new Dictionary<string, string>(), TestActor.Value);
+
+        Assert.False(Assert.Single(saved.Response.SubResponses).Status);
+        Assert.Equal(initial.ContentVersion + 1, saved.State.ContentVersion);
+        Assert.Equal(initial.Revisions[0], saved.State.Revisions[0]);
+        await Assert.ThrowsAsync<StorageCorruptionException>(() =>
+            DocumentPartition.RestoreGraphAsync(historical, tracking, provider.Limits).AsTask());
+        Assert.NotEmpty(await tracking.ReadVerifiedAsync(saved.State.Content));
     }
 
     [Fact]

@@ -139,3 +139,136 @@ It reused a fixed 16-file palette: 488 commits including warm-up produced only
 incremental saves and does not establish active-user capacity. Longer runs and
 separate generator hardware still need qualification; these measurements do not
 predict that another host configuration will meet the target.
+
+## History growth and algorithm experiments
+
+The many-user runs above do not establish performance for documents with long edit
+histories. Current state contains immutable revision records whose graphs retain
+earlier elements. Copying and traversing each cumulative membership makes work grow
+quadratically when every edit adds a fixed number of elements.
+
+Four storage approaches were considered. The complexity estimates below separate
+retained revision count `n`, retained graph size `g`, and changed data `delta` from
+current package validation and response serialization.
+
+| Approach | Intended metadata work per save | Status |
+| --- | --- | --- |
+| Shared graph memberships | `O(g + n)` for normal append histories | Implemented and measured |
+| Durable persistent graph and revision trees | Approximately `O(delta log g + log n)` | Design only; requires durable root publication and collection |
+| Relational immutable revisions with a small current-state record | Approximately `O(delta log g + log n)` with the necessary indexes | Preferred longer-term design; requires new bounded mutation and response contracts |
+| Append log with bounded checkpoints | `O(delta)` foreground append, plus checkpoint and index costs | Design only; checkpoint work and cold replay still need measurement |
+
+The shared-membership experiment preserves every revision and descriptor. Compact
+decoding keeps table views, capture shares unchanged prefixes, and codec validation
+and reference accounting visit shared backing slots once. Reordered multi-range
+memberships retain a potentially nonlinear validation fallback. Full state still
+contains revision metadata and retained graph descriptors; this is not a constant-time
+or logarithmic save implementation.
+
+A separate optimistic-preparation experiment removes a read-only save-preparation
+coordination transaction. It retains the fresh initial read, provider clock and all
+final locked publication checks. It targets request overhead rather than history
+growth. Both changes are compared separately in the same authenticated HTTP workload.
+
+Selective delta loading then separates the complete retained descriptor catalog
+from the graph used to materialize a self-contained proposed file. It reads all
+retained storage indexes, reused incoming identities and specifically selected old
+object groups, stages only new graph objects and preserves every old descriptor.
+General inherited, BLOB-backed and multi-cell cases retain the full-graph path.
+Metadata and knowledge processing still depend on the catalog size. Unrelated old
+payload corruption is checked when those payloads are read, rather than on every
+new save; selected and reused payloads still require verification before staging.
+
+The retained preparation implementation also reuses the coherent view taken
+freshly at file-save entry across digest calculation. It does not reuse an earlier
+SOAP lookup or authorization observation. Final publication checks current authority
+and the prepared authority, so concurrent changes and lease expiry can reject the
+prepared save. Exact receipt replay still revalidates current access and version.
+
+Run the library diagnostic without starting an HTTP host:
+
+```sh
+DOTNET_TieredCompilation=0 dotnet run -c Release --project benchmark/CellBridge.Allocations.Benchmark -- --history-scaling --source local --output artifacts/office-performance/history-scaling.json
+```
+
+It uses actual synthetic full-package protocol saves of one small DOCX in memory.
+Setup, request generation and verification are outside measured intervals. Each
+measured save checks committed content and exact revision counts. Its isolated
+state store shares a warm content store and deterministic next payload with other
+samples; this does not measure novel-content persistence. Measurements include CPU,
+wall time and allocated bytes, with fresh state objects for admission to avoid its
+serialized-size cache. `--checkpoints 1,10,50,100,250` and `--iterations 15` are the
+defaults. `--snapshots DIRECTORY` preserves aged state JSON and verified content.
+This diagnostic does not establish HTTP capacity or desktop Office compatibility.
+
+The first controlled comparison on 2026-10-28 used the same shared host and
+admission, pool, WAL and durability settings as above. Each HTTP run offered
+11,250 saves/minute from 1,500 users at an eight-second cadence, plus queries and
+downloads, with 30 seconds of continuous warm-up and 60 seconds of measurement.
+
+| Implementation | Strict commits/minute | Failed HTTP steps including warm-up | Local CSV |
+| --- | ---: | ---: | --- |
+| Baseline | 6,481 | 9,591 | `nbomber_report_2026-10-28--04-59-44.csv` |
+| Shared memberships only | 6,297 | 9,938 | `nbomber_report_2026-10-28--05-14-15.csv` |
+| Optimistic preparation only | 6,914 | 8,478 | `nbomber_report_2026-10-28--05-09-58.csv` |
+| Shared memberships and optimistic preparation | 6,928 | 8,617 | `nbomber_report_2026-10-28--05-22-29.csv` |
+| Plus selective delta loading | 7,579 | 7,737 | `nbomber_report_2026-10-28--05-43-31.csv` |
+| Plus one fresh save-entry view | 7,919 | 6,998 | `nbomber_report_2026-10-28--05-53-33.csv` |
+| Combined publication read, reverted | 7,886 | 7,123 | `nbomber_report_2026-10-28--06-01-52.csv` |
+| Deferred initial binary read, reverted | 7,905 | 7,069 | `nbomber_report_2026-10-28--06-19-23.csv` |
+
+All runs overloaded. Every acknowledged payload hash was distinct and verified,
+and all runs reported zero missed cadence slots. The small differences in these
+single runs do not establish statistical significance. The last two read experiments
+did not improve throughput and were reverted. Shared memberships did not improve
+the young-document stress result on their own; their benefit appeared in the aged
+library workload. The retained combination increased strict acknowledgements by
+about 22% over this fresh baseline, but did not meet the 10,000/minute target.
+
+The retained implementation was also checked below the overloaded stress rate:
+
+| Save interval, 1,500 users | Strict commits/minute | Save starts | Late acknowledgements | Failed HTTP steps including warm-up | Successful-save p95 | Local CSV |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 30 seconds | 2,998 | 3,000 | 2 | 0 | 35.49 ms | `nbomber_report_2026-10-28--06-35-57.csv` |
+| 15 seconds | 5,994 | 5,998 | 4 | 0 | 133.63 ms | `nbomber_report_2026-10-28--06-44-45.csv` |
+| 12 seconds | 7,337 | 7,497 | 104 | 565 | 926.72 ms | `nbomber_report_2026-10-28--06-40-59.csv` |
+
+All retained-profile acknowledgements had distinct verified payload hashes and
+zero missed cadence slots. The 15-second profile offers 6,000 saves/minute; it
+passed this bounded run, not a production SLA. The baseline was not measured at
+that cadence, so it is not evidence of a before/after capacity doubling. The
+12-second workload offers 7,500 saves/minute and did not pass the no-failures gate.
+Queries and opens retained their 30- and 120-second clocks in every run.
+
+During the final 30 seconds of the reverted publication-read stress experiment,
+host samples averaged fewer than 0.2 idle cores out of four and about 17 runnable
+tasks, with negligible I/O wait. The HTTP generator, server, PostgreSQL and Aspire
+infrastructure shared that host. These observations constrain this local comparison;
+they do not establish an intrinsic server limit or predict another host's capacity.
+
+At 250 revisions, the baseline and retained library implementations produced these
+median wall times with 15 samples after warm-up and tiered compilation disabled:
+
+| Operation | Baseline | Shared memberships and optimistic preparation | Retained implementation |
+| --- | ---: | ---: | ---: |
+| Encode current state | 37.22 ms | 3.92 ms | 3.78 ms |
+| Decode current state | 22.92 ms | 12.89 ms | 12.68 ms |
+| Fresh state admission | 40.89 ms | 3.10 ms | 3.02 ms |
+| Full-package save | 100.78 ms | 12.39 ms | 9.32 ms |
+
+Decode allocation fell from 17.73 MB to 3.50 MB per operation. Other stages can
+allocate more despite lower CPU time: the intermediate full-save diagnostic allocated
+9.35 MB versus 8.01 MB in the baseline. Selective delta capture lowered the retained
+implementation's full-save allocation to 6.01 MB. Both states
+still represented 1,250 current elements and 158,125 logical graph memberships.
+Local raw results are `artifacts/office-performance/history-scaling-baseline.json`
+and `history-scaling-final.json`; the intermediate result is
+`history-scaling-combined.json`. The repeated-save diagnostic uses warm shared
+immutable content; the HTTP workload above uses globally distinct edits.
+
+The final diagnostic also checked 999 revisions before a measured save appended
+the 1,000th. Decode allocated 14.04 MB versus 3.50 MB at 250 revisions, and full-save
+time was 39.86 ms versus 9.32 ms. Tests independently check shared backing slots,
+logical quota boundaries and allocation growth through 1,000 revisions. These
+results support the normal append-history improvement; they do not remove the
+linear metadata work or the arbitrary-membership fallback described above.

@@ -4,7 +4,7 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.InMemory;
 
-public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentReadStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore, IProviderRecoveryStore
+public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentReadStore, IDocumentLifecycleStore, ILocalStorageBudgetParticipant, IAtomicDocumentRenameStore, IProviderRecoveryStore, IDocumentPreparationStore
 {
     public StorageBudget Budget { get; private set; }
     public InMemoryStateStore(StorageBudget? budget = null) => Budget = budget ?? new StorageBudget();
@@ -19,6 +19,13 @@ public sealed partial class InMemoryStateStore : IDocumentStateStore, IDocumentR
     private readonly Dictionary<string, Guid> _paths = new(StringComparer.Ordinal);
     public bool Durable => false;
     public bool Shared => false;
+    public ValueTask<DocumentPreparationRead?> ReadPreparationAsync(Guid resourceId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (Budget.SyncRoot)
+            return ValueTask.FromResult(_documents.GetValueOrDefault(resourceId) is { IsDeleted: false } current
+                ? new DocumentPreparationRead(current, DateTime.UtcNow) : null);
+    }
     public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

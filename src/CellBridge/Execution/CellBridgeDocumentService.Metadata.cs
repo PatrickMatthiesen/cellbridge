@@ -50,7 +50,7 @@ public sealed partial class CellBridgeDocumentService
                 return await RepeatMetadataAsync(initial, key, digest, operation.RequestId, actor, canAppend, cancellationToken);
             if (preparedAuthority is null)
             {
-                var authority = await provider.State.TransitionAsync<(DocumentState State, CoordinationState? Authority, string? Error)>(initial.ResourceId, (current, now) =>
+                var authority = await PrepareSaveAsync<(DocumentState State, CoordinationState? Authority, string? Error)>(initial.ResourceId, (current, now) =>
                 {
                     if (!Access(actor, current).HasFlag(DocumentAccess.Write))
                         return new StateTransition<(DocumentState State, CoordinationState? Authority, string? Error)>(null,

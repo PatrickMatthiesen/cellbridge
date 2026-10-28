@@ -65,6 +65,10 @@ public sealed partial class PartitionGraphSnapshot
 
     /// <summary>Rejects serial reuse for a different mapping while permitting exact mapping repetition.</summary>
     public void ValidateMappingSerials(IEnumerable<StorageIndexMapping> incoming)
+        => ValidateMappingSerials(_elements.Values, incoming);
+
+    /// <summary>Validates mapping serial meanings using verified storage indexes.</summary>
+    public static void ValidateMappingSerials(IEnumerable<DataElement> elements, IEnumerable<StorageIndexMapping> incoming)
     {
         var meanings = new Dictionary<SerialNumber, StorageIndexMapping>();
         foreach (var mapping in incoming.Where(m => !m.Serial.IsNull))
@@ -74,7 +78,7 @@ public sealed partial class PartitionGraphSnapshot
             meanings[mapping.Serial] = mapping;
         }
         // Inspect private immutable buffers directly, without copying index history.
-        foreach (var element in _elements.Values.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData))
+        foreach (var element in elements.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData))
             foreach (var mapping in StorageIndexMappingSerials.ReadMappings(element.Data ?? []))
                 if (!mapping.Serial.IsNull && meanings.TryGetValue(mapping.Serial, out var proposed) && !proposed.Equals(mapping))
                     throw new InvalidDataException("A storage-index mapping serial was reused for a different mapping.");
@@ -150,7 +154,14 @@ public sealed partial class PartitionGraphSnapshot
             AddElement(merged, element, copyPayload: false);
         }
 
-        return Build(merged, storageIndex);
+        var next = Build(merged, storageIndex);
+        var cachedObjects = Volatile.Read(ref _selfContainedObjects);
+        if (cachedObjects is not null && Equals(_rootObject, next._rootObject) &&
+            _objectGroups.SequenceEqual(next._objectGroups) && _objectGroups.All(id =>
+                _elements[id].DataElementType == merged[id].DataElementType &&
+                (_elements[id].Data ?? []).SequenceEqual(merged[id].Data ?? [])))
+            Volatile.Write(ref next._selfContainedObjects, cachedObjects);
+        return next;
     }
 
     /// <summary>Materializes the object graph selected by the manifest chain.</summary>
@@ -166,8 +177,15 @@ public sealed partial class PartitionGraphSnapshot
         CancellationToken cancellationToken = default)
         => SelectedObjectGraph().MaterializeToAsync(destination, _rootObject!, maxBytes, cancellationToken);
 
-    private ObjectGroupGraph SelectedObjectGraph()
+    private ObjectGroupGraph? _selfContainedObjects;
+
+    /// <summary>Tests whether selected file objects can be resolved without other revisions or BLOBs.</summary>
+    public bool IsSelfContainedFileGraph() => TrySelectedFileObjects() is not null;
+
+    private ObjectGroupGraph? TrySelectedFileObjects()
     {
+        var cached = Volatile.Read(ref _selfContainedObjects);
+        if (cached is not null) return cached;
         if (_rootObject is null)
             throw new InvalidDataException("The partition has no revision-manifest root object.");
 
@@ -180,7 +198,15 @@ public sealed partial class PartitionGraphSnapshot
         bool needsResolution = objects.Any(o => o.Declaration.BlobReference is not null || o.Declaration.PartitionId != 1) ||
             !local.Contains(_rootObject) || objects.Where(o => o.Declaration.PartitionId == 1)
                 .Any(o => o.ObjectReferences.Any(id => !local.Contains(id)));
-        if (!needsResolution) return ObjectGroupGraph.FromOpaqueObjects(objects);
+        if (needsResolution) return null;
+        var parsed = ObjectGroupGraph.FromOpaqueObjects(objects);
+        return Interlocked.CompareExchange(ref _selfContainedObjects, parsed, null) ?? parsed;
+    }
+
+    private ObjectGroupGraph SelectedObjectGraph()
+    {
+        var selfContained = TrySelectedFileObjects();
+        if (selfContained is not null) return selfContained;
         var resolved = GenericPartitionGraphSnapshot.Create(_elements.Values, _storageIndex);
         return ObjectGroupGraph.FromOpaqueObjects(resolved.GetObjects(_cell));
     }
@@ -188,6 +214,11 @@ public sealed partial class PartitionGraphSnapshot
     /// <summary>Checks the expected values for the keys updated by a Put Changes request.</summary>
     public bool MatchesPutChanges(IEnumerable<DataElement> elements, ExGuid proposedIndex,
         ExGuid expectedIndex, bool implyNullExpected)
+        => MatchesPutChanges(_elements[_storageIndex], elements, proposedIndex, expectedIndex, implyNullExpected);
+
+    /// <summary>Checks coherency using verified index payloads without a retained object graph.</summary>
+    public static bool MatchesPutChanges(DataElement currentIndex, IEnumerable<DataElement> elements,
+        ExGuid proposedIndex, ExGuid expectedIndex, bool implyNullExpected)
     {
         var candidates = CloneElements(elements.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData));
         var proposed = ParseStorageIndex(RequireElement(candidates, proposedIndex,
@@ -195,7 +226,7 @@ public sealed partial class PartitionGraphSnapshot
         var expected = expectedIndex.IsNull ? new StorageIndexInfo(null, [], []) :
             ParseStorageIndex(RequireElement(candidates, expectedIndex,
                 DataElementType.StorageIndexDataElementData, "expected storage index"));
-        var current = ParseStorageIndex(_elements[StorageIndex]);
+        var current = ParseStorageIndex(currentIndex);
         bool Matches(StorageMapping? actual, StorageMapping? anticipated)
         {
             if (anticipated is null)
@@ -218,9 +249,29 @@ public sealed partial class PartitionGraphSnapshot
         return true;
     }
 
-    private static PartitionGraphSnapshot Build(
-        Dictionary<ExGuid, DataElement> elements,
-        ExGuid storageIndex)
+    /// <summary>Reads the selected group IDs when all file root metadata is supplied in the delta.
+    /// Returns null for incomplete roots or multiple cells so callers can use general resolution.</summary>
+    public static IReadOnlyCollection<ExGuid>? ReadFileSaveObjectGroups(IEnumerable<DataElement> incoming, ExGuid storageIndex)
+    {
+        var elements = CloneElements(incoming);
+        if (!elements.TryGetValue(storageIndex, out var index) ||
+            index.DataElementType != DataElementType.StorageIndexDataElementData ||
+            ParseStorageIndex(index).CellMappings.Count != 1) return null;
+        try { return ResolveFileRoot(elements, storageIndex).Groups.Select(Clone).ToArray(); }
+        catch (InvalidDataException) { return null; }
+    }
+
+    private static PartitionGraphSnapshot Build(Dictionary<ExGuid, DataElement> elements, ExGuid storageIndex)
+    {
+        var root = ResolveFileRoot(elements, storageIndex);
+        foreach (var group in root.Groups)
+            _ = RequireElement(elements, group, DataElementType.ObjectGroupDataElementData, "revision object group");
+        return new PartitionGraphSnapshot(elements, storageIndex, root.Object, root.Revision, root.Groups, root.Cell);
+    }
+
+    private sealed record FileRoot(ExGuid Object, ExGuid Revision, IReadOnlyCollection<ExGuid> Groups, CellId Cell);
+
+    private static FileRoot ResolveFileRoot(Dictionary<ExGuid, DataElement> elements, ExGuid storageIndex)
     {
         if (!elements.TryGetValue(storageIndex, out var indexElement) ||
             indexElement.DataElementType != DataElementType.StorageIndexDataElementData)
@@ -259,14 +310,7 @@ public sealed partial class PartitionGraphSnapshot
 
         if (!revision.RootExtendedGuid.Equals(manifest.RootExtendedGuid))
             throw new InvalidDataException("The revision and storage manifests use different root extended GUIDs.");
-        foreach (var group in revision.ObjectGroups)
-        {
-            _ = RequireElement(elements, group,
-                DataElementType.ObjectGroupDataElementData, "revision object group");
-        }
-
-        return new PartitionGraphSnapshot(elements, storageIndex,
-            revision.ObjectGuid, currentRevision, revision.ObjectGroups, manifest.CellId);
+        return new FileRoot(revision.ObjectGuid, currentRevision, revision.ObjectGroups, manifest.CellId);
     }
 
     private static DataElement RequireElement(

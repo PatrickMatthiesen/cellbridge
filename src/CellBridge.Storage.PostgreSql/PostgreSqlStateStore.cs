@@ -5,7 +5,7 @@ namespace CellBridge.Storage.PostgreSql;
 
 /// <summary>EF document persistence with required cross-host coordination.</summary>
 public sealed class PostgreSqlStateStore : IDocumentStateStore, IDocumentLifecycleStore,
-    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant, IAtomicDocumentSaveStore
+    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant, IAtomicDocumentSaveStore, IDocumentPreparationStore
 {
     private readonly DocumentOperations<CellBridgeDbContext> operations;
     private readonly DbContextOptions<CellBridgeDbContext> options;
@@ -40,6 +40,8 @@ public sealed class PostgreSqlStateStore : IDocumentStateStore, IDocumentLifecyc
     public Task InitializeAsync(CancellationToken cancellationToken = default) => new PostgreSqlStorageMigrator(options, limits).MigrateAsync(cancellationToken);
     internal static Task ConfigureTransactionAsync(CellBridgeDbContext context, CancellationToken cancellationToken) => PostgreSqlDocumentDatabase.ConfigureTransactionAsync(context, cancellationToken);
 
+    public ValueTask<DocumentPreparationRead?> ReadPreparationAsync(Guid resourceId, CancellationToken cancellationToken = default) =>
+        operations.ReadPreparationAsync(resourceId, cancellationToken);
     public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default) => operations.FindByResourceIdAsync(id, cancellationToken);
     public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken cancellationToken = default) => operations.FindByPathKeyAsync(key, cancellationToken);
     public ValueTask<DocumentState?> FindLifecycleAsync(Guid id, CancellationToken cancellationToken = default) => operations.FindLifecycleAsync(id, cancellationToken);

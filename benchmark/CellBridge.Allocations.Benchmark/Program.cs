@@ -1,5 +1,11 @@
 using BenchmarkDotNet.Running;
 
+if (args.Contains("--history-scaling", StringComparer.Ordinal))
+{
+    await HistoryScalingDiagnostics.RunAsync(args.Where(a => a != "--history-scaling").ToArray());
+    return 0;
+}
+
 if (args.Contains("--diagnostics", StringComparer.Ordinal))
 {
     await AllocationDiagnostics.RunAsync(args.Where(a => a != "--diagnostics").ToArray());

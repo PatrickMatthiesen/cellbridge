@@ -151,7 +151,8 @@ content counted by storage quotas.
 | `Protocol:CaptureDirectory` | Opt-in directory for correlated raw requests/responses. Default disabled. Restrict access and manage retention. |
 
 
-The graph-reference limit covers current and historical graph arrays. Exceeding
+The graph-reference limit counts logical memberships in current and historical graphs,
+even when immutable memberships share backing storage. Exceeding
 it rejects the operation without removing history. Raise it only with enough
 memory for concurrent operations; graph objects and file buffers consume memory
 in addition to this limit. Recovery also has a fixed 128 MiB aggregate limit on
@@ -329,10 +330,21 @@ size only; its PostgreSQL wrapper adds shared accounting.
 ## Commit and retry behavior
 
 The document service verifies and combines the retained graph without loading
-the previous complete package. It reconstructs the file into an exclusively
-created temporary file, checks every ZIP member against the limit on expanded
-bytes and rewinds the stream for storage. Graph payloads still load eagerly.
+the previous complete package. Self-contained file saves read retained indexes,
+reused incoming identities and the object groups selected by the proposed file.
+They preserve every other retained descriptor without reading its payload again.
+Inherited, BLOB-backed, multi-cell and other general graph forms use the full
+graph path. The service reconstructs the file into an exclusively created
+temporary file, checks every ZIP member against the limit on expanded bytes and
+rewinds the stream for storage.
 The staging file is deleted on success, failure or cancellation.
+
+An ordinary self-contained save does not check unrelated historical graph bodies
+for corruption. Those bodies remain referenced and their reads still verify
+length and SHA-256, including full graph restore and integrity operations. A
+selected or reused payload that fails verification still rejects the save before
+staging. Historical package downloads verify the materialized package they read;
+they need not read the historical protocol graph.
 
 The service then locks the document row, reads the current state and database
 time, rechecks permission, coherency and leases, and saves a snapshot with a
@@ -383,6 +395,23 @@ including lease-only changes. The current state retains its synchronization
 graph and receipt identities. Superseded receipt response handles are dropped
 from new snapshots, while operation digests remain to reject stale/conflicting
 retries. Current-version retries keep their response.
+
+`PartitionState.Elements` is an immutable `GraphElementCollection`. Appended graphs
+share their retained prefix, and compact state decoding keeps views into a shared
+descriptor table. Normal append histories no longer expand every historical prefix
+into a separate array. The persisted encoding remains version 1; existing snapshots,
+content identities and retained revisions require no migration. Arbitrary reordered
+memberships can still require full membership validation. Explicit expanded JSON and
+portability operations can also enumerate complete historical graphs.
+
+The built-in state stores implement `IDocumentPreparationStore`. Save preparation
+reads a coherent current state and provider UTC clock without acquiring write
+authority. PostgreSQL uses one statement snapshot; SQL Server retains its serializable
+read transaction. File saves take that view freshly at save entry, after any earlier
+request read or authorization await, and reuse it for preparation. Publication still
+rechecks access, receipts, lifecycle, content and coordination under its document
+lock. Providers without this optional read retain preparation through a read-only
+transition callback.
 
 ### Collect orphan content
 

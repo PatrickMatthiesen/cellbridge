@@ -5,7 +5,7 @@ namespace CellBridge.Storage.SqlServer;
 
 /// <summary>EF document persistence with required cross-host coordination.</summary>
 public sealed class SqlServerStateStore : IDocumentStateStore, IDocumentLifecycleStore,
-    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant, IAtomicDocumentSaveStore
+    IAtomicDocumentRenameStore, IDocumentReadStore, IProviderRecoveryStore, IStorageBudgetParticipant, IAtomicDocumentSaveStore, IDocumentPreparationStore
 {
     private readonly DocumentOperations<SqlServerDocumentDbContext> operations;
     public SqlServerStateStore(DbContextOptions<SqlServerDocumentDbContext> options, StorageLimits? limits = null)
@@ -31,6 +31,8 @@ public sealed class SqlServerStateStore : IDocumentStateStore, IDocumentLifecycl
         return operations.TransitionWithContentAsync(resourceId, writer.Writer, pending, transition, cancellationToken);
     }
 
+    public ValueTask<DocumentPreparationRead?> ReadPreparationAsync(Guid resourceId, CancellationToken cancellationToken = default) =>
+        operations.ReadPreparationAsync(resourceId, cancellationToken);
     public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default) => operations.FindByResourceIdAsync(id, cancellationToken);
     public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken cancellationToken = default) => operations.FindByPathKeyAsync(key, cancellationToken);
     public ValueTask<DocumentState?> FindLifecycleAsync(Guid id, CancellationToken cancellationToken = default) => operations.FindLifecycleAsync(id, cancellationToken);

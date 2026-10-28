@@ -341,7 +341,14 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         FsshttpbCellSubRequest operation, DataElementPackage? package, IReadOnlyDictionary<string, string> attributes,
         CellBridgeActor actor, Func<DataElementPackage?, bool> canAppend, CancellationToken cancellationToken)
     {
-        var initial = await CurrentAsync(id, cancellationToken);
+        // Capture fresh authority at save entry, after any earlier request read or
+        // authorization await. This request-local view also prepares file saves;
+        // final publication still rechecks it under the document lock.
+        var entry = kind == DocumentPartitionKind.FileContents && provider.State is IDocumentPreparationStore reads
+            ? await reads.ReadPreparationAsync(id, cancellationToken)
+                ?? throw new KeyNotFoundException("Document does not exist.")
+            : null;
+        var initial = entry?.State ?? await CurrentAsync(id, cancellationToken);
         if (!Access(actor, initial).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), initial);
         if (kind == DocumentPartitionKind.Metadata)
             return await SaveMetadataAsync(initial, operation, package, attributes, actor, canAppend, cancellationToken);
@@ -356,7 +363,7 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
         string digest;
         try { digest = Digest(put, package); }
         catch (InvalidDataException ex) { return await FailedAsync(id, operation.RequestId, CellErrorCode.InvalidObject, ex.Message, cancellationToken); }
-        var preparation = await provider.State.TransitionAsync(id, (current, now) =>
+        var preparation = await PrepareSaveAsync(id, (current, now) =>
         {
             if (!Access(actor, current).HasFlag(DocumentAccess.Write))
                 return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null,
@@ -369,13 +376,13 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             var coordinator = FssHttpLockCoordinator.Restore(metadata, current.Coordination, now, actor.Identity);
             coordinator.ExecuteCellWrite(attributes, () => true, out _, out var error, now);
             return new StateTransition<(DocumentState State, CoordinationState Authority, string? Error)>(null, (current, coordinator.Capture(), error));
-        }, cancellationToken);
+        }, cancellationToken, entry);
         if (preparation.Error == "FileUnauthorizedAccess") return Wrap(CellBridgeAuthorization.Denied(operation), preparation.State);
         if (preparation.Error is not null) return new(new FsshttpbResponse(), preparation.State, preparation.Error);
         for (int attempt = 0; attempt < 4; attempt++)
         {
-            // Preparation already read this state under document coordination.
-            // Publication below still rechecks the authority and state version.
+            // Preparation observed a coherent state and provider clock. The final
+            // locked publication still rechecks access, authority and content.
             var before = attempt == 0 ? preparation.State : await CurrentAsync(id, cancellationToken);
             if (!Access(actor, before).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), before);
             if (before.LifecycleGeneration != initial.LifecycleGeneration)
@@ -385,10 +392,9 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
             if (before.Coordination.Generation != initial.Coordination.Generation)
                 return Wrap(Failure(operation.RequestId, CellErrorCode.CoherencyFailure, "Write authority changed while preparing the save."), before);
             var document = StoredDocument.RestoreMetadata(before, DateTime.UtcNow);
-            var currentGraph = await DocumentPartition.RestoreFileGraphAsync(before, provider.Content, provider.Limits, cancellationToken);
             StorageLimits.Check("save receipts", before.Receipts.Length + 1L, provider.Limits.MaxSaveReceipts);
-            var prepared = FilePartitionSaveHandler.Prepare(document, document.FilePartition, operation, package,
-                provider.Limits, currentGraph);
+            var prepared = await FilePartitionSaveHandler.PrepareAsync(before, document, operation, package,
+                provider.Content, provider.Limits, cancellationToken);
             var result = prepared.Response;
             if (result.Status) return Wrap(result, before);
             if (!canAppend(prepared.ResponsePackage))
@@ -413,8 +419,8 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                     provider.Limits.MaxDocumentBytes, cancellationToken);
                 if (pending is not null)
                 {
-                    var addedBytes = prepared.Graph!.PayloadBytes - currentGraph.PayloadBytes;
-                    var addedObjects = prepared.Graph.ElementCount - currentGraph.ElementCount;
+                    var addedBytes = prepared.AddedBytes;
+                    var addedObjects = prepared.AddedCount;
                     var pendingBytes = checked((prepared.Repeat ? 0 : staging.Length + addedBytes) + receiptBytes.LongLength);
                     useAtomicSave = addedBytes >= 0 && addedObjects >= 0 && pendingBytes <= PendingSaveContent.MaxBytes &&
                         (prepared.Repeat ? 1 : addedObjects + 2) <= IContentBatchWriter.MaxBatchObjects;
@@ -426,8 +432,12 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
                 {
                     staging.Position = 0;
                     var handle = await contentTarget.WriteAsync(staging, cancellationToken);
-                    var file = await DocumentPartition.CaptureFileGraphAsync(before.Partitions.Single(p => p.Kind == 0),
-                        prepared.Graph!, prepared.KnowledgeSequence, handle, contentTarget, cancellationToken);
+                    var sourceFile = before.Partitions.Single(p => p.Kind == 0);
+                    var file = prepared.AddedElements is null
+                        ? await DocumentPartition.CaptureFileGraphAsync(sourceFile, prepared.Graph!,
+                            prepared.KnowledgeSequence, handle, contentTarget, cancellationToken)
+                        : await DocumentPartition.CaptureFileDeltaAsync(sourceFile, prepared.Graph!.StorageIndex,
+                            prepared.AddedElements, prepared.KnowledgeSequence, handle, contentTarget, cancellationToken);
                     candidate = before with
                     {
                         Content = handle,

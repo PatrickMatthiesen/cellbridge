@@ -28,6 +28,7 @@ public sealed class PostgreSqlReadScopeTests
                 async () => Assert.NotNull(await store.FindByResourceIdAsync(state.ResourceId)),
                 async () => Assert.NotNull(await store.FindByPathKeyAsync(state.PathKey)),
                 async () => Assert.NotNull(await store.FindLifecycleAsync(state.ResourceId)),
+                async () => Assert.NotNull(await store.ReadPreparationAsync(state.ResourceId)),
                 async () => Assert.NotNull(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)),
                 async () => Assert.NotNull(await store.FindReadMetadataByPathKeyAsync(state.PathKey)),
                 async () => Assert.NotNull(await store.ReadRevisionSummaryAsync(state.ResourceId, 1)),

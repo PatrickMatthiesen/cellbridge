@@ -5,19 +5,20 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.AspNetCore;
 
-/// <summary>Prepares a complete file graph, including retained delta objects.</summary>
-internal static class FilePartitionSaveHandler
+/// <summary>Prepares file publications while preserving all retained graph identities.</summary>
+internal static partial class FilePartitionSaveHandler
 {
     internal sealed record PreparedFileSave(FsshttpbSubResponse Response,
         PartitionGraphSnapshot? Graph = null, ulong KnowledgeSequence = 0, bool Repeat = false,
-        DataElementPackage? ResponsePackage = null);
+        DataElementPackage? ResponsePackage = null,
+        IReadOnlyCollection<DataElement>? AddedElements = null, long AddedBytes = 0, int AddedCount = 0);
 
     private static PreparedFileSave Reject(ulong id, CellErrorCode code, string message)
         => new(Failure(id, code, message));
 
     internal static PreparedFileSave Prepare(StoredDocument document, DocumentPartition partition,
         FsshttpbCellSubRequest subRequest, DataElementPackage? package, StorageLimits? limits = null,
-        PartitionGraphSnapshot? currentGraph = null)
+        PartitionGraphSnapshot? currentGraph = null, SaveCatalog? catalog = null)
     {
         if (!CellPartitionSelector.MatchesTarget(subRequest, partition.Kind) ||
             partition.Kind != DocumentPartitionKind.FileContents ||
@@ -35,14 +36,19 @@ internal static class FilePartitionSaveHandler
         {
             try
             {
-                var current = currentGraph ?? partition.FileGraph;
-                bool repeat = put.StorageIndex.Equals(current.StorageIndex);
-                if (!repeat && !current.MatchesPutChanges(
-                    current.StorageIndexes.Concat(package.DataElements), put.StorageIndex, put.ExpectedStorageIndex,
+                var current = catalog is null ? currentGraph ?? partition.FileGraph : null;
+                var indexes = catalog?.Indexes ?? current!.StorageIndexes;
+                var currentIndex = catalog?.StorageIndex ?? current!.StorageIndex;
+                bool repeat = put.StorageIndex.Equals(currentIndex);
+                if (!repeat && !PartitionGraphSnapshot.MatchesPutChanges(
+                    indexes.Single(e => e.DataElementExtendedGuid.Equals(currentIndex)),
+                    indexes.Concat(package.DataElements), put.StorageIndex, put.ExpectedStorageIndex,
                     (put.Flags & 1) != 0))
                     return Reject(subRequest.RequestId, CellErrorCode.CoherencyFailure,
                         "The expected storage index is no longer current.");
-                var existing = current.ElementMetadata.ToDictionary(x => x.DataElementExtendedGuid);
+                var metadata = catalog?.Metadata ?? current!.ElementMetadata;
+                var existing = metadata.ToDictionary(x => x.DataElementExtendedGuid);
+                var currentBytes = catalog?.PayloadBytes ?? current!.PayloadBytes;
                 limits ??= new StorageLimits();
                 var additions = package.DataElements.Where(e => !existing.ContainsKey(e.DataElementExtendedGuid))
                     .DistinctBy(e => e.DataElementExtendedGuid).ToArray();
@@ -50,21 +56,21 @@ internal static class FilePartitionSaveHandler
                     return Reject(subRequest.RequestId, CellErrorCode.InvalidObject,
                         "An accepted storage index cannot introduce new data elements.");
                 StorageLimits.Check("graph elements", existing.Count + (long)additions.Length, limits.MaxGraphElements);
-                StorageLimits.Check("graph bytes", current.PayloadBytes + additions.Sum(e => (long)(e.Data?.Length ?? 0)), limits.MaxGraphBytes);
+                StorageLimits.Check("graph bytes", currentBytes + additions.Sum(e => (long)(e.Data?.Length ?? 0)), limits.MaxGraphBytes);
                 foreach (var element in package.DataElements)
-                    if (current.ConflictsWith(element))
+                    if (catalog is null ? current!.ConflictsWith(element) : catalog.ConflictsWith(element))
                         return Reject(subRequest.RequestId, CellErrorCode.InvalidObject,
                             "A data element identifier was reused for different content.");
                 ulong sequence = partition.KnowledgeSequence;
                 var serialGuid = partition.ProtocolIdentity.SerialGuid;
                 var incomingMappings = package.DataElements.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData)
                     .SelectMany(e => StorageIndexMappingSerials.ReadMappings(e.Data ?? [])).ToArray();
-                current.ValidateMappingSerials(incomingMappings);
+                PartitionGraphSnapshot.ValidateMappingSerials(indexes, incomingMappings);
                 // Mapping serials identify mappings, independently of target DE serials.
                 // Never recycle a server serial after a restore or a client upload.
-                foreach (var serial in current.ElementMetadata.Select(e => e.SerialNumber)
+                foreach (var serial in metadata.Select(e => e.SerialNumber)
                     .Concat(package.DataElements.Select(e => e.SerialNumber))
-                    .Concat(current.MappingSerials.Values.SelectMany(s => s))
+                    .Concat(indexes.SelectMany(e => StorageIndexMappingSerials.Read(e.Data ?? [])))
                     .Concat(incomingMappings.Select(m => m.Serial)))
                     if (serial.Guid == serialGuid) sequence = Math.Max(sequence, serial.Value);
                 var assigned = new Dictionary<ExGuid, SerialNumber>();
@@ -79,11 +85,16 @@ internal static class FilePartitionSaveHandler
                     return new DataElement(element.DataElementType, element.DataElementExtendedGuid, serial) { Data = element.Data };
                 }).ToArray();
                 if (!repeat && sequence == partition.KnowledgeSequence) sequence = checked(sequence + 1);
-                var next = current.Merge(accepted, put.StorageIndex);
+                var next = catalog is null ? current!.Merge(accepted, put.StorageIndex) : catalog.Selected.Merge(accepted, put.StorageIndex);
                 StorageLimits.Check("graph elements", next.ElementCount, limits.MaxGraphElements);
                 StorageLimits.Check("graph bytes", next.PayloadBytes, limits.MaxGraphBytes);
-                // Prepare the response before changing visible document state.
-                var knowledge = CreateQueryData(partition, next, sequence);
+                var added = accepted.Where(e => !existing.ContainsKey(e.DataElementExtendedGuid))
+                    .DistinctBy(e => e.DataElementExtendedGuid).ToArray();
+                // Knowledge describes the complete catalog, independently of the selected file graph.
+                var knowledge = catalog is null ? CreateQueryData(partition, next, sequence) :
+                    CreateQueryData(next, sequence, metadata.Concat(added), indexes.Concat(added)
+                        .Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData)
+                        .SelectMany(e => StorageIndexMappingSerials.Read(e.Data ?? [])));
                 var writer = new BinaryWriterEx();
                 knowledge.SerializeKnowledge(writer);
                 var applied = new PutChangesResponse
@@ -111,7 +122,13 @@ internal static class FilePartitionSaveHandler
                     responsePackage = new();
                     responsePackage.DataElements.AddRange(next.SelectElements(e => e.DataElementExtendedGuid.Equals(next.StorageIndex)));
                 }
-                return new(result, next, sequence, repeat, responsePackage);
+                var addedIds = added.Select(e => e.DataElementExtendedGuid).ToHashSet();
+                // Persistence must use the same owned bytes validated by the selected graph.
+                // The caller can reuse or mutate its request buffers after preparation returns.
+                var ownedAdditions = catalog is null ? null :
+                    next.SelectElements(e => addedIds.Contains(e.DataElementExtendedGuid));
+                return new(result, next, sequence, repeat, responsePackage, ownedAdditions,
+                    additions.Sum(e => (long)(e.Data?.Length ?? 0)), additions.Length);
             }
             catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
             {
@@ -121,16 +138,19 @@ internal static class FilePartitionSaveHandler
     }
 
     internal static QueryChangesSubResponseData CreateQueryData(DocumentPartition partition,
-        PartitionGraphSnapshot graph, ulong sequence) => new()
+        PartitionGraphSnapshot graph, ulong sequence) => CreateQueryData(graph, sequence,
+            graph.ElementMetadata, graph.MappingSerials.Values.SelectMany(s => s));
+
+    private static QueryChangesSubResponseData CreateQueryData(PartitionGraphSnapshot graph, ulong sequence,
+        IEnumerable<DataElement> metadata, IEnumerable<SerialNumber> mappingSerials) => new()
     {
         StorageIndexExtendedGuid = graph.StorageIndex,
         CellKnowledgeCellGuid = graph.FileCell.LongId.Guid,
         CellKnowledgeTo = sequence,
         WaterlineCellStorageExtendedGuid = graph.FileCell.ShortId,
         Waterline = sequence,
-        KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(graph.ElementMetadata,
-            graph.FileCell.ShortId, sequence,
-            mappingSerials: graph.MappingSerials.Values.SelectMany(s => s)),
+        KnowledgeBytes = BinaryKnowledgeBuilder.FromElements(metadata, graph.FileCell.ShortId, sequence,
+            mappingSerials: mappingSerials),
     };
 
     private static ZipArchive OpenDocumentArchive(Stream content, string documentUrl)

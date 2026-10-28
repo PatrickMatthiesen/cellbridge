@@ -200,6 +200,27 @@ public sealed partial class DocumentPartition
         return source with { Knowledge = knowledgeSequence, Content = package,
             StorageIndex = StorageIds.Capture(graph.StorageIndex), Elements = elements, InlineContent = [] };
     }
+    /// <summary>Appends newly admitted immutable payloads while preserving every retained descriptor.</summary>
+    internal static async ValueTask<PartitionState> CaptureFileDeltaAsync(PartitionState source, ExGuid storageIndex,
+        IReadOnlyCollection<DataElement> additions, ulong knowledgeSequence, ContentHandle package,
+        IContentStore content, CancellationToken cancellationToken = default)
+    {
+        if (source.Kind != 0) throw new ArgumentException("A file partition is required.", nameof(source));
+        var mappings = additions.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData)
+            .ToDictionary(e => e.DataElementExtendedGuid, e => StorageIndexMappingSerials.Read(e.Data ?? []));
+        async ValueTask VisitAsync(Func<DataElement, Stream, ValueTask> visit)
+        {
+            foreach (var element in additions)
+            {
+                using var payload = new MemoryStream(element.Data ?? [], writable: false);
+                await visit(element, payload);
+            }
+        }
+        var added = await CaptureElementsAsync(VisitAsync, mappings, null, content, cancellationToken);
+        return source with { Knowledge = knowledgeSequence, Content = package,
+            StorageIndex = StorageIds.Capture(storageIndex), Elements = source.Elements.Concat(added), InlineContent = [] };
+    }
+
     internal DocumentPartition(PartitionState state, IReadOnlyDictionary<string, byte[]> payloads, bool metadataOnly = false)
     {
         Kind = (DocumentPartitionKind)state.Kind;
@@ -232,11 +253,11 @@ public sealed partial class DocumentPartition
             graph is null ? Content.ToImmutableArray() : []);
     }
 
-    private static async ValueTask<ImmutableArray<GraphElementState>> CaptureElementsAsync(
+    private static async ValueTask<GraphElementCollection> CaptureElementsAsync(
         PartitionGraphSnapshot graph, PartitionState? source, IContentStore content, CancellationToken cancellationToken)
         => await CaptureElementsAsync(graph.VisitElementsAsync, graph.MappingSerials, source, content, cancellationToken);
 
-    private static async ValueTask<ImmutableArray<GraphElementState>> CaptureElementsAsync(
+    private static async ValueTask<GraphElementCollection> CaptureElementsAsync(
         Func<Func<DataElement, Stream, ValueTask>, ValueTask> visit,
         IReadOnlyDictionary<ExGuid, IReadOnlyList<SerialNumber>> mappingSerials, PartitionState? source,
         IContentStore content, CancellationToken cancellationToken, long maxObjectBytes = long.MaxValue,
@@ -308,7 +329,19 @@ public sealed partial class DocumentPartition
                 if (pending.Count == 64 || pendingBytes >= 8L * 1024 * 1024) await FlushAsync();
             });
         await FlushAsync();
-        return elements.ToImmutable();
+        var captured = elements.ToImmutable();
+        if (source is not null && captured.Length >= source.Elements.Length)
+        {
+            var index = 0;
+            foreach (var old in source.Elements)
+            {
+                if (!ReferenceEquals(old, captured[index])) break;
+                index++;
+            }
+            if (index == source.Elements.Length)
+                return source.Elements.Concat((GraphElementCollection)ImmutableArray.Create(captured.AsSpan()[index..]));
+        }
+        return captured;
     }
 }
 

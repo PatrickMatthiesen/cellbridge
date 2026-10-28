@@ -17,7 +17,7 @@ public sealed record GraphElementState(ExtendedId Id, uint Type, SerialId Serial
     public required ImmutableArray<SerialId> MappingSerials { get; init; }
 }
 public sealed record PartitionState(int Kind, PartitionIdentity Identity, ulong Knowledge,
-    ContentHandle Content, ExtendedId? StorageIndex, ImmutableArray<GraphElementState> Elements,
+    ContentHandle Content, ExtendedId? StorageIndex, GraphElementCollection Elements,
     ImmutableArray<byte> InlineContent = default);
 public sealed record EditorState(Guid ClientId, string? UserName, DateTime JoinedUtc,
     DateTime LastSeenUtc, DateTime ExpiresUtc, int TimeoutSeconds, bool AsEditor, int EditorNumber,

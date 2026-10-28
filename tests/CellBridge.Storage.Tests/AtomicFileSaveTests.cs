@@ -36,8 +36,10 @@ public sealed class AtomicFileSaveDatabaseTests
             var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
                 request, new Dictionary<string, string>(), TestActor.Value);
             Assert.False(Assert.Single(saved.Response.SubResponses).Status);
-            Assert.Equal(2, audit.Committed.Count);
-            Assert.Single(audit.Committed, transaction => !audit.HasWrites(transaction));
+            Assert.Single(audit.Committed);
+            var preparation = Assert.Single(audit.ClockedReads, read => !read.InTransaction);
+            Assert.Contains("LEFT JOIN", preparation.Sql, StringComparison.OrdinalIgnoreCase);
+            Assert.Matches(@"(?s)\bON\b.*resource_id.*resource_id.*state_version.*state_version", preparation.Sql);
             var publication = Assert.Single(audit.Committed, audit.HasWrites);
             var writes = audit.Writes[publication];
             Assert.Contains(writes, sql => sql.Contains("cellbridge_chunks", StringComparison.Ordinal));
@@ -134,11 +136,16 @@ public sealed class AtomicFileSaveDatabaseTests
     {
         public List<DbTransaction> Committed { get; } = [];
         public Dictionary<DbTransaction, List<string>> Writes { get; } = [];
+        public List<(string Sql, bool InTransaction)> ClockedReads { get; } = [];
         public int WritesOutsideTransactions { get; private set; }
         public bool HasWrites(DbTransaction transaction) => Writes.ContainsKey(transaction);
-        public void Clear() { Committed.Clear(); Writes.Clear(); WritesOutsideTransactions = 0; }
+        public void Clear() { Committed.Clear(); Writes.Clear(); ClockedReads.Clear(); WritesOutsideTransactions = 0; }
         public void Record(DbCommand command)
         {
+            if (command.CommandText.Contains("clock_timestamp()", StringComparison.Ordinal) &&
+                command.CommandText.Contains("cellbridge_documents", StringComparison.Ordinal) &&
+                command.CommandText.Contains("cellbridge_states", StringComparison.Ordinal))
+                ClockedReads.Add((command.CommandText, command.Transaction is not null));
             if (!Regex.IsMatch(command.CommandText, @"(?im)^\s*(INSERT|UPDATE|DELETE|MERGE)\b")) return;
             if (command.Transaction is not { } transaction) { WritesOutsideTransactions++; return; }
             if (!Writes.TryGetValue(transaction, out var commands)) Writes.Add(transaction, commands = []);

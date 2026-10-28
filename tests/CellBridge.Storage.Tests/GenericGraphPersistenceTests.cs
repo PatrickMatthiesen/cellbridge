@@ -194,7 +194,7 @@ public class GenericGraphPersistenceTests
         var reopened = await StoredDocument.RestoreAsync(result.State, provider.Content);
         Assert.Equal(f.Bytes, reopened.Content);
         Assert.Equal(f.Bytes, reopened.FilePartition.FileGraph.Materialize());
-        Assert.True(result.State.Partitions[0].Elements.Any(e => e.Id == StorageIds.Capture(f.BaseElement)));
+        Assert.Contains(result.State.Partitions[0].Elements, e => e.Id == StorageIds.Capture(f.BaseElement));
     }
 
     [Fact]
