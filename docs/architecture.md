@@ -1,5 +1,11 @@
 # Architecture
 
+The proposed [Office storage design review](office-storage-design.md),
+[operation catalog](office-operation-catalog.md) and
+[cost/priority model](office-operation-costs.md) examine a replacement for the
+current persistence layout. They are proposals and evidence inventories; the
+implementation described below has not been replaced by them.
+
 CellBridge implements the Office file synchronization protocols in reusable
 .NET libraries. WebDemo provides a development environment;
 [interoperability coverage](interoperability.md) describes the tested client
