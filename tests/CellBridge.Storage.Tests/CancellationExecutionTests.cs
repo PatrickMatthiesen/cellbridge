@@ -22,10 +22,10 @@ public sealed class CancellationExecutionTests
     {
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
         var service = Service(test.Provider, state, content);
-        var request = Proposal(before, MinimalDocx.Create("never accepted"));
+        var request = await Proposal(test.Provider, before, MinimalDocx.Create("never accepted"));
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 
@@ -50,7 +50,7 @@ public sealed class CancellationExecutionTests
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
         var triggered = false;
         void Cancel(CancellationToken token)
@@ -64,8 +64,9 @@ public sealed class CancellationExecutionTests
         else
             content.BeforeRead = (_, token) => { Cancel(token); return ValueTask.CompletedTask; };
 
+        var proposal = await Proposal(test.Provider, before, MinimalDocx.Create("not committed"));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Execute(Service(test.Provider, state, content),
-            before, Proposal(before, MinimalDocx.Create("not committed")), cancellation.Token));
+            before, proposal, cancellation.Token));
 
         Assert.True(triggered);
         Assert.Equal(0, state.Mutations);
@@ -81,19 +82,19 @@ public sealed class CancellationExecutionTests
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
         var triggered = false;
         state.AfterRead = (current, token) =>
         {
-            if (current is not { Receipts.IsEmpty: false }) return;
+            if (current is not { Counters.SaveReceipts: > 0 }) return;
             state.AfterRead = null;
             triggered = true;
             cancellation.Cancel();
             token.ThrowIfCancellationRequested();
         };
         var service = Service(test.Provider, state, content);
-        var save = Proposal(before, MinimalDocx.Create("accepted before next query"));
+        var save = await Proposal(test.Provider, before, MinimalDocx.Create("accepted before next query"));
         var request = Clone(save);
         request.SubRequests.Add(new(RequestTypes.QueryChanges)
             { RequestId = 2, Data = new QueryChangesSubRequestData() });
@@ -121,7 +122,7 @@ public sealed class CancellationExecutionTests
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
         state.AfterCommit = (_, token) =>
         {
@@ -130,7 +131,7 @@ public sealed class CancellationExecutionTests
             if (throwAfterCommit) token.ThrowIfCancellationRequested();
         };
         var service = Service(test.Provider, state, content);
-        var request = Proposal(before, MinimalDocx.Create("last save committed"));
+        var request = await Proposal(test.Provider, before, MinimalDocx.Create("last save committed"));
 
         var result = await Execute(service, before, request, cancellation.Token);
 
@@ -155,7 +156,7 @@ public sealed class CancellationExecutionTests
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
         state.AfterCommit = (_, token) =>
         {
@@ -170,10 +171,10 @@ public sealed class CancellationExecutionTests
 
         Cancelled(result);
         Assert.Empty(result.AcceptedSaves);
-        Assert.Equal(before.Content, result.State.Content);
+        Assert.Equal(before.Package.Sha256, result.State.Package.Sha256);
         Assert.Equal(before.ContentVersion, result.State.ContentVersion);
-        Assert.NotNull(result.State.Partitions.Single(p => p.Kind == 1).StorageIndex);
-        Assert.Equal(1, Assert.Single(result.State.Receipts).PartitionKind);
+        Assert.NotNull((await test.Provider.Documents.ReadPartitionAsync(before.ResourceId, new(1)))!.Partition.StorageIndex);
+        Assert.Equal(1, (await ReceiptAsync(test.Provider, before.ResourceId)).Operation.PartitionKind);
         Assert.Equal(1, state.Mutations);
         await VerifyCommittedAndReplay(test.Provider, service, state, content, before, request, result,
             DocumentPartitionKind.Metadata);
@@ -189,12 +190,12 @@ public sealed class CancellationExecutionTests
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
         var kind = metadata ? DocumentPartitionKind.Metadata : DocumentPartitionKind.FileContents;
-        var request = metadata ? Metadata() : Proposal(before, MinimalDocx.Create("replayed save"));
+        var request = metadata ? Metadata() : await Proposal(test.Provider, before, MinimalDocx.Create("replayed save"));
         var saved = await Execute(new(test.Provider), before, request, default, kind);
         Assert.False(saved.IsCancelled);
-        var receipt = Assert.Single(saved.State.Receipts);
+        var receipt = await ReceiptAsync(test.Provider, before.ResourceId);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
         var triggered = false;
         content.BeforeRead = (handle, token) =>
@@ -239,10 +240,10 @@ public sealed class CancellationExecutionTests
         var current = await Create(test.Provider);
         var skipped = await Create(test.Provider);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
-        var earlierSave = Proposal(earlier, MinimalDocx.Create("earlier file"));
-        var currentSave = metadata ? Metadata() : Proposal(current, MinimalDocx.Create("current file"));
+        var earlierSave = await Proposal(test.Provider, earlier, MinimalDocx.Create("earlier file"));
+        var currentSave = metadata ? Metadata() : await Proposal(test.Provider, current, MinimalDocx.Create("current file"));
         var triggered = false;
         state.AfterCommit = (committed, token) =>
         {
@@ -254,7 +255,7 @@ public sealed class CancellationExecutionTests
         };
         var service = Service(test.Provider, state, content);
         var request = Soap((earlier, earlierSave, false), (current, currentSave, metadata),
-            (skipped, Proposal(skipped, MinimalDocx.Create("must not run")), false));
+            (skipped, await Proposal(test.Provider, skipped, MinimalDocx.Create("must not run")), false));
         state.UnreadableId = skipped.ResourceId;
 
         var result = await new CellBridgeRequestProcessor(service)
@@ -276,11 +277,11 @@ public sealed class CancellationExecutionTests
         Assert.All(result.Response.Responses, file => Assert.Single(file.SubResponses));
         Assert.Equal(2, state.Mutations);
         await Unchanged(test.Provider, skipped);
-        var currentState = (await test.Provider.State.FindByResourceIdAsync(current.ResourceId))!;
-        Assert.Single(currentState.Receipts);
+        var currentState = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(current.ResourceId)))!;
+        Assert.Equal(1, currentState.Counters.SaveReceipts);
         if (metadata)
         {
-            Assert.Equal(current.Content, currentState.Content);
+            Assert.Equal(current.Package.Sha256, currentState.Package.Sha256);
             Assert.Equal(current.ContentVersion, currentState.ContentVersion);
         }
         var writes = content.Writes;
@@ -291,8 +292,8 @@ public sealed class CancellationExecutionTests
             (current, currentSave, metadata ? DocumentPartitionKind.Metadata : DocumentPartitionKind.FileContents),
         })
         {
-            var persisted = (await test.Provider.State.FindByResourceIdAsync(document.ResourceId))!;
-            var expected = await test.Provider.Content.ReadVerifiedAsync(Assert.Single(persisted.Receipts).Response!);
+            var persisted = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(document.ResourceId)))!;
+            var expected = await test.Provider.Content.ReadVerifiedAsync((await ReceiptAsync(test.Provider, document.ResourceId)).Response!);
             var retry = await Execute(service, document, save, default, kind);
             Assert.False(retry.IsCancelled);
             Assert.Equal(expected, retry.Response.ToByteArray());
@@ -313,22 +314,22 @@ public sealed class CancellationExecutionTests
         var before = await Create(test.Provider);
         var skipped = await Create(test.Provider);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State) { UnreadableId = skipped.ResourceId };
+        var state = new HookState(test.Provider.Documents) { UnreadableId = skipped.ResourceId };
         var content = new HookContent(test.Provider.Content);
         var triggered = false;
         state.AfterRead = (current, token) =>
         {
-            if (current is not { Receipts.IsEmpty: false }) return;
+            if (current is not { Counters.SaveReceipts: > 0 }) return;
             state.AfterRead = null;
             triggered = true;
             cancellation.Cancel();
             token.ThrowIfCancellationRequested();
         };
-        var save = metadata ? Metadata() : Proposal(before, MinimalDocx.Create("saved before final lookup"));
-        var first = HostIntegrationTests.File(before.ResourceId, SubRequestType.Cell);
-        HostIntegrationTests.SetBinary(first.SubRequests[0], save.ToByteArray());
+        var save = metadata ? Metadata() : await Proposal(test.Provider, before, MinimalDocx.Create("saved before final lookup"));
+        var first = FileRequest(before.ResourceId, SubRequestType.Cell);
+        SetBinary(first.SubRequests[0], save.ToByteArray());
         if (metadata) first.SubRequests[0].SubRequestDataAttributes["PartitionID"] = StoredDocument.MetadataPartitionId.ToString();
-        var second = HostIntegrationTests.File(skipped.ResourceId, SubRequestType.GetDocMetaInfo);
+        var second = FileRequest(skipped.ResourceId, SubRequestType.GetDocMetaInfo);
         second.RequestToken = 2;
         var service = Service(test.Provider, state, content);
 
@@ -346,17 +347,17 @@ public sealed class CancellationExecutionTests
         MicrosoftResponseSchema.Validate(result.Response.ToSoapEnvelope());
         Assert.Equal(1, state.Mutations);
         await Unchanged(test.Provider, skipped);
-        var current = (await test.Provider.State.FindByResourceIdAsync(before.ResourceId))!;
+        var current = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         if (metadata)
         {
-            Assert.Equal(before.Content, current.Content);
+            Assert.Equal(before.Package.Sha256, current.Package.Sha256);
             Assert.Equal(before.ContentVersion, current.ContentVersion);
-            Assert.Equal(1, Assert.Single(current.Receipts).PartitionKind);
+            Assert.Equal(1, (await ReceiptAsync(test.Provider, before.ResourceId)).Operation.PartitionKind);
         }
         var writes = content.Writes;
         var replay = await Execute(service, before, save, default,
             metadata ? DocumentPartitionKind.Metadata : DocumentPartitionKind.FileContents);
-        Assert.Equal(await test.Provider.Content.ReadVerifiedAsync(Assert.Single(current.Receipts).Response!),
+        Assert.Equal(await test.Provider.Content.ReadVerifiedAsync((await ReceiptAsync(test.Provider, before.ResourceId)).Response!),
             replay.Response.ToByteArray());
         Assert.Equal(writes, content.Writes);
         Assert.Equal(1, state.Mutations);
@@ -372,23 +373,23 @@ public sealed class CancellationExecutionTests
     {
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
-        var request = Proposal(before, MinimalDocx.Create("accepted original"));
+        var request = await Proposal(test.Provider, before, MinimalDocx.Create("accepted original"));
         var saved = await Execute(new(test.Provider), before, request);
         using var cancellation = new CancellationTokenSource();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
-        DocumentState? changed = null;
+        DocumentHead? changed = null;
         content.BeforeRead = async (_, token) =>
         {
             content.BeforeRead = null;
-            changed = await test.Provider.State.TransitionAsync(before.ResourceId, (current, _) =>
+            if (changeDigest) state.CorruptReceiptDigest = true;
+            else
             {
-                var next = changeDigest
-                    ? current with { Receipts = [Assert.Single(current.Receipts) with { Digest = "changed digest" }] }
-                    : current with { Security = current.Security with { Owner = "revoked-owner" } };
-                next = next with { StateVersion = current.StateVersion + 1 };
-                return new StateTransition<DocumentState>(next, next);
-            });
+                var head = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
+                Assert.True((await test.Provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(head.ResourceId,
+                    StorageTestDocuments.Admission(head), head.Security with { Owner = "revoked-owner" }, head.AuthorityGeneration))).Changed);
+            }
+            changed = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
             cancellation.Cancel();
             token.ThrowIfCancellationRequested();
         };
@@ -400,7 +401,7 @@ public sealed class CancellationExecutionTests
         Assert.True(state.UncancelledReadsAfterCancellation > 0);
         Assert.Equal(0, state.Mutations);
         Assert.Equal(0, content.Writes);
-        Assert.Equal(saved.State.Content, changed.Content);
+        Assert.Equal(saved.State.Package.Sha256, changed.Package.Sha256);
         await Unchanged(test.Provider, changed);
     }
 
@@ -413,12 +414,12 @@ public sealed class CancellationExecutionTests
     {
         await using var test = ProtocolExecutionTestProvider.Create(postgreSql);
         var before = await Create(test.Provider);
-        var request = Proposal(before, MinimalDocx.Create("accepted before unrelated failure"));
+        var request = await Proposal(test.Provider, before, MinimalDocx.Create("accepted before unrelated failure"));
         var saved = await Execute(new(test.Provider), before, request);
         using var callerCancellation = new CancellationTokenSource();
         using var otherCancellation = new CancellationTokenSource();
         otherCancellation.Cancel();
-        var state = new HookState(test.Provider.State);
+        var state = new HookState(test.Provider.Documents);
         var content = new HookContent(test.Provider.Content);
         Exception failure = storageFailure ? new IOException("Injected receipt read failure.")
             : new OperationCanceledException("Injected unrelated cancellation.", otherCancellation.Token);
@@ -441,18 +442,18 @@ public sealed class CancellationExecutionTests
     private static CellBridgeDocumentService Service(StorageProvider provider, HookState state, HookContent content) =>
         new(new(state, content, provider.Limits));
 
-    private static Task<CellExecution> Execute(CellBridgeDocumentService service, DocumentState document,
+    private static Task<CellExecution> Execute(CellBridgeDocumentService service, DocumentHead document,
         FsshttpbCellRequest request, CancellationToken token = default,
         DocumentPartitionKind kind = DocumentPartitionKind.FileContents) =>
         service.ExecuteAsync(document.ResourceId, kind, request, new Dictionary<string, string>(), TestActor.Value, token).AsTask();
 
-    private static async Task<DocumentState> Create(StorageProvider provider) =>
+    private static async Task<DocumentHead> Create(StorageProvider provider) =>
         (await new CellBridgeDocumentService(provider).CreateAsync("/cancel-" + Guid.NewGuid().ToString("N") + ".docx",
             MinimalDocx.Create(), TestActor.Value))!;
 
-    private static async Task Unchanged(StorageProvider provider, DocumentState expected) =>
+    private static async Task Unchanged(StorageProvider provider, DocumentHead expected) =>
         Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(
-            await provider.State.FindByResourceIdAsync(expected.ResourceId)));
+            await provider.Documents.FindAsync(new DocumentIdentity.Resource(expected.ResourceId))));
 
     private static void Cancelled(CellExecution result)
     {
@@ -469,14 +470,14 @@ public sealed class CancellationExecutionTests
     }
 
     private static async Task VerifyCommittedAndReplay(StorageProvider provider, CellBridgeDocumentService service,
-        HookState state, HookContent content, DocumentState before, FsshttpbCellRequest request, CellExecution result,
+        HookState state, HookContent content, DocumentHead before, FsshttpbCellRequest request, CellExecution result,
         DocumentPartitionKind kind = DocumentPartitionKind.FileContents)
     {
-        var current = (await provider.State.FindByResourceIdAsync(before.ResourceId))!;
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         Assert.Equal(JsonSerializer.Serialize(current), JsonSerializer.Serialize(result.State));
         Assert.Equal(before.StateVersion + 1, current.StateVersion);
-        Assert.Single(current.Receipts);
-        var receiptBytes = await provider.Content.ReadVerifiedAsync(current.Receipts[0].Response!);
+        Assert.Equal(1, current.Counters.SaveReceipts);
+        var receiptBytes = await provider.Content.ReadVerifiedAsync((await ReceiptAsync(provider, before.ResourceId)).Response!);
         var completed = new FsshttpbResponse
             { SubResponses = result.Response.SubResponses, DataElementPackage = result.Response.DataElementPackage };
         Assert.Equal(receiptBytes, completed.ToByteArray());
@@ -488,13 +489,13 @@ public sealed class CancellationExecutionTests
         if (kind == DocumentPartitionKind.FileContents)
         {
             var accepted = Assert.Single(result.AcceptedSaves);
-            Assert.Equal(current.Content, accepted.Content);
+            Assert.Equal(current.Package, accepted.Package);
             Assert.Equal(accepted with { IsReplay = true }, Assert.Single(replay.AcceptedSaves));
             Assert.Equal(PartitionGraphSnapshot.Create(request.DataElementPackage!.DataElements,
                 Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).StorageIndex).Materialize(),
-                await provider.Content.ReadVerifiedAsync(current.Content));
-            var graph = await DocumentPartition.RestoreFileGraphAsync(current, provider.Content, provider.Limits);
-            Assert.Equal(await provider.Content.ReadVerifiedAsync(current.Content), graph.Materialize());
+                await StorageTestDocuments.PackageAsync(provider, current.Package));
+            var graph = await StorageTestDocuments.GraphAsync(new(provider), current);
+            Assert.Equal(await StorageTestDocuments.PackageAsync(provider, current.Package), graph.Materialize());
         }
         else Assert.Empty(replay.AcceptedSaves);
         Assert.Equal(writes, content.Writes);
@@ -505,22 +506,15 @@ public sealed class CancellationExecutionTests
     private static FsshttpbCellRequest Clone(FsshttpbCellRequest request) =>
         FsshttpbCellRequest.Deserialize(new(request.ToByteArray()));
 
-    private static FsshttpbCellRequest Proposal(DocumentState state, byte[] bytes)
-    {
-        var id = DocumentStorageIdentity.Create();
-        var identity = new StorageManifestBuilder.StableIdentity(id.StorageManifestGuid, id.CellManifestGuid,
-            id.RevisionManifestGuid, id.ObjectGroupGuid, id.ObjectDataBlobGuid, id.ObjectGuid,
-            id.RevisionId, id.CellId, id.SerialGuid);
-        var generated = FileContentPartitionBuilder.BuildQueryChangesResponse(1, bytes, identity, 1);
-        var index = Assert.IsType<QueryChangesSubResponseData>(generated.SubResponses[0].Data).StorageIndexExtendedGuid;
-        return new() { DataElementPackage = generated.DataElementPackage, SubRequests =
-        { new(RequestTypes.PutChanges) { RequestId = 1, Data = new PutChangesSubRequestData
-            { StorageIndex = index, ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!), Flags = 1 } } } };
-    }
+    private static Task<FsshttpbCellRequest> Proposal(StorageProvider provider, DocumentHead state, byte[] bytes) =>
+        StorageTestDocuments.SaveRequestAsync(new(provider), state, bytes);
 
-    private static FsshttpbCellRequest Metadata() => MetadataPublicationTests.Initial(new GraphFixture([1, 2, 3], blob: true));
+    private static async Task<DocumentOperationReceipt> ReceiptAsync(StorageProvider provider, Guid id) =>
+        Assert.Single((await provider.Documents.ExportDocumentAsync(id))!.Receipts);
 
-    private static CellStorageRequest Soap(params (DocumentState Document, FsshttpbCellRequest Save, bool Metadata)[] files)
+    private static FsshttpbCellRequest Metadata() => StorageTestDocuments.MetadataRequest(new GraphFixture([1, 2, 3], blob: true));
+
+    private static CellStorageRequest Soap(params (DocumentHead Document, FsshttpbCellRequest Save, bool Metadata)[] files)
     {
         XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
         XNamespace ns = "http://schemas.microsoft.com/sharepoint/soap/";
@@ -544,6 +538,17 @@ public sealed class CancellationExecutionTests
             new XElement(ns + "ExecuteCellStorageRequest", new XElement(ns + "RequestVersion",
                 new XAttribute("Version", 2), new XAttribute("MinorVersion", 0)),
                 new XElement(ns + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), requests)))).ToString());
+    }
+
+    private static FssHttpRequest FileRequest(Guid id, SubRequestType type) => new()
+    {
+        UseResourceId = true, ResourceId = id.ToString("D"), Url = "https://host.test/unused.docx", RequestToken = 1,
+        SubRequests = [new() { Type = type, SubRequestToken = 1 }],
+    };
+    private static void SetBinary(FssHttpSubRequest request, byte[] bytes)
+    {
+        request.SubRequestDataBinary = bytes;
+        request.SubRequestDataAttributes["BinaryDataSize"] = bytes.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private sealed class HookContent(IContentStore inner) : IContentStore
@@ -571,55 +576,47 @@ public sealed class CancellationExecutionTests
         }
     }
 
-    private sealed class HookState(IDocumentStateStore inner) : IDocumentStateStore
+    private sealed class HookState(IDocumentRepository inner) : RepositoryTestProxy(inner)
     {
-        public Action<DocumentState?, CancellationToken>? AfterRead { get; set; }
-        public Action<DocumentState, CancellationToken>? BeforeCommit { get; set; }
-        public Action<DocumentState, CancellationToken>? AfterCommit { get; set; }
+        public Action<DocumentHead?, CancellationToken>? AfterRead { get; set; }
+        public Action<DocumentHead, CancellationToken>? BeforeCommit { get; set; }
+        public Action<DocumentHead, CancellationToken>? AfterCommit { get; set; }
         public Guid? UnreadableId { get; set; }
+        public bool CorruptReceiptDigest { get; set; }
         public int Mutations { get; private set; }
         public int UncancelledReadsAfterCancellation { get; private set; }
         private CancellationToken requestToken;
-        public bool Durable => inner.Durable;
-        public bool Shared => inner.Shared;
 
-        public async ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken token = default)
+        public override async ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken token = default)
         {
-            Assert.NotEqual(UnreadableId, id);
+            if (identity is DocumentIdentity.Resource resource) Assert.NotEqual(UnreadableId, resource.ResourceId);
             ObserveRead(token);
-            var current = await inner.FindByResourceIdAsync(id, token);
+            var current = await Inner.FindAsync(identity, token);
             AfterRead?.Invoke(current, token);
             return current;
         }
-
-        public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition,
-            CancellationToken token = default)
+        public override async ValueTask<SaveReceiptRead?> ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken ct = default)
+        {
+            ObserveRead(ct);
+            var read = await Inner.ReadReceiptAsync(id, operation, ct);
+            return CorruptReceiptDigest && read?.Receipt is { } receipt ? read with { Receipt = receipt with { Digest = "changed digest" } } : read;
+        }
+        public override async ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken token = default)
         {
             ObserveRead(token);
-            DocumentState? next = null;
-            bool publishedReceipt = false;
-            var result = await inner.TransitionAsync(id, (current, now) =>
+            BeforeCommit?.Invoke((await Inner.FindAsync(new DocumentIdentity.Resource(publication.ResourceId), token))!, token);
+            var result = await Inner.PublishAsync(publication, token);
+            if (result.Status == PublicationStatus.Accepted)
             {
-                var change = transition(current, now);
-                next = change.Next;
-                publishedReceipt = next is not null && next.Receipts.Length > current.Receipts.Length;
-                if (publishedReceipt) BeforeCommit?.Invoke(next!, token);
-                return change;
-            }, token);
-            if (next is not null) Mutations++;
-            if (publishedReceipt) AfterCommit?.Invoke(next!, token);
+                Mutations++;
+                AfterCommit?.Invoke(result.Current, token);
+            }
             return result;
         }
-
         private void ObserveRead(CancellationToken token)
         {
             if (token.CanBeCanceled) requestToken = token;
             if (requestToken.IsCancellationRequested && !token.CanBeCanceled) UncancelledReadsAfterCancellation++;
         }
-
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string path, CancellationToken token = default) => inner.FindByPathKeyAsync(path, token);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken token = default) => inner.ListAsync(offset, limit, token);
-        public ValueTask<bool> TryCreateAsync(DocumentState document, CancellationToken token = default) => inner.TryCreateAsync(document, token);
-        public ValueTask CheckHealthAsync(CancellationToken token = default) => inner.CheckHealthAsync(token);
     }
 }

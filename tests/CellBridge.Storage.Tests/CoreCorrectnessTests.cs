@@ -24,7 +24,7 @@ public sealed class CoreCorrectnessTests
         Assert.Equal("IncompatibleVersion", result.Response.VersionErrorCode);
         Assert.NotNull(result.Response.VersionErrorMessage);
         Assert.Empty(result.Response.Responses);
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Fact]
@@ -33,8 +33,7 @@ public sealed class CoreCorrectnessTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/duplicate.docx", MinimalDocx.Create(), TestActor.Value))!;
         var binary = StorageTests.Fixture("save-first");
-        Assert.IsType<PutChangesSubRequestData>(binary.SubRequests[0].Data).ExpectedStorageIndex =
-            StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        StorageTests.Rebase(binary, await StorageTestDocuments.GraphAsync(service,state));
         var file = HostIntegrationTests.File(state.ResourceId, SubRequestType.Cell, SubRequestType.WhoAmI);
         HostIntegrationTests.SetBinary(file.SubRequests[0], binary.ToByteArray());
         file.SubRequests[1].SubRequestToken = file.SubRequests[0].SubRequestToken;
@@ -44,7 +43,7 @@ public sealed class CoreCorrectnessTests
 
         Assert.Equal("InvalidRequestDependencyType", Assert.Single(result.Response.Responses).ErrorCode);
         Assert.Empty(result.AcceptedSaves);
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Fact]
@@ -60,12 +59,12 @@ public sealed class CoreCorrectnessTests
 
         var read = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, query, stale, TestActor.Value);
         Assert.Equal("CellRequestFail", read.LockError);
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
 
         var metadata = MetadataPublicationTests.Initial(new GraphFixture([1], blob: true));
         var write = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, metadata, stale, TestActor.Value);
         Assert.Equal("CellRequestFail", write.LockError);
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Fact]
@@ -74,8 +73,7 @@ public sealed class CoreCorrectnessTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/replay.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = StorageTests.Fixture("save-first");
-        Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).ExpectedStorageIndex =
-            StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service,state));
         var supplied = new DateTime(2024, 5, 6, 7, 8, 9, DateTimeKind.Utc);
         var attributes = new Dictionary<string, string>
         {
@@ -99,25 +97,29 @@ public sealed class CoreCorrectnessTests
     [Fact]
     public async Task EtagIsRecheckedInsideFinalFileCommitTransition()
     {
-        var stateStore = new InMemoryStateStore();
         var hookedContent = new HookContent(new InMemoryContentStore());
-        var provider = new StorageProvider(stateStore, hookedContent);
+        var provider = StorageTestDocuments.Memory(hookedContent);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/etag-race.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = StorageTests.Fixture("save-first");
-        Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).ExpectedStorageIndex =
-            StorageIds.Restore(state.Partitions[0].StorageIndex!);
-        hookedContent.AfterNextWrite = () => stateStore.TransitionAsync(state.ResourceId,
-            (current, _) => new StateTransition<bool>(current with { ContentVersion = current.ContentVersion + 1 }, true)).AsTask();
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service,state));
+        var concurrentBytes = MinimalDocx.Create("concurrent");
+        var concurrentRequest = await StorageTestDocuments.SaveRequestAsync(service,state,concurrentBytes);
+        hookedContent.AfterNextWrite = async () =>
+        {
+            var concurrent = await service.ExecuteAsync(state.ResourceId,DocumentPartitionKind.FileContents,concurrentRequest,
+                new Dictionary<string,string>(),TestActor.Value);
+            Assert.False(Assert.Single(concurrent.Response.SubResponses).Status);
+        };
 
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request,
             new Dictionary<string, string> { ["Etag"] = state.Etag }, TestActor.Value);
 
         Assert.Equal("CellRequestFail", result.LockError);
-        var current = (await stateStore.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(state.Content, current.Content);
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(concurrentBytes,await StorageTestDocuments.PackageAsync(provider,current.Package));
         Assert.Equal(state.ContentVersion + 1, current.ContentVersion);
-        Assert.Empty(current.Receipts);
+        Assert.Equal(1,current.Counters.SaveReceipts);
     }
 
     [Theory]
@@ -139,7 +141,7 @@ public sealed class CoreCorrectnessTests
             query, attributes, TestActor.Value);
 
         Assert.Equal("InvalidArgument", result.LockError);
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Fact]
@@ -148,8 +150,7 @@ public sealed class CoreCorrectnessTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/atomic.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = StorageTests.Fixture("save-first");
-        Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).ExpectedStorageIndex =
-            StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service,state));
         request.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 99 });
 
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
@@ -158,10 +159,10 @@ public sealed class CoreCorrectnessTests
         Assert.True(result.Response.Status);
         Assert.Equal((ulong)CellErrorCode.RequestStreamSchemaError, result.Response.Error?.ErrorCode);
         Assert.Empty(result.AcceptedSaves);
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
+    private static StorageProvider Memory() => StorageTestDocuments.Memory();
 
     private sealed class HookContent(IContentStore inner) : IContentStore
     {

@@ -39,13 +39,14 @@ public sealed class NestedPathPostgreSqlTests
             var provider = Provider(source);
             var service = new CellBridgeDocumentService(provider, authorizationPolicy: policy);
             var initial = (await service.CreateAsync(oldPath, MinimalDocx.Create("first"), TestActor.Value))!;
-            var saved = await RevisionHistoryTests.Save(service, initial, "second");
-            savedBytes = await provider.Content.ReadVerifiedAsync(saved.Content);
+            var saved = await RepositoryTestPublications.SaveAsync(service, initial, MinimalDocx.Create("second"));
+            var revisions = (await provider.Documents.ReadRevisionsAsync(initial.ResourceId, 0, 256))!.Revisions;
+            savedBytes = await StorageTestDocuments.PackageAsync(provider, saved.Package);
             var moved = await service.MoveDocumentAsync(initial.ResourceId, newPath, TestActor.Value);
             id = moved.ResourceId;
             Assert.Equal(newPath, moved.Path);
-            Assert.Equal(saved.Content, moved.Content);
-            Assert.Equal(JsonSerializer.Serialize(saved.Revisions), JsonSerializer.Serialize(moved.Revisions));
+            Assert.Equal(saved.Package, moved.Package);
+            Assert.Equal(JsonSerializer.Serialize(revisions), JsonSerializer.Serialize((await provider.Documents.ReadRevisionsAsync(initial.ResourceId, 0, 256))!.Revisions));
             var duplicate = (await service.CreateAsync(EscapePath(duplicatePath), MinimalDocx.Create("other"), TestActor.Value))!;
             duplicateId = duplicate.ResourceId;
             policy.Install(duplicateId, 2, false);
@@ -54,8 +55,8 @@ public sealed class NestedPathPostgreSqlTests
 
         await using var reopenedSource = NpgsqlDataSource.Create(connection);
         var reopenedProvider = Provider(reopenedSource);
-        Assert.Null(await reopenedProvider.State.FindByPathKeyAsync(oldPath.ToUpperInvariant()));
-        Assert.Equal(id, (await reopenedProvider.State.FindByPathKeyAsync(newPath.ToUpperInvariant()))!.ResourceId);
+        Assert.Null(await reopenedProvider.Documents.FindAsync(new DocumentIdentity.Path(oldPath.ToUpperInvariant())));
+        Assert.Equal(id, (await reopenedProvider.Documents.FindAsync(new DocumentIdentity.Path(newPath.ToUpperInvariant())))!.ResourceId);
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(policy);
@@ -160,7 +161,7 @@ public sealed class NestedPathPostgreSqlTests
             if (!_allowed.TryAdd((resourceId, revision), allowed))
                 throw new InvalidOperationException("A policy revision cannot change after installation.");
         }
-        public ICellBridgeAuthorizationSnapshot? Resolve(DocumentState state) =>
+        public ICellBridgeAuthorizationSnapshot? Resolve(DocumentAuthorizationView state) =>
             state.Security.AuthorizationPolicy is { } binding && binding == Binding(binding.Revision) &&
             _allowed.TryGetValue((state.ResourceId, binding.Revision), out var allowed)
                 ? new Snapshot(state.ResourceId, binding, allowed) : null;

@@ -16,7 +16,7 @@ public sealed class AsyncAuthorizationEndpointTests
     public async Task SharedAndHistoryDownloadsHideHeadersAndBytesAfterRevocation()
     {
         var authority = new MutableAuthority();
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = TestStorage.Memory();
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         TestActor.Register(builder.Services);

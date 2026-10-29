@@ -323,7 +323,7 @@ intersection of wire, parser, graph, storage and host limits.
 | MTOM | 128 parts; 16 KiB part-header budget | `CellBridgeOptions` |
 | Materialized document / graph / object | 128 MiB document; 512 MiB graph; 512 MiB object; 100000 graph elements | `StorageLimits` |
 | History / receipts | 1000 retained revisions; 10000 save receipts; 1000 restore receipts | `StorageLimits`; no automatic history pruning inferred |
-| Stored bytes / documents | 1 GiB per document; 10 GiB store; 10000 documents | `StorageLimits`; policy scope is separate from protocol operation scope |
+| Stored bytes | 1 GiB per document; no provider-wide byte or document-count cap | `StorageLimits`; provider-wide quotas were removed by the approved policy |
 | Knowledge / author lists | 10000 decoded knowledge entries; 1024 author logins and 64 Ki UTF-16 characters combined | `ClientKnowledge`, `PutChangesSubRequestData` |
 | Rename / property get | 255-character path segment; 256 requested property IDs | `OuterDocumentOperations` |
 | Concurrent request admission / deadline | 8 per process; 2 per subject; 2 minutes | `CellBridgeOptions`; global admission is not a protocol locking requirement |
@@ -355,8 +355,8 @@ Implementation evidence inspected: [HTTP endpoints](../src/CellBridge.AspNetCore
 [history/properties/rename](../src/CellBridge/Execution/OuterDocumentOperations.cs),
 [binary parser](../src/CellBridge.FssHttpB/FsshttpbCellRequest.cs),
 [binary execution](../src/CellBridge/Execution/CellBridgeDocumentService.cs),
-[file saves](../src/CellBridge/Execution/FilePartitionSaveHandler.cs),
-[metadata saves](../src/CellBridge/Execution/GenericPartitionSaveHandler.cs),
+[file saves](../src/CellBridge/Execution/IndexedPartitionSavePreparer.cs),
+[metadata saves](../src/CellBridge/Execution/IndexedPartitionSavePreparer.cs),
 [query shaping](../src/CellBridge/Execution/QueryChangesResponseShaper.cs), and
 [storage limits](../src/CellBridge/Storage/StorageLimits.cs).
 

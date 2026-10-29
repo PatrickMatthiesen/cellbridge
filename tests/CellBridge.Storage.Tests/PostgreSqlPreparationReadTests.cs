@@ -10,28 +10,28 @@ public sealed class PostgreSqlPreparationReadTests
 {
     [PostgreSqlFact]
     public Task PreparationUsesCurrentSnapshotAndDatabaseClockAndRejectsMissingSnapshot() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        EfPostgreSqlMigrationTests.WithInitializedDatabaseAsync(new(), async source =>
         {
-            var store = new PostgreSqlStateStore(source);
+            IDocumentRepository store = new PostgreSqlStateStore(source);
             var initial = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
                 .CreateAsync("/preparation.docx", MinimalDocx.Create(), TestActor.Value))!;
-            Assert.Null(await store.ReadPreparationAsync(Guid.NewGuid()));
+            Assert.Null(await store.ReadControlAsync(Guid.NewGuid()));
 
             await using var beforeCommand = source.CreateCommand("SELECT clock_timestamp()");
             var before = (DateTime)(await beforeCommand.ExecuteScalarAsync())!;
-            var view = (await store.ReadPreparationAsync(initial.ResourceId))!;
+            var view = (await store.ReadControlAsync(initial.ResourceId))!;
             await using var afterCommand = source.CreateCommand("SELECT clock_timestamp()");
             var after = (DateTime)(await afterCommand.ExecuteScalarAsync())!;
-            Assert.Equal(initial.StateVersion, view.State.StateVersion);
-            Assert.Equal(initial.Content, view.State.Content);
+            Assert.Equal(initial.StateVersion, view.Head.StateVersion);
+            Assert.Equal(initial.Package, view.Head.Package);
             Assert.Equal(DateTimeKind.Utc, view.UtcNow.Kind);
             Assert.InRange(view.UtcNow, before, after);
 
-            await using (var remove = source.CreateCommand("DELETE FROM cellbridge_states WHERE resource_id=$1"))
+            await using (var remove = source.CreateCommand("DELETE FROM cellbridge_repository_coordination WHERE \"ResourceId\"=$1"))
             {
                 remove.Parameters.AddWithValue(initial.ResourceId);
                 await remove.ExecuteNonQueryAsync();
             }
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadPreparationAsync(initial.ResourceId).AsTask());
+            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadControlAsync(initial.ResourceId).AsTask());
         });
 }

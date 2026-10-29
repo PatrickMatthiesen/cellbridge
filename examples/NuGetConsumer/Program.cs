@@ -6,7 +6,8 @@ using CellBridge.Storage.InMemory;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 
 var builder = WebApplication.CreateBuilder(args);
-var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+var content = new InMemoryContentStore();
+var provider = new StorageProvider(new InMemoryDocumentRepository(content), content);
 builder.Services.AddCellBridge(provider, requireDurability: false);
 // The consuming application supplies a real token authority. This sample is a
 // bearer-token API host; desktop Office needs its own compatible sign-in flow.

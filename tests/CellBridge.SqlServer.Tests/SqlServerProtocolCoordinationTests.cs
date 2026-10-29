@@ -16,7 +16,7 @@ public sealed class SqlServerProtocolCoordinationTests(SqlServerFixture fixture)
         var database = await SqlServerDocuments.CreateAsync(fixture);
         var provider = database.Provider();
         var initial = (await new CellBridgeDocumentService(provider).CreateAsync("/fallback.docx", MinimalDocx.Create(), SqlServerDocuments.Actor))!;
-        var request = Save(initial);
+        var request = await Save(provider, initial);
         var saved = await Processor().ExecuteAsync(request, "https://host.test", SqlServerDocuments.Actor);
         AssertResponses(saved.Response);
         var accepted = Assert.Single(saved.AcceptedSaves);
@@ -24,11 +24,11 @@ public sealed class SqlServerProtocolCoordinationTests(SqlServerFixture fixture)
         var replay = await Processor().ExecuteAsync(request, "https://host.test", SqlServerDocuments.Actor);
         AssertResponses(replay.Response);
         Assert.Equal(accepted with { IsReplay = true }, Assert.Single(replay.AcceptedSaves));
-        var current = (await provider.State.FindByResourceIdAsync(initial.ResourceId))!;
-        Assert.Equal(accepted.Content, current.Content);
-        Assert.Single(current.Receipts);
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)))!;
+        Assert.Equal(accepted.Package, current.Package);
+        Assert.Equal(1, current.Counters.SaveReceipts);
         var reader = SqlServerDocuments.Actor with { AccessLimit = new(current.ResourceId, DocumentAccess.Read) };
-        var denied = await Processor().ExecuteAsync(Save(current), "https://host.test", reader);
+        var denied = await Processor().ExecuteAsync(await Save(provider, current), "https://host.test", reader);
         Assert.Empty(denied.AcceptedSaves);
         Assert.NotEqual("Success", denied.Response.Responses[0].SubResponses[2].ErrorCode);
 
@@ -36,9 +36,9 @@ public sealed class SqlServerProtocolCoordinationTests(SqlServerFixture fixture)
         missing.Url = "https://host.test/fallback.docx";
         var unknown = await Processor().ExecuteAsync(new() { Requests = { missing } }, "https://host.test", SqlServerDocuments.Actor);
         Assert.NotEqual("Success", Assert.Single(Assert.Single(unknown.Response.Responses).SubResponses).ErrorCode);
-        Assert.Single(await provider.State.ListAsync(0, 100));
-        Assert.Equal(current.ContentVersion, (await provider.State.FindByResourceIdAsync(current.ResourceId))!.ContentVersion);
-        await database.AssertAccountingAsync();
+        Assert.Single(await provider.Documents.ListAsync(0, 100));
+        Assert.Equal(current.ContentVersion, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(current.ResourceId)))!.ContentVersion);
+        await database.AssertInventoryAsync();
 
         CellBridgeRequestProcessor Processor() => new(new CellBridgeDocumentService(database.Provider()));
     }
@@ -55,50 +55,54 @@ public sealed class SqlServerProtocolCoordinationTests(SqlServerFixture fixture)
         Assert.True(acquired.Success);
         Assert.False((await peer.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "casesensitive", SqlServerDocuments.Actor)).Success);
         Assert.True((await peer.ApplyAsync(state.ResourceId, HostLockOperation.Refresh, "CaseSensitive", SqlServerDocuments.Actor)).Success);
-        var current = (await second.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.False(await host.TryCommitAsync(acquired.WriteToken!, current.StateVersion, SqlServerDocuments.Actor, (row, _) => row, Guid.NewGuid()));
+        var current = (await second.Documents.ReadControlAsync(state.ResourceId))!;
+        Assert.False(await host.TryCommitAsync(acquired.WriteToken!, Publication(current, acquired.WriteToken!), SqlServerDocuments.Actor));
         var replaced = await host.ApplyAsync(state.ResourceId, HostLockOperation.Replace, "CaseSensitive", SqlServerDocuments.Actor, "replacement");
         Assert.True(replaced.Success);
-        current = (await second.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.True(await peer.TryCommitAsync(replaced.WriteToken!, current.StateVersion, SqlServerDocuments.Actor, (row, _) => row, Guid.NewGuid()));
+        current = (await second.Documents.ReadControlAsync(state.ResourceId))!;
+        Assert.True(await peer.TryCommitAsync(replaced.WriteToken!, Publication(current, replaced.WriteToken!), SqlServerDocuments.Actor));
         Assert.True((await peer.ApplyAsync(state.ResourceId, HostLockOperation.Release, "replacement", SqlServerDocuments.Actor)).Success);
-        Assert.False(await host.TryCommitAsync(replaced.WriteToken!, current.StateVersion, SqlServerDocuments.Actor, (row, _) => row, Guid.NewGuid()));
+        Assert.False(await host.TryCommitAsync(replaced.WriteToken!, Publication(current, replaced.WriteToken!), SqlServerDocuments.Actor));
 
         var client = Guid.NewGuid().ToString(); var other = Guid.NewGuid().ToString(); var schema = Guid.NewGuid().ToString();
         await Transition("JoinCoauthoring", client);
         await Transition("JoinCoauthoring", other);
-        current = (await second.State.FindByResourceIdAsync(state.ResourceId))!;
+        current = (await second.Documents.ReadControlAsync(state.ResourceId))!;
         Assert.Equal(2, current.Coordination.CoauthorClients.Length);
         Assert.True(current.Coordination.CoauthorTransitionPending);
         await Transition("ExitCoauthoring", other);
         await Transition("MarkTransitionComplete", client);
         await Transition("ConvertToExclusive", client);
-        current = (await first.State.FindByResourceIdAsync(state.ResourceId))!;
+        current = (await first.Documents.ReadControlAsync(state.ResourceId))!;
         Assert.NotNull(current.Coordination.Exclusive);
         Assert.Empty(current.Coordination.CoauthorClients);
-        Assert.Equal(state.Content, current.Content);
-        Assert.Equal(state.ContentVersion, current.ContentVersion);
-        await database.AssertAccountingAsync();
+        Assert.Equal(state.Package,current.Head.Package);
+        Assert.Equal(state.ContentVersion,current.Head.ContentVersion);
+        await database.AssertInventoryAsync();
 
-        async Task Transition(string operation, string id) => await database.Provider().State.TransitionAsync(state.ResourceId, (row, now) =>
+        async Task Transition(string operation, string id)
         {
-            var document = StoredDocument.RestoreMetadata(row, now);
-            var coordinator = FssHttpLockCoordinator.Restore(document, row.Coordination, now, SqlServerDocuments.Actor.Identity);
-            var request = new FssHttpSubRequest { SubRequestDataAttributes =
+            var repository=database.Provider().Documents;
+            var head=(await repository.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+            var request=new FssHttpSubRequest { Type=SubRequestType.Coauth, SubRequestDataAttributes =
             {
-                ["CoauthRequestType"] = operation, ["ClientID"] = id, ["SchemaLockID"] = schema,
-                ["Timeout"] = "3600", ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111"
-            } };
-            if (operation == "ConvertToExclusive")
-                request.SubRequestDataAttributes["ReleaseLockOnConversionToExclusiveFailure"] = "false";
-            var response = new FssHttpSubResponse();
-            coordinator.ApplyCoauthSession(document, request, response);
-            Assert.Null(response.ErrorCode);
-            return new StateTransition<bool>(document.CaptureCoordination(row, coordinator.Capture()), true);
-        });
+                ["CoauthRequestType"]=operation,["ClientID"]=id,["SchemaLockID"]=schema,
+                ["Timeout"]="3600",["ExclusiveLockID"]="11111111-1111-1111-1111-111111111111"
+            }};
+            if(operation=="ConvertToExclusive") request.SubRequestDataAttributes["ReleaseLockOnConversionToExclusiveFailure"]="false";
+            var result=await repository.ExecuteControlAsync(new DocumentControlCommand.Office(head.ResourceId,SqlServerDocuments.Admit(head),request));
+            Assert.Null(result.ErrorCode);
+        }
     }
 
-    private static CellStorageRequest Save(DocumentState state)
+    private static PreparedDocumentPublication Publication(DocumentControlRead read,HostWriteToken token) => new(read.Head.ResourceId,
+        SqlServerDocuments.Admit(read.Head),new(read.Head.LifecycleGeneration,read.Head.AuthorityGeneration,
+            token.CoordinationGeneration,read.Head.StateVersion,read.Head.ContentVersion,[]),
+        new(new(read.Head.LifecycleGeneration,SaveOperationFamily.WholeFile,0,Guid.NewGuid().ToString()),new string('a',64),
+            SqlServerDocuments.Actor.Identity.Subject,read.Head.ContentVersion,read.Head.LatestRevisionNumber,null,null),[])
+        { HostLockToken=token.LockToken };
+
+    private static async Task<CellStorageRequest> Save(StorageProvider provider,DocumentHead state)
     {
         var file = File(state.ResourceId, SubRequestType.Coauth, SubRequestType.SchemaLock, SubRequestType.Cell);
         var client = Guid.NewGuid().ToString(); var schema = Guid.NewGuid().ToString();
@@ -117,7 +121,7 @@ public sealed class SqlServerProtocolCoordinationTests(SqlServerFixture fixture)
         cell.DependsOn = fallback.SubRequestToken; cell.DependencyType = "OnSuccessOrNotSupported";
         cell.SubRequestDataAttributes["BypassLockID"] = schema;
         cell.SubRequestDataAttributes["SchemaLockID"] = schema;
-        cell.SubRequestDataBinary = SqlServerDocumentTests.Proposal(state, MinimalDocx.Create("outer save")).ToByteArray();
+        cell.SubRequestDataBinary = (await SqlServerDocuments.ProposalAsync(provider,state,MinimalDocx.Create("outer save"))).ToByteArray();
         cell.SubRequestDataAttributes["BinaryDataSize"] = cell.SubRequestDataBinary.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return new() { Requests = { file } };
     }

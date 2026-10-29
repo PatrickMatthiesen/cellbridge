@@ -1,19 +1,18 @@
 using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
-using CellBridge.Storage;
 
 namespace CellBridge.TestFixtures;
 
 public static class SyntheticWorkload
 {
-    public static FsshttpbCellRequest Save(StoredDocument current, byte[] payload, string mode, int iteration, Random random)
+    public static FsshttpbCellRequest Save(PartitionGraphSnapshot graph, byte[] payload, string mode, int iteration, Random random)
     {
+        ArgumentNullException.ThrowIfNull(graph);
         byte[] guidBytes = new byte[16]; random.NextBytes(guidBytes);
         var id = new Guid(guidBytes);
-        var cell = current.FilePartition.ProtocolIdentity.CellId;
+        var cell = graph.FileCell;
         var identity = new StorageManifestBuilder.StableIdentity(new(1, id), new(2, id), new(3, id),
             new(4, id), new(5, id), new(6, id), new(7, id), cell, id);
-        var graph = current.FilePartition.FileGraph;
         var generated = FileContentPartitionBuilder.BuildQueryChangesResponse(1,
             mode.StartsWith("delta", StringComparison.Ordinal) ? [] : payload, identity, (ulong)iteration + 1);
         var package = generated.DataElementPackage!;
@@ -46,9 +45,14 @@ public static class SyntheticWorkload
                 proposed.Data = [..proposed.Data!, ..mappings.ToArray()];
             }
         }
+        var expected = graph.StorageIndexes.Single(element => element.DataElementExtendedGuid.Equals(graph.StorageIndex));
+        package.DataElements.Add(new(expected.DataElementType,
+            new(expected.DataElementExtendedGuid.Value, expected.DataElementExtendedGuid.Guid),
+            new(expected.SerialNumber.Guid, expected.SerialNumber.Value)) { Data = expected.Data!.ToArray() });
         var request = new FsshttpbCellRequest { DataElementPackage = package };
         request.SubRequests.Add(new(RequestTypes.PutChanges) { RequestId = (ulong)iteration + 1,
-            Data = new PutChangesSubRequestData { StorageIndex = identity.ObjectDataBlobGuid, ExpectedStorageIndex = graph.StorageIndex } });
+            Data = new PutChangesSubRequestData { StorageIndex = identity.ObjectDataBlobGuid, ExpectedStorageIndex = graph.StorageIndex,
+                HasAdditionalFlags = true, AdditionalFlagsBits = 1 } });
         return request;
     }
 

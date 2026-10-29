@@ -34,7 +34,7 @@ public sealed class CaptureConfigurationTests
             builder.Logging.ClearProviders();
             builder.Logging.AddProvider(logs);
             TestActor.Register(builder.Services);
-            var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+            var provider = TestStorage.Memory();
             builder.Services.AddCellBridge(provider, requireDurability: false,
                 configure: options => options.CaptureDirectory = enabled ? directory : setting);
             await using var app = builder.Build();

@@ -14,163 +14,107 @@ public sealed class SelectiveFileSaveTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task SupportedSavesPreserveCompleteCatalogAndResponseWithoutReadingOldObjectHistory(bool incremental)
+    public async Task SupportedSavesPreserveHistoryWithoutReadingOldObjectPayloads(bool incremental)
     {
         var content = new CountingContent(new InMemoryContentStore());
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory(content);
         var service = new CellBridgeDocumentService(provider);
         var corpus = new IncrementalOfficeWorkload(256);
-        var state = (await service.CreateAsync("/selective.docx", corpus.CreateContent(), TestActor.Value))!;
-        var client = (await StoredDocument.RestoreAsync(state, content)).FilePartition.FileGraph;
+        var head = (await service.CreateAsync("/selective.docx", corpus.CreateContent(), TestActor.Value))!;
         long? firstRead = null;
         for (var revision = 1; revision <= 24; revision++)
         {
-            var document = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-            var save = incremental ? corpus.CreateSave(client, revision).Request :
-                SyntheticWorkload.Save(await StoredDocument.RestoreAsync(state, content), corpus.CreateContent(revision), "full", revision, new Random(revision));
-            var operation = Assert.Single(save.SubRequests);
-            var package = save.DataElementPackage!;
-            var put = Assert.IsType<PutChangesSubRequestData>(operation.Data);
-            // The full graph is available only in the client and reference preparation.
-            if (!incremental) put.ExpectedStorageIndex = client.StorageIndex;
-            var reference = await FilePartitionSaveHandler.PrepareAsync(state, document, operation, package,
-                content, provider.Limits, default, forceFullGraph: true);
-            content.ObjectKeys = state.Partitions.Single(p => p.Kind == 0).Elements
-                .Where(e => e.Type == (uint)DataElementType.ObjectGroupDataElementData).Select(e => e.Payload.Key).ToHashSet();
+            var graph = await StorageTestDocuments.GraphAsync(service, head);
+            var request = incremental ? corpus.CreateSave(graph, revision).Request :
+                SyntheticWorkload.Save(graph, corpus.CreateContent(revision), "full", revision, new Random(revision));
+            var before = (await provider.Documents.ExportDocumentAsync(head.ResourceId))!;
+            content.ObjectKeys = before.Elements.Where(e => e.Element.Type == (uint)DataElementType.ObjectGroupDataElementData)
+                .Select(e => e.Element.Payload.Key).ToHashSet();
             content.ObjectBytesRead = 0;
-            var selected = await FilePartitionSaveHandler.PrepareAsync(state, document, operation, package,
-                content, provider.Limits, default);
-            Assert.False(selected.Response.Status);
-            Assert.NotNull(selected.AddedElements);
-            Assert.Equal(ResponseBytes(reference), ResponseBytes(selected));
-            Assert.Equal(reference.KnowledgeSequence, selected.KnowledgeSequence);
-            Assert.Equal(reference.Graph!.Materialize(), selected.Graph!.Materialize());
-            Assert.Equal(reference.AddedBytes, selected.AddedBytes);
-            Assert.Equal(reference.AddedCount, selected.AddedCount);
+            var saved = await service.ExecuteAsync(head.ResourceId, DocumentPartitionKind.FileContents, request,
+                new Dictionary<string, string>(), TestActor.Value);
+            Assert.False(Assert.Single(saved.Response.SubResponses).Status);
             if (revision >= 2)
             {
                 firstRead ??= content.ObjectBytesRead;
                 Assert.Equal(firstRead.Value, content.ObjectBytesRead);
                 if (!incremental) Assert.Equal(0, content.ObjectBytesRead);
             }
-            var selectedReadBytes = content.ObjectBytesRead;
-            var handle = await content.WriteAsync(new MemoryStream(corpus.CreateContent(revision)));
-            var oldCapture = await DocumentPartition.CaptureFileGraphAsync(state.Partitions.Single(p => p.Kind == 0),
-                reference.Graph!, reference.KnowledgeSequence, handle, content);
-            var newCapture = await DocumentPartition.CaptureFileDeltaAsync(state.Partitions.Single(p => p.Kind == 0),
-                selected.Graph.StorageIndex, selected.AddedElements!, selected.KnowledgeSequence, handle, content);
-            AssertCatalogEqual(oldCapture, newCapture);
-            var before = state;
-            content.ObjectBytesRead = 0;
-            var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, save,
-                new Dictionary<string, string>(), TestActor.Value);
-            Assert.False(Assert.Single(result.Response.SubResponses).Status);
-            Assert.Equal(selectedReadBytes, content.ObjectBytesRead);
-            Assert.Equal(ResponseBytes(reference), result.Response.ToByteArray());
-            AssertCatalogEqual(oldCapture, result.State.Partitions.Single(p => p.Kind == 0));
-            foreach (var old in before.Partitions.Single(p => p.Kind == 0).Elements)
-                Assert.Same(old, result.State.Partitions.Single(p => p.Kind == 0).Elements.Single(e => e.Id == old.Id));
-            state = result.State;
-            client = client.Merge(package.DataElements, put.StorageIndex);
+            head = saved.State;
+            var after = (await provider.Documents.ExportDocumentAsync(head.ResourceId))!;
+            foreach (var old in before.Elements)
+                Assert.Equal(old, after.Elements.Single(e => e.Scope == old.Scope && e.Element.Id == old.Element.Id));
+            Assert.Equal(corpus.CreateContent(revision), await StorageTestDocuments.PackageAsync(provider, head.Package));
+            Assert.Equal((ulong)revision + 1, head.LatestRevisionNumber);
         }
-        Assert.Equal(corpus.CreateContent(24), await content.ReadVerifiedAsync(state.Content));
-        Assert.Equal(corpus.CreateContent(24), (await DocumentPartition.RestoreFileGraphAsync(state, content, provider.Limits)).Materialize());
+        Assert.Equal(corpus.CreateContent(24), (await StorageTestDocuments.GraphAsync(service, head)).Materialize());
     }
 
     [Fact]
     public async Task DeltaPersistenceUsesValidatedOwnedBytesAfterTheCallerMutatesRequestBuffers()
     {
-        var content = new InMemoryContentStore();
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var corpus = new IncrementalOfficeWorkload(256);
-        var state = (await service.CreateAsync("/owned-delta.docx", corpus.CreateContent(), TestActor.Value))!;
-        var graph = (await StoredDocument.RestoreAsync(state, content)).FilePartition.FileGraph;
-        var save = corpus.CreateSave(graph, 1);
-        var prepared = await FilePartitionSaveHandler.PrepareAsync(state,
-            StoredDocument.RestoreMetadata(state, DateTime.UtcNow), save.Request.SubRequests[0],
-            save.Request.DataElementPackage!, content, provider.Limits, default);
-        Assert.False(prepared.Response.Status);
-        Assert.NotNull(prepared.AddedElements);
-        Assert.Equal(save.Content, prepared.Graph!.Materialize());
-        var originalResponse = ResponseBytes(prepared);
-        foreach (var element in save.Request.DataElementPackage!.DataElements)
-            Array.Fill(element.Data!, (byte)0xA5);
-        Assert.Equal(originalResponse, ResponseBytes(prepared));
-        Assert.Equal(save.Content, prepared.Graph.Materialize());
-        var packageHandle = await content.WriteAsync(new MemoryStream(save.Content, writable: false));
-        var partition = await DocumentPartition.CaptureFileDeltaAsync(state.Partitions.Single(p => p.Kind == 0),
-            prepared.Graph.StorageIndex, prepared.AddedElements!, prepared.KnowledgeSequence, packageHandle, content);
-        var candidate = state with { Content = packageHandle,
-            Partitions = state.Partitions.Select(p => p.Kind == 0 ? partition : p).ToImmutableArray() };
-        var persisted = await DocumentPartition.RestoreFileGraphAsync(candidate, content, provider.Limits);
-        Assert.Equal(save.Content, persisted.Materialize());
-        foreach (var expected in prepared.AddedElements!)
-        {
-            var stored = partition.Elements.Single(e => e.Id == StorageIds.Capture(expected.DataElementExtendedGuid));
-            Assert.Equal(expected.Data, await content.ReadVerifiedAsync(stored.Payload));
-        }
+        var head = (await service.CreateAsync("/owned-delta.docx", corpus.CreateContent(), TestActor.Value))!;
+        var save = corpus.CreateSave(await StorageTestDocuments.GraphAsync(service, head), 1);
+        var prepared = await Prepare(provider, head, save.Request);
+        Assert.False(Assert.Single(prepared.Response.SubResponses).Status);
+        var publication = Assert.IsType<PreparedDocumentPublication>(prepared.Publication);
+        var originalResponse = prepared.Response.ToByteArray();
+        var originals = publication.Partitions.Single(p => p.After.Kind == 0).AddedElements.ToDictionary(e => e.Id,
+            e => save.Request.DataElementPackage!.DataElements.Single(i => StorageIds.Capture(i.DataElementExtendedGuid) == e.Id).Data!.ToArray());
+        foreach (var element in save.Request.DataElementPackage!.DataElements) Array.Fill(element.Data!, (byte)0xA5);
+        Assert.Equal(originalResponse, prepared.Response.ToByteArray());
+        var result = await provider.Documents.PublishAsync(publication);
+        Assert.Equal(PublicationStatus.Accepted, result.Status);
+        Assert.Equal(save.Content, await StorageTestDocuments.PackageAsync(provider, result.Current.Package));
+        foreach (var element in publication.Partitions.Single(p => p.After.Kind == 0).AddedElements)
+            Assert.Equal(originals[element.Id], await provider.Content.ReadVerifiedAsync(element.Payload));
     }
 
     [Fact]
-    public async Task MissingCurrentIndexUsesTheSameCorruptionErrorAsFullPreparation()
+    public async Task MissingCurrentMappingRejectsWithoutPublishing()
     {
-        var content = new InMemoryContentStore();
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
-        var corpus = new IncrementalOfficeWorkload(256);
-        var state = (await service.CreateAsync("/missing-current-index.docx", corpus.CreateContent(), TestActor.Value))!;
-        var graph = (await StoredDocument.RestoreAsync(state, content)).FilePartition.FileGraph;
-        var save = corpus.CreateSave(graph, 1).Request;
-        var source = state.Partitions.Single(p => p.Kind == 0);
-        source = source with { Elements = source.Elements.Where(e => e.Id != source.StorageIndex).ToImmutableArray() };
-        state = state with { Partitions = state.Partitions.Select(p => p.Kind == 0 ? source : p).ToImmutableArray() };
-        var metadata = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-        var expected = await Record.ExceptionAsync(async () =>
-        {
-            await FilePartitionSaveHandler.PrepareAsync(state, metadata, save.SubRequests[0], save.DataElementPackage!,
-                content, provider.Limits, default, forceFullGraph: true);
-        });
-        var actual = await Record.ExceptionAsync(async () =>
-        {
-            await FilePartitionSaveHandler.PrepareAsync(state, metadata, save.SubRequests[0], save.DataElementPackage!,
-                content, provider.Limits, default);
-        });
-        Assert.IsType<InvalidDataException>(expected);
-        Assert.NotNull(actual);
-        Assert.Equal(expected.GetType(), actual.GetType());
-        Assert.Equal(expected.Message, actual.Message);
+        var head = (await service.CreateAsync("/missing-current-index.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var request = new IncrementalOfficeWorkload(256).CreateSave(await StorageTestDocuments.GraphAsync(service, head), 1).Request;
+        var preparation = await ReadPreparation(provider, head, request);
+        preparation = preparation with { Partition = preparation.Partition with {
+            Partition = preparation.Partition.Partition with { StorageIndex = null } } };
+        var result = await IndexedPartitionSavePreparer.PrepareAsync(preparation, request.SubRequests[0], request.DataElementPackage!,
+            StorageTestDocuments.Admission(head), new Dictionary<string,string>(), provider.Documents, provider.Content, provider.Limits);
+        Assert.Null(result.Publication);
+        Assert.True(Assert.Single(result.Response.SubResponses).Status);
+        Assert.Equal(head, await provider.Documents.FindAsync(new DocumentIdentity.Resource(head.ResourceId)));
     }
 
     [Fact]
-    public async Task HistoricalCorruptionIsDeferredButSelectedAndTouchedObjectsAreVerified()
+    public async Task HistoricalCorruptionIsDeferredButSelectedObjectsAreVerified()
     {
         var content = new CountingContent(new InMemoryContentStore());
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory(content);
         var service = new CellBridgeDocumentService(provider);
-        var corpus = new IncrementalOfficeWorkload(256);
-        var state = (await service.CreateAsync("/corruption.docx", corpus.CreateContent(), TestActor.Value))!;
-        var client = (await StoredDocument.RestoreAsync(state, content)).FilePartition.FileGraph;
-        var historic = state.Partitions.Single(p => p.Kind == 0).Elements.Single(e => e.Type == (uint)DataElementType.ObjectGroupDataElementData);
-        var seed = corpus.CreateSave(client, 1);
-        state = (await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, seed.Request,
-            new Dictionary<string, string>(), TestActor.Value)).State;
-        client = client.Merge(seed.Request.DataElementPackage!.DataElements,
-            ((PutChangesSubRequestData)seed.Request.SubRequests[0].Data!).StorageIndex);
+        var initial = (await service.CreateAsync("/corruption.docx", MinimalDocx.Create("initial"), TestActor.Value))!;
+        var historic = (await provider.Documents.ReadPartitionAsync(initial.ResourceId, new(0) { IncludeCatalog = true }))!.Elements
+            .Single(e => e.Type == (uint)DataElementType.ObjectGroupDataElementData);
+        var head = (await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
+            await StorageTestDocuments.SaveRequestAsync(service, initial, MinimalDocx.Create("replacement")),
+            new Dictionary<string,string>(), TestActor.Value)).State;
+        var nextBytes = MinimalDocx.Create("next");
+        var request = await StorageTestDocuments.SaveRequestAsync(service, head, nextBytes);
         content.CorruptKey = historic.Payload.Key;
-        var next = corpus.CreateSave(client, 2);
-        var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, next.Request,
-            new Dictionary<string, string>(), TestActor.Value);
+        var saved = await service.ExecuteAsync(head.ResourceId, DocumentPartitionKind.FileContents, request,
+            new Dictionary<string,string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
-        await Assert.ThrowsAsync<StorageCorruptionException>(async () =>
-            await DocumentPartition.RestoreFileGraphAsync(saved.State, content, provider.Limits));
-        content.CorruptKey = state.Partitions.Single(p => p.Kind == 0).Elements
-            .First(e => e.Type == (uint)DataElementType.ObjectGroupDataElementData && e.Id != historic.Id &&
-                !seed.Request.DataElementPackage!.DataElements.Last(e => e.DataElementType == DataElementType.ObjectGroupDataElementData)
-                    .DataElementExtendedGuid.Equals(StorageIds.Restore(e.Id))).Payload.Key;
-        await Assert.ThrowsAsync<StorageCorruptionException>(async () =>
-            await FilePartitionSaveHandler.PrepareAsync(state, StoredDocument.RestoreMetadata(state, DateTime.UtcNow),
-                next.Request.SubRequests[0], next.Request.DataElementPackage!, content, provider.Limits, default));
+        Assert.Equal(nextBytes, await StorageTestDocuments.PackageAsync(provider, saved.State.Package));
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => StorageTestDocuments.PackageAsync(provider, initial.Package));
+        content.CorruptKey = null;
+        var current = (await provider.Documents.ReadPartitionAsync(head.ResourceId, new(0) { IncludeBindings = true }))!;
+        var group = current.Bindings.First().GroupElement;
+        content.CorruptKey = (await provider.Documents.ReadElementsAsync(new(head.ResourceId, head.LifecycleGeneration, 0), [group])).Single().Payload.Key;
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => StorageTestDocuments.PackageAsync(provider, saved.State.Package));
     }
 
     [Theory]
@@ -178,42 +122,39 @@ public sealed class SelectiveFileSaveTests
     [InlineData("type")]
     [InlineData("content")]
     [InlineData("serial")]
-    public async Task DuplicatesIdentityChecksAndMappingSerialsMatchFullPreparation(string mutation)
+    public async Task DuplicateIdentityAndMappingSerialValidationIsPreserved(string mutation)
     {
-        var content = new InMemoryContentStore();
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
-        var corpus = new IncrementalOfficeWorkload(256);
-        var state = (await service.CreateAsync("/identities.docx", corpus.CreateContent(), TestActor.Value))!;
-        var graph = (await StoredDocument.RestoreAsync(state, content)).FilePartition.FileGraph;
-        var save = corpus.CreateSave(graph, 1).Request;
-        var package = save.DataElementPackage!;
+        var head = (await service.CreateAsync("/identities.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var graph = await StorageTestDocuments.GraphAsync(service, head);
+        var request = new IncrementalOfficeWorkload(256).CreateSave(graph, 1).Request;
+        var package = request.DataElementPackage!;
         if (mutation == "duplicate") package.DataElements.Add(package.DataElements[0]);
         else if (mutation is "type" or "content")
         {
             var old = graph.Elements.First(e => e.DataElementType == DataElementType.ObjectGroupDataElementData);
             package.DataElements.Add(new DataElement(mutation == "type" ? DataElementType.ObjectDataBLOBDataElementData : old.DataElementType,
-                old.DataElementExtendedGuid, SerialNumber.Null) { Data = mutation == "content" ? [1, 2, 3] : old.Data });
+                old.DataElementExtendedGuid, SerialNumber.Null) { Data = mutation == "content" ? [1,2,3] : old.Data });
         }
         else
         {
-            var index = graph.StorageIndexes.Single();
-            var mapping = StorageIndexMappingSerials.ReadMappings(index.Data!).First();
-            var target = new ExGuid(99, Guid.NewGuid());
-            var writer = new BinaryWriterEx();
-            var body = new BinaryWriterEx(); target.Serialize(body); mapping.Serial.Serialize(body);
-            new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.StorageIndexManifestMapping, body.Length).Serialize(writer);
-            writer.WriteBytes(body.ToArray());
-            package.DataElements.Add(new DataElement(DataElementType.StorageIndexDataElementData,
-                new ExGuid(98, Guid.NewGuid()), SerialNumber.Null) { Data = writer.ToArray() });
+            var retained = StorageIndexMappingSerials.ReadMappings(graph.StorageIndexes.Single().Data!)
+                .First(mapping => !mapping.Serial.IsNull);
+            var put = (PutChangesSubRequestData)Assert.Single(request.SubRequests).Data!;
+            var selected = package.DataElements.Single(element => element.DataElementExtendedGuid.Equals(put.StorageIndex));
+            var updates = StorageIndexPatch.Read(selected).ToArray();
+            var conflicting = Array.FindIndex(updates, update => update.Type != retained.Type ||
+                !Equals(update.Revision, retained.Revision) || !Equals(update.Cell, retained.Cell) ||
+                !Equals(update.Target, retained.Target));
+            Assert.True(conflicting >= 0);
+            updates[conflicting] = updates[conflicting] with { Serial = retained.Serial };
+            selected.Data = StorageIndexPatch.Serialize(updates);
         }
-        var metadata = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-        var expected = await FilePartitionSaveHandler.PrepareAsync(state, metadata, save.SubRequests[0], package,
-            content, provider.Limits, default, forceFullGraph: true);
-        var actual = await FilePartitionSaveHandler.PrepareAsync(state, metadata, save.SubRequests[0], package,
-            content, provider.Limits, default);
-        Assert.Equal(ResponseBytes(expected), ResponseBytes(actual));
-        Assert.Equal(mutation != "duplicate", actual.Response.Status);
+        var prepared = await Prepare(provider, head, request);
+        Assert.Equal(mutation != "duplicate", Assert.Single(prepared.Response.SubResponses).Status);
+        Assert.Equal(mutation == "duplicate", prepared.Publication is not null);
+        Assert.Equal(head, await provider.Documents.FindAsync(new DocumentIdentity.Resource(head.ResourceId)));
     }
 
     [Theory]
@@ -221,131 +162,73 @@ public sealed class SelectiveFileSaveTests
     [InlineData(true)]
     public async Task CompleteCatalogQuotasApplyEvenWhenSelectedGraphIsSmall(bool bytes)
     {
-        var content = new InMemoryContentStore();
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/quota.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var corpus = new IncrementalOfficeWorkload(256);
-        var client = (await StoredDocument.RestoreAsync(state, content)).FilePartition.FileGraph;
-        for (var revision = 1; revision <= 3; revision++)
-        {
-            var save = corpus.CreateSave(client, revision);
-            state = (await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, save.Request,
-                new Dictionary<string, string>(), TestActor.Value)).State;
-            client = client.Merge(save.Request.DataElementPackage!.DataElements,
-                ((PutChangesSubRequestData)save.Request.SubRequests[0].Data!).StorageIndex);
-        }
-        var next = corpus.CreateSave(client, 4).Request;
-        var totalElements = state.Partitions.Sum(p => p.Elements.Length);
-        var totalBytes = state.Partitions.SelectMany(p => p.Elements).Sum(e => e.Payload.Length);
-        var limits = bytes ? provider.Limits with { MaxGraphBytes = totalBytes + 1 } :
-            provider.Limits with { MaxGraphElements = totalElements + 1 };
-        await Assert.ThrowsAsync<StorageQuotaExceededException>(async () =>
-            await FilePartitionSaveHandler.PrepareAsync(state, StoredDocument.RestoreMetadata(state, DateTime.UtcNow),
-                next.SubRequests[0], next.DataElementPackage!, content, limits, default));
+        var head = (await service.CreateAsync("/quota.docx", MinimalDocx.Create(), TestActor.Value))!;
+        for (var revision = 1; revision <= 3; revision++) head = await RevisionHistoryTests.Save(service, head, "revision-" + revision);
+        var next = await StorageTestDocuments.SaveRequestAsync(service, head, MinimalDocx.Create("next"));
+        var limits = bytes ? provider.Limits with { MaxGraphBytes = head.Counters.GraphBytes + 1 }
+            : provider.Limits with { MaxGraphElements = head.Counters.GraphElements + 1 };
+        await Assert.ThrowsAsync<StorageQuotaExceededException>(() => Prepare(provider, head, next, limits));
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task RetainedNullSerialsAndServerSerialMaximumMatchFullPreparation(bool nullSerial)
+    public async Task RetainedNullSerialsAndServerSerialMaximumArePreserved(bool nullSerial)
     {
-        var content = new InMemoryContentStore();
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory();
+        var created = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), "/serial-maximum.docx", MinimalDocx.Create(),
+            DocumentSecurity.Create(TestActor.Value.Identity), provider.Content, provider.Limits);
+        var file = created.Partitions.Single(p => p.After.Kind == 0);
+        var serial = nullSerial ? new SerialId(Guid.Empty,0) : new SerialId(file.After.Identity.SerialGuid,900000);
+        file = file with { AddedElements = file.AddedElements.Select(e => e.Type == (uint)DataElementType.ObjectGroupDataElementData
+            ? e with { Serial = serial } : e).ToImmutableArray(), After = file.After with { Knowledge = nullSerial ? file.After.Knowledge : 900000 } };
+        created = created with { Partitions = created.Partitions.Select(p => p.After.Kind == 0 ? file : p).ToImmutableArray(),
+            InitialRevision = created.InitialRevision with { Partitions = created.InitialRevision.Partitions.Select(p => p.Kind == 0 ? file.After : p).ToImmutableArray() } };
+        var head = (await provider.Documents.CreateAsync(created)).Current!;
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/serial-maximum.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var client = (await StoredDocument.RestoreAsync(state, content)).FilePartition.FileGraph;
-        var old = client.Elements.Single(e => e.DataElementType == DataElementType.ObjectGroupDataElementData);
-        var source = state.Partitions.Single(p => p.Kind == 0);
-        var serial = nullSerial ? new SerialId(Guid.Empty, 0) : new SerialId(source.Identity.SerialGuid, 900000);
-        source = source with { Knowledge = 1, Elements = source.Elements.Select(e =>
-            e.Id == StorageIds.Capture(old.DataElementExtendedGuid) ? e with { Serial = serial } : e).ToImmutableArray() };
-        state = state with { Partitions = state.Partitions.Select(p => p.Kind == 0 ? source : p).ToImmutableArray(), Revisions = [] };
-        var save = new IncrementalOfficeWorkload(256).CreateSave(client, 1).Request;
-        save.DataElementPackage!.DataElements.Add(old);
-        var metadata = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-        var reference = await FilePartitionSaveHandler.PrepareAsync(state, metadata, save.SubRequests[0], save.DataElementPackage,
-            content, provider.Limits, default, forceFullGraph: true);
-        var selected = await FilePartitionSaveHandler.PrepareAsync(state, metadata, save.SubRequests[0], save.DataElementPackage,
-            content, provider.Limits, default);
-        Assert.False(selected.Response.Status);
-        Assert.NotNull(selected.AddedElements);
-        Assert.Equal(ResponseBytes(reference), ResponseBytes(selected));
-        if (!nullSerial) Assert.True(selected.KnowledgeSequence > 900000);
+        var graph = await StorageTestDocuments.GraphAsync(service, head);
+        var request = new IncrementalOfficeWorkload(256).CreateSave(graph, 1).Request;
+        request.DataElementPackage!.DataElements.Add(graph.Elements.Single(e => e.DataElementType == DataElementType.ObjectGroupDataElementData));
+        var prepared = await Prepare(provider, head, request);
+        Assert.False(Assert.Single(prepared.Response.SubResponses).Status);
+        Assert.NotNull(prepared.Publication);
+        if (!nullSerial) Assert.True(prepared.Publication.Partitions.Single(p => p.After.Kind == 0).After.Knowledge > 900000);
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task InheritedBlobAndMultipleCellGraphsUseTheFullFallback(bool blob, bool multipleCells)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InheritedBlobAndMultipleCellGraphsUseIndexedPreparation(bool blob)
     {
-        var content = new InMemoryContentStore();
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/fallback-selected.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var head = (await service.CreateAsync("/inherited.docx", MinimalDocx.Create(), TestActor.Value))!;
         var fixture = new GraphFixture(MinimalDocx.Create("inherited"), blob);
-        if (!multipleCells)
-        {
-            var index = fixture.Elements.Single(e => e.DataElementExtendedGuid.Equals(fixture.Index));
-            var reader = new BinaryReaderEx(index.Data!);
-            var writer = new BinaryWriterEx();
-            while (reader.Remaining > 0)
-            {
-                var start = reader.Position;
-                var header = StreamObjectHeaderStart.Parse(reader);
-                var body = new BinaryReaderEx(reader.ReadMemory(header.Length));
-                if (header.Type == StreamObjectTypeHeaderStart.StorageIndexCellMapping &&
-                    CellId.Deserialize(body).Equals(fixture.OtherCell)) continue;
-                var end = reader.Position;
-                reader.Position = start;
-                writer.WriteBytes(reader.ReadBytes(end - start));
-            }
-            index.Data = writer.ToArray();
-            var manifest = fixture.Elements.Single(e => e.DataElementExtendedGuid.Equals(fixture.Manifest));
-            fixture.Replace(StorageManifestBuilder.BuildStorageManifestDataElement(fixture.Manifest,
-                manifest.SerialNumber, fixture.Root, fixture.Cell));
-        }
-        var package = new DataElementPackage();
-        package.DataElements.AddRange(fixture.Elements);
-        var operation = new FsshttpbCellSubRequest(RequestTypes.PutChanges)
-        {
-            RequestId = 1,
-            Data = new PutChangesSubRequestData { StorageIndex = fixture.Index,
-                ExpectedStorageIndex = StorageIds.Restore(state.Partitions.Single(p => p.Kind == 0).StorageIndex!) },
-        };
-        var metadata = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-        var expected = await FilePartitionSaveHandler.PrepareAsync(state, metadata, operation, package,
-            content, provider.Limits, default, forceFullGraph: true);
-        var actual = await FilePartitionSaveHandler.PrepareAsync(state, metadata, operation, package,
-            content, provider.Limits, default);
-        Assert.False(actual.Response.Status);
-        Assert.Null(actual.AddedElements);
-        Assert.Equal(ResponseBytes(expected), ResponseBytes(actual));
-        Assert.Equal(fixture.Bytes, actual.Graph!.Materialize());
+        var request = StorageTestDocuments.MetadataRequest(fixture);
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service, head));
+        var prepared = await Prepare(provider, head, request);
+        Assert.False(Assert.Single(prepared.Response.SubResponses).Status);
+        var result = await provider.Documents.PublishAsync(prepared.Publication!);
+        Assert.Equal(PublicationStatus.Accepted, result.Status);
+        Assert.Equal(fixture.Bytes, await StorageTestDocuments.PackageAsync(provider, result.Current.Package));
     }
 
-    private static byte[] ResponseBytes(FilePartitionSaveHandler.PreparedFileSave prepared)
+    private static async Task<SavePreparationRead> ReadPreparation(StorageProvider provider, DocumentHead head, FsshttpbCellRequest request)
     {
-        var response = new FsshttpbResponse { DataElementPackage = prepared.ResponsePackage };
-        response.SubResponses.Add(prepared.Response);
-        return response.ToByteArray();
+        var operation = request.SubRequests[0];
+        var put = (PutChangesSubRequestData)operation.Data!;
+        var index = request.DataElementPackage!.DataElements.First(e => e.DataElementExtendedGuid.Equals(put.StorageIndex));
+        var identity = IndexedPartitionSavePreparer.Identify(head.LifecycleGeneration, 0, operation, request.DataElementPackage);
+        var keys = IndexedDocumentGraph.ReadMetadata(new(head.ResourceId, head.LifecycleGeneration,0), index).Mappings.Select(m => m.Key).Distinct().ToImmutableArray();
+        return (await provider.Documents.PrepareSaveAsync(head.ResourceId, new(0, identity.Operation,keys) { IncludeBindings = true }))!;
     }
 
-    private static void AssertCatalogEqual(PartitionState expected, PartitionState actual)
-    {
-        Assert.Equal(expected.StorageIndex, actual.StorageIndex);
-        Assert.Equal(expected.Knowledge, actual.Knowledge);
-        Assert.Equal(expected.Elements.Length, actual.Elements.Length);
-        foreach (var (left, right) in expected.Elements.Zip(actual.Elements))
-        {
-            Assert.Equal(left.Id, right.Id);
-            Assert.Equal(left.Type, right.Type);
-            Assert.Equal(left.Serial, right.Serial);
-            Assert.Equal(left.Payload, right.Payload);
-            Assert.Equal(left.MappingSerials.ToArray(), right.MappingSerials.ToArray());
-        }
-    }
+    private static async Task<IndexedPreparedSave> Prepare(StorageProvider provider, DocumentHead head,
+        FsshttpbCellRequest request, StorageLimits? limits = null) =>
+        await IndexedPartitionSavePreparer.PrepareAsync(await ReadPreparation(provider,head,request), request.SubRequests[0],request.DataElementPackage!,
+            StorageTestDocuments.Admission(head), new Dictionary<string,string>(), provider.Documents,provider.Content,limits ?? provider.Limits);
 
     private sealed class CountingContent(IContentStore inner) : IContentStore
     {

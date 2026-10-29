@@ -46,11 +46,10 @@ public sealed class ContentBatchWriterTests
     }
 
     [Fact]
-    public async Task LargeGraphPayloadUsesStreamingInsteadOfAnOversizedBatch()
+    public async Task LegacyGraphCaptureStreamsLargePayloadInsteadOfAnOversizedBatch()
     {
         var content = new InMemoryContentStore();
-        var service = new CellBridgeDocumentService(new(new InMemoryStateStore(), content));
-        var initial = (await service.CreateAsync("/bounded.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var initial = await LegacyStorageFixture.CreateAsync(content, "/bounded.docx", MinimalDocx.Create());
         var bytes = RandomNumberGenerator.GetBytes(9 * 1024 * 1024);
         var graph = new GraphFixture(bytes, blob: true).File();
         var recording = new StreamingCaptureStore();

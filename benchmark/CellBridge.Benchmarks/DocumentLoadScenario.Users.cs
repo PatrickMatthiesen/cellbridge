@@ -35,6 +35,8 @@ internal sealed partial class DocumentLoadScenario
     private async Task InitializeUsersAsync()
     {
         var environment = await resources.EnvironmentAsync();
+        Console.WriteLine($"Document user setup runner-pid={Environment.ProcessId}.");
+        IdentifyUserApplicationProcess(environment);
         var cancellationToken = resources.CancellationToken;
         if (environment.Backend == "postgresql")
         {
@@ -48,25 +50,27 @@ internal sealed partial class DocumentLoadScenario
                 $"fsync={row.GetString(2)}, synchronous-commit={row.GetString(3)}, full-page-writes={row.GetString(4)}.");
         }
         userCorpus = new(settings.PackageKiB, settings.Seed, settings.ChangedPartKiB);
-        var templateService = new CellBridgeDocumentService(new StorageProvider(new InMemoryStateStore(), provider.Content, provider.Limits));
+        var templateProvider = new StorageProvider(new InMemoryDocumentRepository(provider.Content, provider.Limits),
+            provider.Content, provider.Limits);
+        var templateService = new CellBridgeDocumentService(templateProvider);
         var owner = new CellBridgeActor(environment.GetUserIdentity(0), CanCreate: true);
-        var template = await templateService.CreateAsync("/shared/template.docx", userCorpus.CreateContent(), owner, cancellationToken)
+        var templateHead = await templateService.CreateAsync("/shared/template.docx", userCorpus.CreateContent(), owner, cancellationToken)
             ?? throw new InvalidDataException("The user workload template could not be created.");
-        var original = await StoredDocument.RestoreAsync(template, provider.Content, cancellationToken);
-        var seed = userCorpus.CreateSave(original, 1);
-        var seeded = await templateService.ExecuteAsync(template.ResourceId, DocumentPartitionKind.FileContents,
+        var original = await ReadClientGraphAsync(templateService, templateHead, owner, cancellationToken);
+        var seed = userCorpus.CreateSave(original.Graph, 1);
+        var seeded = await templateService.ExecuteAsync(templateHead.ResourceId, DocumentPartitionKind.FileContents,
             seed.Request, attributes, owner, cancellationToken);
         CheckResponse(seeded.Response);
         if (seeded.IsCancelled) throw new OperationCanceledException(cancellationToken);
-        template = seeded.State with { Receipts = [], Coordination = CoordinationState.Empty };
-        var templateGraph = await DocumentPartition.RestoreFileGraphAsync(template, provider.Content, provider.Limits, cancellationToken);
+        var client = await ReadClientGraphAsync(templateService, seeded.State, owner, cancellationToken);
+        var templateGraph = client.Graph;
         if (!templateGraph.AnalyzeRetention().Complete || !templateGraph.Materialize().AsSpan().SequenceEqual(seed.Content))
             throw new InvalidDataException("The user workload template does not reproduce its seeded package.");
+        var template = await templateProvider.Documents.ExportDocumentAsync(templateHead.ResourceId, cancellationToken)
+            ?? throw new InvalidDataException("The user workload template could not be exported.");
         payload = seed.Content;
         var cell = templateGraph.FileCell;
-        var partition = template.Partitions.Single(partition => partition.Kind == 0);
-        var initialKnowledge = ClientKnowledge.Deserialize(new(BinaryKnowledgeBuilder.FromElements(templateGraph.ElementMetadata,
-            cell.ShortId, partition.Knowledge, mappingSerials: templateGraph.MappingSerials.Values.SelectMany(serials => serials))));
+        var initialKnowledge = client.Knowledge;
         var documentCount = checked(settings.Clients * settings.DocumentsPerClient);
         var requested = new (string Path, SubjectIdentity Owner)[documentCount];
         var run = Guid.NewGuid().ToString("N");
@@ -97,7 +101,7 @@ internal sealed partial class DocumentLoadScenario
             var views = httpDocuments.Skip(index * settings.DocumentsPerClient).Take(settings.DocumentsPerClient)
                 .Select(document => new UserView(new HttpView(document)
                 {
-                    Index = templateGraph.StorageIndex, Knowledge = initialKnowledge,
+                    Index = templateGraph.StorageIndex, Knowledge = initialKnowledge, Graph = templateGraph,
                 }, templateGraph)).ToArray();
             var session = new UserSession(transport, views) { ActiveDocument = index % views.Length };
             await QueryUserAsync(session, session.Active, token);
@@ -125,9 +129,9 @@ internal sealed partial class DocumentLoadScenario
             throw new ArgumentException("UserModel uses its own warm-up. Set NBomber WarmUpDuration to zero.");
         if (context.ScenarioInfo.ScenarioDuration.TotalMilliseconds < (long)settings.UserWarmUpMs + settings.UserMeasurementMs)
             throw new ArgumentException("The user simulation must cover its warm-up and measurement durations.");
-        StartUserDatabaseSampling();
         Interlocked.CompareExchange(ref userMeasurementMilliseconds, settings.UserMeasurementMs, 0);
         Interlocked.CompareExchange(ref userMeasurementStart, Environment.TickCount64 + settings.UserWarmUpMs, 0);
+        StartUserDatabaseSampling();
         if (Interlocked.CompareExchange(ref user.Busy, 1, 0) != 0)
             throw new InvalidDataException("Two actions overlapped for the same signed-in user.");
         try
@@ -222,7 +226,6 @@ internal sealed partial class DocumentLoadScenario
         var save = userCorpus.CreateSave(view.Graph, revision);
         if (save.ReusedChunks == 0 || save.SentChunks != 1 || save.ChangedChunkBytes >= payload.Length / 2)
             throw new InvalidDataException("A user edit did not reuse the unchanged package parts.");
-        var proposed = ((PutChangesSubRequestData)save.Request.SubRequests.Single().Data!).StorageIndex;
         var hash = Convert.ToHexString(SHA256.HashData(save.Content));
         Interlocked.Increment(ref userSaveAttempts);
         Interlocked.Add(ref userSaveBytes, save.Binary.Length);
@@ -233,7 +236,7 @@ internal sealed partial class DocumentLoadScenario
         var measuredRequest = requestStarted >= userMeasurementStart && requestStarted < userMeasurementStart + userMeasurementMilliseconds;
         if (measuredRequest) Interlocked.Increment(ref userMeasuredSaveStarts);
         await SaveHttpStepAsync(UserStepName("save"), context, user.Transport, view.Wire, save.Request, save.Binary, false, resources.CancellationToken);
-        if (!view.Wire.Document.Committed.TryAdd(proposed, hash))
+        if (!view.Wire.Document.Committed.TryAdd(view.Wire.Index, hash))
             throw new InvalidDataException("A user edit reused a previously acknowledged storage index.");
         Interlocked.Increment(ref commits);
         var completed = Environment.TickCount64;
@@ -243,7 +246,7 @@ internal sealed partial class DocumentLoadScenario
             else Interlocked.Increment(ref userMeasuredLateAcknowledgements);
         }
         view.Saves++;
-        view.Graph = view.Graph.Merge(save.Request.DataElementPackage!.DataElements, proposed);
+        view.Graph = view.Wire.Graph ?? throw new InvalidDataException("Save lost the client graph.");
         if (settings.Retry)
         {
             await SaveHttpStepAsync("replay", context, user.Transport, view.Wire, save.Request, save.Binary, true, resources.CancellationToken);
@@ -253,11 +256,8 @@ internal sealed partial class DocumentLoadScenario
 
     private static async Task QueryUserAsync(UserSession session, UserView view, CancellationToken cancellationToken)
     {
-        var response = await QueryHttpAsync(session.Transport, view.Wire, cancellationToken);
-        if (response.DataElementPackage is { DataElements.Count: > 0 } package)
-            view.Graph = view.Graph.Merge(package.DataElements, view.Wire.Index);
-        else if (!view.Graph.StorageIndex.Equals(view.Wire.Index))
-            throw new InvalidDataException("The user query advanced its index without supplying the missing graph.");
+        await QueryHttpAsync(session.Transport, view.Wire, cancellationToken);
+        view.Graph = view.Wire.Graph ?? throw new InvalidDataException("Query omitted the client graph.");
     }
 
     private async Task DownloadUserAsync(UserSession session, UserView view, CancellationToken cancellationToken)
@@ -269,10 +269,10 @@ internal sealed partial class DocumentLoadScenario
         if (document.Committed.TryGetValue(view.Wire.Index, out var hash)) expected = hash;
         else
         {
-            var initialIndex = document.Initial.Partitions.Single(partition => partition.Kind == 0).StorageIndex!;
+            var initialIndex = document.Initial.Package.Root.StorageIndex;
             if (!view.Wire.Index.Equals(StorageIds.Restore(initialIndex)))
                 throw new InvalidDataException("The opened file has no acknowledged content hash.");
-            expected = document.Initial.Content.Sha256;
+            expected = document.Initial.Package.Sha256;
         }
         var bytes = await session.Transport.Http!.GetByteArrayAsync(document.Initial.Path, cancellationToken);
         if (bytes.Length != payload.Length || !Convert.ToHexString(SHA256.HashData(bytes)).Equals(expected, StringComparison.OrdinalIgnoreCase))

@@ -11,6 +11,16 @@
     <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
     <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
     <Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/NormalizedProviderScenarios.cs" Link="NormalizedProviderScenarios.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/PublicationPrefetchScenario.cs" Link="PublicationPrefetchScenario.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/NormalizedRelationalSchemaAssertions.cs" Link="NormalizedRelationalSchemaAssertions.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/NormalizedProviderFaults.cs" Link="NormalizedProviderFaults.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/NormalizedLegacyFixture.cs" Link="NormalizedLegacyFixture.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/NormalizedLegacyDatabase.cs" Link="NormalizedLegacyDatabase.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/RepositoryTestProxy.cs" Link="RepositoryTestProxy.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/ImmutableIndexedReadScenario.cs" Link="ImmutableIndexedReadScenario.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/PublicationContentReadScenario.cs" Link="PublicationContentReadScenario.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/CurrentMetadataReadScenario.cs" Link="CurrentMetadataReadScenario.cs" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>

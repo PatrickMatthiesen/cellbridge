@@ -62,8 +62,8 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
             {
                 var retry = await CellBridgeLoadTests.StepAsync("retry-" + mode, context,
                     () => SaveAsync(session, entry, entry.Request!, resources.CancellationToken));
-                if (retry.ContentVersion != entry.State.ContentVersion || retry.Content != entry.State.Content ||
-                    retry.Receipts.Length != entry.State.Receipts.Length)
+                if (retry.ContentVersion != entry.State.ContentVersion || retry.Package != entry.State.Package ||
+                    retry.Counters.SaveReceipts != entry.State.Counters.SaveReceipts)
                     throw new InvalidDataException("An identical retry changed the saved document.");
             }
             if (entry.Saves % settings.QueryEvery == 0)
@@ -90,12 +90,15 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
     {
         settings = context.CustomSettings.Get<DocumentLoadSettings>() ?? new();
         settings.Validate();
-        var documentLimit = Math.Max(10_000, checked(settings.Clients * settings.DocumentsPerClient));
         if (backend == "http" && settings.UserModel)
-            resources.ConfigureDocumentUsers(settings.Clients, true, documentLimit);
+            resources.ConfigureDocumentUsers(settings.Clients, true);
         payload = settings.UserModel ? [] : StorageBenchmarkInputs.Package(settings.SizeMiB, settings.Seed);
-        var limits = new StorageLimits { MaxDocuments = documentLimit };
-        if (backend == "memory") provider = new(new InMemoryStateStore(), new InMemoryContentStore(), limits);
+        var limits = new StorageLimits();
+        if (backend == "memory")
+        {
+            var content = new InMemoryContentStore();
+            provider = new(new InMemoryDocumentRepository(content, limits), content, limits);
+        }
         else
         {
             var environment = await resources.EnvironmentAsync();
@@ -112,13 +115,13 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
                 if (backend == "filesystem")
                 {
                     scratch = Path.Combine(Path.GetTempPath(), "cellbridge-load-" + Guid.NewGuid().ToString("N"));
-                    provider = new(new PostgreSqlStateStore(source, limits),
-                        new PostgreSqlFileSystemContentStore(source, scratch, limits.MaxObjectBytes), limits);
+                    var content = new PostgreSqlFileSystemContentStore(source, scratch, limits.MaxObjectBytes);
+                    provider = new(new PostgreSqlStateStore(source, limits, content), content, limits);
                 }
                 else provider = new(new PostgreSqlStateStore(source, limits), new PostgreSqlContentStore(source, limits.MaxObjectBytes), limits);
             }
         }
-        await provider.State.CheckHealthAsync();
+        await provider.Documents.CheckHealthAsync();
         service = new(provider);
         if (backend == "http")
         {
@@ -136,8 +139,8 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
         {
             var state = await service.CreateAsync("/shared/load-" + Guid.NewGuid().ToString("N") + ".docx", payload, actor,
                 resources.CancellationToken) ?? throw new InvalidDataException("HTTP seed document was not created.");
-            var restored = await StoredDocument.RestoreAsync(state, provider.Content, cancellationToken: resources.CancellationToken);
-            httpDocuments.Add(new(state, restored.FilePartition.ProtocolIdentity.CellId));
+            var initial = await ReadClientGraphAsync(service, state, actor, resources.CancellationToken);
+            httpDocuments.Add(new(state, initial.Graph.FileCell));
         }
         httpSessions = new Session[settings.Clients];
         for (var client = 0; client < httpSessions.Length; client++)
@@ -188,7 +191,7 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
                     () => session.Http!.GetByteArrayAsync(view.Document.Initial.Path, cancellationToken));
                 var hash = Convert.ToHexString(SHA256.HashData(bytes));
                 if (bytes.Length != payload.Length ||
-                    !hash.Equals(view.Document.Initial.Content.Sha256, StringComparison.OrdinalIgnoreCase) &&
+                    !hash.Equals(view.Document.Initial.Package.Sha256, StringComparison.OrdinalIgnoreCase) &&
                     !httpSessions.SelectMany(s => s.PayloadHashes).Contains(hash))
                     throw new InvalidDataException("HTTP download is not a seeded or generated document payload.");
             }
@@ -200,9 +203,8 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
         var request = CreateHttpSave(view, session.Payloads[variant], session.Iteration, session.Random);
         // Build the graph and binary outside the measured HTTP request step. Payloads were generated during init.
         var binary = request.ToByteArray();
-        var proposed = ((PutChangesSubRequestData)request.SubRequests.Single().Data!).StorageIndex;
         await SaveHttpStepAsync("save", context, session, view, request, binary, false, cancellationToken);
-        if (!view.Document.Committed.TryAdd(proposed, session.PayloadHashes[variant]))
+        if (!view.Document.Committed.TryAdd(view.Index, session.PayloadHashes[variant]))
             throw new InvalidDataException("A fresh HTTP save reused an accepted storage index.");
         Interlocked.Increment(ref commits);
         view.LastCommittedVariant = variant;
@@ -222,6 +224,7 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
         var identity = new StorageManifestBuilder.StableIdentity(new(1, id), new(2, id), new(3, id),
             new(4, id), new(5, id), new(6, id), new(7, id), view.Document.Cell, id);
         var generated = FileContentPartitionBuilder.BuildQueryChangesResponse(1, content, identity, (ulong)iteration + 1);
+        generated.DataElementPackage!.DataElements.Add(BenchmarkClientGraph.CurrentIndex(view.Graph ?? throw new InvalidDataException("Save requires a queried client graph.")));
         var request = new FsshttpbCellRequest { DataElementPackage = generated.DataElementPackage };
         request.SubRequests.Add(new(RequestTypes.PutChanges)
         {
@@ -255,6 +258,7 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
             throw new InvalidDataException("HTTP query did not return complete storage index and knowledge.");
         view.Index = data.StorageIndexExtendedGuid;
         view.Knowledge = ClientKnowledge.Deserialize(new(data.KnowledgeBytes));
+        view.Graph = BenchmarkClientGraph.ApplyQueryGraph(view.Graph,response,view.Index);
         return response;
     }
 
@@ -274,11 +278,14 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
             }
             CheckHttpResponse(wire);
             if (wire.SubResponses.Single().Data is not PutChangesSubResponseData { PutChangesResponse: { } put } data ||
-                !put.AppliedStorageIndexID.Equals(((PutChangesSubRequestData)request.SubRequests.Single().Data!).StorageIndex) ||
+                put.AppliedStorageIndexID.IsNull ||
                 !replay && put.DataElementAdded.Count == 0)
-                throw new InvalidDataException("HTTP save did not acknowledge the proposed graph with its requested applied index and added elements.");
+                throw new InvalidDataException("HTTP save did not acknowledge an applied index and added elements.");
             if (data.KnowledgeBytes is null)
                 throw new InvalidDataException("HTTP save did not return server knowledge.");
+            if (replay && !view.Index.Equals(put.AppliedStorageIndexID))
+                throw new InvalidDataException("Replay changed the accepted storage index.");
+            if (!replay) view.Graph = BenchmarkClientGraph.ApplyAcceptedGraph(view.Graph!, request, wire, put.AppliedStorageIndexID);
             view.Index = put.AppliedStorageIndexID;
             view.Knowledge = ClientKnowledge.Deserialize(new(data.KnowledgeBytes));
             return true;
@@ -330,20 +337,23 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
             session.Entries[mode] = entry;
             session.AllEntries.Add(entry);
         }
-        entry.State = await provider.State.FindByResourceIdAsync(entry.State.ResourceId, resources.CancellationToken)
+        entry.State = await provider.Documents.FindAsync(new DocumentIdentity.Resource(entry.State.ResourceId), resources.CancellationToken)
             ?? throw new InvalidDataException("Document disappeared.");
-        var restored = await StoredDocument.RestoreAsync(entry.State, provider.Content, cancellationToken: resources.CancellationToken);
+        var client = await ReadClientGraphAsync(service, entry.State, actor, resources.CancellationToken);
         entry.Expected = mode == "changed-full" ? StorageBenchmarkInputs.Package(settings.SizeMiB, settings.Seed + entry.Saves + 1) : payload;
         entry.Request = mode == "captured"
             ? SyntheticWorkload.Capture(Path.Combine(CellBridgeLoadTests.RepositoryRoot(), "testdata/sharepoint/fixtures/save_reopen"), entry.Saves == 0 ? "save-first" : "save-second")
-            : SyntheticWorkload.Save(restored, entry.Expected, mode, entry.Saves, context.Random);
-        if (mode == "captured" && entry.Saves == 0)
-            ((PutChangesSubRequestData)entry.Request.SubRequests.Single().Data!).ExpectedStorageIndex = restored.FilePartition.FileGraph.StorageIndex;
+            : SyntheticWorkload.Save(client.Graph, entry.Expected, mode, entry.Saves, context.Random);
+        if (mode == "captured")
+        {
+            ((PutChangesSubRequestData)entry.Request.SubRequests.Single().Data!).ExpectedStorageIndex = client.Graph.StorageIndex;
+            entry.Request.DataElementPackage!.DataElements.Add(BenchmarkClientGraph.CurrentIndex(client.Graph));
+        }
         entry.Captured = mode == "captured";
         return entry;
     }
 
-    private async Task<DocumentState> SaveAsync(Session session, Entry entry, FsshttpbCellRequest request, CancellationToken cancellationToken)
+    private async Task<DocumentHead> SaveAsync(Session session, Entry entry, FsshttpbCellRequest request, CancellationToken cancellationToken)
     {
         var result = await service.ExecuteAsync(entry.State.ResourceId, DocumentPartitionKind.FileContents, request, attributes, actor, cancellationToken);
         if (result.IsCancelled) throw new OperationCanceledException(cancellationToken);
@@ -431,12 +441,9 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
 
     private async Task<bool> DiagnoseAsync(Session session, Entry entry, CancellationToken cancellationToken)
     {
-        var restored = await StoredDocument.RestoreAsync(entry.State, provider.Content, cancellationToken: cancellationToken);
-        var graph = restored.FilePartition.FileGraph;
-        if (!graph.AnalyzeRetention().Complete) throw new InvalidDataException("Saved graph has unresolved retention requirements.");
-        var current = ClientKnowledge.Deserialize(new(BinaryKnowledgeBuilder.FromElements(graph.ElementMetadata,
-            restored.FilePartition.ProtocolIdentity.CellId.ShortId, restored.FilePartition.KnowledgeSequence,
-            mappingSerials: graph.MappingSerials.Values.SelectMany(s => s))));
+        var client = await ReadClientGraphAsync(service, entry.State, actor, cancellationToken);
+        if (!client.Graph.AnalyzeRetention().Complete) throw new InvalidDataException("Saved graph has unresolved retention requirements.");
+        var current = client.Knowledge;
         foreach (var knowledge in new[] { null, entry.PriorKnowledge, current })
         {
             var query = new FsshttpbCellRequest();
@@ -453,13 +460,16 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
 
     private async Task VerifyEntryAsync(Entry entry)
     {
-        var state = await provider.State.FindByResourceIdAsync(entry.State.ResourceId) ?? throw new InvalidDataException("Final document is missing.");
-        var restored = await StoredDocument.RestoreAsync(state, provider.Content);
-        var bytes = restored.FilePartition.FileGraph.Materialize();
-        if (!restored.FilePartition.FileGraph.AnalyzeRetention().Complete ||
-            state.ContentVersion != entry.State.ContentVersion || state.Content != entry.State.Content ||
-            state.Receipts.Length != entry.Saves || !bytes.AsSpan().SequenceEqual(restored.Content) ||
-            !entry.Captured && !bytes.AsSpan().SequenceEqual(entry.Expected))
+        var state = await provider.Documents.FindAsync(new DocumentIdentity.Resource(entry.State.ResourceId))
+            ?? throw new InvalidDataException("Final document is missing.");
+        var client = await ReadClientGraphAsync(service, state, actor, CancellationToken.None);
+        var bytes = client.Graph.Materialize();
+        await using var package = await provider.Packages.OpenReadAsync(state.Package);
+        using var copy = new MemoryStream();
+        await package.CopyToAsync(copy);
+        if (!client.Graph.AnalyzeRetention().Complete || state.ContentVersion != entry.State.ContentVersion ||
+            state.Package != entry.State.Package || state.Counters.SaveReceipts != entry.Saves ||
+            !bytes.AsSpan().SequenceEqual(copy.ToArray()) || !entry.Captured && !bytes.AsSpan().SequenceEqual(entry.Expected))
             throw new InvalidDataException("Final document, receipts or graph differ from the saved result.");
     }
 
@@ -473,38 +483,38 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
                 throw new InvalidDataException("The executed active-user count differs from the configured client count.");
             if (settings.UserModel && httpDocuments.Count != 0)
             {
-                // All user documents started from the same immutable corpus.
-                // Reverify those shared bytes once, then compare untouched states
-                // exactly rather than downloading the same corpus for every clone.
-                _ = await provider.Content.ReadManyVerifiedAsync(StorageReferences.Handles(httpDocuments[0].Initial),
-                    provider.Limits.MaxObjectBytes);
+                // Every untouched clone references the same verified immutable corpus.
+                await using var initialPackage = await provider.Packages.OpenReadAsync(httpDocuments[0].Initial.Package);
+                await initialPackage.CopyToAsync(Stream.Null);
             }
             foreach (var document in httpDocuments)
             {
-                var state = await provider.State.FindByResourceIdAsync(document.Initial.ResourceId)
+                var state = await provider.Documents.FindAsync(new DocumentIdentity.Resource(document.Initial.ResourceId))
                     ?? throw new InvalidDataException("Final HTTP document is missing.");
                 if (settings.UserModel && document.Committed.IsEmpty)
                 {
-                    if (DocumentStateJson.Serialize(state) != DocumentStateJson.Serialize(document.Initial))
+                    if (System.Text.Json.JsonSerializer.Serialize(state) != System.Text.Json.JsonSerializer.Serialize(document.Initial))
                         throw new InvalidDataException("An untouched user document changed during load.");
                     continue;
                 }
-                var restored = await StoredDocument.RestoreAsync(state, provider.Content);
-                var bytes = restored.FilePartition.FileGraph.Materialize();
-                var committed = document.Committed;
-                var hash = Convert.ToHexString(SHA256.HashData(bytes));
-                var index = restored.FilePartition.FileGraph.StorageIndex;
-                var expectedHash = committed.Count == 0 ? document.Initial.Content.Sha256 :
-                    committed.TryGetValue(index, out var acceptedHash) ? acceptedHash :
+                var partition = await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0))
+                    ?? throw new InvalidDataException("Final HTTP partition is missing.");
+                var index = StorageIds.Restore(partition.Partition.StorageIndex!);
+                var expectedHash = document.Committed.Count == 0 ? document.Initial.Package.Sha256 :
+                    document.Committed.TryGetValue(index, out var acceptedHash) ? acceptedHash :
                     throw new InvalidDataException("The final HTTP storage index was not acknowledged as a commit.");
-                if (!restored.FilePartition.FileGraph.AnalyzeRetention().Complete ||
-                    state.ContentVersion != document.Initial.ContentVersion + committed.Count ||
-                    state.Receipts.Length != committed.Count ||
-                    !hash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase) ||
-                    !bytes.AsSpan().SequenceEqual(restored.Content) ||
-                    state.Revisions.Zip(state.Revisions.Skip(1)).Any(pair =>
-                        pair.First.Content.Sha256 == pair.Second.Content.Sha256))
+                await using var package = await provider.Packages.OpenReadAsync(state.Package);
+                var hash = Convert.ToHexString(await SHA256.HashDataAsync(package));
+                if (state.ContentVersion != document.Initial.ContentVersion + document.Committed.Count ||
+                    state.Counters.SaveReceipts != document.Committed.Count ||
+                    !hash.Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("HTTP commits, versions, receipts or materialized content disagree.");
+                // Full history is inspected only during untimed final correctness validation.
+                var snapshot = await provider.Documents.ExportDocumentAsync(state.ResourceId)
+                    ?? throw new InvalidDataException("Final HTTP revision history is missing.");
+                var revisions = snapshot.ApplicationRevisions.OrderBy(revision => revision.RevisionNumber).ToArray();
+                if (revisions.Zip(revisions.Skip(1)).Any(pair => pair.First.Package.Sha256 == pair.Second.Package.Sha256))
+                    throw new InvalidDataException("Consecutive HTTP revisions contain unchanged payloads.");
             }
             Console.WriteLine($"Document HTTP validation totals including warm-up: commits={commits}, conflicts={conflicts}, replays={replays}, replay-conflicts={replayConflicts}.");
             var uniqueCommittedPayloads = httpDocuments.SelectMany(document => document.Committed.Values).Distinct(StringComparer.OrdinalIgnoreCase).Count();
@@ -534,9 +544,9 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
         public string[] PayloadHashes = [];
         public Random Random = new();
     }
-    private sealed class Entry(DocumentState state, byte[] expected)
+    private sealed class Entry(DocumentHead state, byte[] expected)
     {
-        public DocumentState State = state;
+        public DocumentHead State = state;
         public byte[] Expected = expected;
         public int Saves;
         public bool Captured;
@@ -544,9 +554,9 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
         public ClientKnowledge? PriorKnowledge;
     }
 
-    private sealed class HttpDocument(DocumentState initial, CellId cell)
+    private sealed class HttpDocument(DocumentHead initial, CellId cell)
     {
-        public DocumentState Initial { get; } = initial;
+        public DocumentHead Initial { get; } = initial;
         public CellId Cell { get; } = cell;
         public ConcurrentDictionary<ExGuid, string> Committed { get; } = new();
     }
@@ -556,6 +566,7 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
         public HttpDocument Document { get; } = document;
         public ExGuid Index = ExGuid.Null;
         public ClientKnowledge? Knowledge;
+        public PartitionGraphSnapshot? Graph;
         public int LastCommittedVariant = -1;
     }
 

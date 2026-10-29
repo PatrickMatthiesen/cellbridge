@@ -1,10 +1,10 @@
 # Architecture
 
-The proposed [Office storage design review](office-storage-design.md),
+Document persistence uses small current records, immutable protocol elements,
+current object bindings and versioned mapping intervals. The
+[Office storage design](office-storage-design.md),
 [operation catalog](office-operation-catalog.md) and
-[cost/priority model](office-operation-costs.md) examine a replacement for the
-current persistence layout. They are proposals and evidence inventories; the
-implementation described below has not been replaced by them.
+[cost model](office-operation-costs.md) explain the requirements and tradeoffs.
 
 CellBridge implements the Office file synchronization protocols in reusable
 .NET libraries. WebDemo provides a development environment;
@@ -22,9 +22,9 @@ flowchart TD
     Core --> Soap[MS-FSSHTTP SOAP/MTOM]
     Core --> Binary[CellBridge.FssHttpB]
     Core --> Service[CellBridgeDocumentService]
-    Service --> State[IDocumentStateStore]
+    Service --> Repository[IDocumentRepository]
     Service --> Content[IContentStore]
-    State --> Database[PostgreSQL or SQL Server document state]
+    Repository --> Database[PostgreSQL or SQL Server document records]
     Content --> Blobs[Database chunks or filesystem objects]
 ```
 
@@ -103,21 +103,32 @@ lookup failure. Lookup does not create a document or redirect to a matching path
 
 File contents, application metadata and the editors table have independent
 partition identities, serials and synchronization knowledge. File saves merge
-against the retained graph and reconstruct the Office package through
-`PartitionGraphSnapshot`. Reconstruction follows graph references rather than
-choosing an individual binary object by size.
+keywise storage-index updates and resolve explicit revision/base references through
+`IndexedDocumentGraph`. Current object bindings accelerate the latest revision.
+Historical package reads use binding checkpoints and bounded change replay.
+Reconstruction follows graph references rather than choosing a binary object by size.
 
 ## Saving a document
 
-The document service reconstructs the package into an exclusive temporary file.
-It checks every ZIP member against the limit on expanded bytes before storing
-immutable content.
-The staging file is deleted on success, failure or cancellation. InMemory,
-PostgreSQL and SQL Server use this preparation before updating state.
+The service prepares changed canonical elements and resolved object bindings before
+taking a document lock. It reconstructs the selected package into an exclusive
+temporary file, checks ZIP members against the expanded-byte limit, and records
+its exact length and digest. It deletes the temporary file when preparation ends.
+It stores new canonical elements and the protocol acknowledgement durably. It does
+not store another complete downloadable package for every change.
 
-The service then reads the current state and database time, rechecks Write permission,
-coherency and leases, and commits the selected revision with a save receipt.
-Different documents can progress independently. Sessions use the same coordination.
+Publication then locks the affected document row, reads database time, and checks
+current permission, mapping expectations and lease authority. One transaction
+updates the current roots, changed bindings, application revision, receipt,
+per-document counters and any external delivery intent. It never serializes the
+complete retained history during an ordinary save. PostgreSQL uses row locks and
+SQL Server uses update row locks. Unique path constraints coordinate competing
+names. Different documents can publish independently.
+
+Provider-wide byte and document-count quotas and their reservation buckets were
+removed. Per-document and per-request limits remain. Database migrations preserve
+the old developer data and convert it to the normalized records. Legacy aggregate
+codecs remain only for reading these migration and recovery inputs.
 
 Cancellation after an established save stops remaining operations and returns an
 incomplete execution with `IsCancelled` and known file receipts. The SOAP
@@ -126,8 +137,10 @@ completed saves are never rolled back. See [accepted saves](package-integration.
 for uncertain commit outcomes and HTTP delivery limits.
 
 Downloads take content and headers from one snapshot. Receipts identify duplicate
-saves; shared budgets reject excessive growth before selecting a new revision.
-Prior file parts remain available for subsequent edits and detached readers.
+saves; per-document limits reject excessive growth before selecting a new revision.
+Retained revisions and protocol ancestry keep their canonical elements available.
+Rejected candidates can leave unreferenced physical objects. Collection requires
+readers and writers to be stopped; ordinary operations take no collection gate.
 
 [Storage providers](storage-providers.md) explains publication, retries, maintenance
 and provider contracts. The [protocol guide](protocol-version-decision.md#synchronization-knowledge)

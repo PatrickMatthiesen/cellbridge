@@ -39,9 +39,11 @@ public sealed class HostIntegrationTests
             TestActor.Value.Identity, TestActor.Value);
         Assert.Equal(importId, imported!.ResourceId);
         var restarted = new CellBridgeDocumentService(recreate?.Invoke() ?? provider);
-        var restored = await StoredDocument.RestoreAsync((await restarted.Provider.State.FindByResourceIdAsync(id))!, restarted.Provider.Content);
-        Assert.Equal(id, restored.TransitionId);
+        var restored = (await restarted.Provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!;
+        Assert.Equal(id, restored.ResourceId);
         Assert.Equal(state.Etag, restored.Etag);
+        Assert.Equal(await StorageTestDocuments.PackageAsync(provider, state.Package),
+            await StorageTestDocuments.PackageAsync(restarted.Provider, restored.Package));
         var request = File(id, SubRequestType.GetDocMetaInfo, SubRequestType.GetVersions);
         request.Url = "https://unrelated.invalid/absent.docx";
         var result = await new CellBridgeRequestProcessor(restarted).ExecuteAsync(new() { Requests = { request } }, "https://host.test", TestActor.Value);
@@ -64,7 +66,7 @@ public sealed class HostIntegrationTests
         var attempts = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => new CellBridgeDocumentService(provider)
             .CreateAsync(id, $"/concurrent-{i}.docx", MinimalDocx.Create(), TestActor.Value).AsTask()));
         Assert.Single(attempts, s => s is not null);
-        Assert.Single(await provider.State.ListAsync(0, 100));
+        Assert.Single(await provider.Documents.ListAsync(0, 100));
     }
 
     [Fact]
@@ -95,12 +97,11 @@ public sealed class HostIntegrationTests
         Assert.Equal("FileUnauthorizedAccess", response.Responses[0].SubResponses[1].ErrorCode);
         Assert.Equal("FileUnauthorizedAccess", response.Responses[1].SubResponses[0].ErrorCode);
         Assert.Null(response.Responses[1].ResourceId);
-        Assert.Equal(first.StateVersion, (await provider.State.FindByResourceIdAsync(first.ResourceId))!.StateVersion);
-        Assert.Equal(second.StateVersion, (await provider.State.FindByResourceIdAsync(second.ResourceId))!.StateVersion);
+        Assert.Equal(first.StateVersion, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(first.ResourceId)))!.StateVersion);
+        Assert.Equal(second.StateVersion, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(second.ResourceId)))!.StateVersion);
         var limitedWrite = TestActor.Value with { AccessLimit = new(first.ResourceId, DocumentAccess.Write) };
-        await provider.State.TransitionAsync(first.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Security = current.Security with { Owner = "another-owner" } }, true));
-        Assert.Equal(DocumentAccess.None, service.Access(limitedWrite, (await provider.State.FindByResourceIdAsync(first.ResourceId))!));
+        await TestStorage.SetPermissionsAsync(provider, first.ResourceId, first.Security with { Owner = "another-owner" });
+        Assert.Equal(DocumentAccess.None, service.Access(limitedWrite, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(first.ResourceId)))!));
     }
 
     [Fact]
@@ -126,7 +127,8 @@ public sealed class HostIntegrationTests
         Assert.Equal(first.Response.ToByteArray(), second.Response.ToByteArray());
         Assert.False(first.State.Security.AccessFor(writer.Identity.Subject).HasFlag(DocumentAccess.Write));
         // Metadata editor presence is authorized by the host evaluator, not by a copied ACL.
-        Assert.Single(first.State.Editors, e => e.AsEditor && e.Owner?.Subject == writer.Identity.Subject);
+        Assert.Single((await provider.Documents.ReadControlAsync(state.ResourceId))!.Editors,
+            e => e.AsEditor && e.Owner?.Subject == writer.Identity.Subject);
         var denied = await processor.ExecuteAsync(new() { Requests = { join } }, "https://host.test",
             writer with { AccessLimit = new(state.ResourceId, DocumentAccess.Read) });
         Assert.Equal("FileUnauthorizedAccess", denied.Response.Responses[0].SubResponses[0].ErrorCode);
@@ -137,25 +139,23 @@ public sealed class HostIntegrationTests
     {
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/saved.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var request = StorageTests.Fixture("save-first");
-        var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
-        put.ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        var request = await StorageTestDocuments.SaveRequestAsync(service, state, MinimalDocx.Create("first save"));
         var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         var accepted = Assert.Single(saved.AcceptedSaves);
-        Assert.False(accepted.IsReplay); Assert.Equal(saved.State.Content, accepted.Content);
+        Assert.False(accepted.IsReplay); Assert.Equal(saved.State.Package, accepted.Package);
         Assert.Equal(saved.State.ContentVersion, accepted.ContentVersion); Assert.Equal(state.ResourceId, accepted.ResourceId);
         var retry = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal(accepted with { IsReplay = true }, Assert.Single(retry.AcceptedSaves));
-        var next = StorageTests.Fixture("save-second");
+        var next = await StorageTestDocuments.SaveRequestAsync(service, saved.State, MinimalDocx.Create("second save"));
         var batch = new CellStorageRequest { Requests = { File(state.ResourceId, SubRequestType.Cell, SubRequestType.Properties) } };
         SetBinary(batch.Requests[0].SubRequests[0], next.ToByteArray());
         var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(batch, "https://host.test", TestActor.Value);
         Assert.False(Assert.Single(result.AcceptedSaves).IsReplay);
         Assert.Equal("InvalidArgument", result.Response.Responses[0].SubResponses[1].ErrorCode);
         Assert.NotEqual(accepted.ContentVersion, result.AcceptedSaves[0].ContentVersion);
-        Assert.NotEqual(accepted.Content, result.AcceptedSaves[0].Content);
-        Assert.Equal(saved.State.Content, accepted.Content);
+        Assert.NotEqual(accepted.Package, result.AcceptedSaves[0].Package);
+        Assert.Equal(saved.State.Package, accepted.Package);
     }
 
     [Fact]
@@ -164,7 +164,7 @@ public sealed class HostIntegrationTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/read-only.docx", MinimalDocx.Create(), TestActor.Value))!;
         var actor = TestActor.Value with { AccessLimit = new(state.ResourceId, DocumentAccess.Read) };
-        var binary = StorageTests.Fixture("save-first");
+        var binary = await StorageTestDocuments.SaveRequestAsync(service, state, MinimalDocx.Create("read-only save"));
         binary.SubRequests.Insert(0, new(RequestTypes.QueryAccess)
             { RequestId = 99, Data = new QueryAccessSubRequestData() });
         var request = File(state.ResourceId, SubRequestType.Cell);
@@ -177,8 +177,8 @@ public sealed class HostIntegrationTests
         Assert.True(response.SubResponses[1].Status);
         Assert.Equal(CellBridgeAuthorization.AccessDeniedHResult, response.SubResponses[1].Error!.ErrorCode);
         Assert.Empty(result.AcceptedSaves);
-        Assert.Equal(state.Content, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.Content);
-        Assert.Equal(state.StateVersion, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.StateVersion);
+        Assert.Equal(state.Package, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Package);
+        Assert.Equal(state.StateVersion, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.StateVersion);
     }
 
     [Fact]
@@ -197,11 +197,10 @@ public sealed class HostIntegrationTests
     public async Task AcceptedSaveRemainsVisibleWhenALaterBinaryQueryFails(bool useSoap)
     {
         var memory = Memory(); var content = new FailingReadsAfterCommit(memory.Content);
-        var stateStore = new ObserveCommits(memory.State, () => content.FailReads = true);
+        var stateStore = new ObserveCommits(memory.Documents, () => content.FailReads = true);
         var service = new CellBridgeDocumentService(new(stateStore, content));
         var state = (await service.CreateAsync("/partial.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var binary = StorageTests.Fixture("save-first");
-        Assert.IsType<PutChangesSubRequestData>(binary.SubRequests[0].Data).ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        var binary = await StorageTestDocuments.SaveRequestAsync(service, state, MinimalDocx.Create("committed before failing query"));
         binary.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 99,
             Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } });
         AcceptedSave receipt;
@@ -220,9 +219,9 @@ public sealed class HostIntegrationTests
             Assert.IsType<IOException>(error.InnerException);
             receipt = Assert.Single(error.AcceptedSaves);
         }
-        var current = (await memory.State.FindByResourceIdAsync(state.ResourceId))!;
+        var current = (await memory.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         Assert.Equal(current.ContentVersion, receipt.ContentVersion);
-        Assert.Equal(current.Content, receipt.Content);
+        Assert.Equal(current.Package, receipt.Package);
         Assert.False(receipt.IsReplay);
     }
 
@@ -230,19 +229,18 @@ public sealed class HostIntegrationTests
     public async Task AcceptedSaveRemainsVisibleWhenALaterFileLookupFails()
     {
         var memory = Memory(); var later = Guid.NewGuid();
-        var store = new ObserveCommits(memory.State, () => { }) { UnavailableId = later };
+        var store = new ObserveCommits(memory.Documents, () => { }) { UnavailableId = later };
         var service = new CellBridgeDocumentService(new(store, memory.Content));
         var state = (await service.CreateAsync("/lookup.docx", MinimalDocx.Create(), TestActor.Value))!;
         var first = File(state.ResourceId, SubRequestType.Cell);
-        var binary = StorageTests.Fixture("save-first");
-        Assert.IsType<PutChangesSubRequestData>(binary.SubRequests[0].Data).ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        var binary = await StorageTestDocuments.SaveRequestAsync(service, state, MinimalDocx.Create("committed before failing lookup"));
         SetBinary(first.SubRequests[0], binary.ToByteArray());
         var second = File(later, SubRequestType.GetDocMetaInfo);
         second.RequestToken = 2;
         var error = await Assert.ThrowsAsync<AcceptedSaveException>(() => new CellBridgeRequestProcessor(service)
             .ExecuteAsync(new() { Requests = { first, second } }, "https://host.test", TestActor.Value));
         Assert.IsType<IOException>(error.InnerException);
-        Assert.Equal((await memory.State.FindByResourceIdAsync(state.ResourceId))!.Content, Assert.Single(error.AcceptedSaves).Content);
+        Assert.Equal((await memory.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Package, Assert.Single(error.AcceptedSaves).Package);
     }
 
     [Theory]
@@ -276,9 +274,9 @@ public sealed class HostIntegrationTests
         request.SubRequestDataBinary = bytes;
         request.SubRequestDataAttributes["BinaryDataSize"] = bytes.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
+    private static StorageProvider Memory() => StorageTestDocuments.Memory();
     private sealed class HostAccess(DocumentAccess access = DocumentAccess.Read | DocumentAccess.Write) : ICellBridgeAccessEvaluator
-    { public DocumentAccess Evaluate(CellBridgeActor actor, DocumentState state) => access; }
+    { public DocumentAccess Evaluate(CellBridgeActor actor, DocumentAuthorizationView state) => access; }
 
     private sealed class FailingReadsAfterCommit(IContentStore inner) : IContentStore
     {
@@ -289,26 +287,16 @@ public sealed class HostIntegrationTests
             => FailReads ? throw new IOException("Injected query read failure after a save.") : inner.OpenReadAsync(handle, ct);
     }
 
-    private sealed class ObserveCommits(IDocumentStateStore inner, Action committed) : IDocumentStateStore
+    private sealed class ObserveCommits(IDocumentRepository inner, Action committed) : RepositoryTestProxy(inner)
     {
         public Guid? UnavailableId { get; init; }
-        public bool Durable => false; public bool Shared => false;
-        public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken ct = default)
-            => id == UnavailableId ? throw new IOException("Injected later file lookup failure.") : inner.FindByResourceIdAsync(id, ct);
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken ct = default) => inner.FindByPathKeyAsync(key, ct);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken ct = default) => inner.ListAsync(offset, limit, ct);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken ct = default) => inner.TryCreateAsync(state, ct);
-        public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
-        public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> change, CancellationToken ct = default)
+        public override ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken ct = default)
+            => identity is DocumentIdentity.Resource resource && resource.ResourceId == UnavailableId
+                ? throw new IOException("Injected later file lookup failure.") : Inner.FindAsync(identity, ct);
+        public override async ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken ct = default)
         {
-            var published = false;
-            var result = await inner.TransitionAsync(id, (current, now) =>
-            {
-                var next = change(current, now);
-                published = next.Next is not null && next.Next.Receipts.Length > current.Receipts.Length;
-                return next;
-            }, ct);
-            if (published) committed();
+            var result = await Inner.PublishAsync(publication, ct);
+            if (result.Status == PublicationStatus.Accepted) committed();
             return result;
         }
     }

@@ -14,13 +14,10 @@ internal sealed partial class PostgreSqlDocumentDatabase
         var (connection, transaction) = PostgreSqlDatabase.GetTransaction(db);
         await using var batch = new NpgsqlBatch(connection, transaction);
         var inserts = new List<(string Key, NpgsqlBatchCommand Command)>(handles.Count);
-        // Input is unique and sorted by canonical key. Keep each lock before its
-        // insert, and keep all creation locks until the caller's transaction ends.
+        // The unique index coordinates duplicate creation. Sort keys to keep
+        // overlapping multi-object insertions in the same order.
         foreach (var handle in handles)
         {
-            var creationLock = new NpgsqlBatchCommand("SELECT pg_advisory_xact_lock(hashtextextended($1,748219353))");
-            creationLock.Parameters.AddWithValue(handle.Key);
-            batch.BatchCommands.Add(creationLock);
             var insert = new NpgsqlBatchCommand("INSERT INTO cellbridge_objects VALUES ($1,$2,$1) ON CONFLICT DO NOTHING");
             insert.Parameters.AddWithValue(handle.Key);
             insert.Parameters.AddWithValue(handle.Length);

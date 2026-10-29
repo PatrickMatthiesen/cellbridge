@@ -7,7 +7,8 @@ using CellBridge.Storage.InMemory;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
-var documents = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+var content = new InMemoryContentStore();
+var documents = new StorageProvider(new InMemoryDocumentRepository(content), content);
 
 builder.Services.AddCellBridge(documents, requireDurability: false);
 builder.Services.AddAuthentication("CellBridge");

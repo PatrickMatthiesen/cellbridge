@@ -6,12 +6,11 @@ using Microsoft.EntityFrameworkCore.Metadata;
 namespace CellBridge.Storage.Shared;
 
 /// <summary>Stores immutable content in bounded database chunks and reuses matching objects.</summary>
-internal sealed partial class DocumentContent<TContext> : IContentStore, IStorageBudgetParticipant where TContext : DbContext
+internal sealed partial class DocumentContent<TContext> : IContentStore where TContext : DbContext
 {
     private const int ChunkSize = 65536;
     private const int ChunksPerBatch = 16;
     private readonly IDocumentDatabase<TContext> database;
-    private readonly object _budgetScope;
     private readonly long _maxObjectBytes;
     // Bound chunk staging while allowing independent document transactions to
     // overlap database round trips and durable commits.
@@ -27,15 +26,13 @@ internal sealed partial class DocumentContent<TContext> : IContentStore, IStorag
             context.Set<ChunkRow>().AsNoTracking().Where(row => row.ObjectKey == key)
                 .OrderBy(row => row.Ordinal).Select(row => new ChunkProjection { Ordinal = row.Ordinal, Bytes = row.Bytes }));
 
-    public DocumentContent(IDocumentDatabase<TContext> database, long maxObjectBytes, object budgetScope)
+    public DocumentContent(IDocumentDatabase<TContext> database, long maxObjectBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxObjectBytes);
         this.database = database;
         _maxObjectBytes = maxObjectBytes;
-        _budgetScope = budgetScope;
     }
 
-    public object BudgetScope => _budgetScope;
     public bool Durable => true;
     public bool Shared => true;
     private TContext CreateContext() =>
@@ -46,6 +43,7 @@ internal sealed partial class DocumentContent<TContext> : IContentStore, IStorag
         ArgumentNullException.ThrowIfNull(source);
         await _writers.WaitAsync(cancellationToken);
         try { return await WriteCoreAsync(source, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex) when (database.IsDatabaseException(ex))
         { throw new StorageUnavailableException("Content write failed or its commit outcome is unknown.", ex); }
         finally { _writers.Release(); }
@@ -73,7 +71,6 @@ internal sealed partial class DocumentContent<TContext> : IContentStore, IStorag
         await using var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
         await database.ConfigureAsync(context, cancellationToken);
         await database.CheckConfigurationAsync(context, cancellationToken);
-        await database.Locks.PublicationAsync(context, false, cancellationToken);
         var inserted = false;
         if (!await TryVerifyExistingContentAsync(context, handle, cancellationToken))
         {
@@ -98,10 +95,6 @@ internal sealed partial class DocumentContent<TContext> : IContentStore, IStorag
                     await SaveChunkBatchAsync(context, pending, cancellationToken);
             }
             if (pending.Count != 0) await SaveChunkBatchAsync(context, pending, cancellationToken);
-            // The shared usage row serializes quota admission across documents.
-            // Lock it only after uploading chunks; rejection still rolls back
-            // the object and every chunk in this transaction.
-            await DocumentBudget.AdjustAsync(database, context, length, 0, cancellationToken);
             await context.SaveChangesAsync(cancellationToken);
         }
         cancellationToken.ThrowIfCancellationRequested();
@@ -127,9 +120,8 @@ internal sealed partial class DocumentContent<TContext> : IContentStore, IStorag
     private async Task VerifyExistingContentAsync(TContext context, ContentHandle handle,
         ContentMetadata metadata, CancellationToken cancellationToken)
     {
-        // Every caller holds the shared publication gate. Existing objects are
-        // immutable, and maintenance cannot remove them until the transaction
-        // ends, so reusing one needs no exclusive object-creation lock.
+        // Existing objects are immutable. Reclamation requires stopped readers
+        // and writers, so ordinary reuse needs no publication gate.
         if (metadata.Length != handle.Length || metadata.Sha256 != handle.Sha256)
             throw new StorageCorruptionException("Existing content has invalid metadata.");
         using var verification = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

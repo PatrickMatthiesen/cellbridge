@@ -18,7 +18,7 @@ namespace CellBridge.Packages.Tests;
 
 public sealed class HostingRegistrationTests
 {
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
+    private static StorageProvider Memory() => TestStorage.Memory();
 
     [Fact]
     public async Task TypedPolicyReusesHostSingletonAndActuallyControlsDocumentAccess()
@@ -183,15 +183,15 @@ public sealed class HostingRegistrationTests
         var provider = Memory(); var destination = new Destination { FailOnce = true };
         using var worker = Worker(provider, destination);
         var id = await Queue(provider, 2);
-        var first = (await provider.State.FindByResourceIdAsync(id))!.Publication!.Pending[0];
+        var first = (await provider.Documents.ReadNextDeliveryAsync(id))!.Revision;
         Assert.Equal(0, await worker.PublishPendingOnceAsync());
-        Assert.Equal(2, (await provider.State.FindByResourceIdAsync(id))!.Publication!.Pending.Length);
+        Assert.Equal(2, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!.Counters.PendingDeliveries);
         Assert.Equal(1, await worker.PublishPendingOnceAsync());
-        Assert.Single((await provider.State.FindByResourceIdAsync(id))!.Publication!.Pending);
+        Assert.Equal(1, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!.Counters.PendingDeliveries);
         Assert.Equal(first.OperationId, destination.Operations[0]);
         Assert.Equal(first.OperationId, destination.Operations[1]);
         Assert.Equal(1, await worker.PublishPendingOnceAsync());
-        Assert.Empty((await provider.State.FindByResourceIdAsync(id))!.Publication!.Pending);
+        Assert.Equal(0, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!.Counters.PendingDeliveries);
     }
 
     [Fact]
@@ -226,7 +226,7 @@ public sealed class HostingRegistrationTests
         await worker.StopAsync(CancellationToken.None);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => active);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
-        Assert.Single((await provider.State.FindByResourceIdAsync(id))!.Publication!.Pending);
+        Assert.Equal(1, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!.Counters.PendingDeliveries);
         worker.Dispose();
         await Task.WhenAll(Enumerable.Range(0, 1000).Select(_ => Task.Run(worker.Wake)));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => worker.PublishPendingOnceAsync());
@@ -243,7 +243,7 @@ public sealed class HostingRegistrationTests
         await restarted.StartAsync(CancellationToken.None);
         await destination.Applied.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await restarted.StopAsync(CancellationToken.None);
-        Assert.Empty((await provider.State.FindByResourceIdAsync(id))!.Publication!.Pending);
+        Assert.Equal(0, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!.Counters.PendingDeliveries);
         Assert.Equal(destination.Operations[0], destination.Operations[1]);
     }
 
@@ -293,8 +293,8 @@ public sealed class HostingRegistrationTests
     public async Task TransientFailureWaitsEvenWhenAnotherDocumentHasABacklogAndWakesArrive()
     {
         var provider = Memory(); var destination = new Destination();
-        destination.PersistentFailureId = await Queue(provider, 1, "/shared/a-failing.bin");
-        var goodId = await Queue(provider, 2, "/shared/b-working.bin");
+        destination.PersistentFailureId = await Queue(provider, 1, "/shared/a-failing.docx");
+        var goodId = await Queue(provider, 2, "/shared/b-working.docx");
         using var worker = new ExternalRevisionPublicationWorker(provider, new(provider, destination),
             new() { PollingInterval = TimeSpan.FromSeconds(30) }, NullLogger<ExternalRevisionPublicationWorker>.Instance);
         await worker.StartAsync(CancellationToken.None);
@@ -303,25 +303,41 @@ public sealed class HostingRegistrationTests
         await Assert.ThrowsAsync<TimeoutException>(() => destination.ExtraAttempt.Task.WaitAsync(TimeSpan.FromMilliseconds(200)));
         await worker.StopAsync(CancellationToken.None);
         Assert.Equal(2, destination.Calls);
-        Assert.Single((await provider.State.FindByResourceIdAsync(goodId))!.Publication!.Pending);
-        Assert.Single((await provider.State.FindByResourceIdAsync(destination.PersistentFailureId))!.Publication!.Pending);
+        Assert.Equal(1, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(goodId)))!.Counters.PendingDeliveries);
+        Assert.Equal(1, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(destination.PersistentFailureId)))!.Counters.PendingDeliveries);
     }
 
     private static ExternalRevisionPublicationWorker Worker(StorageProvider provider, Destination destination) =>
         new(provider, new(provider, destination), new(), NullLogger<ExternalRevisionPublicationWorker>.Instance);
 
-    private static async Task<Guid> Queue(StorageProvider provider, int count, string path = "/shared/queued.bin")
+    private static async Task<Guid> Queue(StorageProvider provider, int count, string path = "/shared/queued.docx")
     {
         var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync(path, [1, 2, 3], TestActor.Value))!;
+        var state = (await service.CreateAsync(path, DocumentBytes(0), TestActor.Value))!;
         var publisher = new ExternalRevisionPublisher(provider, new Destination());
         Assert.True(await publisher.BindAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion,
             Guid.NewGuid(), "host-file", "r0"));
+        Assert.True((await new SharedDocumentLocks(service).ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "queue", TestActor.Value)).Success);
         for (var i = 0; i < count; i++)
-            await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(
-                ExternalPublication.Append(current, current with { ContentVersion = current.ContentVersion + 1 },
-                    Guid.NewGuid(), provider.Limits), true));
+        {
+            using var input = new MemoryStream(DocumentBytes(i + 1));
+            await service.SaveWholeFileAsync(state.ResourceId, input, "queued-" + i, TestActor.Value, "queue");
+        }
         return state.ResourceId;
+    }
+
+    private static byte[] DocumentBytes(int version)
+    {
+        using var result = new MemoryStream();
+        using (var archive = new System.IO.Compression.ZipArchive(result, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+        {
+            void Part(string name, string value)
+            { using var writer = new StreamWriter(archive.CreateEntry(name).Open()); writer.Write(value); }
+            Part("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>");
+            Part("_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>");
+            Part("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Revision " + version + "</w:t></w:r></w:p></w:body></w:document>");
+        }
+        return result.ToArray();
     }
 
     private static string Field(string html, string name) => WebUtility.HtmlDecode(Regex.Match(html,
@@ -339,7 +355,7 @@ public sealed class HostingRegistrationTests
         public bool Deny { get; set; }
         public string PolicyDomain => "test:host-permissions";
         public DocumentAuthorizationBinding? BindNewDocument(Guid id) => new(PolicyDomain, 1, 1);
-        public ICellBridgeAuthorizationSnapshot? Resolve(DocumentState state) =>
+        public ICellBridgeAuthorizationSnapshot? Resolve(DocumentAuthorizationView state) =>
             Deny ? null : new Snapshot(state.ResourceId, state.Security.AuthorizationPolicy!);
         private sealed record Snapshot(Guid ResourceId, DocumentAuthorizationBinding Binding) : ICellBridgeAuthorizationSnapshot
         {

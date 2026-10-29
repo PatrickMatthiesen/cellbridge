@@ -20,13 +20,13 @@ public sealed class LockInputValidationTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/coauth-owner.docx", MinimalDocx.Create(), TestActor.Value))!;
         var other = new CellBridgeActor(new("tests:other", "other", "Other user"));
-        await provider.State.TransitionAsync(state.ResourceId, (s, _) => new StateTransition<bool>(s with
-        { Security = s.Security with { Grants = s.Security.Grants.SetItem(other.Identity.Subject, DocumentAccess.Read | DocumentAccess.Write) } }, true));
+        await TestStorage.SetPermissionsAsync(provider, state.ResourceId,
+            state.Security with { Grants = state.Security.Grants.SetItem(other.Identity.Subject, DocumentAccess.Read | DocumentAccess.Write) });
         var processor = new CellBridgeRequestProcessor(service);
         var initial = Attributes(SubRequestType.Coauth, "JoinCoauthoring"); initial["ClientID"] = "string-client";
         var joined = await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId, SubRequestType.Coauth, initial)), "https://host.test", TestActor.Value);
         Assert.Equal("Success", Assert.Single(Assert.Single(joined.Response.Responses).SubResponses).ErrorCode);
-        var before = JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId));
+        var before = JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
         var attrs = Attributes(SubRequestType.Coauth, operation); attrs["ClientID"] = initial["ClientID"];
         var doc = new DocumentStore().GetOrAdd("/direct-coauth-owner.docx");
         var now = DateTime.UtcNow; doc.UseAuthoritativeTime(now);
@@ -38,7 +38,7 @@ public sealed class LockInputValidationTests
             if (timeout is null) attrs.Remove("Timeout"); else attrs["Timeout"] = timeout;
             var result = await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId, SubRequestType.Coauth, attrs)), "https://host.test", other);
             Assert.Equal("FileUnauthorizedAccess", Assert.Single(Assert.Single(result.Response.Responses).SubResponses).ErrorCode);
-            Assert.Equal(before, JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId)));
+            Assert.Equal(before, JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId))));
             Assert.Equal(LockOperationResult.AccessDenied, Apply(coordinator, doc, SubRequestType.Coauth, attrs, now));
             if (operation != "RefreshCoauthoring")
             {
@@ -59,19 +59,19 @@ public sealed class LockInputValidationTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/owner-input.docx", MinimalDocx.Create(), TestActor.Value))!;
         var other = new CellBridgeActor(new("tests:other", "other", "Other user"));
-        await provider.State.TransitionAsync(state.ResourceId, (s, _) => new StateTransition<bool>(s with
-        { Security = s.Security with { Grants = s.Security.Grants.SetItem(other.Identity.Subject, DocumentAccess.Read | DocumentAccess.Write) } }, true));
+        await TestStorage.SetPermissionsAsync(provider, state.ResourceId,
+            state.Security with { Grants = state.Security.Grants.SetItem(other.Identity.Subject, DocumentAccess.Read | DocumentAccess.Write) });
         var processor = new CellBridgeRequestProcessor(service);
         var attrs = Attributes(type, "GetLock");
         await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId, type, attrs)), "https://host.test", TestActor.Value);
-        var before = JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId));
+        var before = JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
         attrs[type == SubRequestType.SchemaLock ? "SchemaLockRequestType" : "ExclusiveLockRequestType"] = "RefreshLock";
         foreach (string? timeout in new string?[] { null, "", "bad" })
         {
             if (timeout is null) attrs.Remove("Timeout"); else attrs["Timeout"] = timeout;
             var result = await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId, type, attrs)), "https://host.test", other);
             Assert.Equal("FileUnauthorizedAccess", Assert.Single(Assert.Single(result.Response.Responses).SubResponses).ErrorCode);
-            Assert.Equal(before, JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId)));
+            Assert.Equal(before, JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId))));
         }
         var doc = new DocumentStore().GetOrAdd("/direct-owner.docx");
         var now = DateTime.UtcNow; var coordinator = FssHttpLockCoordinator.For(doc, TestActor.Value.Identity);
@@ -85,7 +85,9 @@ public sealed class LockInputValidationTests
     [Fact]
     public async Task SchemaRefreshReacquiresPersistedExpiredLeaseThroughNewProcessor()
     {
-        var provider = Memory();
+        var clock = new ManualClock();
+        var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/schema-refresh.docx", MinimalDocx.Create(), TestActor.Value))!;
         var attrs = Attributes(SubRequestType.SchemaLock, "GetLock");
@@ -93,14 +95,8 @@ public sealed class LockInputValidationTests
         var granted = await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId,
             SubRequestType.SchemaLock, attrs)), "https://host.test", TestActor.Value);
         Assert.Equal("Success", Assert.Single(Assert.Single(granted.Response.Responses).SubResponses).ErrorCode);
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        {
-            Coordination = current.Coordination with
-            {
-                SchemaOwners = [Assert.Single(current.Coordination.SchemaOwners) with { ExpiresUtc = now.AddSeconds(-1) }],
-            },
-        }, true));
-        var expired = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        clock.Advance(TimeSpan.FromHours(2));
+        var expired = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         attrs["SchemaLockRequestType"] = "RefreshLock";
         // Refresh has no GetLock-only fallback identifier requirement, even
         // when the expired lease is reacquired.
@@ -115,15 +111,15 @@ public sealed class LockInputValidationTests
         Assert.Equal("Success", response.ErrorCode);
         Assert.Equal("SchemaLock", response.SubResponseDataAttributes["LockType"]);
         MicrosoftResponseSchema.Validate(refreshed.Response.ToSoapEnvelope());
-        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var after = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         var lease = Assert.Single(after.Coordination.SchemaOwners);
         Assert.Equal(attrs["ClientID"], lease.Client);
         Assert.Equal(attrs["SchemaLockID"], lease.Id);
         Assert.Equal(TestActor.Value.Identity.Subject, lease.OwnerSubject);
         Assert.True(lease.ExpiresUtc > Assert.Single(expired.Coordination.SchemaOwners).ExpiresUtc);
         Assert.True(after.Coordination.Generation > expired.Coordination.Generation);
-        Assert.Equal(state.Content, after.Content);
-        Assert.Equal(state.ContentVersion, after.ContentVersion);
+        Assert.Equal(state.Package, after.Head.Package);
+        Assert.Equal(state.ContentVersion, after.Head.ContentVersion);
         Assert.Empty(after.Coordination.CoauthorClients);
         Assert.Empty(refreshed.AcceptedSaves);
     }
@@ -182,7 +178,7 @@ public sealed class LockInputValidationTests
             Assert.Equal("InvalidArgument", Assert.Single(file.SubResponses).ErrorCode);
             MicrosoftResponseSchema.Validate(result.Response.ToSoapEnvelope());
             Assert.Empty(result.AcceptedSaves);
-            Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+            Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
         }
     }
 
@@ -234,7 +230,7 @@ public sealed class LockInputValidationTests
             var result = await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId, type, attrs)),
                 "https://host.test", TestActor.Value);
             Assert.Equal("InvalidArgument", Assert.Single(Assert.Single(result.Response.Responses).SubResponses).ErrorCode);
-            Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+            Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
         }
         foreach (var text in new string?[] { null, "false", "0", " false " })
         {
@@ -267,38 +263,30 @@ public sealed class LockInputValidationTests
     [Fact]
     public async Task RejectedCoauthInputDoesNotPublishExpiredEditorsOrKnowledge()
     {
-        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var clock = new ManualClock(); var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/expired.docx", MinimalDocx.Create(), TestActor.Value))!;
         var processor = new CellBridgeRequestProcessor(service);
         var join = Attributes(SubRequestType.Coauth, "JoinCoauthoring");
         await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId, SubRequestType.Coauth, join)),
             "https://host.test", TestActor.Value);
-        state = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
-        {
-            var expired = DateTime.UtcNow.AddDays(-1);
-            var next = current with
-            {
-                Editors = [Assert.Single(current.Editors) with { ExpiresUtc = expired }],
-                Coordination = current.Coordination with
-                { SchemaOwners = [Assert.Single(current.Coordination.SchemaOwners) with { ExpiresUtc = expired }] },
-            };
-            return new StateTransition<DocumentState>(next, next);
-        });
-        state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        string before = JsonSerializer.Serialize(state);
+        clock.Advance(TimeSpan.FromDays(2));
+        var expiredControl = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
+        string before = JsonSerializer.Serialize(expiredControl with { UtcNow = default });
         join.Remove("Timeout");
         var invalid = await processor.ExecuteAsync(CellStorageRequestParser.Parse(Soap(state.ResourceId, SubRequestType.Coauth, join)),
             "https://host.test", TestActor.Value);
         Assert.Equal("InvalidArgument", Assert.Single(Assert.Single(invalid.Response.Responses).SubResponses).ErrorCode);
-        Assert.Equal(before, JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId)));
+        Assert.Equal(before, JsonSerializer.Serialize((await provider.Documents.ReadControlAsync(state.ResourceId))! with { UtcNow = default }));
 
         var valid = CellStorageRequestParser.Parse(Soap(state.ResourceId, SubRequestType.SchemaLock,
             Attributes(SubRequestType.SchemaLock, "CheckLockAvailability")));
         Assert.Equal("Success", Assert.Single(Assert.Single((await processor.ExecuteAsync(valid,
             "https://host.test", TestActor.Value)).Response.Responses).SubResponses).ErrorCode);
-        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var after = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         Assert.Empty(after.Editors); Assert.Empty(after.Coordination.SchemaOwners);
-        Assert.True(after.Partitions.Single(p => p.Kind == 2).Knowledge > state.Partitions.Single(p => p.Kind == 2).Knowledge);
+        Assert.True(after.Partitions.Single(p => p.Kind == 2).Knowledge > expiredControl.Partitions.Single(p => p.Kind == 2).Knowledge);
+
     }
 
     [Theory]
@@ -380,7 +368,7 @@ public sealed class LockInputValidationTests
         var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(request, "https://host.test", TestActor.Value);
         Assert.Equal(new[] { "InvalidArgument", "Success", "Success" },
             Assert.Single(result.Response.Responses).SubResponses.Select(r => r.ErrorCode));
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Fact]
@@ -419,7 +407,7 @@ public sealed class LockInputValidationTests
         request.Requests[0].SubRequests[0].DependencyType = "OnSuccess";
         var dependency = await processor.ExecuteAsync(request, "https://host.test", TestActor.Value);
         Assert.Equal("DependentRequestNotExecuted", Assert.Single(Assert.Single(dependency.Response.Responses).SubResponses).ErrorCode);
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     internal static Dictionary<string, string> Attributes(SubRequestType type, string operation)
@@ -453,5 +441,12 @@ public sealed class LockInputValidationTests
         };
     }
 
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset _now = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan elapsed) => _now += elapsed;
+    }
+
+    private static StorageProvider Memory() => StorageTestDocuments.Memory();
 }

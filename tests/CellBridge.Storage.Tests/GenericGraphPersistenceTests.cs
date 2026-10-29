@@ -19,13 +19,12 @@ public class GenericGraphPersistenceTests
     [Fact]
     public async Task OversizedReceiptCannotPublishContentReceiptsOrOutbox()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore(),
-            new StorageLimits { MaxObjectBytes = 4096 });
+        var provider = StorageTestDocuments.Memory(limits: new StorageLimits { MaxObjectBytes = 4096 });
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/receipt-bound.docx", MinimalDocx.Create(), TestActor.Value))!;
-        await provider.State.TransitionAsync(initial.ResourceId, (current, _) => new StateTransition<bool>(current with
-            { Publication = new(Guid.NewGuid(), "external", "revision-0", 1, []) }, true));
-        initial = (await provider.State.FindByResourceIdAsync(initial.ResourceId))!;
+        Assert.True((await provider.Documents.UpdateDeliveryAsync(new DocumentDeliveryCommand.Bind(initial.ResourceId,
+            initial.LifecycleGeneration, initial.StateVersion, new(Guid.NewGuid(), "external", "revision-0", 1)))).Applied);
+        initial = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)))!;
         var file = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         // Many small admitted elements produce a response larger than any payload.
         for (uint i = 0; i < 200; i++)
@@ -33,43 +32,37 @@ public class GenericGraphPersistenceTests
                 new ExGuid(i + 100, Guid.NewGuid()), w => GraphFixture.Record(w,
                     StreamObjectTypeHeaderStart.ObjectDataBLOB, b => b.WriteBytes([1]))));
         var result = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            Save(initial, file), new Dictionary<string, string>(), TestActor.Value);
+            await Save(service, initial, file), new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(result.Response.SubResponses).Status);
         Assert.Contains("save receipt bytes", result.Response.SubResponses[0].Error!.ErrorMessage);
         Assert.Empty(result.AcceptedSaves);
-        Assert.Equal(initial, await provider.State.FindByResourceIdAsync(initial.ResourceId));
+        Assert.Equal(initial, await provider.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)));
     }
 
     [Fact]
     public async Task FileSavePreservesOpaqueMetadataAndItsScopedReceipt()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/opaque-save.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var opaque = await DocumentPartition.CaptureGraphAsync(initial.Partitions.Single(p => p.Kind == 1),
-            new GraphFixture([1], blob: true).Generic(), 9, provider.Content, new());
+        var metadata = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.Metadata,
+            StorageTestDocuments.MetadataRequest(new GraphFixture([1], blob: true)), new Dictionary<string, string>(), TestActor.Value);
+        Assert.False(Assert.Single(metadata.Response.SubResponses).Status);
+        var opaque = (await provider.Documents.ReadPartitionAsync(initial.ResourceId, new(1)))!.Partition;
+        var scoped = Assert.Single((await provider.Documents.ExportDocumentAsync(initial.ResourceId))!.Receipts);
         var file = new GraphFixture(MinimalDocx.Create("after"), blob: true);
-        using var response = new MemoryStream([1, 2, 3]);
-        var scoped = new SaveReceipt($"{file.Index.Value}:{file.Index.Guid:D}", "digest", initial.ContentVersion,
-            await provider.Content.WriteAsync(response), TestActor.Value.Identity.Subject)
-            { PartitionKind = 1, AcceptedStorageIndex = opaque.StorageIndex };
-        await provider.State.TransitionAsync(initial.ResourceId, (current, _) => new StateTransition<bool>(current with
-        {
-            Partitions = current.Partitions.Select(p => p.Kind == 1 ? opaque : p).ToImmutableArray(),
-            Receipts = [scoped]
-        }, true));
-        var request = Save(initial, file);
+        var request = await Save(service, initial, file);
         var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
-        Assert.Equal(opaque, saved.State.Partitions.Single(p => p.Kind == 1));
-        Assert.Equal(scoped, saved.State.Receipts.Single(r => r.PartitionKind == 1));
-        Assert.Contains(scoped.Response!, StorageReferences.Handles(saved.State));
+        Assert.Equal(opaque, (await provider.Documents.ReadPartitionAsync(initial.ResourceId, new(1)))!.Partition);
+        Assert.Equal(scoped, (await provider.Documents.ExportDocumentAsync(initial.ResourceId))!.Receipts.Single(r => r.Operation.PartitionKind == 1));
+        Assert.Contains((await provider.Documents.ExportDocumentAsync(initial.ResourceId))!.ContentReferences, reference => reference.Handle == scoped.Response);
         var repeat = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(repeat.AcceptedSaves).IsReplay);
-        Assert.Equal(opaque, repeat.State.Partitions.Single(p => p.Kind == 1));
-        Assert.Equal(scoped, repeat.State.Receipts.Single(r => r.PartitionKind == 1));
+        Assert.Equal(opaque, (await provider.Documents.ReadPartitionAsync(initial.ResourceId, new(1)))!.Partition);
+        Assert.Equal(scoped, (await provider.Documents.ExportDocumentAsync(initial.ResourceId))!.Receipts.Single(r => r.Operation.PartitionKind == 1));
     }
 
     [PostgreSqlFact]
@@ -81,15 +74,20 @@ public class GenericGraphPersistenceTests
         var initial = (await service.CreateAsync("/pg-graph-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            Save(initial, f), new Dictionary<string, string>(), TestActor.Value);
+            await Save(service, initial, f), new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
-        var metadata = await DocumentPartition.CaptureGraphAsync(saved.State.Partitions[1], f.Generic(), 9, provider.Content, new());
-        await provider.State.TransitionAsync(initial.ResourceId, (state, now) => new StateTransition<bool>(state with
-            { Partitions = state.Partitions.Select(p => p.Kind == 1 ? metadata : p).ToImmutableArray() }, true));
+        var metadata = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.Metadata,
+            StorageTestDocuments.MetadataRequest(f), new Dictionary<string, string>(), TestActor.Value);
+        Assert.False(Assert.Single(metadata.Response.SubResponses).Status);
         var reopened = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
-        var state = (await reopened.State.FindByResourceIdAsync(initial.ResourceId))!;
-        Assert.Equal(f.Bytes, (await StoredDocument.RestoreAsync(state, reopened.Content)).Content);
-        var opaque = await DocumentPartition.RestoreGraphAsync(state.Partitions[1], reopened.Content, new());
+        var state = (await reopened.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)))!;
+        Assert.Equal(f.Bytes, await StorageTestDocuments.PackageAsync(reopened, state.Package));
+        var opaqueQuery = new FsshttpbCellRequest { SubRequests = { new(RequestTypes.QueryChanges) { RequestId = 1,
+            Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } } } };
+        var opaqueResult = await new CellBridgeDocumentService(reopened).ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
+            opaqueQuery, new Dictionary<string, string>(), TestActor.Value);
+        var opaque = GenericPartitionGraphSnapshot.Create(opaqueResult.Response.DataElementPackage!.DataElements,
+            Assert.IsType<QueryChangesSubResponseData>(opaqueResult.Response.SubResponses[0].Data).StorageIndexExtendedGuid);
         Assert.Equal(f.Bytes, Assert.Single(opaque.GetObjectPartitions(f.Cell, f.Child)).Content);
         var queries = new FsshttpbCellRequest();
         foreach (var cell in new[] { f.Cell, f.OtherCell }) queries.SubRequests.Add(new(RequestTypes.QueryChanges)
@@ -103,7 +101,7 @@ public class GenericGraphPersistenceTests
     }
 
     [Fact]
-    public async Task GenericCaptureRejectsImmutableIdentityReuseAndReusesExactHandles()
+    public async Task LegacyGenericCaptureRejectsImmutableIdentityReuseAndReusesExactHandles()
     {
         var content = new InMemoryContentStore();
         var initial = await new DocumentStore().Put("/immutable.docx", MinimalDocx.Create()).CaptureAsync(content);
@@ -124,7 +122,7 @@ public class GenericGraphPersistenceTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
-    public async Task SerializedStateAndReopenedContentPreserveRootsInheritedPartitionsAndBlobReferences(int kind)
+    public async Task LegacySerializedStateAndReopenedContentPreserveRootsInheritedPartitionsAndBlobReferences(int kind)
     {
         var root = Path.Combine(Path.GetTempPath(), "cellbridge-graph-" + Guid.NewGuid().ToString("N"));
         try
@@ -158,7 +156,7 @@ public class GenericGraphPersistenceTests
     }
 
     [Fact]
-    public async Task RestoreChecksBudgetsMappingMetadataAndCancellation()
+    public async Task LegacyRestoreChecksBudgetsMappingMetadataAndCancellation()
     {
         var content = new InMemoryContentStore();
         var initial = await new DocumentStore().Put("/bounds.docx", MinimalDocx.Create()).CaptureAsync(content);
@@ -182,40 +180,42 @@ public class GenericGraphPersistenceTests
     [InlineData(true)]
     public async Task DurableFileSavePublishesInheritedGraphAndReopensCorrectBytes(bool blob)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/inherited.docx", MinimalDocx.Create("before"), TestActor.Value))!;
         var f = new GraphFixture(MinimalDocx.Create("after"), blob);
-        var request = Save(initial, f);
+        var request = await Save(service, initial, f);
         var result = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(result.Response.SubResponses).Status);
         Assert.Equal(initial.ContentVersion + 1, result.State.ContentVersion);
-        var reopened = await StoredDocument.RestoreAsync(result.State, provider.Content);
-        Assert.Equal(f.Bytes, reopened.Content);
-        Assert.Equal(f.Bytes, reopened.FilePartition.FileGraph.Materialize());
-        Assert.Contains(result.State.Partitions[0].Elements, e => e.Id == StorageIds.Capture(f.BaseElement));
+        Assert.Equal(f.Bytes, await StorageTestDocuments.PackageAsync(provider, result.State.Package));
+        Assert.Equal(f.Bytes, (await StorageTestDocuments.GraphAsync(service, result.State)).Materialize());
+        Assert.Contains((await provider.Documents.ReadPartitionAsync(initial.ResourceId, new(0) { IncludeCatalog = true }))!.Elements,
+            e => e.Id == StorageIds.Capture(f.BaseElement));
+
     }
 
     [Fact]
     public async Task MissingInheritedDataCannotPublishOrAdvanceKnowledge()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/missing.docx", MinimalDocx.Create(), TestActor.Value))!;
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         f.Elements.RemoveAll(e => e.DataElementExtendedGuid.Equals(f.Blob));
         var result = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            Save(initial, f), new Dictionary<string, string>(), TestActor.Value);
+            await Save(service, initial, f), new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal((ulong)CellErrorCode.InvalidObject, Assert.Single(result.Response.SubResponses).Error!.ErrorCode);
-        Assert.Equal(initial, await provider.State.FindByResourceIdAsync(initial.ResourceId));
+        Assert.Equal(initial, await provider.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)));
     }
 
-    private static FsshttpbCellRequest Save(DocumentState state, GraphFixture f)
+    private static async Task<FsshttpbCellRequest> Save(CellBridgeDocumentService service, DocumentHead state, GraphFixture f)
     {
         var package = new DataElementPackage(); package.DataElements.AddRange(f.Elements);
-        return new() { DataElementPackage = package, SubRequests = { new(RequestTypes.PutChanges)
-        { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = f.Index,
-            ExpectedStorageIndex = StorageIds.Restore(state.Partitions.Single(p => p.Kind == 0).StorageIndex!), Flags = 1 } } } };
+        var request = new FsshttpbCellRequest { DataElementPackage = package, SubRequests = { new(RequestTypes.PutChanges)
+        { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = f.Index, Flags = 1 } } } };
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service, state));
+        return request;
     }
 }

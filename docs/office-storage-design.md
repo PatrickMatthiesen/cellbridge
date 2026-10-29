@@ -1,16 +1,53 @@
 # Office operation and storage design review
 
-This is a proposed replacement design, not a description of shipped behavior.
-The audit starts from `f569399`. It does not establish a performance result or
-authorize weakening an existing quota, permission, coherency or durability rule.
-The immediate decision is which complete design to prototype, rather than which
-additional locks or caches to add to the current aggregate.
+The user approved this replacement design on 2026-10-28. Implementation proceeds
+from archived commit `1e35edd`; PR #104 was closed without merging. This document
+describes the replacement contract and acceptance criteria. The implementation
+costs and remaining algorithmic limits are recorded in
+[operation costs](office-operation-costs.md#costs-of-the-replacement-implementation);
+measurements are recorded separately in [Office performance](office-performance.md).
+The user explicitly approved removing provider-wide byte and document-count
+quotas, including shared accounting and buckets. Per-request/per-document bounds,
+permissions, coherency and durability remain requirements.
 
 - [Microsoft operation catalog](office-operation-catalog.md) lists requests,
   responses, advertised profiles, implementation coverage and size drivers.
 - [Operation costs and priorities](office-operation-costs.md) separates protocol
   bounds, planning assumptions, observed fixtures and unknown production averages.
 - [Existing measurements](office-performance.md) describe the previous experiments.
+
+## Storage-index semantics checked during implementation
+
+The transmitted storage index is an update message, not a replacement snapshot.
+[MS-FSSHTTPB 2.2.2.1.4](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/e4c224ca-0717-4b02-b713-e75d353904bb)
+requires atomic updates of supplied keys without overwriting other updates.
+Expected values compare mapping targets. A mapping's transmission identifier and
+serial number do not change that comparison. The earlier implementation selected
+the uploaded index as a complete replacement; preserving that behavior would
+preserve a protocol bug.
+
+`ExpectedStorageIndex` supplies preconditions for the keys being updated. The
+server parses it and compares the relevant targets, but does not publish its
+mappings as new serial claims. Unreferenced transmission indexes also do not
+create claims. `ExpectedIndexMappingClaimTests` covers these cases, including a
+large expected envelope and serial aliases that must not change coherency.
+
+[MS-FSSHTTPB 2.2.1.12.2](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/f5724986-bd0f-488d-9b85-7d5f954d8e9a)
+defines the storage-index data element as temporary transmission data. New saves
+keep current key/value mappings and version intervals, rather than storing each
+incoming index package as canonical document content. The server constructs
+transmitted indexes from the selected mapping version. In-memory mapping versions
+share unchanged dictionary branches; SQL versions store changed keys and their
+visibility intervals. Neither provider copies the full mapping table per save.
+
+For non-coalescing Put Changes, the implementation returns knowledge of the
+accepted elements and mappings without claiming a complete-cell waterline. This
+is an inference from the complete-knowledge restriction in section 2.2.2.1.4 and
+the knowledge representation in
+[section 2.2.1.13](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/d6414c58-95ba-40ab-be03-17faf38b6bde).
+It needs non-coalescing request/replay validation. It is not evidence of live
+desktop Office interoperability. Query Changes knowledge remains a separate
+operation with its own selected snapshot and response rules.
 
 ## Requirements before mechanisms
 
@@ -40,9 +77,9 @@ nine seconds offer 10,000 saves/minute. Query and open actions add work. Ten
 documents per user is a collection-size assumption, not a tenfold save multiplier.
 Sizes and frequencies outside the synthetic fixture remain assumptions.
 
-## Work that exists because of the current implementation
+## Mechanisms replaced from the archived implementation
 
-| Current mechanism | Consequence | Proposed replacement |
+| Archived mechanism | Consequence | Replacement |
 | --- | --- | --- |
 | `DocumentState` contains current metadata, graphs, revisions, receipts, permissions and coordination | A whole-state transition can load and validate history for a small operation. | Explicit read projections and typed mutation contracts. No generic whole-history callback on ordinary requests. |
 | `StageSnapshotAsync` serializes another complete aggregate | Repeated state bytes and work grow with retained metadata. | Append the new revision/change records and update the small current record. |
@@ -51,7 +88,7 @@ Sizes and frequencies outside the synthetic fixture remain assumptions.
 | Every successful changed file save stores its materialized package | A small incoming edit causes another complete package object. | Treat the protocol graph as canonical and evaluate derived-package strategies separately. |
 | Global publication/namespace gates and shared quota accounting | Unrelated documents share coordination. | Specific document/path constraints; separate any genuinely shared product policy. |
 
-These are observations from `CellBridgeRequestProcessor`, `StorageContracts`,
+These observations describe archived `CellBridgeRequestProcessor`, `StorageContracts`,
 `DocumentOperations`, `DocumentSelectiveReads` and `CellBridgeDocumentService`.
 They do not imply that existing correctness checks can simply be deleted while
 leaving their underlying invariants unimplemented.
@@ -275,7 +312,7 @@ they are not a global mutual-exclusion rule for document correctness.
 
 ## The shared quota is a product policy, not a graph algorithm
 
-Current `MaxStoredBytes` and `MaxDocuments` enforce provider-wide limits. Neither
+The archived implementation used `MaxStoredBytes` and `MaxDocuments` for provider-wide limits. Neither
 the operation catalog nor a requirement for safe same-document editing implies
 those particular policies. Retaining an exact hard shared limit requires shared
 coordination or reserved spending rights somewhere. Row-level locks cannot make
@@ -287,14 +324,13 @@ updates to one shared counter independent.
 | Exact cap per genuinely independent workspace | Coordination within that workspace | A workspace is a product boundary, not automatically a user or server. |
 | Global monitoring/soft admission threshold, bounded individual operations | No exact global counter in every save; overshoot becomes an explicit policy | Recommended for the minimal-lock design if a hard global cap is not required. This changes existing behavior. |
 
-Do not add another quota framework or automatically growing buckets to avoid this
-decision. The proposed document algorithm should not depend on a bucket scheme.
-Existing strict quotas remain in shipping code until their replacement is chosen
-explicitly. If strict provider-wide admission stays required, the design must
-name that coordination exception instead of claiming complete document independence.
-Staging outside the publication transaction does not exempt bytes from that cap:
-staged/unreachable objects must also be admitted and accounted if the policy
-limits all stored content. Include this coordination in the staging cost.
+The selected policy removes provider-wide `MaxStoredBytes` and `MaxDocuments`
+admission and their accounting. Do not add another quota framework, soft-cap
+implementation or automatically growing buckets. Per-request/per-document limits
+remain; resource exhaustion still causes an explicit storage failure. Historical
+migrations remain intact, with new migrations retiring the accounting tables.
+The alternatives above record why the removed policy had shared coordination;
+they are not runtime modes to implement in this rewrite.
 
 ## Counterexamples that the recommendation must survive
 
@@ -332,14 +368,15 @@ uses its bounded/indexed representation; canonical storage avoids a mandatory
 whole-package copy; and ordinary document operations never explicitly lock an
 unrelated document, namespace inventory or quota bucket pool. Account for
 unavoidable graph validation and growing response output.
-This independence is conditional on the explicit quota policy above. Keeping
-an exact provider-wide cap adds its named shared admission dependency.
+The selected quota policy above removes the shared admission dependency.
 
-Model the chosen publication/authority/receipt and reclamation rules with a small
-[TLA+/PlusCal state machine][tla] before coding their concurrency. State each
-assumption and connect model transitions to transaction tests. The desired result
-is proof-backed deletion of unnecessary coordination and guards. No formal model
-or proof has been executed by this review, and no throughput result is claimed.
+The bounded [publication state machine](../models/README.md) checks document
+guards, current authority, keywise coherency, durable staging and atomic receipts.
+Four safe configurations passed exhaustive TLC exploration; deliberately omitted
+authority/root checks produced counterexamples. Its guide maps the abstract
+transitions to transaction tests and states the assumptions. It does not prove
+the C# implementation or online reclamation. Collection still requires explicit
+quiescence; no throughput result follows from the model.
 
 Beta permits replacing the whole-state callback and storage layout directly.
 Update all repository callers and real migrations while preserving developer

@@ -5,6 +5,22 @@ public sealed record HistoricalGraphPublication(GenericPartitionGraphSnapshot Gr
 /// <summary>Publishes historical cells through fresh immutable wrappers without changing their objects or ancestors.</summary>
 public static class HistoricalGraphRestorer
 {
+    /// <summary>Creates a fresh revision wrapper whose objects remain in the selected base revision.</summary>
+    public static DataElement BuildInheritedRevision(ExGuid elementId, SerialNumber serial,
+        ExGuid revision, ExGuid baseRevision, IEnumerable<RevisionRootReference> roots)
+    {
+        var payload = new BinaryWriterEx();
+        var record = new BinaryWriterEx();
+        revision.Serialize(record); baseRevision.Serialize(record);
+        Write(payload, StreamObjectTypeHeaderStart.RevisionManifest, record);
+        foreach (var root in roots)
+        {
+            record = new(); root.Root.Serialize(record); root.Object.Serialize(record);
+            Write(payload, StreamObjectTypeHeaderStart.RevisionManifestRootDeclare, record);
+        }
+        return new(DataElementType.RevisionManifestDataElementData, elementId, serial) { Data = payload.ToArray() };
+    }
+
     public static HistoricalGraphPublication Rebase(GenericPartitionGraphSnapshot current,
         GenericPartitionGraphSnapshot selected, Guid serialNamespace, ulong knowledge, GenericGraphLimits? limits = null)
     {

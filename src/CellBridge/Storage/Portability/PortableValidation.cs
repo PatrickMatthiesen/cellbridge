@@ -1,6 +1,5 @@
 using System.Collections.Immutable;
 using System.IO.Compression;
-using System.Security.Cryptography;
 using System.Text.Json;
 using CellBridge.FssHttpB;
 using CellBridge.Storage.Abstractions;
@@ -9,168 +8,193 @@ namespace CellBridge.Storage;
 
 public sealed partial class PortableArchive
 {
-    private async ValueTask ValidateStateAsync(PortableManifest manifest, IContentStore content, CancellationToken cancellationToken)
+    private async ValueTask ValidateStateAsync(PortableManifest manifest, IContentStore content, CancellationToken ct)
     {
         try
         {
-            var immutable = new Dictionary<(Guid Resource, int Partition, ExtendedId Id), GraphElementState>();
-            foreach (var state in manifest.State.Snapshots)
+            foreach (var snapshot in manifest.State.Snapshots)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                CheckStateShape(state);
-                foreach (var handle in ContentStoreReader.UniqueHandles(StorageReferences.Handles(state)))
+                ct.ThrowIfCancellationRequested();
+                CheckStateShape(snapshot);
+                NormalizedDocumentRecovery.Validate(snapshot, _storage);
+                foreach (var reference in snapshot.ContentReferences)
                 {
-                    await using var stream = await content.OpenReadAsync(handle, cancellationToken);
-                    await CopyVerifiedAsync(stream, Stream.Null, handle, cancellationToken);
+                    await using var bytes = await content.OpenReadAsync(reference.Handle, ct);
+                    await CopyVerifiedAsync(bytes, Stream.Null, reference.Handle, ct);
                 }
-                await ValidatePartitionsAsync(state, state.Content, state.Partitions, content, immutable, cancellationToken);
-                ulong previous = 0;
-                foreach (var revision in state.Revisions)
+                var source = new NormalizedSnapshotGraphSource(snapshot, content, _storage);
+                await ValidateIndexesAsync(snapshot, source, ct);
+                // Check every logical publication, including intermediate protocol revisions.
+                foreach (var root in snapshot.MappingRoots)
                 {
-                    if (revision.ResourceId != state.ResourceId || revision.LifecycleGeneration != state.LifecycleGeneration ||
-                        revision.RevisionNumber <= previous || revision.ContentVersion == 0 || revision.Author is null ||
-                        string.IsNullOrWhiteSpace(revision.Author.Subject) || revision.CreatedUtc.Kind != DateTimeKind.Utc ||
-                        revision.Partitions.Length != 2 || !revision.Partitions.Select(p => p.Kind).Order().SequenceEqual(new[] { 0, 1 }))
-                        throw new StorageCorruptionException("Invalid revision history identity, ordering or partitions.");
-                    previous = revision.RevisionNumber;
-                    await ValidatePartitionsAsync(state, revision.Content, revision.Partitions, content, immutable, cancellationToken);
-                }
-                if (!state.Revisions.IsEmpty && (state.Revisions[^1].Content != state.Content ||
-                    state.Revisions[^1].ContentVersion != state.ContentVersion ||
-                    JsonSerializer.Serialize(state.Revisions[^1].Partitions) != JsonSerializer.Serialize(state.Partitions.Where(p => p.Kind != 2))))
-                    throw new StorageCorruptionException("Current publication disagrees with revision history.");
-                foreach (var receipt in state.Receipts)
-                {
-                    if (receipt.LifecycleGeneration != state.LifecycleGeneration || receipt.PartitionKind is < 0 or > 2 ||
-                        string.IsNullOrWhiteSpace(receipt.OperationKey) || string.IsNullOrWhiteSpace(receipt.Digest) ||
-                        receipt.ContentVersion > state.ContentVersion && receipt.PartitionKind == 0)
-                        throw new StorageCorruptionException("Invalid save receipt identity.");
-                    if (receipt.Response is null) continue;
-                    var reader = new BinaryReaderEx(await content.ReadVerifiedAsync(receipt.Response, _storage.MaxObjectBytes, cancellationToken));
-                    var response = FsshttpbResponse.Deserialize(reader);
-                    if (reader.Remaining != 0 || response.SubResponses.Count != 1 || response.SubResponses[0].RequestType != RequestTypes.PutChanges ||
-                        response.SubResponses[0].Status) throw new StorageCorruptionException("Invalid retained save response.");
-                }
-                if (state.Receipts.Select(r => (r.PartitionKind, r.OperationKey)).Distinct().Count() != state.Receipts.Length ||
-                    state.RestoreReceipts.Select(r => (r.LifecycleGeneration, r.OwnerSubject, r.OperationKey)).Distinct().Count() != state.RestoreReceipts.Length ||
-                    state.RestoreReceipts.Any(r => r.LifecycleGeneration != state.LifecycleGeneration || string.IsNullOrWhiteSpace(r.OwnerSubject) ||
-                        string.IsNullOrWhiteSpace(r.OperationKey) || string.IsNullOrWhiteSpace(r.Digest) ||
-                        !state.Revisions.Any(v => v.RevisionNumber == r.RevisionNumber)) ||
-                    state.WholeFileSaveReceipts.Select(r => (r.LifecycleGeneration, r.OwnerSubject, r.OperationKey)).Distinct().Count() != state.WholeFileSaveReceipts.Length ||
-                    state.WholeFileSaveReceipts.Any(r => r.LifecycleGeneration != state.LifecycleGeneration || string.IsNullOrWhiteSpace(r.OwnerSubject) ||
-                        string.IsNullOrWhiteSpace(r.OperationKey) || r.OperationKey.Length > 256 || string.IsNullOrWhiteSpace(r.Digest) || r.Digest.Length != 64 ||
-                        r.Digest.Any(c => !char.IsAsciiHexDigit(c)) || !state.Revisions.Any(v => v.RevisionNumber == r.RevisionNumber)))
-                    throw new StorageCorruptionException("Invalid or conflicting durable receipts.");
-                if (state.Publication is { } publication)
-                {
-                    if (publication.BindingId == Guid.Empty || string.IsNullOrWhiteSpace(publication.Destination) ||
-                        string.IsNullOrWhiteSpace(publication.ExpectedRevision) || publication.NextSequence < 1 ||
-                        publication.Pending.IsDefault || publication.Pending.Select(r => r.OperationId).Distinct().Count() != publication.Pending.Length)
-                        throw new StorageCorruptionException("Invalid external publication binding.");
-                    long sequence = 0;
-                    foreach (var pending in publication.Pending)
+                    ct.ThrowIfCancellationRequested();
+                    var mappings = source.Mappings(root.Scope, root.Id);
+                    var mappedManifest = mappings.SingleOrDefault(value => value.Key.Kind == IndexedMappingKind.Manifest && !NullTarget(value.Target));
+                    if (mappedManifest is null)
                     {
-                        if (pending.OperationId == Guid.Empty || pending.ResourceId != state.ResourceId ||
-                            pending.LifecycleGeneration != state.LifecycleGeneration || pending.Sequence <= sequence ||
-                            pending.Sequence >= publication.NextSequence || pending.ContentVersion > state.ContentVersion)
-                            throw new StorageCorruptionException("Invalid external publication receipt or pin.");
-                        sequence = pending.Sequence;
+                        if (root.Scope.TargetPartition != 1 || mappings.Any(value => !NullTarget(value.Target)) ||
+                            source.Bindings(root.Scope,root.Sequence).Length != 0)
+                            throw new StorageCorruptionException("A retained graph has no storage manifest.");
+                        continue;
                     }
+                    var storage = snapshot.StorageManifests.Single(value => value.Scope == root.Scope && value.ElementId == mappedManifest.Target);
+                    foreach (var declared in storage.Roots)
+                        if (!mappings.Any(value => value.Key.Kind == IndexedMappingKind.Cell && value.Key.Cell == declared.Cell && !NullTarget(value.Target)))
+                            throw new StorageCorruptionException("An unmapped storage root cell was retained.");
+                    var bindings = ImmutableArray.CreateBuilder<IndexedObjectBinding>();
+                    foreach (var mapping in mappings.Where(value => value.Key.Kind == IndexedMappingKind.Cell && !NullTarget(value.Target)))
+                    {
+                        var cell = mapping.Key.Cell ?? throw new StorageCorruptionException("Missing cell identity.");
+                        var metadata = snapshot.Cells.Single(value => value.Scope == root.Scope && value.ElementId == mapping.Target);
+                        var resolved = root.Scope.TargetPartition == 0
+                            ? await IndexedDocumentGraph.ResolveFileCellAsync(root.Scope, root.Id, cell, metadata.RevisionId, source,
+                                new(MaxElements: _storage.MaxGraphElements, MaxPayloadBytes: _storage.MaxGraphBytes), ct)
+                            : await IndexedDocumentGraph.ResolveCellAsync(root.Scope, root.Id, cell, metadata.RevisionId, source,
+                                new(MaxElements: _storage.MaxGraphElements, MaxPayloadBytes: _storage.MaxGraphBytes), ct);
+                        bindings.AddRange(resolved.Bindings);
+                    }
+                    Equal(IndexedDocumentGraph.Checkpoint(root.Scope, root.Sequence, bindings),
+                        IndexedDocumentGraph.Checkpoint(root.Scope, root.Sequence, source.Bindings(root.Scope, root.Sequence)));
                 }
+                foreach (var revision in snapshot.ApplicationRevisions)
+                {
+                    if (revision.RevisionNumber == 0 || revision.ContentVersion == 0 || revision.Author is null ||
+                        string.IsNullOrWhiteSpace(revision.Author.Subject) || revision.CreatedUtc.Kind != DateTimeKind.Utc ||
+                        revision.Package.RevisionNumber != revision.RevisionNumber || revision.Partitions.Length != 2 ||
+                        !revision.Partitions.Select(partition => partition.Kind).Order().SequenceEqual(new[] { 0, 1 }))
+                        throw new StorageCorruptionException("Invalid immutable application revision.");
+                    foreach (var partition in revision.Partitions)
+                    {
+                        var scope = new IndexedGraphScope(revision.ResourceId, revision.LifecycleGeneration, partition.Kind);
+                        if (partition.StorageIndex is { } index && !snapshot.MappingRoots.Any(root => root.Scope == scope && root.Id == index &&
+                            root.Sequence == partition.PublicationSequence && root.Serial == partition.StorageIndexSerial))
+                            throw new StorageCorruptionException("An application revision selects another graph publication.");
+                    }
+                    await using var package = await source.PackageReader().OpenReadAsync(revision.Package, ct);
+                    await ValidatePackageAsync(package, snapshot.Current.Head.Path, ct);
+                }
+                foreach (var receipt in snapshot.Receipts)
+                {
+                    if (string.IsNullOrWhiteSpace(receipt.Operation.OperationKey) || receipt.Operation.PartitionKind is < 0 or > 2 ||
+                        !snapshot.ApplicationRevisions.Any(revision => revision.RevisionNumber == receipt.RevisionNumber && revision.ContentVersion == receipt.ContentVersion))
+                        throw new StorageCorruptionException("A retained receipt has no matching application revision.");
+                    if (receipt.Response is null) continue;
+                    var reader = new BinaryReaderEx(await content.ReadVerifiedAsync(receipt.Response, _storage.MaxObjectBytes, ct));
+                    var response = FsshttpbResponse.Deserialize(reader);
+                    if (reader.Remaining != 0 || response.SubResponses.Count != 1 || response.SubResponses[0].Status ||
+                        response.SubResponses[0].RequestType != RequestTypes.PutChanges)
+                        throw new StorageCorruptionException("A retained protocol response is malformed.");
+                }
+                var binding = snapshot.Current.Head.Delivery;
+                if (binding is not null && (binding.BindingId == Guid.Empty || string.IsNullOrWhiteSpace(binding.Destination) ||
+                    string.IsNullOrWhiteSpace(binding.ExpectedRevision) || binding.NextSequence <= 0))
+                    throw new StorageCorruptionException("Invalid external delivery binding.");
+                foreach (var delivery in snapshot.Deliveries)
+                    if (binding is null || delivery.OperationId == Guid.Empty || delivery.Sequence <= 0 || delivery.Sequence >= binding.NextSequence ||
+                        !snapshot.ApplicationRevisions.Any(revision => revision.Package == delivery.Package && revision.ContentVersion == delivery.ContentVersion))
+                        throw new StorageCorruptionException("A delivery has no matching immutable application revision or binding.");
             }
             CheckNamespace(manifest.State);
         }
-        catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or FormatException or ArgumentException or
+        catch (Exception error) when (error is InvalidDataException or EndOfStreamException or FormatException or ArgumentException or
             OverflowException or InvalidOperationException or NullReferenceException)
-        { throw new StorageCorruptionException("Recovery state or graph is corrupt or unsupported.", ex); }
+        { throw new StorageCorruptionException("Recovery state or graph is corrupt or unsupported.", error); }
     }
 
-    private static void CheckStateShape(DocumentState state)
+    private static void Equal<T>(T expected, T actual)
     {
-        if (state.FormatVersion != DocumentState.CurrentFormat || state.ResourceId == Guid.Empty || state.StateVersion < 0 ||
-            state.ContentVersion == 0 || state.LifecycleGeneration < 1 || !CanonicalPath(state.Path) ||
-            state.PathKey != StorageIds.PathKey(state.Path) || state.CreatedUtc.Kind != DateTimeKind.Utc || state.ModifiedUtc.Kind != DateTimeKind.Utc ||
-            state.Security is null || state.Security.Grants is null || state.Security.Grants.Any(g => string.IsNullOrWhiteSpace(g.Key) ||
-                (g.Value & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0) ||
-            state.Partitions.IsDefault || state.Editors.IsDefault || state.Receipts.IsDefault || state.Revisions.IsDefault ||
-            state.RestoreReceipts.IsDefault || state.WholeFileSaveReceipts.IsDefault || state.RetiredPathKeys.IsDefault || state.Coordination is null ||
-            state.Coordination.SchemaOwners.IsDefault || state.Coordination.CoauthorClients.IsDefault ||
-            state.Coordination.Generation < 0 || state.Partitions.Length != 3 ||
-            !state.Partitions.Select(p => p.Kind).Order().SequenceEqual(new[] { 0, 1, 2 }) ||
-            state.IsDeleted != state.DeletedFromStateVersion.HasValue || state.DeletedFromStateVersion >= state.StateVersion ||
-            state.DeletedFromStateVersion < 0 || state.ReplacedBy is not null && !state.IsDeleted ||
-            state.RetiredPathKeys.Distinct(StringComparer.Ordinal).Count() != state.RetiredPathKeys.Length ||
-            state.RetiredPathKeys.Any(k => !CanonicalPath(k) || k != k.ToUpperInvariant()))
+        if (JsonSerializer.Serialize(expected) != JsonSerializer.Serialize(actual))
+            throw new StorageCorruptionException("An indexed recovery record disagrees with its immutable graph bytes.");
+    }
+
+    private async ValueTask ValidateIndexesAsync(NormalizedDocumentSnapshot snapshot, NormalizedSnapshotGraphSource source, CancellationToken ct)
+    {
+        var revisions = snapshot.GraphRevisions.ToDictionary(value => (value.Scope, value.ElementId));
+        var cells = snapshot.Cells.ToDictionary(value => (value.Scope, value.ElementId));
+        var manifests = snapshot.StorageManifests.ToDictionary(value => (value.Scope, value.ElementId));
+        var objects = snapshot.Objects.ToDictionary(value => (value.Scope, value.GroupElement, value.Ordinal));
+        var elements = snapshot.Elements.ToDictionary(value => (value.Scope, value.Element.Id), value => value.Element);
+        foreach (var item in snapshot.Elements)
+        {
+            var element = await source.ReadElementAsync(item.Scope, item.Element.Id, ct);
+            if (element.DataElementType is not (DataElementType.StorageManifestDataElementData or DataElementType.CellManifestDataElementData or
+                DataElementType.RevisionManifestDataElementData or DataElementType.ObjectGroupDataElementData or DataElementType.ObjectDataBLOBDataElementData) ||
+                !item.Element.MappingSerials.IsEmpty)
+                throw new StorageCorruptionException("Transient or unsupported canonical graph element.");
+            var parsed = IndexedDocumentGraph.ReadMetadata(item.Scope, element);
+            if (parsed.Revision is { } revision)
+            {
+                if (!revisions.Remove((item.Scope, revision.ElementId), out var actual)) throw new StorageCorruptionException("Missing revision index.");
+                Equal(revision, actual);
+                foreach (var group in revision.ObjectGroups)
+                    if (!elements.TryGetValue((item.Scope, group), out var descriptor) || descriptor.Type != (uint)DataElementType.ObjectGroupDataElementData)
+                        throw new StorageCorruptionException("A revision references a missing object group.");
+            }
+            if (parsed.CellManifest is { } cell)
+            { if (!cells.Remove((item.Scope, cell.ElementId), out var actual)) throw new StorageCorruptionException("Missing cell index."); Equal(cell, actual); }
+            if (parsed.StorageManifest is { } manifest)
+            { if (!manifests.Remove((item.Scope, manifest.ElementId), out var actual)) throw new StorageCorruptionException("Missing manifest index."); Equal(manifest, actual); }
+            foreach (var obj in parsed.Objects)
+            {
+                if (!objects.Remove((item.Scope, obj.GroupElement, obj.Ordinal), out var actual)) throw new StorageCorruptionException("Missing object index.");
+                Equal(obj, actual);
+                if (obj.BlobElement is { } blob && (!elements.TryGetValue((item.Scope, blob), out var descriptor) ||
+                    descriptor.Type != (uint)DataElementType.ObjectDataBLOBDataElementData))
+                    throw new StorageCorruptionException("An object references a missing BLOB.");
+            }
+        }
+        if (revisions.Count + cells.Count + manifests.Count + objects.Count != 0)
+            throw new StorageCorruptionException("Graph indexes are absent from physical graph bytes.");
+        var claims = snapshot.MappingClaims.ToDictionary(value => (value.Scope, value.Serial));
+        foreach (var interval in snapshot.MappingIntervals)
+        {
+            var value = interval.Mapping;
+            var expected = value.Key.Kind switch
+            {
+                IndexedMappingKind.Manifest => DataElementType.StorageManifestDataElementData,
+                IndexedMappingKind.Cell => DataElementType.CellManifestDataElementData,
+                IndexedMappingKind.Revision => DataElementType.RevisionManifestDataElementData,
+                _ => throw new StorageCorruptionException("Unknown mapping kind."),
+            };
+            if (!NullTarget(value.Target) && (!elements.TryGetValue((value.Scope, value.Target), out var descriptor) || descriptor.Type != (uint)expected ||
+                value.Key.Kind == IndexedMappingKind.Cell && value.Key.Cell is null ||
+                value.Key.Kind == IndexedMappingKind.Revision && !snapshot.GraphRevisions.Any(revision => revision.Scope == value.Scope &&
+                    revision.ElementId == value.Target && revision.RevisionId == value.Key.Revision)))
+                throw new StorageCorruptionException("A mapping disagrees with its immutable target.");
+            if ((value.Serial.Guid != Guid.Empty || value.Serial.Value != 0) &&
+                (!claims.TryGetValue((value.Scope, value.Serial), out var claim) || claim.Key != value.Key || claim.Target != value.Target))
+                throw new StorageCorruptionException("A mapping has no matching immutable serial claim.");
+        }
+    }
+
+    private static bool NullTarget(ExtendedId id) => id.Guid == Guid.Empty && id.Value == 0;
+
+    private static void CheckStateShape(NormalizedDocumentSnapshot snapshot)
+    {
+        var head = snapshot.Current.Head;
+        var coordination = snapshot.Current.Coordination;
+        if (head.ResourceId == Guid.Empty || head.StateVersion < 0 || head.ContentVersion == 0 || head.LifecycleGeneration < 1 ||
+            !CanonicalPath(head.Path) || head.PathKey != StorageIds.PathKey(head.Path) || head.CreatedUtc.Kind != DateTimeKind.Utc ||
+            head.ModifiedUtc.Kind != DateTimeKind.Utc || head.Security.Grants is null || head.Security.Grants.Any(grant =>
+                string.IsNullOrWhiteSpace(grant.Key) || (grant.Value & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0) ||
+            coordination.SchemaOwners.IsDefault || coordination.CoauthorClients.IsDefault || coordination.Generation < 0 ||
+            !snapshot.Partitions.Select(partition => partition.Head.Kind).Order().SequenceEqual(new[] { 0, 1, 2 }) ||
+            head.IsDeleted != head.DeletedFromStateVersion.HasValue || head.DeletedFromStateVersion >= head.StateVersion ||
+            head.DeletedFromStateVersion < 0 || head.ReplacedBy is not null && !head.IsDeleted ||
+            snapshot.PathClaims.Any(path => !CanonicalPath(path) || path != StorageIds.PathKey(path)))
             throw new StorageCorruptionException("Invalid recovery document shape or lifecycle.");
-        foreach (var editor in state.Editors)
-            if (editor.ClientId == Guid.Empty || editor.Metadata is null || editor.Metadata.Any(p => p.Value.IsDefault) ||
-                editor.ExpiresUtc.Kind != DateTimeKind.Utc || editor.LastSeenUtc.Kind != DateTimeKind.Utc || editor.JoinedUtc.Kind != DateTimeKind.Utc)
+        foreach (var editor in snapshot.Current.Editors)
+            if (editor.ClientId == Guid.Empty || editor.Metadata is null || editor.Metadata.Any(value => value.Value.IsDefault) ||
+                editor.ExpiresUtc.Kind != DateTimeKind.Utc || editor.JoinedUtc.Kind != DateTimeKind.Utc || editor.LastSeenUtc.Kind != DateTimeKind.Utc)
                 throw new StorageCorruptionException("Invalid editor state.");
-        foreach (var lease in state.Coordination.SchemaOwners.Concat(state.Coordination.Exclusive is null ? [] : new[] { state.Coordination.Exclusive }))
-            if (string.IsNullOrWhiteSpace(lease.Id) || lease.ExpiresUtc.Kind != DateTimeKind.Utc)
-                throw new StorageCorruptionException("Invalid lease state.");
-        if (state.Coordination.HostLock is { } host && (string.IsNullOrWhiteSpace(host.Token) ||
-            string.IsNullOrWhiteSpace(host.OwnerSubject) || host.ExpiresUtc.Kind != DateTimeKind.Utc))
+        foreach (var lease in coordination.SchemaOwners.Concat(coordination.Exclusive is null ? [] : new[] { coordination.Exclusive }))
+            if (string.IsNullOrWhiteSpace(lease.Id) || lease.ExpiresUtc.Kind != DateTimeKind.Utc) throw new StorageCorruptionException("Invalid lease state.");
+        if (coordination.HostLock is { } host && (string.IsNullOrWhiteSpace(host.Token) || string.IsNullOrWhiteSpace(host.OwnerSubject) || host.ExpiresUtc.Kind != DateTimeKind.Utc))
             throw new StorageCorruptionException("Invalid host lease state.");
     }
 
     private static bool CanonicalPath(string path) => !string.IsNullOrWhiteSpace(path) && path.StartsWith('/') &&
-        !path.Contains('\\') && !path.Any(char.IsControl) &&
-        path.Split('/').Skip(1).All(s => s.Length > 0 && s is not "." and not "..");
-
-    private async ValueTask ValidatePartitionsAsync(DocumentState owner, ContentHandle package,
-        ImmutableArray<PartitionState> partitions, IContentStore content,
-        Dictionary<(Guid Resource, int Partition, ExtendedId Id), GraphElementState> immutable, CancellationToken cancellationToken)
-    {
-        foreach (var partition in partitions)
-        {
-            if (partition.Identity is null || partition.Elements.IsDefault ||
-                new[] { partition.Identity.StorageManifest, partition.Identity.CellManifest, partition.Identity.RevisionManifest,
-                    partition.Identity.ObjectGroup, partition.Identity.ObjectDataBlob, partition.Identity.Object,
-                    partition.Identity.Revision, partition.Identity.CellLong, partition.Identity.CellShort }.Any(id => id is null) ||
-                partition.Elements.Select(e => e.Id).Distinct().Count() != partition.Elements.Length ||
-                partition.StorageIndex is null && !partition.Elements.IsEmpty ||
-                partition.Kind != 0 && partition.InlineContent.IsDefault)
-                throw new StorageCorruptionException("Invalid recovery partition shape.");
-            StorageLimits.Check("recovery partition elements", partition.Elements.Length, _storage.MaxGraphElements);
-            StorageLimits.Check("recovery partition bytes", partition.Elements.Sum(e => e.Payload.Length), _storage.MaxGraphBytes);
-            foreach (var element in partition.Elements)
-            {
-                if (element.Id is null || element.Serial is null || element.MappingSerials.IsDefault)
-                    throw new StorageCorruptionException("Incomplete graph element metadata.");
-                var key = (owner.ResourceId, partition.Kind, element.Id);
-                if (immutable.TryGetValue(key, out var previous) && (previous.Type != element.Type ||
-                    previous.Payload.Length != element.Payload.Length || previous.Payload.Sha256 != element.Payload.Sha256 ||
-                    previous.Serial.Guid != Guid.Empty && element.Serial.Guid != Guid.Empty && previous.Serial != element.Serial))
-                    throw new StorageCorruptionException("Immutable graph element identity was reused.");
-                // A legacy null occurrence must not erase the known immutable serial watermark.
-                immutable[key] = previous is not null && previous.Serial.Guid != Guid.Empty && element.Serial.Guid == Guid.Empty
-                    ? element with { Serial = previous.Serial } : element;
-                if (element.Type == (uint)DataElementType.StorageIndexDataElementData)
-                {
-                    var bytes = await content.ReadVerifiedAsync(element.Payload, _storage.MaxObjectBytes, cancellationToken);
-                    if (!element.MappingSerials.SequenceEqual(StorageIndexMappingSerials.Read(bytes).Select(s => new SerialId(s.Guid, s.Value))))
-                        throw new StorageCorruptionException("Persisted mapping serials disagree with graph bytes.");
-                }
-                else if (!element.MappingSerials.IsEmpty) throw new StorageCorruptionException("Mapping serials on a non-index element.");
-            }
-            if (partition.Kind != 0 && partition.StorageIndex is not null)
-                _ = await DocumentPartition.RestoreGraphAsync(partition, content, _storage, cancellationToken);
-        }
-        var file = partitions.Single(p => p.Kind == 0);
-        var state = owner with { Content = package, Partitions = partitions, Revisions = [], Receipts = [], RestoreReceipts = [], WholeFileSaveReceipts = [], Publication = null };
-        var graph = await DocumentPartition.RestoreFileGraphAsync(state, content, _storage, cancellationToken);
-        string temporary = Path.Combine(Path.GetTempPath(), "cellbridge-recovered-package-" + Guid.NewGuid().ToString("N"));
-        await using var reconstructed = ConfidentialFileSystem.CreateFile(temporary, FileAccess.ReadWrite,
-            FileOptions.Asynchronous | FileOptions.DeleteOnClose);
-        await graph.MaterializeToAsync(reconstructed, _storage.MaxDocumentBytes, cancellationToken);
-        reconstructed.Position = 0;
-        if (reconstructed.Length != package.Length || file.Content != package ||
-            Convert.ToHexStringLower(await SHA256.HashDataAsync(reconstructed, cancellationToken)) != package.Sha256)
-            throw new StorageCorruptionException("Recovered graph and materialized document disagree.");
-        reconstructed.Position = 0;
-        await ValidatePackageAsync(reconstructed, owner.Path, cancellationToken);
-    }
+        !path.Contains('\\') && !path.Any(char.IsControl) && path.Split('/').Skip(1).All(segment => segment.Length > 0 && segment is not "." and not "..");
 
     private async ValueTask ValidatePackageAsync(Stream source, string path, CancellationToken cancellationToken)
     {
@@ -200,57 +224,36 @@ public sealed partial class PortableArchive
 
     private static void CheckNamespace(ProviderSnapshot snapshot)
     {
-        var states = snapshot.Snapshots.ToDictionary(s => (s.ResourceId, s.StateVersion));
-        var heads = snapshot.Heads.ToDictionary(h => h.ResourceId, h => states[(h.ResourceId, h.StateVersion)]);
-        foreach (var group in snapshot.Snapshots.GroupBy(s => s.ResourceId))
-        {
-            var ordered = group.OrderBy(s => s.StateVersion).ToArray();
-            for (int i = 1; i < ordered.Length; i++)
-            {
-                var previous = ordered[i - 1]; var next = ordered[i];
-                // Receipt order is not identity. Every earlier accepted record must remain unchanged.
-                var wholeFileReceipts = next.WholeFileSaveReceipts.ToHashSet();
-                if (previous.LifecycleGeneration != next.LifecycleGeneration || previous.CreatedUtc != next.CreatedUtc ||
-                    previous.ContentVersion > next.ContentVersion ||
-                    previous.RetiredPathKeys.Any(k => !next.RetiredPathKeys.Contains(k)) ||
-                    previous.PathKey != next.PathKey && !next.RetiredPathKeys.Contains(previous.PathKey) ||
-                    previous.IsDeleted && (!next.IsDeleted || previous.DeletedFromStateVersion != next.DeletedFromStateVersion) ||
-                    previous.ReplacedBy is not null && previous.ReplacedBy != next.ReplacedBy ||
-                    previous.WholeFileSaveReceipts.Any(r => !wholeFileReceipts.Contains(r)) ||
-                    previous.Revisions.Any(r => !next.Revisions.Any(n => n.RevisionNumber == r.RevisionNumber &&
-                        JsonSerializer.Serialize(n) == JsonSerializer.Serialize(r))))
-                    throw new StorageCorruptionException("Retained snapshots disagree on identity, lifecycle, history, whole-file receipts or permanent path reservations.");
-            }
-        }
+        var documents = snapshot.Snapshots.ToDictionary(value => value.Current.Head.ResourceId);
         var parents = new Dictionary<Guid, Guid>();
-        foreach (var state in heads.Values)
-            if (state.ReplacedBy is { } replacement)
-            {
-                if (!heads.TryGetValue(replacement, out var next) || next.LifecycleGeneration != state.LifecycleGeneration + 1 ||
-                    !parents.TryAdd(replacement, state.ResourceId))
-                    throw new StorageCorruptionException("Incomplete or branching recovery lifecycle chain.");
-            }
-        bool Ancestor(Guid ancestor, Guid descendant)
+        foreach (var document in documents.Values)
         {
-            var seen = new HashSet<Guid>();
-            while (parents.TryGetValue(descendant, out var parent))
-            {
-                if (!seen.Add(descendant)) throw new StorageCorruptionException("Recovery lifecycle cycle.");
-                if (parent == ancestor) return true;
-                descendant = parent;
-            }
-            return false;
+            var head = document.Current.Head;
+            if (head.ReplacedBy is { } replacement && (!head.IsDeleted || !documents.TryGetValue(replacement, out var next) ||
+                next.Current.Head.LifecycleGeneration != head.LifecycleGeneration + 1 || !parents.TryAdd(replacement, head.ResourceId)))
+                throw new StorageCorruptionException("Incomplete or branching recovery lifecycle chain.");
+            if (head.ReplacedBy is null && !document.PathClaims.Contains(head.PathKey))
+                throw new StorageCorruptionException("A current document has no filename claim.");
         }
-        var claims = new Dictionary<string, List<DocumentState>>(StringComparer.Ordinal);
-        foreach (var state in heads.Values)
-            foreach (var key in state.RetiredPathKeys.Append(state.PathKey).Distinct(StringComparer.Ordinal))
-            {
-                if (!claims.TryGetValue(key, out var owners)) claims[key] = owners = [];
-                foreach (var other in owners)
-                    if (!(other.IsDeleted && other.PathKey == key && Ancestor(other.ResourceId, state.ResourceId)) &&
-                        !(state.IsDeleted && state.PathKey == key && Ancestor(state.ResourceId, other.ResourceId)))
-                        throw new StorageCorruptionException("Recovery namespace contains conflicting live, retired or reserved paths.");
-                owners.Add(state);
-            }
+        foreach (var id in documents.Keys)
+        {
+            var seen = new HashSet<Guid>(); var current = id;
+            while (parents.TryGetValue(current, out var parent))
+            { if (!seen.Add(current)) throw new StorageCorruptionException("Recovery lifecycle cycle."); current = parent; }
+        }
+        foreach (var document in documents.Values)
+        {
+            var original = document.Current.Head;
+            var owner = document;
+            while (!owner.PathClaims.Contains(original.PathKey) && owner.Current.Head.ReplacedBy is { } replacement)
+                owner = documents[replacement];
+            if (!owner.PathClaims.Contains(original.PathKey))
+                throw new StorageCorruptionException("A recreated document lost its permanent filename claim.");
+        }
+        // Recreate transfers the current claim; retired ancestors retain their other reserved names.
+        var claims = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var document in documents.Values)
+            foreach (var path in document.PathClaims)
+                if (!claims.Add(path)) throw new StorageCorruptionException("Recovery has conflicting filename claims.");
     }
 }

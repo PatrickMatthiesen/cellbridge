@@ -54,11 +54,7 @@ public sealed class GenericPartitionGraphSnapshot
         ReadIndex(Require(_storageIndex, DataElementType.StorageIndexDataElementData));
         foreach (var (cell, elementId) in _cellMappings)
         {
-            var reader = Reader(Require(elementId, DataElementType.CellManifestDataElementData));
-            var body = Body(reader, StreamObjectTypeHeaderStart.CellManifestCurrentRevision);
-            var current = ExGuid.Deserialize(body);
-            Empty(body);
-            Empty(reader);
+            var current = IndexedGraphRecords.ReadCellRevision(Require(elementId, DataElementType.CellManifestDataElementData));
             _cells.Add(cell, ResolveCell(current));
         }
         foreach (var root in _roots)
@@ -208,74 +204,42 @@ public sealed class GenericPartitionGraphSnapshot
             return;
         }
         _storageManifest = Copy(manifest);
-        var manifestReader = Reader(Require(manifest, DataElementType.StorageManifestDataElementData));
-        var schema = Body(manifestReader, StreamObjectTypeHeaderStart.StorageManifestSchemaGUID);
-        SchemaGuid = ExGuid.ReadGuid(schema);
-        Empty(schema);
-        var roots = new HashSet<ExGuid>();
-        while (manifestReader.Remaining > 0)
+        var storage = IndexedGraphRecords.ReadStorageManifest(Require(manifest, DataElementType.StorageManifestDataElementData));
+        SchemaGuid = storage.Schema;
+        foreach (var root in storage.Roots)
         {
-            var body = Body(manifestReader, StreamObjectTypeHeaderStart.StorageManifestRootDeclare);
-            var root = ExGuid.Deserialize(body);
-            var cell = CellId.Deserialize(body);
-            Empty(body);
-            if (!roots.Add(root)) throw new InvalidDataException("Duplicate storage root identifier.");
-            _roots.Add(new(root, cell));
+            _roots.Add(root);
             VisitReference();
         }
-        if (_roots.Count == 0) throw new InvalidDataException("Storage manifest must declare at least one root.");
     }
 
     private RevisionInfo ReadRevision(ExGuid id)
     {
         if (_revisions.TryGetValue(id, out var cached)) return cached;
         if (!_revisionMappings.TryGetValue(id, out var elementId)) throw new InvalidDataException("Unmapped revision reference.");
-        var reader = Reader(Require(elementId, DataElementType.RevisionManifestDataElementData));
-        var body = Body(reader, StreamObjectTypeHeaderStart.RevisionManifest);
-        var actual = ExGuid.Deserialize(body);
-        var baseRevision = ExGuid.Deserialize(body);
-        Empty(body);
-        if (!actual.Equals(id)) throw new InvalidDataException("Revision mapping does not match its target revision.");
-        var roots = new List<RevisionRootReference>();
-        var rootIds = new HashSet<ExGuid>();
+        var revision = IndexedGraphRecords.ReadRevision(Require(elementId, DataElementType.RevisionManifestDataElementData));
+        if (!revision.Revision.Equals(id)) throw new InvalidDataException("Revision mapping does not match its target revision.");
         var objects = new Dictionary<ObjectKey, ObjectGroupObject>();
-        var groups = new List<ExGuid>();
-        while (reader.Remaining > 0)
+        foreach (var _ in revision.Roots) VisitReference();
+        foreach (var groupId in revision.ObjectGroups)
         {
-            var header = StreamObjectHeaderStart.Parse(reader);
-            body = Body(reader, header);
-            switch (header.Type)
+            if (!_groups.TryGetValue(groupId, out var group))
             {
-                case StreamObjectTypeHeaderStart.RevisionManifestRootDeclare:
-                    var root = ExGuid.Deserialize(body);
-                    var obj = ExGuid.Deserialize(body);
-                    if (!rootIds.Add(root)) throw new InvalidDataException("Duplicate revision root identifier.");
-                    roots.Add(new(root, obj));
-                    break;
-                case StreamObjectTypeHeaderStart.RevisionManifestObjectGroupReferences:
-                    var groupId = ExGuid.Deserialize(body);
-                    groups.Add(groupId);
-                    if (!_groups.TryGetValue(groupId, out var group))
-                    {
-                        group = ObjectGroupDataElement.ParseOpaque(Require(groupId, DataElementType.ObjectGroupDataElementData), _parsingBudget).Objects;
-                        _groups.Add(groupId, group);
-                    }
-                    foreach (var item in group)
-                    {
-                        VisitObject();
-                        var key = Key(item);
-                        if (objects.TryGetValue(key, out var previous) && !Same(previous, item))
-                            throw new InvalidDataException("Conflicting object-partition definitions in one revision.");
-                        objects[key] = item;
-                        if (item.Declaration.BlobReference is { } blob) ReadBlob(blob);
-                    }
-                    break;
-                default: throw new InvalidDataException($"Unexpected revision record {header.Type}.");
+                group = ObjectGroupDataElement.ParseOpaque(Require(groupId, DataElementType.ObjectGroupDataElementData), _parsingBudget).Objects;
+                _groups.Add(groupId, group);
             }
-            Empty(body);
+            foreach (var item in group)
+            {
+                VisitObject();
+                var key = Key(item);
+                if (objects.TryGetValue(key, out var previous) && !Same(previous, item))
+                    throw new InvalidDataException("Conflicting object-partition definitions in one revision.");
+                objects[key] = item;
+                if (item.Declaration.BlobReference is { } blob) ReadBlob(blob);
+            }
             VisitReference();
         }
-        var result = new RevisionInfo(actual, baseRevision, roots, objects, groups);
+        var result = new RevisionInfo(revision.Revision, revision.BaseRevision, revision.Roots, objects, revision.ObjectGroups);
         _revisions.Add(id, result);
         return result;
     }
@@ -358,10 +322,7 @@ public sealed class GenericPartitionGraphSnapshot
     private void ReadBlob(ExGuid id)
     {
         if (_blobs.ContainsKey(id)) return;
-        var reader = Reader(Require(id, DataElementType.ObjectDataBLOBDataElementData));
-        var body = Body(reader, StreamObjectTypeHeaderStart.ObjectDataBLOB);
-        _blobs.Add(id, body.ReadBytes(body.Remaining));
-        Empty(reader);
+        _blobs.Add(id, IndexedGraphRecords.ReadBlob(Require(id, DataElementType.ObjectDataBLOBDataElementData)));
     }
 
     private DataElement Require(ExGuid id, DataElementType type)

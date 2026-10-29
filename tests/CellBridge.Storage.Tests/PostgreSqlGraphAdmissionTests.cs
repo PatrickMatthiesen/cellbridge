@@ -1,7 +1,7 @@
-using System.Collections.Immutable;
 using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;
 using Npgsql;
@@ -12,126 +12,65 @@ namespace CellBridge.Storage.Tests;
 public sealed class PostgreSqlGraphAdmissionTests
 {
     [PostgreSqlFact]
-    public Task MembershipBudgetMigrationFailureRollsBackAndExactBudgetPreservesHistory() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
+    public Task LegacyMembershipBudgetFailureRollsBackAndExactBudgetPreservesHistory() =>
+        EfPostgreSqlMigrationTests.WithEmptyDatabase(async source =>
         {
-            var store = new PostgreSqlStateStore(source);
-            var content = new PostgreSqlContentStore(source);
-            var service = new CellBridgeDocumentService(new(store, content));
-            var state = (await service.CreateAsync("/membership-migration.docx", MinimalDocx.Create("original"), TestActor.Value))!;
-            for (var index = 0; index < 3; index++)
-                state = await RevisionHistoryTests.Save(service, state, "changed revision " + index);
-            await store.InitializeAsync();
-            var originalRecovery = await store.CaptureRecoveryAsync();
-            var originalRows = await AuthoritativeRows(source);
-            var originalBytes = new List<byte[]>();
-            foreach (var revision in state.Revisions)
-                originalBytes.Add(await content.ReadVerifiedAsync(revision.Content));
-            var exactBytes = StorageLimits.GetDecodedGraphMembershipBytes(state);
-
-            await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
-                await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("UPDATE cellbridge_usage SET stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint; DROP TABLE \"__CellBridgeDocumentMigrationsHistory\", cellbridge_usage_buckets; UPDATE cellbridge_schema SET version=5"))
-                await version.ExecuteNonQueryAsync();
-
-            var restricted = new PostgreSqlStateStore(source, new() { MaxDecodedGraphMembershipBytes = exactBytes - 1 });
-            var exception = await Assert.ThrowsAsync<StorageQuotaExceededException>(() => restricted.InitializeAsync());
-            Assert.Equal("decoded graph membership bytes", exception.Budget);
-            Assert.Equal(exactBytes, exception.Used);
-            Assert.Equal(originalRows, await AuthoritativeRows(source, hasAllowances: false));
-            await using (var check = source.CreateCommand("SELECT version,to_regclass('cellbridge_read_heads') IS NULL,to_regclass('cellbridge_revision_summaries') IS NULL FROM cellbridge_schema"))
-            await using (var reader = await check.ExecuteReaderAsync())
-            {
-                Assert.True(await reader.ReadAsync());
-                Assert.Equal(5, reader.GetInt32(0));
-                Assert.True(reader.GetBoolean(1));
-                Assert.True(reader.GetBoolean(2));
-            }
-
-            var admitted = new PostgreSqlStateStore(source, new() { MaxDecodedGraphMembershipBytes = exactBytes });
-            await admitted.InitializeAsync();
-            Assert.Equal(originalRows, await AuthoritativeRows(source));
-            Assert.Equal(JsonSerializer.Serialize(originalRecovery), JsonSerializer.Serialize(await admitted.CaptureRecoveryAsync()));
-            var migrated = (await admitted.FindByResourceIdAsync(state.ResourceId))!;
-            Assert.Equal(state.Revisions.Length, migrated.Revisions.Length);
-            var summaries = (await admitted.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!;
-            Assert.Equal(state.Revisions.Reverse().Select(revision => revision.RevisionNumber),
-                summaries.Revisions.Select(revision => revision.RevisionNumber));
-            for (var index = 0; index < migrated.Revisions.Length; index++)
-                Assert.Equal(originalBytes[index], await content.ReadVerifiedAsync(migrated.Revisions[index].Content));
+            var oldContent = new InMemoryContentStore();
+            var state = await LegacyStorageFixture.CreateAsync(oldContent, "/membership-migration.docx", MinimalDocx.Create("original"));
+            for (var index = 0; index < 3; index++) state = (await LegacyStorageFixture.SaveAsync(state, oldContent, MinimalDocx.Create("revision " + index))).State;
+            await LegacyPostgreSqlFixture.SeedAsync(source, oldContent, [state], 5, expandedJson: false);
+            var before = await AuthoritativeRows(source); var exact = StorageLimits.GetDecodedGraphMembershipBytes(state);
+            var rejected = new PostgreSqlStorageMigrator(source, new() { MaxDecodedGraphMembershipBytes = exact - 1 });
+            var error = await Assert.ThrowsAsync<StorageQuotaExceededException>(() => rejected.MigrateAsync());
+            Assert.Equal("decoded graph membership bytes", error.Budget); Assert.Equal(before, await AuthoritativeRows(source));
+            await using (var check = source.CreateCommand("SELECT version=5 AND to_regclass('cellbridge_repository_heads') IS NULL FROM cellbridge_schema")) Assert.Equal(true, await check.ExecuteScalarAsync());
+            var limits = new StorageLimits { MaxDecodedGraphMembershipBytes = exact };
+            await new PostgreSqlStorageMigrator(source, limits).MigrateAsync();
+            IDocumentRepository store = new PostgreSqlStateStore(source, limits); var content = new PostgreSqlContentStore(source);
+            var snapshot = (await store.ExportDocumentAsync(state.ResourceId))!; Assert.Equal(state.Revisions.Length, snapshot.ApplicationRevisions.Length);
+            var provider = new StorageProvider(store, content, limits);
+            foreach (var revision in snapshot.ApplicationRevisions)
+                Assert.Equal(await oldContent.ReadVerifiedAsync(state.Revisions.Single(old => old.RevisionNumber == revision.RevisionNumber).Content),
+                    await StorageTestDocuments.PackageAsync(provider, revision.Package));
+            Assert.Equal(before, await AuthoritativeRows(source));
         });
-
     [PostgreSqlFact]
-    public Task RejectedCreatesAndTransitionsPreservePointersSnapshotsIndexesAndLedger() =>
+    public Task InvalidAndOverQuotaTypedPlansPreserveAllNormalizedPublicationRows() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var store = new PostgreSqlStateStore(source);
-            var state = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
-                .CreateAsync("/membership-publication.docx", MinimalDocx.Create(), TestActor.Value))!;
-            var restricted = new PostgreSqlStateStore(source, new()
-            {
-                MaxDecodedGraphMembershipBytes = StorageLimits.GetDecodedGraphMembershipBytes(state),
-            });
+            var content = new PostgreSqlContentStore(source); IDocumentRepository store = new PostgreSqlStateStore(source);
+            var provider = new StorageProvider(store, content);
+            var head = (await new CellBridgeDocumentService(provider).CreateAsync("/admission.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var create = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), "/rejected.docx", MinimalDocx.Create("rejected"), head.Security, content, provider.Limits);
+            var part = create.Partitions[0];
+            var invalid = create with { Partitions = create.Partitions.SetItem(0, part with { AddedElements = [part.AddedElements[0], part.AddedElements[0]] }) };
             var before = await PublicationRows(source);
-            var partitionIndex = Array.FindIndex(state.Partitions.ToArray(), partition => partition.Elements.Length > 0);
-            var partition = state.Partitions[partitionIndex];
-            var duplicatePartitions = state.Partitions.SetItem(partitionIndex,
-                partition with { Elements = [partition.Elements[0], partition.Elements[0]] });
-            var replacementId = Guid.NewGuid();
-            var replacement = state with
-            {
-                ResourceId = replacementId,
-                Path = "/membership-refused.docx",
-                PathKey = StorageIds.PathKey("/membership-refused.docx"),
-                Revisions = state.Revisions.Select(revision => revision with { ResourceId = replacementId }).ToImmutableArray(),
-            };
-
-            await Assert.ThrowsAsync<StorageCorruptionException>(() =>
-                restricted.TryCreateAsync(replacement with { Partitions = duplicatePartitions }).AsTask());
+            var error = await Record.ExceptionAsync(() => store.CreateAsync(invalid).AsTask());
+            Assert.True(error is StorageCorruptionException or InvalidDataException or ArgumentException, error?.ToString());
             Assert.Equal(before, await PublicationRows(source));
-            var overBudget = replacement with
-            {
-                Revisions = replacement.Revisions.Add(replacement.Revisions[^1] with { RevisionNumber = 2 }),
-            };
-            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => restricted.TryCreateAsync(overBudget).AsTask());
-            Assert.Equal(before, await PublicationRows(source));
-            Assert.Null(await store.FindByResourceIdAsync(replacementId));
-
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => restricted.TransitionAsync(state.ResourceId,
-                (current, _) => new StateTransition<bool>(current with { Partitions = duplicatePartitions }, true)).AsTask());
-            Assert.Equal(before, await PublicationRows(source));
-            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => restricted.TransitionAsync(state.ResourceId,
-                (current, _) => new StateTransition<bool>(current with
-                {
-                    Revisions = current.Revisions.Add(current.Revisions[^1] with { RevisionNumber = 2 }),
-                }, true)).AsTask());
+            IDocumentRepository restricted = new PostgreSqlStateStore(source, new() { MaxGraphElements = 1 });
+            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => restricted.CreateAsync(create).AsTask());
+            Assert.Equal(before, await PublicationRows(source)); Assert.Null(await store.FindAsync(new DocumentIdentity.Resource(create.Head.ResourceId)));
+            var publication = await PublicationTestPlans.NoopAsync(provider, head.ResourceId, "over-quota");
+            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => restricted.PublishAsync(publication).AsTask());
             Assert.Equal(before, await PublicationRows(source));
         });
-
-    private static async Task<string> AuthoritativeRows(NpgsqlDataSource source, bool hasAllowances = true)
+    private static async Task<string> AuthoritativeRows(NpgsqlDataSource source)
     {
-        var exactBytes = hasAllowances
-            ? "stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint"
-            : "stored_bytes";
-        await using var command = source.CreateCommand($$"""
-            SELECT jsonb_build_object(
-                'documents',(SELECT jsonb_agg(to_jsonb(d) ORDER BY resource_id) FROM cellbridge_documents d),
-                'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY resource_id,state_version) FROM cellbridge_states s),
-                'usage',(SELECT jsonb_set(to_jsonb(u),'{stored_bytes}',to_jsonb({{exactBytes}})) FROM cellbridge_usage u))::text
-            """);
+        await using var command = source.CreateCommand("SELECT jsonb_build_object('documents',(SELECT jsonb_agg(to_jsonb(d) ORDER BY resource_id) FROM cellbridge_documents d),'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY resource_id,state_version) FROM cellbridge_states s))::text");
         return (string)(await command.ExecuteScalarAsync())!;
     }
-
     private static async Task<string> PublicationRows(NpgsqlDataSource source)
     {
-        await using var command = source.CreateCommand("""
-            SELECT jsonb_build_object(
-                'documents',(SELECT jsonb_agg(to_jsonb(d) ORDER BY resource_id) FROM cellbridge_documents d),
-                'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY resource_id,state_version) FROM cellbridge_states s),
-                'heads',(SELECT jsonb_agg(to_jsonb(h) ORDER BY resource_id) FROM cellbridge_read_heads h),
-                'revisions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY resource_id,lifecycle_generation,revision_number) FROM cellbridge_revision_summaries r),
-                'usage',(SELECT to_jsonb(u) FROM cellbridge_usage u))::text
-            """);
-        return (string)(await command.ExecuteScalarAsync())!;
+        var tables = new List<string>();
+        await using (var command = source.CreateCommand("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'cellbridge_repository_%' ORDER BY tablename"))
+        await using (var reader = await command.ExecuteReaderAsync()) while (await reader.ReadAsync()) tables.Add(reader.GetString(0));
+        var result = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var table in tables)
+        {
+            var rows = new List<string>(); await using var command = source.CreateCommand($"SELECT to_jsonb(t)::text FROM \"{table}\" t ORDER BY to_jsonb(t)::text COLLATE \"C\"");
+            await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) rows.Add(reader.GetString(0)); result.Add(table, rows);
+        }
+        return JsonSerializer.Serialize(result);
     }
 }

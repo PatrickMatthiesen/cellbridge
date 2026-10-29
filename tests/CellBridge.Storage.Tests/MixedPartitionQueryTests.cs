@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using CellBridge.AspNetCore;
+using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
@@ -22,7 +23,7 @@ public sealed class MixedPartitionQueryTests
         var result = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
             new() { SubRequests = { Query(1, Guid.Empty), inherit } }, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.All(result.SubResponses, s => Assert.False(s.Status));
-        Assert.Equal(new ExGuid(1, state.Partitions[1].Identity.SerialGuid),
+        Assert.Equal(new ExGuid(1, (await provider.Documents.ReadPartitionAsync(state.ResourceId, new(1)))!.Partition.Identity.SerialGuid),
             Assert.IsType<QueryChangesSubResponseData>(result.SubResponses[1].Data).StorageIndexExtendedGuid);
     }
 
@@ -111,7 +112,7 @@ public sealed class MixedPartitionQueryTests
         Assert.All(response.SubResponses.Take(5), s => Assert.False(s.Status));
         Assert.All(response.SubResponses.Skip(5), s => Assert.True(s.Status));
         var elements = response.DataElementPackage!.DataElements;
-        Assert.Equal(state.Partitions[0].Elements.Length + 7, elements.Count);
+        Assert.Equal((await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0) { IncludeCatalog = true }))!.Elements.Length + 8, elements.Count);
         Assert.Equal(elements.Count, elements.Select(e => e.DataElementExtendedGuid).Distinct().Count());
         var indexes = response.SubResponses.Take(5).Select(s => Assert.IsType<QueryChangesSubResponseData>(s.Data).StorageIndexExtendedGuid).ToArray();
         Assert.Equal(3, indexes.Distinct().Count());
@@ -142,7 +143,7 @@ public sealed class MixedPartitionQueryTests
             var mixed = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
                 new() { SubRequests = { Query(2, target, knowledge: knowledge), Query(3, Guid.Empty) } }, new Dictionary<string, string>(), TestActor.Value)).Response;
             Assert.All(mixed.SubResponses, s => Assert.False(s.Status));
-            Assert.Equal(state.Partitions[0].Elements.Length, mixed.DataElementPackage!.DataElements.Count);
+            Assert.Equal((await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0) { IncludeCatalog = true }))!.Elements.Length + 1, mixed.DataElementPackage!.DataElements.Count);
         }
     }
 
@@ -180,13 +181,8 @@ public sealed class MixedPartitionQueryTests
         await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
         var provider = testProvider.Provider;
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/snapshot-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        ulong captured = state.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.EditorsTable).Knowledge;
-        var changing = new BeforeReadStateStore(provider.State, 3, () => provider.State.TransitionAsync(state.ResourceId, (current, now) =>
-        {
-            var document = StoredDocument.RestoreMetadata(current, now);
-            document.JoinEditingSession(Guid.NewGuid(), 3600, true, "later-editor", TestActor.Value.Identity);
-            return new StateTransition<bool>(document.CaptureCoordination(current, current.Coordination), true);
-        }).AsTask());
+        ulong captured = (await provider.Documents.ReadPartitionAsync(state.ResourceId, new(2)))!.Partition.Knowledge;
+        var changing = new AfterFirstControlRead(provider.Documents, () => JoinAsync(provider, state.ResourceId));
         var result = await new CellBridgeDocumentService(new(changing, provider.Content)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, new() { SubRequests =
                 { Query(1, StoredDocument.EditorsTablePartitionId), Query(2, StoredDocument.EditorsTablePartitionId) } },
@@ -199,7 +195,7 @@ public sealed class MixedPartitionQueryTests
         Assert.True(after.CellKnowledgeTo > captured);
         Assert.NotEqual(before.StorageIndexExtendedGuid, after.StorageIndexExtendedGuid);
         Assert.Equal(12, result.Response.DataElementPackage!.DataElements.Count);
-        Assert.Single(result.State.Editors);
+        Assert.Equal(1, result.State.ActiveEditors);
     }
 
     [Theory]
@@ -209,18 +205,11 @@ public sealed class MixedPartitionQueryTests
     {
         await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
         var provider = testProvider.Provider;
-        var inner = provider.State;
+        var inner = provider.Documents;
         var content = provider.Content;
-        var state = (await new CellBridgeDocumentService(provider).CreateAsync("/between-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        await inner.TransitionAsync(state.ResourceId, (current, now) =>
-        {
-            var doc = StoredDocument.RestoreMetadata(current, now);
-            doc.JoinEditingSession(Guid.NewGuid(), 3600, true, "editor", TestActor.Value.Identity);
-            return new StateTransition<bool>(doc.CaptureCoordination(current, current.Coordination), true);
-        });
-        var changing = new BeforeReadStateStore(inner, 3, () => inner.TransitionAsync(state.ResourceId, (current, now) =>
-            new StateTransition<bool>(current with { Editors = current.Editors.Select(e => e with
-                { ExpiresUtc = now.AddMinutes(-1) }).ToImmutableArray() }, true)).AsTask());
+        var state = await CreateWithExpiringEditorAsync(provider, "/between-" + Guid.NewGuid() + ".docx");
+        var expires = (await inner.ReadControlAsync(state.ResourceId))!.Editors.Single().ExpiresUtc;
+        var changing = new AfterFirstControlRead(inner, () => WaitForExpiryAsync(expires));
         var result = await new CellBridgeDocumentService(new(changing, content)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.Metadata, new() { SubRequests =
                 { Query(1, StoredDocument.EditorsTablePartitionId), Query(2, StoredDocument.EditorsTablePartitionId) } },
@@ -231,7 +220,7 @@ public sealed class MixedPartitionQueryTests
         var after = Assert.IsType<QueryChangesSubResponseData>(result.Response.SubResponses[1].Data);
         Assert.NotEqual(before.StorageIndexExtendedGuid, after.StorageIndexExtendedGuid);
         Assert.True(after.CellKnowledgeTo > before.CellKnowledgeTo);
-        Assert.Empty(result.State.Editors);
+        Assert.Equal(0, result.State.ActiveEditors);
     }
 
     [Theory]
@@ -241,31 +230,58 @@ public sealed class MixedPartitionQueryTests
     {
         await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
         var provider = testProvider.Provider;
-        var state = (await new CellBridgeDocumentService(provider).CreateAsync("/expiry-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) =>
-        {
-            var document = StoredDocument.RestoreMetadata(current, now);
-            document.JoinEditingSession(Guid.NewGuid(), 3600, true, "editor", TestActor.Value.Identity);
-            return new StateTransition<bool>(document.CaptureCoordination(current, current.Coordination), true);
-        });
+        var state = await CreateWithExpiringEditorAsync(provider, "/expiry-" + Guid.NewGuid() + ".docx");
+        var expires = (await provider.Documents.ReadControlAsync(state.ResourceId))!.Editors.Single().ExpiresUtc;
         var first = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
             new() { SubRequests = { Query(1, StoredDocument.EditorsTablePartitionId) } }, new Dictionary<string, string>(), TestActor.Value)).Response;
         var known = ClientKnowledge.Deserialize(new(Assert.IsType<QueryChangesSubResponseData>(first.SubResponses[0].Data).KnowledgeBytes!));
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Security = current.Security with { Owner = "new-owner", Grants = current.Security.Grants.SetItem(TestActor.Value.Identity.Subject, DocumentAccess.Read) } }, true));
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        var permissions = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(state.ResourceId,
+            StorageTestDocuments.Admission(current), current.Security with { Owner = "new-owner",
+                Grants = current.Security.Grants.SetItem(TestActor.Value.Identity.Subject, DocumentAccess.Read) }, current.AuthorityGeneration));
+        Assert.True(permissions.Changed);
         var changed = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
             new() { SubRequests = { Query(2, StoredDocument.EditorsTablePartitionId, knowledge: known) } }, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.Equal(6, changed.DataElementPackage!.DataElements.Count);
         Assert.NotEqual(Assert.IsType<QueryChangesSubResponseData>(first.SubResponses[0].Data).StorageIndexExtendedGuid,
             Assert.IsType<QueryChangesSubResponseData>(changed.SubResponses[0].Data).StorageIndexExtendedGuid);
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Editors = current.Editors.Select(e => e with { ExpiresUtc = now.AddMinutes(-1) }).ToImmutableArray() }, true));
+        await WaitForExpiryAsync(expires);
         known = ClientKnowledge.Deserialize(new(Assert.IsType<QueryChangesSubResponseData>(changed.SubResponses[0].Data).KnowledgeBytes!));
         var expired = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
             new() { SubRequests = { Query(3, StoredDocument.EditorsTablePartitionId, knowledge: known) } }, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.Equal(6, expired.DataElementPackage!.DataElements.Count);
-        Assert.Empty((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Editors);
+        Assert.Empty((await provider.Documents.ReadControlAsync(state.ResourceId))!.Editors);
     }
+
+    private static async Task JoinAsync(StorageProvider provider, Guid id, int timeout = 3600)
+    {
+        var head = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!;
+        var joined = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(id,
+            StorageTestDocuments.Admission(head), new() { Type = SubRequestType.EditorsTable,
+                SubRequestDataAttributes = { ["EditorsTableRequestType"] = "JoinEditingSession", ["ClientID"] = Guid.NewGuid().ToString(),
+                    ["Timeout"] = timeout.ToString(), ["AsEditor"] = "true" } }));
+        Assert.True(joined.Changed);
+    }
+
+    private static async Task<DocumentHead> CreateWithExpiringEditorAsync(StorageProvider provider, string path)
+    {
+        var prepared = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), path, MinimalDocx.Create(),
+            DocumentSecurity.Create(TestActor.Value.Identity), provider.Content, provider.Limits);
+        var earlier = new DocumentControlRead(prepared.Head, DateTime.UtcNow.AddSeconds(-3598), prepared.Coordination,
+            prepared.Editors, prepared.Partitions.Select(partition => partition.After).ToImmutableArray());
+        var joined = DocumentControlReducer.Apply(earlier, new DocumentControlCommand.Office(prepared.Head.ResourceId,
+            StorageTestDocuments.Admission(prepared.Head), new() { Type = SubRequestType.EditorsTable, SubRequestDataAttributes =
+            { ["EditorsTableRequestType"] = "JoinEditingSession", ["ClientID"] = Guid.NewGuid().ToString(), ["Timeout"] = "3600", ["AsEditor"] = "true" } }), provider.Limits);
+        Assert.True(joined.Changed);
+        prepared = prepared with { Head = joined.Current.Head, Editors = joined.Current.Editors,
+            Partitions = prepared.Partitions.Select(partition => partition.After.Kind == 2
+                ? partition with { After = joined.Current.Partitions.Single(head => head.Kind == 2) } : partition).ToImmutableArray() };
+        var created = await provider.Documents.CreateAsync(prepared);
+        Assert.True(created.Created);
+        return created.Current!;
+    }
+
+    private static Task WaitForExpiryAsync(DateTime expiry) => Task.Delay(TimeSpan.FromMilliseconds(Math.Max(0, (expiry - DateTime.UtcNow).TotalMilliseconds) + 100));
 
     private static FsshttpbCellSubRequest Query(ulong id, Guid target, ClientKnowledge? knowledge = null, ulong? maximum = null, CellId? cell = null) =>
         new(RequestTypes.QueryChanges) { RequestId = id, TargetPartitionId = target, Data = new QueryChangesSubRequestData
@@ -273,19 +289,23 @@ public sealed class MixedPartitionQueryTests
 }
 
 // Inject a concurrent persisted change between operation reads without timing sleeps.
-internal sealed class BeforeReadStateStore(IDocumentStateStore inner, int ordinal, Func<Task> beforeRead) : IDocumentStateStore
+internal sealed class BeforeReadStateStore(IDocumentRepository inner, int ordinal, Func<Task> beforeRead) : RepositoryTestProxy(inner)
 {
     private int _reads;
-    public bool Durable => inner.Durable;
-    public bool Shared => inner.Shared;
-    public async ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default)
+    public override async ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken ct = default)
     {
-        if (++_reads == ordinal) await beforeRead();
-        return await inner.FindByResourceIdAsync(id, cancellationToken);
+        if (Interlocked.Increment(ref _reads) == ordinal) await beforeRead();
+        return await Inner.FindAsync(identity, ct);
     }
-    public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken ct = default) => inner.FindByPathKeyAsync(key, ct);
-    public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken ct = default) => inner.ListAsync(offset, limit, ct);
-    public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken ct = default) => inner.TryCreateAsync(state, ct);
-    public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken ct = default) => inner.TransitionAsync(id, transition, ct);
-    public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
+}
+
+internal sealed class AfterFirstControlRead(IDocumentRepository inner,Func<Task> afterRead) : RepositoryTestProxy(inner)
+{
+    private int reads;
+    public override async ValueTask<DocumentControlRead?> ReadControlAsync(Guid id,CancellationToken cancellationToken=default)
+    {
+        var snapshot = await Inner.ReadControlAsync(id,cancellationToken);
+        if (Interlocked.Increment(ref reads) == 1) await afterRead();
+        return snapshot;
+    }
 }

@@ -24,29 +24,31 @@ public sealed class PortabilityProviderTests
             using var files = new PortabilityTests.TemporaryFiles();
             var source = new StorageProvider(new PostgreSqlStateStore(sourceDb), new PostgreSqlContentStore(sourceDb));
             var binding = Guid.NewGuid(); var original = await PortabilityTests.History(source, binding);
-            var snapshot = await ((IProviderRecoveryStore)source.State).CaptureRecoveryAsync();
-            Assert.True(snapshot.Snapshots.Length > snapshot.Heads.Length);
-            var headReferences = StorageReferences.Handles(original).Select(h => h.Key).ToHashSet();
-            var oldOnly = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(StorageReferences.Handles))
-                .Where(h => !headReferences.Contains(h.Key)).ToArray();
+            var snapshot = await ((IProviderRecoveryStore)source.Documents).CaptureRecoveryAsync();
+            Assert.All(snapshot.Snapshots, document => Assert.True(document.ApplicationRevisions.Length > 1));
+            var document = Assert.Single(snapshot.Snapshots);
+            var headReferences = document.Visibility.Where(value => value.StartSequence <= document.Partitions.Single(partition => partition.Head.Kind == value.Scope.TargetPartition).Head.PublicationSequence && value.EndSequence is null)
+                .Select(value => document.Elements.Single(element => element.Scope == value.Scope && element.Element.Id == value.Element).Element.Payload.Key).ToHashSet();
+            var oldOnly = document.ContentReferences.Select(reference => reference.Handle).Where(handle => !headReferences.Contains(handle.Key)).ToArray();
             Assert.NotEmpty(oldOnly);
-            var fs = new StorageProvider(new PostgreSqlStateStore(fileDb), new PostgreSqlFileSystemContentStore(fileDb, files.Path("content")));
+            var fsContent = new PostgreSqlFileSystemContentStore(fileDb, files.Path("content"));
+            var fs = new StorageProvider(new PostgreSqlStateStore(fileDb, validationContent: fsContent), fsContent);
             var portable = new PortableArchive(); var context = PortabilityTests.Context with
                 { ExternalDestinations = [new(binding, "remote", "same-delivery-ledger")] };
             await portable.MigrateAsync(source, fs, files.Path("postgres.zip"), context);
-            Assert.Equal(JsonSerializer.Serialize(snapshot.Snapshots), JsonSerializer.Serialize((await ((IProviderRecoveryStore)fs.State).CaptureRecoveryAsync()).Snapshots));
+            Assert.Equal(PortabilityTests.CanonicalSnapshots(snapshot.Snapshots), PortabilityTests.CanonicalSnapshots((await fs.Documents.CaptureRecoveryAsync()).Snapshots));
             foreach (var handle in oldOnly) Assert.Equal(await source.Content.ReadVerifiedAsync(handle), await fs.Content.ReadVerifiedAsync(handle));
             var target = new StorageProvider(new PostgreSqlStateStore(restoredDb), new PostgreSqlContentStore(restoredDb));
             var receipt = await portable.MigrateAsync(fs, target, files.Path("filesystem.zip"), context);
-            var after = await ((IProviderRecoveryStore)target.State).CaptureRecoveryAsync();
+            var after = await ((IProviderRecoveryStore)target.Documents).CaptureRecoveryAsync();
             Assert.Equal(JsonSerializer.Serialize(snapshot.Heads), JsonSerializer.Serialize(after.Heads));
-            Assert.Equal(JsonSerializer.Serialize(snapshot.Snapshots), JsonSerializer.Serialize(after.Snapshots));
+            Assert.Equal(PortabilityTests.CanonicalSnapshots(snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(after.Snapshots));
             Assert.Equal(2, after.Receipts.Length);
-            Assert.Equal(JsonSerializer.Serialize(original.Publication), JsonSerializer.Serialize((await target.State.FindByResourceIdAsync(original.ResourceId))!.Publication));
-            Assert.NotEmpty(original.Publication!.Pending);
+            Assert.Equal(JsonSerializer.Serialize(original.Delivery), JsonSerializer.Serialize((await target.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)))!.Delivery));
+            Assert.NotEmpty(document.Deliveries);
             var restored = await new CellBridgeDocumentService(target).RestoreRevisionAsync(original.ResourceId,
-                3, RevisionHistory.Latest(original), "durable-recovery-restore", TestActor.Value);
-            Assert.Equal(original.Revisions[2].Content, restored.Revision.Content);
+                3, original.LatestRevisionNumber, "durable-recovery-restore", TestActor.Value);
+            Assert.Equal(document.ApplicationRevisions.Single(revision => revision.RevisionNumber == 3).Package.Sha256, restored.Revision.Package.Sha256);
             var reopened = new StorageProvider(new PostgreSqlStateStore(restoredDb), new PostgreSqlContentStore(restoredDb));
             Assert.Equal(receipt, await portable.ImportAsync(reopened, files.Path("filesystem.zip"), context));
             await new PostgreSqlStateStore(restoredDb).InitializeAsync();
@@ -55,13 +57,6 @@ public sealed class PortabilityProviderTests
             var collected = await new StorageMaintenance(restoredDb).CollectOrphansAsync(apply: true, quiescent: true);
             Assert.True(collected.OrphanObjects > 0);
             Assert.Equal(receipt, await portable.ImportAsync(reopened, files.Path("filesystem.zip"), context));
-            await using var usage = restoredDb.CreateCommand("""
-                SELECT (SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets) FROM cellbridge_usage) =
-                    (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
-                    (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
-                    (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts)
-                """);
-            Assert.Equal(true, await usage.ExecuteScalarAsync());
         })));
 
     [PostgreSqlFact]
@@ -77,8 +72,8 @@ public sealed class PortabilityProviderTests
                 if (defect == "nested") state["Security"]!["ForeignPolicy"] = "unsupported";
                 if (defect == "missing") state.AsObject().Remove("ContentVersion");
                 var json = state.ToJsonString();
-                if (defect == "duplicate") json = json.Replace("\"FormatVersion\":2", "\"FormatVersion\":2,\"FormatVersion\":2");
-                await using var change = db.CreateCommand("UPDATE cellbridge_states SET state_json=$1 WHERE resource_id=$2");
+                if (defect == "duplicate") json = json.Replace("\"ContentVersion\":1", "\"ContentVersion\":1,\"ContentVersion\":1");
+                await using var change = db.CreateCommand("UPDATE cellbridge_repository_heads SET \"Json\"=$1 WHERE \"ResourceId\"=$2");
                 change.Parameters.AddWithValue(json); change.Parameters.AddWithValue(original.ResourceId); await change.ExecuteNonQueryAsync();
                 await Assert.ThrowsAsync<StorageCorruptionException>(() => new PortableArchive().ExportAsync(source,
                     files.Path(defect + ".zip"), PortabilityTests.Context).AsTask());
@@ -88,7 +83,7 @@ public sealed class PortabilityProviderTests
             await new CellBridgeDocumentService(memory).CreateAsync("/a.docx", MinimalDocx.Create(), TestActor.Value);
             await new PortableArchive().ExportAsync(memory, files.Path("good.zip"), PortabilityTests.Context);
             var writes = new PortabilityTests.CountWrites(source.Content);
-            var destination = new StorageProvider(source.State, writes);
+            var destination = new StorageProvider(source.Documents, writes);
             await using (var schema = db.CreateCommand("UPDATE cellbridge_recovery_schema SET version=2")) await schema.ExecuteNonQueryAsync();
             await Assert.ThrowsAsync<StorageUnavailableException>(() => new PortableArchive().ImportAsync(destination,
                 files.Path("good.zip"), PortabilityTests.Context).AsTask());
@@ -105,26 +100,27 @@ public sealed class PortabilityProviderTests
     public async Task OpaqueProviderKeysAreRemappedAndCancellationLeavesNothingCurrent(bool interrupt)
     {
         using var files = new PortabilityTests.TemporaryFiles();
-        var source = new StorageProvider(new InMemoryStateStore(), new RenamedKeys(new InMemoryContentStore(), "source/../"));
+        var source = StorageTestDocuments.Memory(new RenamedKeys(new InMemoryContentStore(), "source/../"));
         var original = (await new CellBridgeDocumentService(source).CreateAsync("/a.docx", MinimalDocx.Create(), TestActor.Value))!;
         var portable = new PortableArchive(); await portable.ExportAsync(source, files.Path("export.zip"), PortabilityTests.Context);
         var content = new RenamedKeys(new InMemoryContentStore(), "target:");
-        var destination = new StorageProvider(new InMemoryStateStore(), content);
+        var destination = StorageTestDocuments.Memory(content);
         if (interrupt)
         {
             using var cancel = new CancellationTokenSource(); content.Cancel = cancel;
             await Assert.ThrowsAsync<OperationCanceledException>(() => portable.ImportAsync(destination,
                 files.Path("export.zip"), PortabilityTests.Context, cancel.Token).AsTask());
-            Assert.Empty(await destination.State.ListAsync(0, 100));
-            Assert.Empty((await ((IProviderRecoveryStore)destination.State).CaptureRecoveryAsync()).Receipts);
+            Assert.Empty((await destination.Documents.CaptureRecoveryAsync()).Snapshots);
+            Assert.Empty((await ((IProviderRecoveryStore)destination.Documents).CaptureRecoveryAsync()).Receipts);
             content.Cancel = null;
         }
         await portable.ImportAsync(destination, files.Path("export.zip"), PortabilityTests.Context);
-        var state = (await destination.State.FindByResourceIdAsync(original.ResourceId))!;
-        Assert.All(StorageReferences.Handles(state), h => Assert.StartsWith("target:", h.Key));
-        Assert.Equal(original.Content.Sha256, state.Content.Sha256);
-        Assert.Equal(await source.Content.ReadVerifiedAsync(original.Content), await destination.Content.ReadVerifiedAsync(state.Content));
-        Assert.Equal(JsonSerializer.Serialize(original.Partitions.Select(p => p.Identity)), JsonSerializer.Serialize(state.Partitions.Select(p => p.Identity)));
+        var state = (await destination.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)))!;
+        var exported = (await destination.Documents.ExportDocumentAsync(state.ResourceId))!;
+        Assert.All(exported.ContentReferences, reference => Assert.StartsWith("target:", reference.Handle.Key));
+        Assert.Equal(original.Package.Sha256, state.Package.Sha256);
+        Assert.Equal(await StorageTestDocuments.PackageAsync(source, original.Package), await StorageTestDocuments.PackageAsync(destination, state.Package));
+        Assert.Equal(JsonSerializer.Serialize((await source.Documents.ReadControlAsync(original.ResourceId))!.Partitions.Select(p => p.Identity)), JsonSerializer.Serialize((await destination.Documents.ReadControlAsync(state.ResourceId))!.Partitions.Select(p => p.Identity)));
     }
 
     [Fact]
@@ -132,24 +128,23 @@ public sealed class PortabilityProviderTests
     {
         using var files = new PortabilityTests.TemporaryFiles(); var source = PortabilityTests.Memory();
         var original = await PortabilityTests.History(source);
-        var frozen = await ((IProviderRecoveryStore)source.State).CaptureRecoveryAsync();
+        var frozen = await ((IProviderRecoveryStore)source.Documents).CaptureRecoveryAsync();
         var content = new BlockingContent(source.Content);
-        var task = new PortableArchive().ExportAsync(new(source.State, content), files.Path("concurrent.zip"), PortabilityTests.Context).AsTask();
+        var task = new PortableArchive().ExportAsync(new(source.Documents, content), files.Path("concurrent.zip"), PortabilityTests.Context).AsTask();
         await content.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var service = new CellBridgeDocumentService(source);
-        await service.RestoreRevisionAsync(original.ResourceId, 3, RevisionHistory.Latest(original), "during-export", TestActor.Value);
-        await ((IAtomicDocumentRenameStore)source.State).RenameAsync(original.ResourceId, (s, _) =>
-            new StateTransition<bool>(s with { Path = "/renamed.docx", PathKey = "/RENAMED.DOCX" }, true));
-        var live = (await source.State.FindByResourceIdAsync(original.ResourceId))!;
-        await ((IDocumentLifecycleStore)source.State).TryDeleteAsync(live.ResourceId, live.LifecycleGeneration, live.StateVersion);
-        var retired = (await ((IDocumentLifecycleStore)source.State).FindLifecycleAsync(live.ResourceId))!;
-        var replacement = await new DocumentStore().Put(retired.Path, MinimalDocx.Create("new incarnation")).CaptureAsync(source.Content);
-        replacement = RevisionHistory.Initialize(replacement with { LifecycleGeneration = 2, Security = original.Security });
-        Assert.True(await ((IDocumentLifecycleStore)source.State).TryRecreateAsync(retired.ResourceId, 1, retired.StateVersion, replacement));
+        await service.RestoreRevisionAsync(original.ResourceId, 3, original.LatestRevisionNumber, "during-export", TestActor.Value);
+        var live = (await source.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)))!;
+        live = (await source.Documents.ChangePathAsync(new(live.ResourceId, StorageTestDocuments.Admission(live), "/renamed.docx", "/RENAMED.DOCX", ImmutableDictionary<string, string>.Empty))).Current;
+        Assert.True((await source.Documents.ChangeLifecycleAsync(new DocumentLifecycleCommand.Delete(live.ResourceId, live.LifecycleGeneration, live.StateVersion))).Applied);
+        var retired = (await source.Documents.FindAsync(new DocumentIdentity.Resource(live.ResourceId, true)))!;
+        var replacement = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), retired.Path, MinimalDocx.Create("new incarnation"),
+            original.Security, source.Content, source.Limits, lifecycleGeneration: 2);
+        Assert.True((await source.Documents.ChangeLifecycleAsync(new DocumentLifecycleCommand.Recreate(retired.ResourceId, 1, retired.StateVersion, replacement))).Applied);
         content.Proceed.TrySetResult(); await task;
         var destination = PortabilityTests.Memory(); await new PortableArchive().ImportAsync(destination, files.Path("concurrent.zip"), PortabilityTests.Context);
-        var after = await ((IProviderRecoveryStore)destination.State).CaptureRecoveryAsync();
-        Assert.Equal(JsonSerializer.Serialize(frozen.Snapshots), JsonSerializer.Serialize(after.Snapshots));
+        var after = await ((IProviderRecoveryStore)destination.Documents).CaptureRecoveryAsync();
+        Assert.Equal(PortabilityTests.CanonicalSnapshots(frozen.Snapshots), PortabilityTests.CanonicalSnapshots(after.Snapshots));
     }
 
     [Fact]
@@ -161,16 +156,16 @@ public sealed class PortabilityProviderTests
         await sourceService.CreateAsync("/b.docx", MinimalDocx.Create(), TestActor.Value);
         var portable = new PortableArchive(); await portable.ExportAsync(source, files.Path("export.zip"), PortabilityTests.Context);
         var inner = new InMemoryContentStore(); var content = new BlockingContent(inner) { BlockWrites = true };
-        var destination = new StorageProvider(new InMemoryStateStore(), content);
+        var destination = StorageTestDocuments.Memory(content);
         var importing = portable.ImportAsync(destination, files.Path("export.zip"), PortabilityTests.Context).AsTask();
         await content.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Empty(await destination.State.ListAsync(0, 100));
+        Assert.Empty((await destination.Documents.CaptureRecoveryAsync()).Snapshots);
         // Different writer uses the same immutable content without waiting for the recovery writer.
-        var winner = await new CellBridgeDocumentService(new(destination.State, inner)).CreateAsync("/winner.docx", MinimalDocx.Create(), TestActor.Value);
+        var winner = await new CellBridgeDocumentService(new(destination.Documents, inner)).CreateAsync("/winner.docx", MinimalDocx.Create(), TestActor.Value);
         content.Proceed.TrySetResult();
         await Assert.ThrowsAsync<RecoveryConflictException>(() => importing);
-        Assert.Equal(winner!.ResourceId, Assert.Single(await destination.State.ListAsync(0, 100)).ResourceId);
-        Assert.Empty((await ((IProviderRecoveryStore)destination.State).CaptureRecoveryAsync()).Receipts);
+        Assert.Equal(winner!.ResourceId, Assert.Single(await destination.Documents.ListAsync(0, 100)).ResourceId);
+        Assert.Empty((await ((IProviderRecoveryStore)destination.Documents).CaptureRecoveryAsync()).Receipts);
     }
 
     [Theory]
@@ -182,24 +177,18 @@ public sealed class PortabilityProviderTests
         var service = new CellBridgeDocumentService(source);
         var original = (await service.CreateAsync("/history.docx", MinimalDocx.Create(), TestActor.Value))!;
         var large = MinimalDocx.Create(string.Concat(Enumerable.Range(0, 2000).Select(_ => Guid.NewGuid().ToString("N"))));
-        var graph = new CellBridge.Tests.GraphFixture(large, blob: true);
-        var request = MetadataPublicationTests.Initial(graph);
-        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex = StorageIds.Restore(original.Partitions[0].StorageIndex!);
-        var old = await service.ExecuteAsync(original.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
-        Assert.False(Assert.Single(old.Response.SubResponses).Status);
-        var small = await new DocumentStore().Put(original.Path, MinimalDocx.Create("small")).CaptureAsync(source.Content);
-        var selected = small.Partitions.Select(p => p with { Identity = original.Partitions.Single(o => o.Kind == p.Kind).Identity }).ToImmutableArray();
-        // A legacy provider can have pruned its old metadata snapshot while preserving immutable revision history.
-        await source.State.TransitionAsync(original.ResourceId, (current, now) => new StateTransition<bool>(RevisionHistory.Append(current,
-            current with { Content = small.Content, ContentVersion = current.ContentVersion + 1, Partitions = selected, ModifiedUtc = now,
-                Receipts = current.Receipts.Select(r => r with { Response = null }).ToImmutableArray() }, TestActor.Value.Identity, now), true));
-        var before = await ((IProviderRecoveryStore)source.State).CaptureRecoveryAsync(); Assert.Single(before.Snapshots);
+        var locks = new SharedDocumentLocks(service);
+        Assert.True((await locks.ApplyAsync(original.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value)).Success);
+        using (var input = new MemoryStream(large)) await service.SaveWholeFileAsync(original.ResourceId, input, "large", TestActor.Value, "lock");
+        using (var input = new MemoryStream(MinimalDocx.Create("small"))) await service.SaveWholeFileAsync(original.ResourceId, input, "small", TestActor.Value, "lock");
+        Assert.True((await locks.ApplyAsync(original.ResourceId, HostLockOperation.Release, "lock", TestActor.Value)).Success);
+        var before = await ((IProviderRecoveryStore)source.Documents).CaptureRecoveryAsync(); Assert.Single(before.Snapshots);
         var portable = new PortableArchive(); await portable.ExportAsync(source, files.Path("history.zip"), PortabilityTests.Context);
         var limits = budget == "document" ? new StorageLimits { MaxDocumentBytes = 8000 }
-            : new StorageLimits { MaxGraphElements = selected.Sum(p => p.Elements.Length) };
-        var content = new PortabilityTests.CountWrites(new InMemoryContentStore()); var destination = new StorageProvider(new InMemoryStateStore(new(limits)), content);
+            : new StorageLimits { MaxGraphElements = before.Snapshots[0].Current.Head.Counters.GraphElements - 1 };
+        var content = new PortabilityTests.CountWrites(new InMemoryContentStore()); var destination = StorageTestDocuments.Memory(content, limits);
         await Assert.ThrowsAsync<StorageQuotaExceededException>(() => portable.ImportAsync(destination, files.Path("history.zip"), PortabilityTests.Context).AsTask());
-        Assert.Equal(0, content.Writes); Assert.Empty(await destination.State.ListAsync(0, 100));
+        Assert.Equal(0, content.Writes); Assert.Empty((await destination.Documents.CaptureRecoveryAsync()).Snapshots);
     }
 
     [Theory]
@@ -209,27 +198,26 @@ public sealed class PortabilityProviderTests
     public async Task EveryActiveCoordinationKindBlocksImport(string kind)
     {
         using var files = new PortabilityTests.TemporaryFiles(); var source = PortabilityTests.Memory();
-        var original = (await new CellBridgeDocumentService(source).CreateAsync("/active.docx", MinimalDocx.Create(), TestActor.Value))!;
-        await source.State.TransitionAsync(original.ResourceId, (current, now) =>
+        var seed = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), "/active.docx", MinimalDocx.Create(),
+            DocumentSecurity.Create(TestActor.Value.Identity), source.Content, source.Limits);
+        var now = DateTime.UtcNow;
+        var lease = new LeaseState("id", "client", now.AddMinutes(5), 1, null, TestActor.Value.Identity.Subject);
+        seed = kind switch
         {
-            var lease = new LeaseState("id", "client", now.AddMinutes(5), 1, null, TestActor.Value.Identity.Subject);
-            var state = kind switch
-            {
-                "schema" => current with { Coordination = current.Coordination with { SchemaOwners = [lease] } },
-                "exclusive" => current with { Coordination = current.Coordination with { Exclusive = lease } },
-                _ => current with { Editors = [new(Guid.NewGuid(), "user", now, now, now.AddMinutes(5), 300, true, 1,
-                    ImmutableDictionary<string, ImmutableArray<byte>>.Empty, TestActor.Value.Identity)] },
-            };
-            return new StateTransition<bool>(state, true);
-        });
+            "schema" => seed with { Coordination = seed.Coordination with { SchemaOwners = [lease] } },
+            "exclusive" => seed with { Coordination = seed.Coordination with { Exclusive = lease } },
+            _ => seed with { Editors = [new(Guid.NewGuid(), "user", now, now, now.AddMinutes(5), 300, true, 1,
+                ImmutableDictionary<string, ImmutableArray<byte>>.Empty, TestActor.Value.Identity)] },
+        };
+        Assert.True((await source.Documents.CreateAsync(seed)).Created);
         var portable = new PortableArchive(); await portable.ExportAsync(source, files.Path("active.zip"), PortabilityTests.Context);
-        var writes = new PortabilityTests.CountWrites(new InMemoryContentStore()); var destination = new StorageProvider(new InMemoryStateStore(), writes);
+        var writes = new PortabilityTests.CountWrites(new InMemoryContentStore()); var destination = StorageTestDocuments.Memory(writes);
         await Assert.ThrowsAsync<RecoveryConflictException>(() => portable.ImportAsync(destination, files.Path("active.zip"), PortabilityTests.Context).AsTask());
         Assert.Equal(0, writes.Writes);
     }
 
     [PostgreSqlFact]
-    public Task AtomicDurableImportsRaceAndChargeExactRecoveryBudget() =>
+    public Task AtomicDurableImportsReplayAcrossConcurrentRequests() =>
         BudgetAndQueryTests.WithDatabase(new(), async db =>
         {
             using var files = new PortabilityTests.TemporaryFiles(); var memory = PortabilityTests.Memory();
@@ -239,20 +227,7 @@ public sealed class PortabilityProviderTests
             var receipts = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => portable.ImportAsync(destination,
                 files.Path("export.zip"), PortabilityTests.Context).AsTask()));
             Assert.All(receipts, r => Assert.Equal(receipts[0], r));
-            Assert.Single(await destination.State.ListAsync(0, 100));
-            await using var usage = db.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint FROM cellbridge_usage");
-            var required = (long)(await usage.ExecuteScalarAsync())!;
-            await BudgetAndQueryTests.WithDatabase(new() { MaxStoredBytes = required - 1 }, async quotaDb =>
-            {
-                var limits = new StorageLimits { MaxStoredBytes = required - 1 };
-                var limited = new StorageProvider(new PostgreSqlStateStore(quotaDb, limits), new PostgreSqlContentStore(quotaDb), limits);
-                await Assert.ThrowsAsync<StorageQuotaExceededException>(() => portable.ImportAsync(limited, files.Path("export.zip"), PortabilityTests.Context).AsTask());
-                Assert.Empty(await limited.State.ListAsync(0, 100));
-                Assert.Empty((await ((IProviderRecoveryStore)limited.State).CaptureRecoveryAsync()).Receipts);
-                await new PostgreSqlStateStore(quotaDb, limits with { MaxStoredBytes = required }).InitializeAsync();
-                await portable.ImportAsync(limited, files.Path("export.zip"), PortabilityTests.Context);
-                Assert.Single(await limited.State.ListAsync(0, 100));
-            });
+            Assert.Single(await destination.Documents.ListAsync(0, 100));
         });
 
     private sealed class RenamedKeys(IContentStore inner, string prefix) : IContentStore

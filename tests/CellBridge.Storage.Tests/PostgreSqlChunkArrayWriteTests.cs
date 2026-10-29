@@ -47,7 +47,7 @@ public sealed class PostgreSqlChunkArrayWriteTests
         });
 
     [PostgreSqlFact]
-    public Task CancellationAfterAnArrayBatchRollsBackStandaloneBatchAndAtomicWrites() =>
+    public Task CancellationAfterAnArrayBatchRollsBackStandaloneAndBatchWrites() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
             var plainStates = new PostgreSqlStateStore(source);
@@ -56,7 +56,7 @@ public sealed class PostgreSqlChunkArrayWriteTests
             var initial = (await new CellBridgeDocumentService(new(plainStates, plainContent))
                 .CreateAsync("/array-cancel.docx", seedBytes, TestActor.Value))!;
             var before = await InventoryAsync(source);
-            for (var mode = 0; mode < 3; mode++)
+            for (var mode = 0; mode < 2; mode++)
             {
                 using var cancellation = new CancellationTokenSource();
                 var writes = new ArrayWrites { AfterBatch = cancellation.Cancel };
@@ -64,45 +64,19 @@ public sealed class PostgreSqlChunkArrayWriteTests
                     .UseNpgsql(source).AddInterceptors(writes).Options;
                 var content = new PostgreSqlContentStore(options);
                 var bytes = RandomNumberGenerator.GetBytes(17 * 65536);
-                var callbacks = 0;
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
                 {
                     if (mode == 0)
                         await content.WriteAsync(new MemoryStream(bytes), cancellation.Token);
                     else if (mode == 1)
                         await content.WriteManyAsync(new ReadOnlyMemory<byte>[] { bytes, new byte[] { 1 } }, cancellation.Token);
-                    else
-                        await new PostgreSqlStateStore(options).TransitionWithContentAsync(initial.ResourceId, content,
-                            new ReadOnlyMemory<byte>[] { bytes }, (current, _) =>
-                            {
-                                callbacks++;
-                                return new StateTransition<bool>(current, true);
-                            }, cancellation.Token);
+
                 });
                 Assert.Equal(new[] { 16 }, writes.Rows);
-                Assert.Equal(0, callbacks);
                 Assert.Equal(before, await InventoryAsync(source));
-                Assert.Equal(initial.StateVersion, (await plainStates.FindByResourceIdAsync(initial.ResourceId))!.StateVersion);
-                Assert.Equal(seedBytes, await plainContent.ReadVerifiedAsync(initial.Content));
+                Assert.Equal(initial.StateVersion, (await ((IDocumentRepository)plainStates).FindAsync(new DocumentIdentity.Resource(initial.ResourceId)))!.StateVersion);
+                Assert.Equal(seedBytes, await StorageTestDocuments.PackageAsync(new(plainStates, plainContent), initial.Package));
             }
-        });
-
-    [PostgreSqlFact]
-    public Task QuotaRejectionRollsBackBothCompletedArrayBatches() =>
-        BudgetAndQueryTests.WithDatabase(new() { MaxStoredBytes = 17 * 65536 - 1 }, async source =>
-        {
-            var writes = new ArrayWrites();
-            var content = new PostgreSqlContentStore(new DbContextOptionsBuilder<CellBridgeDbContext>()
-                .UseNpgsql(source).AddInterceptors(writes).Options);
-            var bytes = new byte[17 * 65536];
-            var before = await InventoryAsync(source);
-            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => content.WriteAsync(new MemoryStream(bytes)).AsTask());
-            Assert.Equal(new[] { 16, 1 }, writes.Rows);
-            Assert.Equal(before, await InventoryAsync(source));
-            writes.Rows.Clear();
-            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => content.WriteManyAsync(new ReadOnlyMemory<byte>[] { bytes }).AsTask());
-            Assert.Equal(new[] { 16, 1 }, writes.Rows);
-            Assert.Equal(before, await InventoryAsync(source));
         });
 
     [PostgreSqlFact]
@@ -148,6 +122,7 @@ public sealed class PostgreSqlChunkArrayWriteTests
             var bytes = RandomNumberGenerator.GetBytes(65536 + 17);
             var handle = await content.WriteAsync(new MemoryStream(bytes));
             Assert.Equal(bytes, await content.ReadVerifiedAsync(handle));
+            Assert.Equal(bytes, (await content.ReadManyAsync([handle]))[handle.Key]);
             Assert.Empty(writes.Rows);
             Assert.Contains(writes.OtherChunkInserts, sql => sql.Contains("chunk_number", StringComparison.Ordinal));
             Assert.All(writes.Timeouts, timeout => Assert.Equal(45, timeout));
@@ -164,6 +139,7 @@ public sealed class PostgreSqlChunkArrayWriteTests
             var bytes = RandomNumberGenerator.GetBytes(65537);
             var handle = await content.WriteAsync(new MemoryStream(bytes));
             Assert.Equal(bytes, await content.ReadVerifiedAsync(handle));
+            Assert.Equal(bytes, (await content.ReadManyAsync([handle]))[handle.Key]);
             Assert.Empty(writes.Rows);
             Assert.NotEmpty(writes.OtherChunkInserts);
         });
@@ -174,8 +150,7 @@ public sealed class PostgreSqlChunkArrayWriteTests
             SELECT ROW((SELECT count(*) FROM cellbridge_objects),
                 (SELECT count(*) FROM cellbridge_chunks), (SELECT count(*) FROM cellbridge_states),
                 (SELECT count(*) FROM cellbridge_read_heads), (SELECT count(*) FROM cellbridge_revision_summaries),
-                stored_bytes, (SELECT sum(available_bytes) FROM cellbridge_usage_buckets))::text
-            FROM cellbridge_usage
+                (SELECT COALESCE(sum(length),0) FROM cellbridge_objects))::text
             """);
         return (string)(await command.ExecuteScalarAsync())!;
     }

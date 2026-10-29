@@ -21,7 +21,7 @@ internal sealed class ProtocolExecutionTestProvider : IAsyncDisposable
     public static ProtocolExecutionTestProvider Create(bool postgreSql)
     {
         if (!postgreSql)
-            return new(new(new InMemoryStateStore(), new InMemoryContentStore()));
+            return new(StorageTestDocuments.Memory());
 
         var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
         return new(new(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source)), source);

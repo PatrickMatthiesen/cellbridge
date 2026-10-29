@@ -11,6 +11,25 @@ namespace CellBridge.Storage.Tests;
 public sealed class PostgreSqlContentBatchReadTests
 {
     [PostgreSqlFact]
+    public Task BatchReadsPreserveCallerOwnedConnectionStateAndConfiguredTimeout() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var bytes = RandomNumberGenerator.GetBytes(65536 + 19);
+            var handle = await new PostgreSqlContentStore(source).WriteAsync(new MemoryStream(bytes));
+            await using var connection = source.CreateConnection();
+            var commands = new ReadCommands();
+            var content = new PostgreSqlContentStore(new DbContextOptionsBuilder<CellBridgeDbContext>()
+                .UseNpgsql(connection, pg => pg.CommandTimeout(47)).AddInterceptors(commands).Options);
+            Assert.Equal(System.Data.ConnectionState.Closed, connection.State);
+            Assert.Equal(bytes, (await content.ReadManyAsync([handle]))[handle.Key]);
+            Assert.Equal(System.Data.ConnectionState.Closed, connection.State);
+            await connection.OpenAsync();
+            Assert.Equal(bytes, (await content.ReadManyAsync([handle]))[handle.Key]);
+            Assert.Equal(System.Data.ConnectionState.Open, connection.State);
+            Assert.All(commands.Timeouts, timeout => Assert.Equal(47, timeout));
+        });
+
+    [PostgreSqlFact]
     public Task SixtyFiveObjectsUseTwoQueriesPerBoundedBatchAndReleaseTheConnection() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
@@ -100,8 +119,9 @@ public sealed class PostgreSqlContentBatchReadTests
     private sealed class ReadCommands : DbCommandInterceptor
     {
         public List<string> Sql { get; } = [];
+        public List<int> Timeouts { get; } = [];
         public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
             CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
-        { Sql.Add(command.CommandText); return ValueTask.FromResult(result); }
+        { Sql.Add(command.CommandText); Timeouts.Add(command.CommandTimeout); return ValueTask.FromResult(result); }
     }
 }

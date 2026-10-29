@@ -97,16 +97,14 @@ internal sealed class LoadResources : IAsyncDisposable
     private int failed;
     private int userCount = 1;
     private bool useDefaultAdmissionLimits;
-    private int maxDocumentCount = 10_000;
     public LoadResources(string backend) => environment = new(() => LoadTestEnvironment.StartAsync(
-        cancellation.Token, backend, userCount, useDefaultAdmissionLimits, maxDocumentCount));
-    public void ConfigureDocumentUsers(int count, bool useShippingLimits, int documentCount = 10_000)
+        cancellation.Token, backend, userCount, useDefaultAdmissionLimits));
+    public void ConfigureDocumentUsers(int count, bool useShippingLimits)
     {
         if (environment.IsValueCreated)
             throw new InvalidOperationException("Configure document users before starting the load environment. Run user capacity separately.");
         userCount = count;
         useDefaultAdmissionLimits = useShippingLimits;
-        maxDocumentCount = documentCount;
     }
     public CancellationToken CancellationToken => cancellation.Token;
     public bool Failed => Volatile.Read(ref failed) != 0;

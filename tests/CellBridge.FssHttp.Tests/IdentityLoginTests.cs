@@ -689,7 +689,7 @@ public sealed class IdentityLoginTests
                 };
             });
             builder.Services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.Zero);
-            builder.Services.AddCellBridge(new(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+            builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false);
             builder.Services.AddCellBridgeIdentityLogin<IdentityUser>(o =>
             {
                 o.IdentityAuthority = "test:accounts";

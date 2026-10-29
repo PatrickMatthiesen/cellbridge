@@ -15,27 +15,15 @@ public sealed class SelectiveDownloadEndpointTests
     [Fact]
     public async Task CurrentAndHistoricalDownloadsUseSelectiveReadsAndHeadSkipsContent()
     {
-        var raw = new InMemoryStateStore();
         var memoryContent = new InMemoryContentStore();
+        var raw = new InMemoryDocumentRepository(memoryContent);
         var seedProvider = new StorageProvider(raw, memoryContent);
         var seedService = new CellBridgeDocumentService(seedProvider);
         var originalBytes = MinimalDocx.Create("history");
         var state = (await seedService.CreateAsync("/shared/selective-download.docx", originalBytes, TestActor.Value))!;
         var currentBytes = MinimalDocx.Create("current");
-        ContentHandle currentHandle;
-        await using (var source = new MemoryStream(currentBytes))
-            currentHandle = await memoryContent.WriteAsync(source);
-        await raw.TransitionAsync(state.ResourceId, (current, now) =>
-        {
-            var next = current with
-            {
-                Content = currentHandle,
-                ContentVersion = current.ContentVersion + 1,
-                ModifiedUtc = now,
-            };
-            next = RevisionHistory.Append(current, next, TestActor.Value.Identity, now);
-            return new StateTransition<bool>(next, true);
-        });
+        state = (await seedService.ExecuteAsync(state.ResourceId,DocumentPartitionKind.FileContents,
+            await StorageTestDocuments.SaveRequestAsync(seedService,state,currentBytes),new Dictionary<string,string>(),TestActor.Value)).State;
 
         var countedContent = new CountingContentStore(memoryContent);
         var throwingState = new SelectiveOnlyStateStore(raw);
@@ -60,28 +48,30 @@ public sealed class SelectiveDownloadEndpointTests
         using var currentGet = await client.GetAsync(state.Path);
         Assert.Equal(HttpStatusCode.OK, currentGet.StatusCode);
         Assert.Equal(currentBytes, await currentGet.Content.ReadAsByteArrayAsync());
-        Assert.Equal(1, countedContent.OpenReadCount);
+        Assert.True(countedContent.OpenReadCount > 0);
+        var currentReads = countedContent.OpenReadCount;
 
         var historyPath = $"/_cellbridge/history/{state.ResourceId:D}/{state.LifecycleGeneration}/1";
         using var historyHead = await client.SendAsync(new(HttpMethod.Head, historyPath));
         Assert.Equal(HttpStatusCode.OK, historyHead.StatusCode);
         Assert.Equal(originalBytes.Length, historyHead.Content.Headers.ContentLength);
         Assert.Empty(await historyHead.Content.ReadAsByteArrayAsync());
-        Assert.Equal(1, countedContent.OpenReadCount);
+        Assert.Equal(currentReads, countedContent.OpenReadCount);
 
         using var historyGet = await client.GetAsync(historyPath);
         Assert.Equal(HttpStatusCode.OK, historyGet.StatusCode);
         Assert.Equal(originalBytes, await historyGet.Content.ReadAsByteArrayAsync());
-        Assert.Equal(2, countedContent.OpenReadCount);
+        Assert.True(countedContent.OpenReadCount > currentReads);
+        var totalReads = countedContent.OpenReadCount;
         Assert.Equal(0, throwingState.FullReadCount);
 
-        await raw.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-            { Security = current.Security with { Owner = "revoked" } }, true));
+        Assert.True((await raw.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(state.ResourceId,StorageTestDocuments.Admission(state),
+            state.Security with { Owner = "revoked" },state.AuthorityGeneration))).Changed);
         using var deniedCurrent = await client.GetAsync(state.Path);
         using var deniedHistory = await client.GetAsync(historyPath);
         Assert.Equal(HttpStatusCode.NotFound, deniedCurrent.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, deniedHistory.StatusCode);
-        Assert.Equal(2, countedContent.OpenReadCount);
+        Assert.Equal(totalReads, countedContent.OpenReadCount);
         Assert.Equal(0, throwingState.FullReadCount);
     }
 

@@ -1,10 +1,216 @@
 # Measuring active Office user capacity
 
-The 10,000 successful commits/minute target was not met on the tested shared host.
-The final 1,500-user overload run completed 8,151 commits inside its measured
-minute, with HTTP failures. Saving every fifteen seconds completed 5,995 inside
-the minute, plus two late acknowledgements, without HTTP failures.
-These measurements describe synthetic workloads and do not validate desktop Office capacity.
+The 10,000 successful commits/minute target remains unmet. The latest measured
+replacement acknowledged 5,286 saves inside a minute while offering 11,250,
+with HTTP 503 overload failures. A separate run offering 3,000 saves/minute
+passed without HTTP failures, with 2,994 acknowledged inside its minute.
+Both used 1,500 authenticated users and 15,000 documents.
+
+The archived implementation reached 8,151 inside a measured minute with HTTP
+failures. The rewrite has not demonstrated a throughput gain over that result.
+These synthetic workloads do not validate desktop Office capacity.
+
+## Initial replacement measurements
+
+The first completed replacement run used the frequent-AutoSave profile and the
+command below: 1,500 authenticated users, 15,000 documents, 256 KiB packages,
+16 KiB changed XML, 30 seconds of warm-up and 60 seconds of measurement. It
+acknowledged 1,922 saves inside the minute, with 117 late acknowledgements excluded.
+It had HTTP 503 admission failures, so this is an overload observation, not passing
+capacity. All 2,990 acknowledged saves including warm-up passed final content,
+version and receipt validation.
+
+During that minute WebDemo used 121% of one logical CPU and at most 685,334,528
+sampled RSS bytes. Runtime counters over 50 seconds within the measurement
+reported about 269 MB/s of managed allocations and 1.23 seconds of GC pauses.
+The runner and database shared this four-CPU host; WebDemo metrics exclude them.
+The database sampler observed no blocked backends at its 250 ms sampling interval;
+that does not prove every short wait was absent. Most observed backend time was
+idle in transaction, awaiting the application. Individual SQL execution times
+were small, while many lookups each opened a separate transaction.
+
+Across warm-up, measurement and completion drain, physical object bytes grew by
+53,485,091 for 2,990 saves, about 17.5 KiB/save. Document charges grew by
+99,773,938 bytes, about 32.6 KiB/save. These are different measures: charges
+include metadata and per-document references; physical objects deduplicate
+identical bytes. Allocated table/index space and WAL are separate again. No new
+complete 256 KiB package object is required for each edit. Reconstruction,
+package hashing and ZIP validation still process the complete candidate file.
+
+A diagnostic rerun with canonical payload batching, reuse of prepared mappings,
+three transaction-free immutable lookup APIs and the simpler strict JSON checker
+acknowledged 1,933 in-window saves. It included a 40-second managed-stack,
+allocation and database trace and is not a clean comparison with the untraced
+run. All 3,147 acknowledged saves including warm-up passed final validation.
+Further changes require an untraced measurement before claiming a gain. The trace
+contains substantial instrumentation overhead, including DiagnosticSource event
+serialization and runtime suspension. Managed samples also include waits; they
+are not a scheduler CPU-time profile. Its allocation samples identify repeated EF
+expression processing, content-buffer copies and object-group parsing. Those
+inclusive paths overlap. The captured per-record publication paths were replaced
+by the subsequent bounded prefetch implementation; the trace does not measure
+that later code.
+
+Import setup is outside request timing. Bounded EF flushes and a verified private
+payload spool reduced one 15,000-document import from 336 seconds to about
+80 seconds. The earlier attempt stalled during account setup and was stopped;
+it produced no capacity result. The change keeps all import flushes and its
+recovery receipt inside one atomic transaction. Batching bounds extra EF tracking,
+not the caller-supplied complete snapshot's memory.
+
+Raw local results are under `artifacts/office-rewrite/` and
+`artifacts/load-tests/office-users-1500-20261029T0019338889908Z-38cca6a2250940648cd74c72bebd06da.pgstats.json`.
+The traced report is
+`office-users-1500-20261029T0036130440825Z-3de6b77dc7a54257a31e2f148023f069.pgstats.json`
+in the same load-test directory. Query statistics cover warm-up, measurement and
+drain before final validation. They are not per-request wall-clock traces.
+The [implementation cost table](office-operation-costs.md#costs-of-the-replacement-implementation)
+records remaining catalog scans, package-sized validation and checkpoint costs.
+
+## Later replacement runs
+
+The same 1,500-user frequent-AutoSave profile produced these untraced overload
+results. These are individual local runs, not statistical estimates of a
+capacity gain. Every row had HTTP 503 failures and missed the target.
+
+| Working implementation / experiment | Document pool cap | In-window acknowledgements/minute | Excluded late acknowledgements |
+| --- | ---: | ---: | ---: |
+| First completed replacement | 24 | 1,922 | 117 |
+| Bounded publication prefetch and resource-head reads | 24 | 3,075 | 117 |
+| Verified payload batches, combined ACK staging and selected-index claims | 24 | 3,299 | 109 |
+| Same implementation, larger pool | 64 | 3,881 | 114 |
+| External-reader lease fix and request-local immutable metadata reuse | 64 | 3,928 | 110 |
+| Same source, automatic preparation cap 64 | 64 | 4,595 | 110 |
+| Reused partition reads and batched affected-key current mappings, preparation cap 64 | 64 | 5,286 | 114 |
+
+All 5,807 acknowledged saves including warm-up/drain in the lease-fix row passed final
+content, revision, receipt and distinct-payload checks. WebDemo's measured phase
+used 135% of one logical CPU and at most 709,591,040 sampled RSS bytes. A separate
+one-second `/proc/stat` sampler observed 93.8% host CPU busy over 59.15 seconds
+inside that minute, with 0.08% I/O wait and 0.06% steal. The runner used about
+45% of one CPU; the database and other processes also shared the four-CPU host.
+This is evidence of a local resource limit, not an application-only CPU profile.
+Automatic preparation is a benchmark-only connection-string override. It uses
+`Parameters__LoadPostgreSqlMaxAutoPrepare=64`; the default minimum usage count
+remains five. All 6,696 acknowledged saves including warm-up/drain passed final
+verification. Npgsql [documents preparation](https://www.npgsql.org/doc/prepare.html)
+as a way to reuse PostgreSQL statement plans; it is disabled by default. The
+library and demo defaults are unchanged. The statement limit applies separately
+to each physical WebDemo connection; runner/diagnostic connections retain their
+existing configuration.
+
+The final read cleanup reused partition headers inside each preparation and
+replaced repeated root/history lookups with bounded current-key reads. A
+260-key regression on both databases changed preparation from 524 partition,
+root and interval queries to four partition, root and current-mapping queries;
+the publication fence changed from 520 root/interval queries to three root/current
+queries. These counts exclude other preparation/publication work. It adds no
+schema, cache across requests or shared lock.
+
+The last row acknowledged 5,286 saves inside the measured minute, about 15%
+more than the preceding run with the same pool and preparation settings.
+All 7,652 acknowledged saves including warm-up/drain passed final validation.
+WebDemo used 159% of one logical CPU and at most 756,051,968 sampled RSS bytes
+during measurement. The PostgreSQL sampler observed no blocked backends; short
+waits can escape its sampling. The report is
+`artifacts/load-tests/office-users-1500-20261029T0321148414127Z-e77cbfcd7d784055a990a9768b7d91cd.pgstats.json`.
+This is still an overload result with HTTP 503 failures.
+
+A fresh run of the primary profile used the same final source, pool cap 64 and
+automatic preparation cap 64, with each user saving every 30 seconds. It passed
+without HTTP failures or missed cadence slots. Of 2,998 saves started during
+measurement, 2,994 were acknowledged inside the minute and four completed later.
+All 4,482 acknowledged saves including warm-up passed final content, revision,
+receipt and distinct-payload checks. Queries and opens ran alongside saves.
+WebDemo used 143% of one logical CPU and at most 579,747,840 sampled RSS bytes
+during measurement. This single passing run supports approximately 3,000 offered
+saves/minute on this host, not the 10,000 target. Its report is
+`artifacts/load-tests/office-users-1500-20261029T0326070813059Z-61dbd9ee51f842ee9a6cf421564e1211.pgstats.json`.
+
+That primary run made 80,814 document-head SELECTs. The service paths account
+for them exactly: seven per save, eight per query and four per download. Each
+open performs both a download and a query. These are current metadata reads,
+not history scans. An experiment reused the entry head for the first operation
+to remove one read per Cell request. It failed the existing file/metadata tests
+where a lease is reacquired after the entry snapshot but before operation
+admission: a successful save became a conflict. The experiment was reverted;
+all 70 focused tests then passed. This rejects that reuse strategy, rather than
+establishing that the current number of reads is minimal.
+
+The archived 8,151/minute overload result remains higher than these replacement
+results. The rewrite has not demonstrated an overall throughput gain over it.
+
+The new batch reader initially held its database header connection while
+invoking the configured external reader. When both used the same pool, a
+one-connection pool stalled. The unchanged actual PostgreSQL and SQL Server
+regression now passes after header queries release library-opened connections
+before invoking that reader. Already-open caller connections/transactions retain
+their ownership. These tests cover the provider pairing used by WebDemo.
+
+A temporary opt-in phase run preceded that fix. Median one-second p50 values
+were 1.43 s for save total, 740 ms for graph preparation, 324 ms for guarded
+publication, 186 ms for payload verification and 108 ms for package materializing
+and validation. Several connection acquisition phases were around 40 ms. Nested
+scopes overlap; these percentiles cannot be summed or treated as lock-hold time.
+The content writer admission wait was near zero. Those observations motivated
+the lease and repeated-lookup fixes; they do not profile the final source.
+
+The retained meter is `CellBridge.Operations`, with histogram
+`cellbridge.operation.duration` in seconds and fixed `phase` labels. Without a
+listener, its scopes skip timestamp/tag work and allocate no bytes after
+initialization. For a diagnostic collection, use the verified WebDemo process ID
+from the benchmark log, rather than the benchmark runner:
+
+```sh
+TMPDIR="$PWD/artifacts/tmp" dnx --allow-roll-forward dotnet-counters -- collect \
+  --process-id "$office_webdemo_pid" \
+  --counters 'CellBridge.Operations[cellbridge.operation.duration]' \
+  --maxHistograms 64 --maxTimeSeries 256 --refresh-interval 1 \
+  --format json --duration 00:00:30 --output artifacts/office-phases.json
+```
+
+Set `office_webdemo_pid` to that logged ID first. The collector's `TMPDIR` must
+match the target process; the command uses the fixture's default temporary path.
+The default histogram cap of ten is insufficient for the 22 fixed phases.
+Timings include failed/cancelled attempts and instrumentation overhead, so keep
+these collections separate from untraced qualification runs.
+
+## History scaling of the replacement
+
+A separate component diagnostic used one document, in-memory storage and tiny
+fixed-timestamp DOCX packages of about 1.25 KB. It verified package bytes and
+revision counts at 1, 10, 50, 100 and 250 revisions. Each stage had ten warm-ups
+and fifteen measured samples. Construction, aging, isolated-store import and
+correctness checks were outside timing. Content was shared and warm; this does
+not measure novel-content persistence, HTTP concurrency or Office capacity.
+
+| Component | Allocated bytes at 1 revision | Allocated bytes at 250 revisions |
+| --- | ---: | ---: |
+| Current head read | 40 | 40 |
+| Current partition metadata | 624 | 624 |
+| Current bindings | 712 | 712 |
+| Current package stream | 80,112 | 80,120 |
+| Whole-query client graph | 48,472 | 5,575,616 |
+| Next full-package save | 809,256 | 1,063,208 |
+
+These are process allocation-counter deltas including the measurement callback.
+Whole-query output processing includes the visible catalog, which grew from four
+to 1,000 elements. The save input includes the complete current expected-index
+envelope; retained revision mappings make that input grow with history. The
+31% save-allocation increase is therefore not an isolated provider bound at fixed
+input size. The source-based bounds are in the operation cost guide.
+
+This experiment exposed an implementation bug: expected-value and unreferenced
+index envelopes were processed as new serial claims. They now remain input
+preconditions; only the selected update index supplies new claims. The earlier
+five-sample run allocated 1,827,888 bytes for the aged save; the final run allocated
+1,063,208. Different sample counts and runtime tiering prevent a clean CPU speedup
+claim. Process CPU can include background GC triggered by setup; short wall times
+also depend on the shared host. Allocation counts are the useful evidence here.
+Raw results are `artifacts/office-rewrite/history-scaling-final.json` and
+`history-scaling-before-selected-claims.json` in that directory.
+
+## Workload profiles
 
 Maintained profiles use distinct authenticated users and ten documents per user:
 

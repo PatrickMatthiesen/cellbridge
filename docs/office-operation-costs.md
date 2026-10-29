@@ -6,8 +6,10 @@ a lock refresh cannot justify decoding every retained revision. Save optimizatio
 must separate changed bytes, current graph work, retained history, and durability.
 This cost model does not depend on a particular replacement storage design.
 
-This audit describes source at `f569399` and existing measurements through
-2026-10-28. It introduces no new capacity measurements. Protocol authority comes
+The protocol inventory and original volume evidence were audited at `f569399`
+on 2026-10-28. The implementation cost table below describes the replacement
+repository. Capacity measurements are maintained separately in
+[Office performance](office-performance.md). Protocol authority comes
 from Microsoft's [outer operation enumeration][outer], [binary operation
 enumeration][binary], [Query Changes][query], and [Put Changes][put]. The
 [requirements ledger](protocol-requirements.md) records implementation limits and
@@ -80,7 +82,7 @@ selected scope/filter identifiers in `V`.
 | D2 | Cell QueryChanges, incremental file | `C..C+K+V` | `C+K..C+K+B` selected missing closure | U/U | `v(C)/U/v(C+K+V); v(C+K)/U/v(R)` |
 | D3 | Cell QueryChanges, initial/unknown knowledge or whole-cell retransmission | `C..C+K+V` | `C+K..C+K+B` full selected graph | U/U | `v(C)/U/v(C+K+V); v(C+K)/U/v(R)` |
 | D4 | Cell QueryChanges, metadata partition, selected cell or storage-index-only | `C..C+K+V` | `C+K..C+K+B` for that scope | U/U | `v(C)/U/v(C+K+V); v(C+K)/U/v(R)` |
-| E1 | Cell PutChanges, complete file publication with reused graph objects | `C..C+delta+serialized(d)+K` | `C..C+K+added-IDs+applied-index` | U/U; fixture input mean 17,733 bytes | `v(C)/U/v(request); v(C)/U/v(R)`; fixture input `3/3/3` |
+| E1 | Cell PutChanges, complete file publication with reused graph objects | `C..C+delta+serialized(d)+K` | `C..C+K+added-IDs+applied-index` | U/U; archived fixture input mean 17,733 bytes, final replacement overload mean 18,124 bytes | `v(C)/U/v(request); v(C)/U/v(R)`; both fixture inputs `3/3/3` |
 | E2 | Cell PutChanges, full package replacement | `C+D..C+B+K` for supplied full graph | `C..C+K+added-IDs+applied-index` | U/U | `v(C+D)/U/v(request); v(C)/U/v(R)` |
 | E3 | Cell PutChanges, complete supported opaque metadata graph | `C..C+B+K` | `C..C+K+added-IDs+applied-index` | U/U | `v(C)/U/v(request); v(C)/U/v(R)` |
 | E4 | Exact accepted-save receipt replay; coherency conflict | Same submitted save as E1/E2/E3 | `C..C+stored-acknowledgement` or error | U/U | Same input triple as original save; `v(C)/U/v(R)` output |
@@ -135,9 +137,10 @@ subrequests are not a transaction rolled back by a later failure.
 | Normative field | QueryChanges Maximum Data Elements is a compact unsigned 64-bit byte constraint. | It limits serialized data elements, not their count or the whole SOAP response. Its integer representation is not a supported document maximum or a measured response size. |
 | Normative operation | [GetVersionList][version-list] lets the server decide how many recent versions to return. | A bounded recent list is possible; its output still costs `Omega(h)`. |
 | Host default | [StorageLimits](../src/CellBridge/Storage/StorageLimits.cs) admits 128 MiB documents, 512 MiB graph payloads, 100,000 graph elements and 1,000 history revisions. | These are admission limits, not qualification at those sizes. |
-| Host default | Document stored bytes 1 GiB; namespace stored bytes 10 GiB; 10,000 documents; decoded memberships 128 MiB. | Independent constraints can reject well before a nominal payload maximum. |
+| Host default | Document stored bytes 1 GiB; decoded memberships 128 MiB. Provider-wide byte and document-count caps were removed by the approved rewrite. | Individual document/request limits remain independent of namespace size. |
 | Host default | [Transport/storage configuration](storage-providers.md#configuration) documents 128 MiB SOAP/MTOM requests; PropertyGet accepts at most 256 IDs in current code. | Framing consumes request budget; property count is not property-byte size. |
-| Observed fixture | Final overload input min/mean/max 17,732/17,733/17,734 binary bytes, 16,700 changed ZIP bytes. | This distribution covers the synthetic fixture only; response mean was not established. |
+| Observed archived fixture | Overload input min/mean/max 17,732/17,733/17,734 binary bytes, 16,700 changed ZIP bytes. | This distribution covers the synthetic fixture only; response mean was not established. |
+| Observed replacement fixture | Final overload input min/mean/max 18,025/18,124/18,636 binary bytes, 16,700 changed ZIP bytes. | These are submitted save sizes including warm-up, not an empirical Office average. |
 | Planning assumption | 256 KiB or 1.5 MiB package, 16 KiB editable XML. | These are scenario parameters, not ordinary Office averages. |
 
 Microsoft's [SharePoint storage planning example][size-planning] uses 250 KB and
@@ -145,6 +148,39 @@ its [migration guide][size-migration] uses Office files around 1.5 MB. Neither
 provides an empirical modern Office average suitable for this workload. Sample
 the intended collection by application and package size; report percentiles,
 mean, compression ratio and edit/changed-part distributions before weighting costs.
+
+## Costs of the replacement implementation
+
+These are source-based bounds, not measured latency. SQL indexes add logarithmic
+lookup/index-maintenance costs. Let `L` count current resolved object bindings,
+`M` count selected storage-index mappings, `A` count serialized permission bytes,
+and `U` count expanded ZIP bytes examined during package validation. Variable
+record bytes still count even where a table uses descriptor counts below.
+
+| Operation | Current work and working memory | Coordination and remaining cost |
+| --- | --- | --- |
+| Resource metadata/access | The repository resource lookup uses one indexed head statement and decodes `A` plus current metadata; independent of `H`. Service authorization can reread the head. A path lookup also reads its indexed claim. | Reads do not lock the namespace. Due editor expiry can require a document control update. |
+| Lease/editor control | Read current coordination, editor entries and partition headers, approximately `O(E + A)`. | One affected document row; no application revision or file graph load. |
+| Current package download | Read `L` bindings and their selected immutable graph/payload closure, reconstruct and verify `D` bytes. | No application-history scan. Reconstruction uses a temporary seekable file. |
+| File save | Validate admitted input, read current bindings, resolve changed/selected graph objects, reconstruct/hash `D` and examine up to `U` expanded ZIP bytes. Store new canonical payloads, changed mappings/bindings, revision and receipt. | Physical staging precedes the affected document lock. It stores no additional complete package, but package reconstruction and validation still cost document-sized work. |
+| Mapping/binding publication | Insert changed keys and their immutable version records; update current projections. | Checkpoints copy current bindings when the 128-change or 1 MiB replay bound is reached. This costs `O(L)` on that save, outside the document lock. |
+| QueryChanges | Read the selected live catalog and mappings, then process knowledge and select/serialize the response. Working memory includes `G + M + K` and selected response buffers. | The current service still enumerates the catalog and mappings even for warm knowledge. `G` and `M` can grow with protocol history. Indexed storage APIs alone do not make this operation output-sensitive. |
+| Point application revision / recent version page | Indexed revision selection; offset paging also scans the skipped entries. Returned records cost at least `O(h)`. | A full SOAP version list can still return all `H` records. |
+| Historical package / restore | Read selected checkpoint bindings and bounded delta tail, plus selected graph closure and package bytes. Restore may traverse retained base references/catalog data. | Explicit cold operation. Publication uses the affected document row; restore is not constant time. |
+| Recovery/export/collection | Visit retained records and referenced payloads. Import uses bounded EF flush batches and a private payload spool inside one atomic transaction. | Offline operations require quiescence. The supplied complete archive/snapshot itself is not bounded by the EF batch size. |
+
+Current bindings avoid replaying all application revisions to open the latest
+file. They do not remove the lower bound of reading returned bytes, eliminate
+whole-package validation, or make arbitrary protocol base chains constant time.
+No provider-wide counter, bucket pool or namespace publication lock participates
+in normal saves. Request admission limits still bound concurrent resource use.
+
+Save preparation and the publication fence read only their affected current
+mapping keys, in batches of at most 256. They check the selected logical root
+once, rather than looking up the root and a historical interval for every key.
+Preparation reuses partition headers and replay positions inside its coherent
+transaction. Current projections are maintained atomically with history;
+offline recovery checks their completeness against the retained intervals.
 
 ## Time and space priorities
 

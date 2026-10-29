@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using BenchmarkDotNet.Attributes;
+using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
@@ -29,7 +30,8 @@ public class AllocationBenchmarks
     private byte[] payload = null!;
     private byte[] binary = null!;
     private byte[] inbound = null!;
-    private DocumentState state = null!;
+    private DocumentHead state = null!;
+    private StorageProvider repository = null!;
     private const string ContentType = "multipart/related; boundary=bench";
 
     [GlobalSetup]
@@ -50,9 +52,10 @@ public class AllocationBenchmarks
         var soap = "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><RequestVersion xmlns=\"http://schemas.microsoft.com/sharepoint/soap/\" Version=\"2\" MinorVersion=\"2\"/><RequestCollection xmlns=\"http://schemas.microsoft.com/sharepoint/soap/\" CorrelationId=\"00112233-4455-6677-8899-aabbccddeeff\"><Request Url=\"http://example.invalid/shared/test.docx\" RequestToken=\"1\"><SubRequest Type=\"Cell\" SubRequestToken=\"1\"><SubRequestData BinaryDataSize=\"" + binary.Length + "\"><x:Include xmlns:x=\"http://www.w3.org/2004/08/xop/include\" href=\"cid:binary\"/></SubRequestData></SubRequest></Request></RequestCollection></s:Body></s:Envelope>";
         inbound = [.. Encoding.UTF8.GetBytes("--bench\r\nContent-Type: application/xop+xml\r\nContent-ID: <soap>\r\n\r\n" + soap + "\r\n--bench\r\nContent-Type: application/octet-stream\r\nContent-ID: <binary>\r\n\r\n"),
             .. binary, .. "\r\n--bench--\r\n"u8];
-        state = await new DocumentStore().Put("/shared/benchmark.docx", payload).CaptureAsync(content);
-        var partition = await DocumentPartition.CaptureFileGraphAsync(state.Partitions.Single(p => p.Kind == 0), graph, 1, state.Content, content);
-        state = state with { Partitions = state.Partitions.Select(p => p.Kind == 0 ? partition : p).ToImmutableArray() };
+        repository = new(new InMemoryDocumentRepository(content), content);
+        var prepared = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), "/shared/benchmark.docx", payload,
+            DocumentSecurity.Create(new("benchmark:writer", "writer", "Benchmark writer")), content, repository.Limits);
+        state = (await repository.Documents.CreateAsync(prepared)).Current ?? throw new InvalidDataException("Benchmark create failed.");
         // Write metadata beside the BDN results. This happens once per benchmark
         // case before its warm-up, never in a measured invocation.
         var directory = Path.GetFullPath(Environment.GetEnvironmentVariable("CELLBRIDGE_BENCHMARK_METADATA")
@@ -63,8 +66,8 @@ public class AllocationBenchmarks
             workload = "Deterministic complete synthetic file graph, seed 42; opaque bytes, no Office client.", PayloadBytes, Backend,
             payloadSha256 = Convert.ToHexStringLower(SHA256.HashData(payload)), requestBytes = inbound.Length, binaryBytes = binary.Length,
             setup = "Payload, MTOM request and stored document prepared in GlobalSetup; BDN warm-up excluded from measured intervals.",
-            interval = "One parse, restore or build invocation, selected by the benchmark method.",
-            source = BenchmarkMetadata.Capture(typeof(AllocationBenchmarks).Assembly, typeof(FsshttpbCellRequest).Assembly, typeof(StoredDocument).Assembly)
+            interval = "One parse, derived package stream or build invocation, selected by the benchmark method.",
+            source = BenchmarkMetadata.Capture(typeof(AllocationBenchmarks).Assembly, typeof(FsshttpbCellRequest).Assembly, typeof(DocumentHead).Assembly)
         }, new JsonSerializerOptions { WriteIndented = true }));
     }
 
@@ -80,7 +83,11 @@ public class AllocationBenchmarks
     public FsshttpbCellRequest BinaryParse() => Parse(binary);
 
     [Benchmark]
-    public async Task<StoredDocument> Restore() => await StoredDocument.RestoreAsync(state, content);
+    public async Task PackageRead()
+    {
+        await using var stream = await repository.Packages.OpenReadAsync(state.Package);
+        await stream.CopyToAsync(Stream.Null);
+    }
 
     [Benchmark]
     public DataElement NestedObjectGroupBuild() => StorageManifestBuilder.BuildObjectGroupDataElement(

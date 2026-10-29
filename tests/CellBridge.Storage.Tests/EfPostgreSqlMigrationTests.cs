@@ -30,6 +30,10 @@ public sealed class EfPostgreSqlMigrationTests
             context.GetService<IMigrationsAssembly>().FindMigrationId("BaselineSchema6"));
         Assert.Equal("20261028000100_UsageAllowances",
             context.GetService<IMigrationsAssembly>().FindMigrationId("UsageAllowances"));
+        Assert.Equal("20261028000300_NormalizedDocumentRepository",
+            context.GetService<IMigrationsAssembly>().FindMigrationId("NormalizedDocumentRepository"));
+        Assert.Equal("20261028000200_RemoveSharedQuotas",
+            context.GetService<IMigrationsAssembly>().FindMigrationId("RemoveSharedQuotas"));
     }
 
     [Fact]
@@ -55,7 +59,7 @@ public sealed class EfPostgreSqlMigrationTests
             await future.ExecuteNonQueryAsync();
         await Assert.ThrowsAsync<StorageUnavailableException>(() => migrator.MigrateAsync());
         await using var count = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\"");
-        Assert.Equal(3L, await count.ExecuteScalarAsync());
+        Assert.Equal(5L, await count.ExecuteScalarAsync());
     });
 
     [PostgreSqlFact]
@@ -63,24 +67,24 @@ public sealed class EfPostgreSqlMigrationTests
     {
         var store = new PostgreSqlStateStore(source);
         _ = new StorageProvider(store, new PostgreSqlContentStore(source));
-        await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
+        await Assert.ThrowsAsync<StorageUnavailableException>(() => ((IDocumentRepository)store).CheckHealthAsync().AsTask());
         await using (var absent = source.CreateCommand("SELECT to_regclass('cellbridge_documents') IS NULL"))
             Assert.Equal(true, await absent.ExecuteScalarAsync());
 
         await store.InitializeAsync();
-        await store.CheckHealthAsync();
+        await ((IDocumentRepository)store).CheckHealthAsync();
         await using (var history = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\""))
-            Assert.Equal(2L, await history.ExecuteScalarAsync());
+            Assert.Equal(4L, await history.ExecuteScalarAsync());
         var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
         var created = (await service.CreateAsync("/empty-ef.docx", MinimalDocx.Create("EF"), TestActor.Value))!;
         await store.InitializeAsync();
-        Assert.Equal(DocumentStateJson.Serialize(created),
-            DocumentStateJson.Serialize((await store.FindByResourceIdAsync(created.ResourceId))!));
+        Assert.Equal(JsonSerializer.Serialize(created),
+            JsonSerializer.Serialize(await ((IDocumentRepository)store).FindAsync(new DocumentIdentity.Resource(created.ResourceId))));
     });
 
     [PostgreSqlFact]
     public Task ContentReadObservesCancellationSuppliedAfterOpeningTheStream() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        WithInitializedDatabaseAsync(new(), async source =>
         {
             var content = new PostgreSqlContentStore(source);
             using var input = new MemoryStream(new byte[2 * 65536]);
@@ -93,7 +97,7 @@ public sealed class EfPostgreSqlMigrationTests
         });
 
     [PostgreSqlFact]
-    public Task ConsumerConfiguredOptionsSupportSharedAccountingAndExplicitMigrations() => WithEmptyDatabase(async source =>
+    public Task ConsumerConfiguredOptionsSupportAtomicPublicationAndExplicitMigrations() => WithEmptyDatabase(async source =>
     {
         var interceptor = new LeaseTrackingInterceptor();
         var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
@@ -101,40 +105,29 @@ public sealed class EfPostgreSqlMigrationTests
             .UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
             .AddInterceptors(interceptor).Options;
         Assert.Equal(QueryTrackingBehavior.NoTracking, options.FindExtension<CoreOptionsExtension>()!.QueryTrackingBehavior);
-        var limits = new StorageLimits { MaxDocuments = 2 };
+        var limits = new StorageLimits();
         await new PostgreSqlStorageMigrator(options, limits).MigrateAsync();
         var store = new PostgreSqlStateStore(options, limits);
         var content = new PostgreSqlContentStore(options, limits.MaxObjectBytes);
-        Assert.Same(options, store.BudgetScope);
-        Assert.Same(options, content.BudgetScope);
         var provider = new StorageProvider(store, content, limits);
         await provider.CheckHealthAsync();
         var service = new CellBridgeDocumentService(provider);
         var bytes = MinimalDocx.Create("configured");
         var state = (await service.CreateAsync(
             "/configured-ef.docx", bytes, TestActor.Value))!;
-        Assert.Equal(bytes, await content.ReadVerifiedAsync(state.Content));
-        Assert.Equal(DocumentStateJson.Serialize(state),
-            DocumentStateJson.Serialize((await store.FindByResourceIdAsync(state.ResourceId))!));
+        Assert.Equal(bytes, await StorageTestDocuments.PackageAsync(provider, state.Package));
+        Assert.Equal(JsonSerializer.Serialize(state),
+            JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId))));
 
         var savedBytes = MinimalDocx.Create("configured save");
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            RevisionHistoryTests.Request(state, savedBytes), new Dictionary<string, string>(), TestActor.Value);
+            await StorageTestDocuments.SaveRequestAsync(service, state, savedBytes), new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(result.Response.SubResponses).Status);
         Assert.True(result.State.StateVersion > state.StateVersion);
-        var persisted = (await store.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(DocumentStateJson.Serialize(result.State), DocumentStateJson.Serialize(persisted));
-        var graph = await DocumentPartition.RestoreFileGraphAsync(persisted, content, limits);
+        var persisted = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(JsonSerializer.Serialize(result.State), JsonSerializer.Serialize(persisted));
+        var graph = await StorageTestDocuments.GraphAsync(service, persisted);
         Assert.Equal(savedBytes, graph.Materialize());
-        await using (var accounting = source.CreateCommand("""
-            SELECT document_count = 1 AND max_documents = 2 AND
-                stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets) =
-                (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)
-                + (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)
-                + (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts)
-            FROM cellbridge_usage
-            """))
-            Assert.Equal(true, await accounting.ExecuteScalarAsync());
 
         Assert.NotEmpty(interceptor.CommandTimeouts);
         Assert.All(interceptor.CommandTimeouts, timeout => Assert.Equal(45, timeout));
@@ -156,21 +149,21 @@ public sealed class EfPostgreSqlMigrationTests
 
         interceptor.FailNext(new OperationCanceledException("Injected cancellation."));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            store.FindByResourceIdAsync(missing).AsTask());
+            ((IDocumentRepository)store).FindAsync(new DocumentIdentity.Resource(missing)).AsTask());
         var context = Assert.Single(interceptor.Contexts.Distinct());
 
         interceptor.Clear();
-        Assert.Null(await store.FindByResourceIdAsync(missing));
+        Assert.Null(await ((IDocumentRepository)store).FindAsync(new DocumentIdentity.Resource(missing)));
         Assert.Same(context, Assert.Single(interceptor.Contexts.Distinct()));
 
         interceptor.Clear();
         interceptor.FailNext(new InvalidOperationException("Injected command failure."));
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            store.FindByResourceIdAsync(missing).AsTask());
+            ((IDocumentRepository)store).FindAsync(new DocumentIdentity.Resource(missing)).AsTask());
         Assert.Same(context, Assert.Single(interceptor.Contexts.Distinct()));
 
         interceptor.Clear();
-        Assert.Null(await store.FindByResourceIdAsync(missing));
+        Assert.Null(await ((IDocumentRepository)store).FindAsync(new DocumentIdentity.Resource(missing)));
         Assert.Same(context, Assert.Single(interceptor.Contexts.Distinct()));
     });
 
@@ -184,13 +177,11 @@ public sealed class EfPostgreSqlMigrationTests
             .UseNpgsql(connection).AddInterceptors(interceptor).Options;
         var store = new PostgreSqlStateStore(options);
         var content = new PostgreSqlContentStore(options);
-        Assert.Same(options, store.BudgetScope);
-        Assert.Same(options, content.BudgetScope);
 
-        Assert.Null(await store.FindByResourceIdAsync(Guid.NewGuid()));
+        Assert.Null(await ((IDocumentRepository)store).FindAsync(new DocumentIdentity.Resource(Guid.NewGuid())));
         var first = Assert.Single(interceptor.Contexts.Distinct());
         interceptor.Clear();
-        Assert.Null(await store.FindByResourceIdAsync(Guid.NewGuid()));
+        Assert.Null(await ((IDocumentRepository)store).FindAsync(new DocumentIdentity.Resource(Guid.NewGuid())));
         var second = Assert.Single(interceptor.Contexts.Distinct());
 
         Assert.NotSame(first, second);
@@ -202,7 +193,7 @@ public sealed class EfPostgreSqlMigrationTests
 
     [PostgreSqlFact]
     public Task PartialStreamDisposalIsIdempotentAndReturnsFailedEnumeratorLease() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        WithInitializedDatabaseAsync(new(), async source =>
         {
             var interceptor = new LeaseTrackingInterceptor();
             var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
@@ -249,7 +240,7 @@ public sealed class EfPostgreSqlMigrationTests
 
     [PostgreSqlFact]
     public Task StreamDisposalWaitsForActiveReadBeforeReturningContextLease() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        WithInitializedDatabaseAsync(new(), async source =>
         {
             var interceptor = new LeaseTrackingInterceptor();
             var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
@@ -314,19 +305,14 @@ public sealed class EfPostgreSqlMigrationTests
             """))
             await recovery.ExecuteNonQueryAsync();
 
-        var memoryState = new InMemoryStateStore();
         var memoryContent = new InMemoryContentStore();
-        var memoryService = new CellBridgeDocumentService(new(memoryState, memoryContent));
-        var original = (await memoryService.CreateAsync("/sql-upgrade.docx", MinimalDocx.Create("original"), TestActor.Value))!;
+        var original = await LegacyStorageFixture.CreateAsync(memoryContent, "/sql-upgrade.docx", MinimalDocx.Create("original"));
         var savedBytes = MinimalDocx.Create("SQL accepted save");
-        var request = RevisionHistoryTests.Request(original, savedBytes);
-        var accepted = await memoryService.ExecuteAsync(original.ResourceId, DocumentPartitionKind.FileContents,
-            request, new Dictionary<string, string>(), TestActor.Value);
-        Assert.False(Assert.Single(accepted.AcceptedSaves).IsReplay);
+        var accepted = await LegacyStorageFixture.SaveAsync(original, memoryContent, savedBytes);
+        var request = accepted.Request;
         var saved = accepted.State;
-        var retired = (await memoryService.CreateAsync("/retired-sql.docx", MinimalDocx.Create("retired"), TestActor.Value))!;
-        await memoryState.TryDeleteAsync(retired.ResourceId, retired.LifecycleGeneration, retired.StateVersion);
-        retired = (await memoryState.FindLifecycleAsync(retired.ResourceId))!;
+        var retired = await LegacyStorageFixture.CreateAsync(memoryContent, "/retired-sql.docx", MinimalDocx.Create("retired"));
+        retired = retired with { IsDeleted = true, DeletedFromStateVersion = retired.StateVersion, StateVersion = retired.StateVersion + 1 };
         DocumentState[] snapshots = [original, saved, retired];
         var recoveryReceipt = new RecoveryReceipt(Guid.NewGuid(), new string('a', 64), 2, snapshots.Length);
 
@@ -405,25 +391,29 @@ public sealed class EfPostgreSqlMigrationTests
         var store = new PostgreSqlStateStore(source);
         await store.InitializeAsync();
         await store.InitializeAsync();
-        Assert.Equal(before, await Rows(source, hasAllowances: true));
+        Assert.Equal(before, await Rows(source));
         await using (var schema = source.CreateCommand("SELECT version FROM cellbridge_schema"))
-            Assert.Equal(7, await schema.ExecuteScalarAsync());
+            Assert.Equal(9, await schema.ExecuteScalarAsync());
         await using (var history = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\""))
-            Assert.Equal(2L, await history.ExecuteScalarAsync());
-        await using (var allowances = source.CreateCommand("SELECT count(*),SUM(available_bytes)::bigint FROM cellbridge_usage_buckets"))
-        await using (var reader = await allowances.ExecuteReaderAsync())
-        {
-            Assert.True(await reader.ReadAsync());
-            Assert.Equal(64L, reader.GetInt64(0));
-            Assert.Equal(0L, reader.GetInt64(1));
-        }
-        Assert.Equal(recoveryReceipt, await store.FindRecoveryReceiptAsync(recoveryReceipt.OperationId));
-        Assert.Equal(DocumentStateJson.Serialize(saved), DocumentStateJson.Serialize((await store.FindByResourceIdAsync(saved.ResourceId))!));
-        Assert.Null(await store.FindByResourceIdAsync(retired.ResourceId));
-        Assert.Equal(DocumentStateJson.Serialize(retired), DocumentStateJson.Serialize((await store.FindLifecycleAsync(retired.ResourceId))!));
-        var snapshotAfter = await store.CaptureRecoveryAsync();
-        Assert.Equal(snapshots.Length, snapshotAfter.Snapshots.Length);
-        Assert.Equal(snapshots.Select(DocumentStateJson.Serialize).Order(), snapshotAfter.Snapshots.Select(DocumentStateJson.Serialize).Order());
+            Assert.Equal(4L, await history.ExecuteScalarAsync());
+        await using (var removed = source.CreateCommand("SELECT to_regclass('cellbridge_usage') IS NULL AND to_regclass('cellbridge_usage_buckets') IS NULL"))
+            Assert.Equal(true, await removed.ExecuteScalarAsync());
+        var repository = (IDocumentRepository)store;
+        Assert.Equal(recoveryReceipt, await repository.FindRecoveryReceiptAsync(recoveryReceipt.OperationId));
+        var migratedHead = (await repository.FindAsync(new DocumentIdentity.Resource(saved.ResourceId)))!;
+        Assert.Equal(saved.StateVersion, migratedHead.StateVersion);
+        Assert.Equal(saved.Content.Sha256, migratedHead.Package.Sha256);
+        Assert.Null(await repository.FindAsync(new DocumentIdentity.Resource(retired.ResourceId)));
+        var retiredHead = (await repository.FindAsync(new DocumentIdentity.Resource(retired.ResourceId, IncludeDeleted: true)))!;
+        Assert.True(retiredHead.IsDeleted);
+        Assert.Equal(retired.StateVersion, retiredHead.StateVersion);
+        var snapshotAfter = await repository.CaptureRecoveryAsync();
+        Assert.Equal(2, snapshotAfter.Snapshots.Length);
+        var migrated = Assert.Single(snapshotAfter.Snapshots, item => item.Current.Head.ResourceId == saved.ResourceId);
+        Assert.Equal(saved.Revisions.Length, migrated.ApplicationRevisions.Length);
+        Assert.Equal(saved.Receipts.Select(receipt => receipt.Response), migrated.Receipts.Select(receipt => receipt.Response));
+        foreach (var document in snapshotAfter.Snapshots)
+            Assert.Equal(NormalizedDocumentRecovery.StoredBytes(document), document.Current.Head.Counters.StoredBytes);
 
         var content = new PostgreSqlContentStore(source);
         foreach (var handle in ContentStoreReader.UniqueHandles(snapshots.SelectMany(StorageReferences.Handles)))
@@ -435,22 +425,25 @@ public sealed class EfPostgreSqlMigrationTests
         Assert.True(Assert.Single(replay.AcceptedSaves).IsReplay);
         Assert.Equal(accepted.Response.ToByteArray(), replay.Response.ToByteArray());
         Assert.Equal(saved.StateVersion, replay.State.StateVersion);
-        Assert.Equal(2, (await service.ListRevisionsAsync(saved.ResourceId, TestActor.Value)).Count);
+        Assert.Equal(2, (await provider.Documents.ReadRevisionsAsync(saved.ResourceId, 0, 10))!.Revisions.Length);
         var graph = await DocumentPartition.RestoreFileGraphAsync(saved, content, provider.Limits);
         Assert.Equal(savedBytes, graph.Materialize());
-        var next = await RevisionHistoryTests.Save(service, saved, "EF save after SQL upgrade");
-        Assert.Equal(saved.ContentVersion + 1, next.ContentVersion);
-        Assert.Equal(3, next.Revisions.Length);
+        foreach (var revision in migrated.ApplicationRevisions)
+            Assert.Equal(await memoryContent.ReadVerifiedAsync(saved.Revisions.Single(old => old.RevisionNumber == revision.RevisionNumber).Content),
+                await StorageTestDocuments.PackageAsync(provider, revision.Package));
+        var next = await service.ExecuteAsync(saved.ResourceId, DocumentPartitionKind.FileContents,
+            await StorageTestDocuments.SaveRequestAsync(service, migratedHead, MinimalDocx.Create("EF save after SQL upgrade")),
+            new Dictionary<string, string>(), TestActor.Value);
+        Assert.False(Assert.Single(next.Response.SubResponses).Status);
+        Assert.Equal(saved.ContentVersion + 1, next.State.ContentVersion);
+        Assert.Equal(3, next.State.Counters.Revisions);
         await using var consumer = source.CreateCommand("SELECT value FROM consumer_business_data WHERE id=1");
         Assert.Equal("keep consumer tables", await consumer.ExecuteScalarAsync());
     });
 
-    private static async Task<string> Rows(NpgsqlDataSource source, bool hasAllowances = false)
+    private static async Task<string> Rows(NpgsqlDataSource source)
     {
         // A deterministic digest covers every pre-existing library data row.
-        var exactBytes = hasAllowances
-            ? "stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint"
-            : "stored_bytes";
         await using var command = source.CreateCommand($$"""
             SELECT jsonb_build_object(
               'documents',(SELECT jsonb_agg(to_jsonb(t) ORDER BY resource_id) FROM cellbridge_documents t),
@@ -459,13 +452,19 @@ public sealed class EfPostgreSqlMigrationTests
               'chunks',(SELECT jsonb_agg(to_jsonb(t) ORDER BY object_key,ordinal) FROM cellbridge_chunks t),
               'heads',(SELECT jsonb_agg(to_jsonb(t) ORDER BY resource_id) FROM cellbridge_read_heads t),
               'summaries',(SELECT jsonb_agg(to_jsonb(t) ORDER BY resource_id,lifecycle_generation,revision_number) FROM cellbridge_revision_summaries t),
-              'receipts',(SELECT jsonb_agg(to_jsonb(t) ORDER BY operation_id) FROM cellbridge_recovery_receipts t),
-              'usage',(SELECT jsonb_agg(jsonb_set(to_jsonb(t),'{stored_bytes}',to_jsonb({{exactBytes}}))) FROM cellbridge_usage t))::text
+              'receipts',(SELECT jsonb_agg(to_jsonb(t) ORDER BY operation_id) FROM cellbridge_recovery_receipts t))::text
             """);
         return (string)(await command.ExecuteScalarAsync())!;
     }
 
-    private static async Task WithEmptyDatabase(Func<NpgsqlDataSource, Task> test)
+    internal static Task WithInitializedDatabaseAsync(StorageLimits limits, Func<NpgsqlDataSource, Task> test) =>
+        WithEmptyDatabase(async source =>
+        {
+            await new PostgreSqlStorageMigrator(source, limits).MigrateAsync();
+            await test(source);
+        });
+
+    internal static async Task WithEmptyDatabase(Func<NpgsqlDataSource, Task> test)
     {
         var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!;
         await using var admin = NpgsqlDataSource.Create(connectionString);

@@ -7,15 +7,20 @@ using Npgsql;
 internal sealed partial class DocumentLoadScenario
 {
     private JsonObject? userDatabaseBefore;
+    private OwnedWebDemoProcessProbe? userProcessProbe;
+    private WebDemoProcessSampler? userProcessSampler;
+    private string? userProcessFailure;
     private readonly object userDatabaseSamplingGate = new();
     private DatabaseActivitySampler? userDatabaseSampler;
 
     private void StartUserDatabaseSampling()
     {
-        if (userDatabaseBefore is null) return;
         lock (userDatabaseSamplingGate)
         {
-            if (userDatabaseSampler is not null) return;
+            if (userProcessSampler is null && userProcessProbe is not null)
+                userProcessSampler = new(userProcessProbe.ResourceProcessId, userProcessProbe.Read,
+                    userMeasurementStart, userMeasurementStart + userMeasurementMilliseconds);
+            if (userDatabaseBefore is null || userDatabaseSampler is not null) return;
             NpgsqlConnection? connection = null;
             userDatabaseSampler = new DatabaseActivitySampler(async token =>
             {
@@ -23,8 +28,13 @@ internal sealed partial class DocumentLoadScenario
                 await using var command = new NpgsqlCommand("""
                     SELECT COALESCE(jsonb_agg(to_jsonb(s)), '[]'::jsonb)::text FROM (
                         SELECT state, wait_event_type, wait_event,
-                            CASE WHEN state='active' AND query ILIKE '%cellbridge_usage%'
-                                THEN 'quota' ELSE 'other' END AS query_class,
+                            CASE
+                                WHEN query ILIKE '%cellbridge_repository_%' THEN 'normalized-document'
+                                WHEN query ILIKE '%cellbridge_objects%' OR query ILIKE '%cellbridge_chunks%' THEN 'physical-content'
+                                WHEN query ILIKE '%cellbridge_recovery_%' THEN 'recovery'
+                                WHEN query ILIKE '%AspNet%' THEN 'identity'
+                                ELSE 'other'
+                            END AS query_class,
                             count(*) AS backends,
                             count(*) FILTER (WHERE cardinality(pg_blocking_pids(pid)) > 0) AS blocked_backends,
                             sum(cardinality(pg_blocking_pids(pid))) AS blocking_pids
@@ -46,12 +56,29 @@ internal sealed partial class DocumentLoadScenario
         DatabaseActivitySampler? sampler;
         lock (userDatabaseSamplingGate) sampler = userDatabaseSampler;
         if (sampler is not null) await sampler.StopAsync();
+        if (userProcessSampler is not null) await userProcessSampler.StopAsync();
+    }
+
+    private void IdentifyUserApplicationProcess(LoadTestEnvironment environment)
+    {
+        try
+        {
+            userProcessProbe = environment.CreateWebDemoProcessProbe();
+            Console.WriteLine($"WebDemo metrics process verified: resource-pid={userProcessProbe.ResourceProcessId}, " +
+                $"application-pid={userProcessProbe.ProcessId}, application-start-utc={userProcessProbe.StartUtc:O}.");
+        }
+        catch (Exception exception)
+        {
+            userProcessFailure = exception.GetType().Name;
+            Console.WriteLine($"WebDemo process metrics unavailable: {userProcessFailure}. No unrelated process will be sampled.");
+        }
     }
 
     private async Task ResetUserDatabaseStatisticsAsync()
     {
         var environment = await resources.EnvironmentAsync();
-        if (!settings.UserModel || environment.Backend != "postgresql" || !environment.QueryStatisticsEnabled) return;
+        if (!settings.UserModel) return;
+        if (environment.Backend != "postgresql" || !environment.QueryStatisticsEnabled) return;
         await using var connection = await OpenStatisticsConnectionAsync(environment, resources.CancellationToken);
         // Only statement statistics for the owned load database are reset. Cluster I/O
         // and WAL counters retain their baseline so setup work can be subtracted.
@@ -65,7 +92,19 @@ internal sealed partial class DocumentLoadScenario
     private async Task CaptureUserDatabaseStatisticsAsync()
     {
         await StopUserDatabaseSamplingAsync();
-        if (userDatabaseBefore is null) return;
+        if (userDatabaseBefore is null)
+        {
+            var processDirectory = Path.Combine(CellBridgeLoadTests.RepositoryRoot(), "artifacts", "load-tests");
+            Directory.CreateDirectory(processDirectory);
+            var processPath = Path.Combine(processDirectory, $"office-users-{settings.Clients}-{Guid.NewGuid():N}.process.json");
+            await File.WriteAllTextAsync(processPath, new JsonObject
+            {
+                ["workload"] = UserMeasurementReport(),
+                ["webDemoProcessMetrics"] = ProcessReport(),
+            }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"WebDemo process statistics: report={processPath}");
+            return;
+        }
         var environment = await resources.EnvironmentAsync();
         // Preserve requested diagnostics even when a load failure cancelled its requests.
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -101,6 +140,7 @@ internal sealed partial class DocumentLoadScenario
         {
             ["scope"] = "Warm-up plus measurement and completion drain, before final validation. PostgreSQL cumulative counters may lag activity.",
             ["ioScope"] = "pg_stat_io and pg_stat_wal cover the disposable cluster, including authentication, health checks and background activity. Database counters and statements cover cellbridge.",
+            ["inventoryScope"] = "Document charges include metadata and references per document; shared physical objects are counted once separately. Table bytes include indexes and allocated free space. Neither is a provider quota.",
             ["queryText"] = "pg_stat_statements normalized SQL, with remaining literals/comments removed and text limited to 1024 characters.",
             ["timing"] = "Statement execution and I/O times are milliseconds. Query collection is enabled throughout load; report queries run outside HTTP timing.",
             ["users"] = settings.Clients,
@@ -109,6 +149,10 @@ internal sealed partial class DocumentLoadScenario
             ["protocolConcurrencyPerSubject"] = environment.ProtocolConcurrencyPerSubject,
             ["configuredWebDemoPostgreSqlMaximumPoolSizePerPool"] = environment.PostgreSqlPoolSize,
             ["poolScope"] = "When configured, the limit applies separately to WebDemo document and Identity pools. Activity samples are server connections, not a client pool high-water mark.",
+            ["configuredWebDemoPostgreSqlMaxAutoPreparePerConnection"] = environment.PostgreSqlMaxAutoPrepare,
+            ["effectiveWebDemoPostgreSqlMaxAutoPreparePerConnection"] = environment.PostgreSqlMaxAutoPrepare ?? new NpgsqlConnectionStringBuilder().MaxAutoPrepare,
+            ["webDemoPostgreSqlAutoPrepareMinUsages"] = new NpgsqlConnectionStringBuilder().AutoPrepareMinUsages,
+            ["autoPrepareScope"] = "Benchmark-only WebDemo connection-string override. The cap is per physical connection in each document/Identity pool; runner and diagnostic connections retain their existing settings. The driver default minimum usages is unchanged.",
             ["before"] = userDatabaseBefore.DeepClone(),
             ["after"] = after,
             ["ioDelta"] = ioDeltas,
@@ -116,11 +160,8 @@ internal sealed partial class DocumentLoadScenario
             ["databaseDelta"] = databaseDelta,
             ["topStatementsByTotalExecutionTime"] = statements,
             ["activitySampling"] = userDatabaseSampler?.Report(),
-            ["webDemoProcessMetrics"] = new JsonObject
-            {
-                ["status"] = "notCollected",
-                ["reason"] = "The load fixture exposes no owned WebDemo process ID or runtime metrics API. RSS, CPU and GC cannot be attributed safely; benchmark-runner metrics would describe a different process.",
-            },
+            ["webDemoProcessMetrics"] = ProcessReport(),
+            ["workload"] = UserMeasurementReport(),
         };
         var directory = Path.Combine(CellBridgeLoadTests.RepositoryRoot(), "artifacts", "load-tests");
         Directory.CreateDirectory(directory);
@@ -138,6 +179,31 @@ internal sealed partial class DocumentLoadScenario
         }
         userDatabaseBefore = null;
     }
+
+    private JsonObject UserMeasurementReport() => new()
+    {
+        ["authenticatedUsers"] = settings.Clients,
+        ["startedUsers"] = userSessions.Count(user => user.Started),
+        ["documentsPerUser"] = settings.DocumentsPerClient,
+        ["documents"] = httpDocuments.Count,
+        ["measurementMilliseconds"] = userMeasurementMilliseconds,
+        ["saveStartsInWindow"] = userMeasuredSaveStarts,
+        ["acknowledgedCommitsInWindow"] = userMeasuredCommits,
+        ["lateAcknowledgementsExcluded"] = userMeasuredLateAcknowledgements,
+        ["acknowledgedCommitsPerMinute"] = userMeasurementMilliseconds > 0 ? userMeasuredCommits * 60_000d / userMeasurementMilliseconds : null,
+        ["offeredSavesPerMinute"] = settings.Clients * 60_000d / settings.SaveIntervalMs,
+        ["missedCadenceSlotsIncludingWarmup"] = userMissedCadences,
+        ["maximumActionStartLatenessMillisecondsIncludingWarmup"] = userMaximumLateStartMilliseconds,
+        ["contentVerification"] = "Capture precedes final package and receipt verification; successful completion also requires that verification.",
+    };
+
+    private JsonObject ProcessReport() => userProcessSampler?.Report() ?? new JsonObject
+    {
+        ["status"] = "notCollected",
+        ["failureType"] = userProcessFailure,
+        ["reason"] = "Could not verify an owned WebDemo application process from the Aspire resource snapshot.",
+        ["gc"] = "notCollected",
+    };
 
     private static async Task<NpgsqlConnection> OpenStatisticsConnectionAsync(LoadTestEnvironment environment,
         CancellationToken cancellationToken)
@@ -176,47 +242,19 @@ internal sealed partial class DocumentLoadScenario
                     GROUP BY datname,state,wait_event_type ORDER BY datname,state,wait_event_type
                 ) a),
                 'tableEstimates', (SELECT jsonb_agg(to_jsonb(t)) FROM (
-                    SELECT relname, n_live_tup, n_dead_tup, seq_scan, idx_scan, n_tup_ins, n_tup_upd
+                    SELECT relname, n_live_tup, n_dead_tup, seq_scan, idx_scan, n_tup_ins, n_tup_upd,
+                        pg_total_relation_size(relid) AS relation_bytes
                     FROM pg_stat_user_tables ORDER BY relname
                 ) t),
-                'usageLedger', (SELECT jsonb_build_object('documentCount',document_count,'storedBytes',stored_bytes,
-                    'maxDocuments',max_documents,'maxStoredBytes',max_stored_bytes) FROM cellbridge_usage WHERE singleton=true),
-                'usageAllowancesPresent', to_regclass('cellbridge_usage_buckets') IS NOT NULL
+                'inventory', jsonb_build_object(
+                    'documentCount', (SELECT count(*) FROM cellbridge_repository_heads WHERE NOT "IsDeleted"),
+                    'documentChargedBytes', (SELECT COALESCE(SUM(("Json"::jsonb->'Counters'->>'StoredBytes')::bigint),0)
+                        FROM cellbridge_repository_heads),
+                    'physicalObjectBytes', (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects),
+                    'normalizedTableBytes', (SELECT COALESCE(SUM(pg_total_relation_size(relid)),0)
+                        FROM pg_stat_user_tables WHERE starts_with(relname,'cellbridge_repository_')))
             )::text
             """, cancellationToken)).AsObject();
-        if (counters["usageAllowancesPresent"]!.GetValue<bool>())
-        {
-            // One statement gives a coherent charged-minus-unused inventory,
-            // including concurrent bucket debits and global refills.
-            counters["usageLedger"] = await ReadStatisticsJsonAsync(connection, """
-                SELECT jsonb_build_object('documentCount',document_count,'chargedBytes',stored_bytes,
-                    'unusedAllowanceBytes',r.available,'storedBytes',stored_bytes-r.available,
-                    'inventoryBytes',
-                        (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
-                        (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
-                        (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts),
-                    'maxDocuments',max_documents,'maxStoredBytes',max_stored_bytes)
-                FROM cellbridge_usage CROSS JOIN
-                    (SELECT COALESCE(SUM(available_bytes),0) AS available FROM cellbridge_usage_buckets) r
-                WHERE singleton=true
-                """, cancellationToken);
-        }
-        else
-        {
-            // Use the same inventory validation for the pre-allowance control.
-            counters["usageLedger"] = await ReadStatisticsJsonAsync(connection, """
-                SELECT jsonb_build_object('documentCount',document_count,'storedBytes',stored_bytes,
-                    'inventoryBytes',
-                        (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
-                        (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
-                        (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts),
-                    'maxDocuments',max_documents,'maxStoredBytes',max_stored_bytes)
-                FROM cellbridge_usage WHERE singleton=true
-                """, cancellationToken);
-        }
-        var ledger = counters["usageLedger"]!;
-        if (ledger["storedBytes"]!.GetValue<long>() != ledger["inventoryBytes"]!.GetValue<long>())
-            throw new InvalidDataException("Storage accounting disagrees with the persisted inventory.");
         return counters;
     }
 

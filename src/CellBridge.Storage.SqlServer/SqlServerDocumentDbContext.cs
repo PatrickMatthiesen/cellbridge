@@ -11,10 +11,6 @@ public sealed partial class SqlServerDocumentDbContext(DbContextOptions<SqlServe
     public const string MigrationsHistoryTable = "__CellBridgeDocumentMigrationsHistory";
     internal DbSet<ObjectRow> Objects => Set<ObjectRow>();
     internal DbSet<ChunkRow> Chunks => Set<ChunkRow>();
-    internal DbSet<UsageRow> Usage => Set<UsageRow>();
-    internal DbSet<UsageAllowanceRow> UsageBuckets => Set<UsageAllowanceRow>();
-    internal IDbContextTransaction? UsageAllowancePoolTransaction { get; set; }
-    internal IReadOnlyList<UsageAllowanceRow>? LockedUsageAllowances { get; set; }
     internal DbSet<DocumentRow> Documents => Set<DocumentRow>();
     internal DbSet<StateRow> Snapshots => Set<StateRow>();
     internal DbSet<ReadHeadRow> Metadata => Set<ReadHeadRow>();
@@ -24,8 +20,11 @@ public sealed partial class SqlServerDocumentDbContext(DbContextOptions<SqlServe
     internal DbSet<DocumentSchema> SchemaVersions => Set<DocumentSchema>();
     internal static long ByteLength(string value) => throw new NotSupportedException("Database translation only.");
 
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    protected override void OnModelCreating(ModelBuilder modelBuilder) => ConfigureModel(modelBuilder);
+
+    internal static void ConfigureModel(ModelBuilder modelBuilder)
     {
+        RepositoryModel.Configure(modelBuilder, false);
         modelBuilder.HasDefaultSchema(Schema);
         modelBuilder.Entity<ObjectRow>(entity =>
         {
@@ -46,33 +45,8 @@ public sealed partial class SqlServerDocumentDbContext(DbContextOptions<SqlServe
             entity.Property(row => row.Bytes).HasColumnType("varbinary(max)");
             entity.HasOne<ObjectRow>().WithMany().HasForeignKey(row => row.ObjectKey).OnDelete(DeleteBehavior.NoAction).HasConstraintName("FK_chunks_objects_Key");
         });
-        modelBuilder.Entity<UsageRow>(entity =>
-        {
-            entity.ToTable("usage", table =>
-            {
-                table.HasCheckConstraint("usage_singleton", "[Id] = 1");
-                table.HasCheckConstraint("usage_bytes", "[StoredBytes] >= 0 AND [MaxStoredBytes] > 0");
-            });
-            entity.Property(row => row.ChargedBytes).HasColumnName("StoredBytes");
-            entity.HasKey(row => row.Singleton);
-            entity.Property(row => row.Singleton).HasColumnName("Id").HasConversion(value => value ? 1 : 0, value => value == 1).ValueGeneratedNever();
-            entity.Property(row => row.DocumentCount).HasDefaultValue(0L);
-            entity.Property(row => row.MaxDocuments).HasDefaultValue(10000L);
-            entity.ToTable(table => table.HasCheckConstraint("usage_documents", "[DocumentCount] >= 0 AND [MaxDocuments] > 0"));
-            entity.HasData(new UsageRow { Singleton = true, MaxStoredBytes = 10L * 1024 * 1024 * 1024, MaxDocuments = 10000 });
-        });
-        modelBuilder.Entity<UsageAllowanceRow>(entity =>
-        {
-            entity.ToTable("usage_buckets", table =>
-            {
-                table.HasCheckConstraint("usage_buckets_id", "[BucketId] BETWEEN 0 AND 63");
-                table.HasCheckConstraint("usage_buckets_available", "[AvailableBytes] >= 0");
-            });
-            entity.HasKey(row => row.BucketId);
-            entity.Property(row => row.BucketId).ValueGeneratedNever();
-            entity.HasData(Enumerable.Range(0, UsageAllowances.BucketCount)
-                .Select(bucket => new UsageAllowanceRow { BucketId = bucket, AvailableBytes = 0 }));
-        });
+
+
         modelBuilder.HasDbFunction(() => DocumentSql.ByteLength(default!))
             .HasName("DATALENGTH").IsBuiltIn();
         modelBuilder.HasDbFunction(() => DocumentSql.ClockUtc())
@@ -131,7 +105,7 @@ public sealed partial class SqlServerDocumentDbContext(DbContextOptions<SqlServe
             entity.ToTable("schema_version", table => table.HasCheckConstraint("schema_singleton", "[Id] = 1"));
             entity.HasKey(row => row.Id);
             entity.Property(row => row.Id).ValueGeneratedNever();
-            entity.HasData(new DocumentSchema { Id = 1, Version = 2 });
+            entity.HasData(new DocumentSchema { Id = 1, Version = 4 });
         });
     }
 }

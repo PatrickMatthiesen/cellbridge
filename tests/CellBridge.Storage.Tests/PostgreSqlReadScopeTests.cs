@@ -1,7 +1,6 @@
 using System.Data;
 using System.Data.Common;
 using CellBridge.AspNetCore;
-using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;
@@ -14,132 +13,121 @@ namespace CellBridge.Storage.Tests;
 public sealed class PostgreSqlReadScopeTests
 {
     [PostgreSqlFact]
-    public Task OrdinaryReadsIssueOneStatementWithoutTransactionOrConfigurationCommands() =>
+    public Task ResourceLookupReadsOneCoherentHeadWithoutAnExplicitTransaction() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var state = (await new CellBridgeDocumentService(new(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source)))
-                .CreateAsync("/read-scope.docx", MinimalDocx.Create(), TestActor.Value))!;
-            var commands = new ReadCommands();
-            var transactions = new ReadTransactions();
-            var store = new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>()
-                .UseNpgsql(source).AddInterceptors(commands, transactions).Options);
+            var content = new PostgreSqlContentStore(source);
+            await CellBridge.Tests.ImmutableIndexedReadScenario.RunHeadReadAsync(new(new PostgreSqlStateStore(source), content), interceptors =>
+                new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source, pg => pg.CommandTimeout(42))
+                    .AddInterceptors(interceptors).Options));
+        });
+
+    [PostgreSqlFact]
+    public Task ExactImmutablePointReadsUseNoExplicitTransactionAndPreserveScopeTimeoutAndCancellation() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var content = new PostgreSqlContentStore(source);
+            await CellBridge.Tests.ImmutableIndexedReadScenario.RunAsync(new(new PostgreSqlStateStore(source), content), interceptors =>
+                new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source, pg => pg.CommandTimeout(42))
+                    .AddInterceptors(interceptors).Options));
+        });
+
+    [PostgreSqlFact]
+    public Task SingleHeadAndImmutableReadsLeaveAnExplicitConnectionInItsOriginalOpenOrClosedState() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            IDocumentRepository normal = new PostgreSqlStateStore(source); var content = new PostgreSqlContentStore(source);
+            var head = (await new CellBridgeDocumentService(new(normal, content)).CreateAsync("/connection.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var element = (await normal.ReadPartitionAsync(head.ResourceId, new(0) { IncludeCatalog = true }))!.Elements[0];
+            await using var connection = source.CreateConnection();
+            IDocumentRepository store = new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(connection).Options);
+            var scope = new IndexedGraphScope(head.ResourceId, head.LifecycleGeneration, 0);
+            Assert.Equal(ConnectionState.Closed, connection.State);
+            Assert.Single(await store.ReadElementsAsync(scope, [element.Id]));
+            Assert.NotNull(await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId)));
+            Assert.Equal(ConnectionState.Closed, connection.State);
+            await connection.OpenAsync();
+            Assert.Single(await store.ReadElementsAsync(scope, [element.Id]));
+            Assert.NotNull(await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId)));
+            Assert.Equal(ConnectionState.Open, connection.State);
+            await using var command = connection.CreateCommand(); command.CommandText = "SELECT 1";
+            Assert.Equal(1, await command.ExecuteScalarAsync());
+        });
+
+    [PostgreSqlFact]
+    public Task TypedReadsUseCoherentRepeatableReadTransactionsWithoutLegacyAggregates() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            var content = new PostgreSqlContentStore(source);
+            var head = (await new CellBridgeDocumentService(new(new PostgreSqlStateStore(source), content)).CreateAsync("/read-scope.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var commands = new ReadCommands(); var transactions = new ReadTransactions();
+            IDocumentRepository store = new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source).AddInterceptors(commands, transactions).Options);
             Func<Task>[] reads =
             [
-                async () => Assert.NotNull(await store.FindByResourceIdAsync(state.ResourceId)),
-                async () => Assert.NotNull(await store.FindByPathKeyAsync(state.PathKey)),
-                async () => Assert.NotNull(await store.FindLifecycleAsync(state.ResourceId)),
-                async () => Assert.NotNull(await store.ReadPreparationAsync(state.ResourceId)),
-                async () => Assert.NotNull(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)),
-                async () => Assert.NotNull(await store.FindReadMetadataByPathKeyAsync(state.PathKey)),
-                async () => Assert.NotNull(await store.ReadRevisionSummaryAsync(state.ResourceId, 1)),
-                async () => Assert.NotNull(await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 1)),
+                async () => Assert.NotNull(await store.FindAsync(new DocumentIdentity.Path(head.PathKey))),
+                async () => Assert.NotNull(await store.ReadControlAsync(head.ResourceId)),
+                async () => Assert.NotNull(await store.ReadPartitionAsync(head.ResourceId, new(0) { IncludeBindings = true })),
+                async () => Assert.NotNull(await store.PrepareSaveAsync(head.ResourceId, new(0, new(1, SaveOperationFamily.Protocol, 0, "read"), []))),
+                async () => Assert.NotNull(await store.ReadRevisionAsync(head.ResourceId, 1)),
+                async () => Assert.NotNull(await store.ReadRevisionsAsync(head.ResourceId, 0, 1)),
                 async () => Assert.Single(await store.ListAsync(0, 1)),
                 async () => Assert.Null(await store.FindRecoveryReceiptAsync(Guid.NewGuid())),
             ];
             foreach (var read in reads)
             {
-                commands.Sql.Clear();
-                await read();
-                Assert.Single(commands.Sql);
-                Assert.DoesNotMatch(@"(?i)\bSET\s", commands.Sql[0]);
+                commands.Sql.Clear(); transactions.Started.Clear(); transactions.Committed = 0; await read();
+                Assert.Equal(IsolationLevel.RepeatableRead, Assert.Single(transactions.Started)); Assert.Equal(1, transactions.Committed);
+                Assert.DoesNotContain(commands.Sql, sql => sql.Contains("cellbridge_states", StringComparison.Ordinal) || sql.Contains("cellbridge_read_heads", StringComparison.Ordinal));
             }
-            Assert.Empty(transactions.Started);
-            Assert.Equal(0, transactions.Committed);
         });
-
     [PostgreSqlFact]
-    public Task HealthKeepsOneSnapshotAcrossConfigurationAndNamespaceInventory() =>
+    public Task ControlReadKeepsOneSnapshotWhenAnotherTransactionChangesAuthority() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var normal = new PostgreSqlStateStore(source);
-            var state = (await new CellBridgeDocumentService(new(normal, new PostgreSqlContentStore(source)))
-                .CreateAsync("/health-snapshot.docx", MinimalDocx.Create(), TestActor.Value))!;
-            var injection = new AfterFirstRead(async () =>
-            {
-                await using var corrupt = source.CreateCommand("UPDATE cellbridge_documents SET path_key='/WRONG.DOCX' WHERE resource_id=$1");
-                corrupt.Parameters.AddWithValue(state.ResourceId);
-                await corrupt.ExecuteNonQueryAsync();
-            });
-            var transactions = new ReadTransactions();
-            var guarded = new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>()
-                .UseNpgsql(source).AddInterceptors(injection, transactions).Options);
-            try
-            {
-                await guarded.CheckHealthAsync();
-                Assert.True(injection.Injected);
-                Assert.Equal(IsolationLevel.RepeatableRead, Assert.Single(transactions.Started));
-                Assert.Equal(1, transactions.Committed);
-                await Assert.ThrowsAsync<StorageCorruptionException>(() => normal.CheckHealthAsync().AsTask());
-            }
-            finally
-            {
-                await using var repair = source.CreateCommand("UPDATE cellbridge_documents SET path_key=$2 WHERE resource_id=$1");
-                repair.Parameters.AddWithValue(state.ResourceId);
-                repair.Parameters.AddWithValue(state.PathKey);
-                await repair.ExecuteNonQueryAsync();
-            }
+            IDocumentRepository normal = new PostgreSqlStateStore(source);
+            var head = (await new CellBridgeDocumentService(new(normal, new PostgreSqlContentStore(source))).CreateAsync("/coherent-control.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var injection = new AfterHeadRead(async () => Assert.True((await normal.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(head.ResourceId,
+                StorageTestDocuments.Admission(head), head.Security with { Grants = head.Security.Grants.Add("other", DocumentAccess.Read) }, head.AuthorityGeneration))).Changed));
+            IDocumentRepository guarded = new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source).AddInterceptors(injection).Options);
+            var snapshot = (await guarded.ReadControlAsync(head.ResourceId))!;
+            Assert.True(injection.Injected); Assert.Equal(head.StateVersion, snapshot.Head.StateVersion); Assert.Equal(head.AuthorityGeneration, snapshot.Head.AuthorityGeneration);
+            Assert.False(snapshot.Head.Security.Grants.ContainsKey("other"));
+            Assert.True((await normal.ReadControlAsync(head.ResourceId))!.Head.Security.Grants.ContainsKey("other"));
         });
-
-    [Theory]
-    [InlineData("GraphMetadata")]
-    [InlineData("Revisions")]
-    public Task NamespaceChecksDoNotDecodeUnrelatedCurrentOrHistoricalGraphs(string property) =>
+    [PostgreSqlFact]
+    public Task HeadAndCatalogLookupsDoNotDecodeUnrelatedImmutablePayloadMetadata() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var store = new PostgreSqlStateStore(source);
-            var content = new PostgreSqlContentStore(source);
-            var state = (await new CellBridgeDocumentService(new(store, content))
-                .CreateAsync("/namespace-graphs.docx", MinimalDocx.Create(), TestActor.Value))!;
-            await using (var corrupt = source.CreateCommand("UPDATE cellbridge_states SET state_json=jsonb_set(state_json::jsonb,ARRAY[$2],'{\"malformed\":true}'::jsonb)::text WHERE resource_id=$1"))
-            {
-                corrupt.Parameters.AddWithValue(state.ResourceId);
-                corrupt.Parameters.AddWithValue(property);
-                await corrupt.ExecuteNonQueryAsync();
-            }
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.FindByResourceIdAsync(state.ResourceId).AsTask());
-            await store.CheckHealthAsync();
-            Assert.Null(await store.FindByPathKeyAsync("/MISSING.DOCX"));
-            var candidate = await new DocumentStore().Put("/admitted.docx", MinimalDocx.Create()).CaptureAsync(content);
-            Assert.True(await store.TryCreateAsync(candidate));
-            await using var wrongPointer = source.CreateCommand("UPDATE cellbridge_documents SET path_key='/WRONG.DOCX' WHERE resource_id=$1");
-            wrongPointer.Parameters.AddWithValue(state.ResourceId);
-            await wrongPointer.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.CheckHealthAsync().AsTask());
+            IDocumentRepository store = new PostgreSqlStateStore(source); var content = new PostgreSqlContentStore(source);
+            var head = (await new CellBridgeDocumentService(new(store, content)).CreateAsync("/unrelated-graph.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var element = (await store.ReadPartitionAsync(head.ResourceId, new(0) { IncludeCatalog = true }))!.Elements[0];
+            await using (var corrupt = source.CreateCommand("UPDATE cellbridge_repository_elements SET \"Json\"='not JSON' WHERE \"ResourceId\"=$1 AND \"Partition\"=0"))
+            { corrupt.Parameters.AddWithValue(head.ResourceId); await corrupt.ExecuteNonQueryAsync(); }
+            Assert.NotNull(await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId)));
+            Assert.Single(await store.ListAsync(0, 10)); Assert.NotNull(await store.ReadControlAsync(head.ResourceId));
+            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadElementsAsync(new(head.ResourceId, head.LifecycleGeneration, 0), [element.Id]).AsTask());
         });
-
     private sealed class ReadCommands : DbCommandInterceptor
     {
         public List<string> Sql { get; } = [];
-        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
-            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
-        { Sql.Add(command.CommandText); return ValueTask.FromResult(result); }
-        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command,
-            CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
-        { Sql.Add(command.CommandText); return ValueTask.FromResult(result); }
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData data,
+            InterceptionResult<DbDataReader> result, CancellationToken ct = default) { Sql.Add(command.CommandText); return ValueTask.FromResult(result); }
     }
-
     private sealed class ReadTransactions : DbTransactionInterceptor
     {
-        public List<IsolationLevel> Started { get; } = [];
-        public int Committed { get; private set; }
-        public override ValueTask<DbTransaction> TransactionStartedAsync(DbConnection connection, TransactionEndEventData eventData,
-            DbTransaction result, CancellationToken cancellationToken = default)
+        public List<IsolationLevel> Started { get; } = []; public int Committed;
+        public override ValueTask<DbTransaction> TransactionStartedAsync(DbConnection connection, TransactionEndEventData data, DbTransaction result, CancellationToken ct = default)
         { Started.Add(result.IsolationLevel); return ValueTask.FromResult(result); }
-        public override Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData,
-            CancellationToken cancellationToken = default)
+        public override Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData data, CancellationToken ct = default)
         { Committed++; return Task.CompletedTask; }
     }
-
-    private sealed class AfterFirstRead(Func<Task> action) : DbCommandInterceptor
+    private sealed class AfterHeadRead(Func<Task> action) : DbCommandInterceptor
     {
-        public bool Injected { get; private set; }
-        public override async ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData,
-            DbDataReader result, CancellationToken cancellationToken = default)
+        public bool Injected;
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData data, DbDataReader result, CancellationToken ct = default)
         {
-            // The first read establishes the transaction's snapshot. Change the
-            // namespace from another connection before the remaining reads.
-            if (!Injected)
-            { Injected = true; await action(); }
+            if (!Injected && command.CommandText.Contains("cellbridge_repository_heads", StringComparison.Ordinal))
+            { Injected = true; try { await action(); } catch { await result.DisposeAsync(); throw; } }
             return result;
         }
     }

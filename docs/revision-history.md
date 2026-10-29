@@ -65,25 +65,24 @@ retry guarantees. No automatic retry of an uncertain SOAP restore should be infe
 ## Outer document operations
 
 `FileOperation/Rename` requires a filename without a relative path and write access.
-It preserves the resource GUID, content, graph and history. Providers opt into
-`IAtomicDocumentRenameStore`; the in-memory and PostgreSQL providers coordinate
-state and destination-path uniqueness atomically, including case-only rename.
-Other providers return `NotSupported`. Existing protocol locks remain authoritative.
-Paths use the same decoded storage convention as creation; public URLs escape each
-segment once.
+It preserves the resource GUID, content, graph and history. Every document provider
+implements the typed `IDocumentRepository.ChangePathAsync` operation. The affected
+document lock and a unique destination path claim make the move atomic, including
+case-only rename. Existing protocol locks remain authoritative. Paths use the same
+decoded storage convention as creation; public URLs escape each segment once.
+
 Released canonical path keys remain permanently reserved to that resource, including
 after deletion. Old-path lookup remains a miss; the same resource may rename back.
-Other resources cannot create or rename into a reserved name. Providers own these
-reservations and reject callbacks that remove them. The default cap is 128 keys per
-resource; admission fails without evicting names when the cap would be exceeded.
-PostgreSQL serializes namespace changes with one transaction advisory lock acquired
-before document/path locks. Its initial reservation lookup scans current state JSON,
-including tombstones, within document-count and metadata-byte budgets. Large catalogs
-can make this scan expensive. Lifecycle recreation uses the same namespace guard
-and preserves the old tombstone's reservations. A replacement accepts empty history
-or one coherent current snapshot for its new resource identity, with no copied
-restore receipts. Recreated resources require explicit matching `UseResourceID`
-for SOAP mutations. A case-only rename keeps the existing canonical path ownership.
+Other resources cannot create or rename into a reserved name. Reactivating an owned
+path does not allocate another reservation or consume another retired-path slot.
+The default cap is 128 retired keys per resource. Admission fails without evicting
+names when the cap would be exceeded.
+
+Ordinary rename and lifecycle operations do not scan retained snapshots or take a
+provider-wide namespace lock. Recreation uses the retired document row and its
+specific path claim. It preserves the tombstone and creates a new resource identity
+with the next lifecycle generation, one initial revision and no copied receipts.
+Recreated resources require explicit matching `UseResourceID` for SOAP mutations.
 
 `Properties/PropertyEnumerate` lists the derived document property IDs.
 `Properties/PropertyGet` accepts `PropertyIds/PropertyId` elements with lowercase

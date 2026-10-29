@@ -80,7 +80,7 @@ public sealed class ContentBatchReaderTests
     }
 
     [Fact]
-    public async Task DocumentAndFileGraphRestoreUseBatchReads()
+    public async Task ExplicitLegacyDocumentAndFileGraphRestoreUseBatchReads()
     {
         var bytes = MinimalDocx.Create();
         var content = new InMemoryContentStore();

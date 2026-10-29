@@ -2,7 +2,6 @@ using System.Collections.Immutable;
 using System.Data.Common;
 using System.Text.Json;
 using CellBridge.AspNetCore;
-using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
@@ -17,152 +16,81 @@ namespace CellBridge.Storage.Tests;
 public sealed class RecoveryBulkProjectionTests
 {
     [PostgreSqlFact]
-    public Task ImportBuildsOnlyCurrentProjectionsWithoutReadingEachDocumentsEmptyIndexes() =>
+    public Task ImportPublishesNormalizedHeadsAndHistoryWithoutLegacyAggregateRows() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
             var content = new PostgreSqlContentStore(source);
             var snapshot = await PrepareAsync(content, 16);
-            var before = await UsageAsync(source);
             var commands = new ProjectionCommands();
-            var detections = 0;
-            var store = new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>()
-                .UseNpgsql(source).AddInterceptors(commands)
-                .LogTo(_ => detections++, [CoreEventId.DetectChangesStarting]).Options);
+            IDocumentRepository store = new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>()
+                .UseNpgsql(source).AddInterceptors(commands).Options, validationContent: content);
             var receipt = Receipt(snapshot);
-
             Assert.Equal(receipt, await store.ImportRecoveryAsync(snapshot, receipt));
-            Assert.Equal(1, detections);
-            var after = await UsageAsync(source);
-            Assert.Equal(before.Documents + snapshot.Heads.Length, after.Documents);
-            Assert.Equal(before.Bytes + snapshot.Snapshots.Sum(DocumentStateJson.GetSerializedSize) +
-                JsonSerializer.SerializeToUtf8Bytes(receipt).LongLength, after.Bytes);
-
-            // The two namespace-wide emptiness probes are required. Import must not
-            // add a head or history SELECT for every document it publishes.
-            foreach (var table in new[] { "cellbridge_read_heads", "cellbridge_revision_summaries" })
-            {
-                var query = Assert.Single(commands.Selects, sql => sql.Contains(table, StringComparison.Ordinal));
-                Assert.Contains("EXISTS", query, StringComparison.OrdinalIgnoreCase);
-                Assert.DoesNotContain("WHERE", query, StringComparison.OrdinalIgnoreCase);
-            }
+            Assert.DoesNotContain(commands.Selects, sql => sql.Contains("cellbridge_states", StringComparison.Ordinal) ||
+                sql.Contains("cellbridge_read_heads", StringComparison.Ordinal) || sql.Contains("cellbridge_revision_summaries", StringComparison.Ordinal));
             Assert.Equal(receipt, await store.FindRecoveryReceiptAsync(receipt.OperationId));
-            var expectedHeads = snapshot.Heads.ToDictionary(head => head.ResourceId, head => head.StateVersion);
             var restored = await store.CaptureRecoveryAsync();
-            Assert.Equal(snapshot.Snapshots.Length, restored.Snapshots.Length);
-            Assert.Equal(expectedHeads.OrderBy(pair => pair.Key),
-                restored.Heads.ToDictionary(head => head.ResourceId, head => head.StateVersion).OrderBy(pair => pair.Key));
-
-            foreach (var current in snapshot.Snapshots.Where(state => state.StateVersion == expectedHeads[state.ResourceId]))
+            Assert.Equal(PortabilityTests.CanonicalSnapshots(snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(restored.Snapshots));
+            await using (var rows = source.CreateCommand("SELECT (SELECT count(*) FROM cellbridge_states) + (SELECT count(*) FROM cellbridge_read_heads) + (SELECT count(*) FROM cellbridge_revision_summaries)"))
+                Assert.Equal(0L, await rows.ExecuteScalarAsync());
+            var provider = new StorageProvider(store, content);
+            foreach (var current in snapshot.Snapshots)
             {
-                var metadata = (await store.FindReadMetadataByResourceIdAsync(current.ResourceId))!;
-                Assert.Equal(JsonSerializer.Serialize(DocumentReadModels.Metadata(current)), JsonSerializer.Serialize(metadata));
-                Assert.Equal(metadata.ResourceId, (await store.FindReadMetadataByPathKeyAsync(current.PathKey))!.ResourceId);
-                var page = (await store.ReadRevisionSummariesAsync(current.ResourceId, 0, 10))!;
-                Assert.Equal(JsonSerializer.Serialize(DocumentReadModels.Revisions(current).Reverse()),
-                    JsonSerializer.Serialize(page.Revisions));
+                var head = current.Current.Head;
+                Assert.Equal(JsonSerializer.Serialize(head), JsonSerializer.Serialize(await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId))));
+                Assert.Equal(head.ResourceId, (await store.FindAsync(new DocumentIdentity.Path(head.PathKey)))!.ResourceId);
+                var page = (await store.ReadRevisionsAsync(head.ResourceId, 0, 10))!;
+                Assert.Equal(JsonSerializer.Serialize(current.ApplicationRevisions.Reverse()), JsonSerializer.Serialize(page.Revisions));
                 Assert.Null(page.NextOffset);
-                foreach (var revision in current.Revisions)
+                foreach (var revision in current.ApplicationRevisions)
                 {
-                    var selected = (await store.ReadRevisionSummaryAsync(current.ResourceId, revision.RevisionNumber))!;
-                    Assert.Equal(DocumentReadModels.Summary(revision), selected.Revision);
-                    Assert.Equal(current.ResourceId, selected.Current.ResourceId);
+                    var selected = (await store.ReadRevisionAsync(head.ResourceId, revision.RevisionNumber))!;
+                    Assert.Equal(JsonSerializer.Serialize(revision), JsonSerializer.Serialize(selected.Revision));
+                    Assert.Equal(head.ResourceId, selected.Current.ResourceId);
+                    Assert.Equal(revision.Package.Length, (await StorageTestDocuments.PackageAsync(provider, revision.Package)).Length);
                 }
-                var persisted = (await store.FindByResourceIdAsync(current.ResourceId))!;
-                var graph = await DocumentPartition.RestoreFileGraphAsync(persisted, content, new());
-                Assert.Equal(await content.ReadVerifiedAsync(current.Content), graph.Materialize());
             }
         });
-
     [PostgreSqlFact]
-    public Task InconsistentRevisionProjectionRollsBackTheEntireImport() =>
+    public Task InconsistentRevisionMetadataRollsBackTheEntireImport() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
             var snapshot = await PrepareAsync(new PostgreSqlContentStore(source), 2);
-            var bad = snapshot.Snapshots.Last(state => state.Revisions.Length == 2);
-            var invalid = bad with { Revisions = [bad.Revisions[0], bad.Revisions[0]] };
-            snapshot = snapshot with
-            {
-                Snapshots = snapshot.Snapshots.Select(state => state.ResourceId == bad.ResourceId &&
-                    state.StateVersion == bad.StateVersion ? invalid : state).ToImmutableArray(),
-            };
-            var store = new PostgreSqlStateStore(source);
-            var before = await UsageAsync(source);
-
+            var bad = snapshot.Snapshots[1];
+            snapshot = snapshot with { Snapshots = snapshot.Snapshots.SetItem(1,
+                bad with { ApplicationRevisions = [bad.ApplicationRevisions[0], bad.ApplicationRevisions[0]] }) };
+            IDocumentRepository store = new PostgreSqlStateStore(source);
+            var before = await InventoryAsync(source);
             await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ImportRecoveryAsync(snapshot, Receipt(snapshot)).AsTask());
-            Assert.Equal(before, await UsageAsync(source));
-
-            var after = await store.CaptureRecoveryAsync();
-            Assert.Empty(after.Heads);
-            Assert.Empty(after.Snapshots);
-            Assert.Empty(after.Receipts);
-            Assert.Empty(await store.ListAsync(0, 10));
-            await using var rows = source.CreateCommand("SELECT (SELECT count(*) FROM cellbridge_read_heads) + (SELECT count(*) FROM cellbridge_revision_summaries)");
+            Assert.Equal(before, await InventoryAsync(source));
+            var after = await store.CaptureRecoveryAsync(); Assert.Empty(after.Snapshots); Assert.Empty(after.Receipts);
+            await using var rows = source.CreateCommand("SELECT (SELECT count(*) FROM cellbridge_repository_heads) + (SELECT count(*) FROM cellbridge_repository_revisions)");
             Assert.Equal(0L, await rows.ExecuteScalarAsync());
         });
-
-    [PostgreSqlFact]
-    public Task QuotaFailureDoesNotPublishTrackedBudgetChanges() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
-        {
-            var snapshot = await PrepareAsync(new PostgreSqlContentStore(source), 2);
-            var before = await UsageAsync(source);
-            // Allow the document-count adjustment, but reject the following state bytes.
-            await using (var quota = source.CreateCommand("UPDATE cellbridge_usage SET max_stored_bytes=stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint+1"))
-                await quota.ExecuteNonQueryAsync();
-            var store = new PostgreSqlStateStore(source);
-
-            await Assert.ThrowsAsync<StorageQuotaExceededException>(() => store.ImportRecoveryAsync(snapshot, Receipt(snapshot)).AsTask());
-
-            Assert.Equal(before, await UsageAsync(source));
-            var after = await store.CaptureRecoveryAsync();
-            Assert.Empty(after.Heads);
-            Assert.Empty(after.Snapshots);
-            Assert.Empty(after.Receipts);
-        });
-
-    private static async Task<(long Bytes, long Documents)> UsageAsync(NpgsqlDataSource source)
+    private static async Task<string> InventoryAsync(NpgsqlDataSource source)
     {
-        await using var command = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint,document_count FROM cellbridge_usage WHERE singleton=true");
-        await using var reader = await command.ExecuteReaderAsync();
-        Assert.True(await reader.ReadAsync());
-        return (reader.GetInt64(0), reader.GetInt64(1));
+        await using var command = source.CreateCommand("SELECT ROW((SELECT count(*) FROM cellbridge_objects),(SELECT count(*) FROM cellbridge_chunks),(SELECT count(*) FROM cellbridge_repository_heads),(SELECT count(*) FROM cellbridge_repository_revisions),(SELECT count(*) FROM cellbridge_recovery_receipts))::text");
+        return (string)(await command.ExecuteScalarAsync())!;
     }
-
-    private static RecoveryReceipt Receipt(ProviderSnapshot snapshot) =>
-        new(Guid.NewGuid(), new string('A', 64), snapshot.Heads.Length, snapshot.Snapshots.Length);
-
+    private static RecoveryReceipt Receipt(ProviderSnapshot snapshot) => new(Guid.NewGuid(), new string('A', 64), snapshot.Snapshots.Length, snapshot.Snapshots.Length);
     private static async Task<ProviderSnapshot> PrepareAsync(IContentStore content, int count)
     {
-        // Only the state store is temporary. Immutable content is already durable
-        // in the destination content store before recovery publishes its heads.
-        var memory = new InMemoryStateStore();
-        var service = new CellBridgeDocumentService(new(memory, content));
-        var initial = new List<DocumentState>();
+        var memory = new InMemoryDocumentRepository(content); var service = new CellBridgeDocumentService(new(memory, content));
         for (var index = 0; index < count; index++)
         {
             var actor = new CellBridgeActor(new("recovery-owner-" + index, "owner-" + index, "Owner " + index), CanCreate: true);
-            var state = (await service.CreateAsync("/bulk-recovery-" + index + ".docx", MinimalDocx.Create("before " + index), actor))!;
-            initial.Add(state);
-            var request = RevisionHistoryTests.Request(state, MinimalDocx.Create("after " + index));
-            var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-                request, new Dictionary<string, string>(), actor);
-            Assert.False(saved.Response.Status);
+            var head = (await service.CreateAsync("/bulk-recovery-" + index + ".docx", MinimalDocx.Create("before " + index), actor))!;
+            var request = await StorageTestDocuments.SaveRequestAsync(service, head, MinimalDocx.Create("after " + index), actor);
+            var saved = await service.ExecuteAsync(head.ResourceId, DocumentPartitionKind.FileContents, request, ImmutableDictionary<string, string>.Empty, actor);
             Assert.False(Assert.Single(saved.Response.SubResponses).Status);
         }
-        var snapshot = await memory.CaptureRecoveryAsync();
-        // Retained older snapshots must not overwrite the projections of current heads.
-        return snapshot with { Snapshots = snapshot.Snapshots.Concat(initial).ToImmutableArray() };
+        return await memory.CaptureRecoveryAsync();
     }
-
     private sealed class ProjectionCommands : DbCommandInterceptor
     {
         public List<string> Selects { get; } = [];
-        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
-            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
-        {
-            if (command.CommandText.TrimStart().StartsWith("SELECT", StringComparison.OrdinalIgnoreCase))
-                Selects.Add(command.CommandText);
-            return ValueTask.FromResult(result);
-        }
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData,
+            InterceptionResult<DbDataReader> result, CancellationToken ct = default)
+        { if (command.CommandText.TrimStart().StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)) Selects.Add(command.CommandText); return ValueTask.FromResult(result); }
     }
 }

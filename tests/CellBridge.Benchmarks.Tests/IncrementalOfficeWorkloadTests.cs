@@ -20,13 +20,13 @@ public sealed class IncrementalOfficeWorkloadTests
     public async Task TwoSmallEditsAndTheirRetriesReuseUnchangedPartsAndPersistChangedPackages(int packageKiB, int changedPartKiB)
     {
         var workload = new IncrementalOfficeWorkload(packageKiB, changedPartKiB: changedPartKiB);
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = BenchmarkTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var actor = new CellBridgeActor(new SubjectIdentity("synthetic:writer", "writer", "Synthetic writer"), CanCreate: true);
         var state = (await service.CreateAsync("/incremental.docx", workload.CreateContent(), actor))!;
         // An imported file initially has one whole-file object. Install independently reusable
         // chunks once before measuring small edits, as the HTTP benchmark does during setup.
-        var current = await StoredDocument.RestoreAsync(state, provider.Content);
+        var current = await BenchmarkTestDocuments.GraphAsync(service, state, actor);
         var seed = workload.CreateSave(current, 1);
         Assert.Equal(0, seed.ReusedChunks);
         Assert.Equal(seed.Content.Length, seed.ChangedChunkBytes);
@@ -35,7 +35,7 @@ public sealed class IncrementalOfficeWorkloadTests
         AssertSuccess(seeded.Response);
         Assert.True(seeded.State.ContentVersion > state.ContentVersion);
         state = seeded.State;
-        var file = state.Partitions.Single(partition => partition.Kind == 0);
+        var file = (await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0) { IncludeCatalog = true }))!;
         var stableGroups = seed.Request.DataElementPackage!.DataElements
             .Where(element => element.DataElementType == DataElementType.ObjectGroupDataElementData &&
                 ObjectGroupDataElement.Parse(element).Objects.Any(item => item.PayloadKind == ObjectGroupPayloadKind.Raw &&
@@ -47,42 +47,41 @@ public sealed class IncrementalOfficeWorkloadTests
 
         for (var revision = 2; revision <= 3; revision++)
         {
-            current = await StoredDocument.RestoreAsync(state, provider.Content);
-            var save = workload.CreateSave(current.FilePartition.FileGraph, revision);
+            current = await BenchmarkTestDocuments.GraphAsync(service, state, actor);
+            var save = workload.CreateSave(current, revision);
             Assert.True(save.ReusedChunks > 0);
             Assert.Equal(1, save.SentChunks);
             Assert.InRange(save.ChangedChunkBytes, workload.ChangedDocumentPartBytes, workload.ChangedDocumentPartBytes + 4096);
             Assert.True(save.Binary.Length < workload.ChangedDocumentPartBytes + 8192);
             Assert.True(save.Binary.Length < save.Content.Length / 2,
                 $"The {save.Binary.Length}-byte save should be much smaller than the {save.Content.Length}-byte package.");
-            Assert.NotEqual(state.Content.Sha256, Digest(save.Content));
+            Assert.NotEqual(state.Package.Sha256, Digest(save.Content));
             foreach (var id in stableGroups)
                 Assert.DoesNotContain(save.Request.DataElementPackage!.DataElements,
                     element => StorageIds.Capture(element.DataElementExtendedGuid) == id);
-            // A client can advance its own graph using only its request and the acknowledged index.
-            var index = ((PutChangesSubRequestData)save.Request.SubRequests.Single().Data!).StorageIndex;
-            var clientGraph = current.FilePartition.FileGraph.Merge(save.Request.DataElementPackage!.DataElements, index);
-            Assert.Equal(save.Content, clientGraph.Materialize());
-            Assert.True(clientGraph.AnalyzeRetention().Complete);
-
             var previous = state;
             var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
                 Decode(save.Binary), new Dictionary<string, string>(), actor);
             AssertSuccess(result.Response);
+            var applied = ((PutChangesSubResponseData)result.Response.SubResponses.Single().Data!).PutChangesResponse!.AppliedStorageIndexID;
+            var clientGraph = BenchmarkClientGraph.ApplyAcceptedGraph(current, save.Request, result.Response, applied);
+            Assert.Equal(save.Content, clientGraph.Materialize());
+            Assert.True(clientGraph.AnalyzeRetention().Complete);
             state = result.State;
             Assert.True(state.ContentVersion > previous.ContentVersion);
             Assert.True(state.StateVersion > previous.StateVersion);
-            Assert.Equal(Digest(save.Content), state.Content.Sha256);
-            var persisted = await provider.Content.ReadVerifiedAsync(state.Content);
+            Assert.Equal(Digest(save.Content), state.Package.Sha256);
+            var persisted = await BenchmarkTestDocuments.PackageAsync(provider, state.Package);
             Assert.Equal(save.Content, persisted);
             AssertPackage(persisted, packageKiB, revision, workload.ChangedDocumentPartBytes);
-            var restored = await StoredDocument.RestoreAsync(state, provider.Content);
-            Assert.Equal(save.Content, restored.FilePartition.FileGraph.Materialize());
-            Assert.True(restored.FilePartition.FileGraph.AnalyzeRetention().Complete);
-            foreach (var retained in state.Partitions.Single(partition => partition.Kind == 0).Elements
+            var restored = await BenchmarkTestDocuments.GraphAsync(service, state, actor);
+            Assert.Equal(save.Content, restored.Materialize());
+            Assert.True(restored.AnalyzeRetention().Complete);
+            var savedPartition = (await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0) { IncludeCatalog = true }))!;
+            foreach (var retained in savedPartition.Elements
                 .Where(element => stableHandles.ContainsKey(element.Id)))
                 Assert.Equal(stableHandles[retained.Id], retained.Payload);
-            Assert.Equal(stableHandles.Count, state.Partitions.Single(partition => partition.Kind == 0).Elements
+            Assert.Equal(stableHandles.Count, savedPartition.Elements
                 .Count(element => stableHandles.ContainsKey(element.Id)));
 
             var retry = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
@@ -90,7 +89,7 @@ public sealed class IncrementalOfficeWorkloadTests
             AssertSuccess(retry.Response);
             Assert.Equal(state.StateVersion, retry.State.StateVersion);
             Assert.Equal(state.ContentVersion, retry.State.ContentVersion);
-            Assert.Equal(state.Content, retry.State.Content);
+            Assert.Equal(state.Package, retry.State.Package);
         }
     }
 

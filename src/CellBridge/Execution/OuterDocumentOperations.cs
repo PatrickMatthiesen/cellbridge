@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.Immutable;
 using System.Xml.Linq;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
@@ -23,10 +24,10 @@ internal static class OuterDocumentOperations
                 if (!TryVersion(attributes.GetValueOrDefault("Version"), out var number, out var minor))
                 { response.ErrorCode = "InvalidArgument"; return; }
                 if (minor != 0) { response.ErrorCode = "VersionNotFound"; return; }
-                var current = await service.Provider.State.FindByResourceIdAsync(resourceId, cancellationToken)
+                var current = await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(resourceId), cancellationToken)
                     ?? throw new KeyNotFoundException();
                 // SOAP tokens correlate messages; they are not durable retry identities.
-                await service.RestoreRevisionAsync(resourceId, number, RevisionHistory.Latest(current),
+                await service.RestoreRevisionAsync(resourceId, number, current.LatestRevisionNumber,
                     Guid.NewGuid().ToString("N"), actor, attributes, cancellationToken);
                 return;
             }
@@ -37,18 +38,16 @@ internal static class OuterDocumentOperations
                 await service.RenameDocumentAsync(resourceId, attributes.GetValueOrDefault("NewFileName") ?? "", actor, attributes, cancellationToken);
                 return;
             }
-            await service.Provider.State.TransitionAsync(resourceId, (state, _) =>
-            {
-                if (!service.Access(actor, state).HasFlag(DocumentAccess.Read)) throw new UnauthorizedAccessException();
+            var state = await service.GetDocumentMetadataAsync(resourceId, actor, cancellationToken);
                 switch (request.Type)
                 {
                     case SubRequestType.GetVersions:
-                        response.SubResponseXml = MetadataVersioningResponseBuilder.BuildGetVersions(state, origin).SubResponseXml;
+                        response.SubResponseXml = MetadataVersioningResponseBuilder.BuildGetVersions(await service.ListRevisionsAsync(resourceId, actor, cancellationToken), origin).SubResponseXml;
                         break;
                     case SubRequestType.Versioning:
                         if (attributes.GetValueOrDefault("VersioningRequestType") != "GetVersionList")
                         { response.ErrorCode = attributes.ContainsKey("VersioningRequestType") ? "RequestNotSupported" : "InvalidArgument"; break; }
-                        var revisions = RevisionHistory.Initialize(state).Revisions.Reverse().ToArray();
+                        var revisions = (await service.ListRevisionsAsync(resourceId, actor, cancellationToken)).ToArray();
                         var users = revisions.Select(r => r.Author).DistinctBy(u => u.Subject).ToArray();
                         var xml = new XElement("SubResponseData",
                             new XElement("UserTable", users.Select((u, index) => new XElement("User",
@@ -64,8 +63,7 @@ internal static class OuterDocumentOperations
                         Properties(state, request, response);
                         break;
                 }
-                return new StateTransition<bool>(null, true);
-            }, cancellationToken);
+
         }
         catch (UnauthorizedAccessException) { response.ErrorCode = "FileUnauthorizedAccess"; response.HResult = "2147942405"; }
         catch (KeyNotFoundException) { response.ErrorCode = request.Type == SubRequestType.Versioning ? "VersionNotFound" : "FileNotExistsOrCannotBeCreated"; }
@@ -90,10 +88,9 @@ internal static class OuterDocumentOperations
         return true;
     }
 
-    private static void Properties(DocumentState state, FssHttpSubRequest request, FssHttpSubResponse response)
+    private static void Properties(DocumentHead state, FssHttpSubRequest request, FssHttpSubResponse response)
     {
-        var props = XElement.Parse(MetadataVersioningResponseBuilder.BuildGetDocMetaInfo(
-            StoredDocument.RestoreMetadata(state, DateTime.UtcNow)).SubResponseDataXml!).Elements()
+        var props = XElement.Parse(MetadataVersioningResponseBuilder.BuildGetDocMetaInfo(state).SubResponseDataXml!).Elements()
             .ToDictionary(e => (string)e.Attribute("Key")!, e => (string)e.Attribute("Value")!, StringComparer.Ordinal);
         XElement result;
         switch (request.SubRequestDataAttributes.GetValueOrDefault("Properties"))
@@ -124,7 +121,7 @@ internal static class OuterDocumentOperations
 
 public sealed partial class CellBridgeDocumentService
 {
-    public async ValueTask<DocumentState> RenameDocumentAsync(Guid resourceId, string newFileName, CellBridgeActor actor,
+    public async ValueTask<DocumentHead> RenameDocumentAsync(Guid resourceId, string newFileName, CellBridgeActor actor,
         IReadOnlyDictionary<string, string>? lockAttributes = null, CancellationToken cancellationToken = default)
     {
         if (!ValidPathSegment(newFileName) || ReservedPathSegment(newFileName))
@@ -136,7 +133,7 @@ public sealed partial class CellBridgeDocumentService
 
     /// <summary>Atomically moves a resource to a decoded application-rooted path without changing its identity or content.</summary>
     /// <remarks>The input is not URL-decoded. A retry to the same exact path checks permissions and locks but does not change state.</remarks>
-    public ValueTask<DocumentState> MoveDocumentAsync(Guid resourceId, string newPath, CellBridgeActor actor,
+    public ValueTask<DocumentHead> MoveDocumentAsync(Guid resourceId, string newPath, CellBridgeActor actor,
         IReadOnlyDictionary<string, string>? lockAttributes = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(newPath) || newPath[0] != '/' || newPath == "/" ||
@@ -155,24 +152,16 @@ public sealed partial class CellBridgeDocumentService
         segment.IndexOfAny(['/', '\\', ':', '?', '*', '"', '<', '>', '|']) < 0 &&
         !segment.Any(char.IsControl);
 
-    private async ValueTask<DocumentState> ChangePathAsync(Guid resourceId, Func<DocumentState, string> pathFor,
+    private async ValueTask<DocumentHead> ChangePathAsync(Guid resourceId, Func<DocumentHead, string> pathFor,
         CellBridgeActor actor, IReadOnlyDictionary<string, string>? lockAttributes, CancellationToken cancellationToken)
     {
-        if (provider.State is not IAtomicDocumentRenameStore store) throw new NotSupportedException("This provider does not support atomic rename.");
-        actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Write, cancellationToken);
-        return await store.RenameAsync(resourceId, (current, now) =>
-        {
-            Demand(actor, current, DocumentAccess.Write);
-            var document = StoredDocument.RestoreMetadata(current, now);
-            var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, actor.Identity);
-            if (!coordinator.ExecuteCellWrite(lockAttributes ?? new Dictionary<string, string>(), () => true, out _, out var error, now))
-                throw new DocumentOperationLockException(error ?? "FileLockConflict");
-            var path = pathFor(current);
-            if (path == current.Path) return new StateTransition<DocumentState>(null, current);
-            var next = current with { Path = path, PathKey = StorageIds.PathKey(path),
-                StateVersion = checked(current.StateVersion + 1) };
-            return new StateTransition<DocumentState>(next, next with
-                { RetiredPathKeys = DocumentPathReservations.Capture(current, next, rename: true) });
-        }, cancellationToken);
+        var current = await CurrentAsync(resourceId, cancellationToken);
+        actor = await AuthorizeActorAsync(actor, current, DocumentAccess.Write, cancellationToken);
+        Demand(actor, current, DocumentAccess.Write);
+        var path = pathFor(current);
+        var result = await provider.Documents.ChangePathAsync(new(resourceId, Admission(actor, current), path,
+            StorageIds.PathKey(path), (lockAttributes ?? ImmutableDictionary<string, string>.Empty).ToImmutableDictionary(StringComparer.Ordinal)), cancellationToken);
+        if (result.ErrorCode is { } error) throw new DocumentOperationLockException(error);
+        return result.Current;
     }
 }

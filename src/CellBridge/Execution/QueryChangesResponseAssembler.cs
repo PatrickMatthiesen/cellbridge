@@ -55,6 +55,15 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
             if (save) saveIds.Add(element.DataElementExtendedGuid);
             if (proposed.TryGetValue(element.DataElementExtendedGuid, out var previous))
             {
+                // A storage index is a transmission envelope. A PutChanges delta
+                // and a later full query can describe the same accepted map.
+                if (previous.DataElementType == DataElementType.StorageIndexDataElementData &&
+                    element.DataElementType == previous.DataElementType)
+                {
+                    try { proposed[element.DataElementExtendedGuid] = CombineIndexes(previous, element); }
+                    catch (InvalidDataException ex) { error = ex.Message; return false; }
+                    continue;
+                }
                 if (previous.DataElementType != element.DataElementType ||
                     !(previous.Data ?? []).SequenceEqual(element.Data ?? []) ||
                     !previous.SerialNumber.IsNull && !element.SerialNumber.IsNull && !previous.SerialNumber.Equals(element.SerialNumber))
@@ -112,6 +121,24 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
             }
         }
         return true;
+    }
+
+    private static DataElement CombineIndexes(DataElement previous, DataElement next)
+    {
+        if (!previous.SerialNumber.IsNull && !next.SerialNumber.IsNull && !previous.SerialNumber.Equals(next.SerialNumber))
+            throw new InvalidDataException("Response results contain conflicting storage-index serials.");
+        var mappings = StorageIndexPatch.Read(previous).ToDictionary(mapping => (mapping.Type, mapping.Revision, mapping.Cell));
+        foreach (var mapping in StorageIndexPatch.Read(next))
+        {
+            var key = (mapping.Type, mapping.Revision, mapping.Cell);
+            if (mappings.TryGetValue(key, out var existing) &&
+                (!existing.Target.Equals(mapping.Target) || !existing.Serial.Equals(mapping.Serial)))
+                throw new InvalidDataException("Response results contain conflicting storage-index mapping values.");
+            mappings[key] = mapping;
+        }
+        return new(previous.DataElementType, previous.DataElementExtendedGuid,
+            previous.SerialNumber.IsNull ? next.SerialNumber : previous.SerialNumber)
+        { Data = StorageIndexPatch.Serialize(mappings.Values) };
     }
 
     private void CommitPackage(DataElementPackage? package, Dictionary<ExGuid, DataElement> proposed,

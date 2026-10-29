@@ -30,6 +30,7 @@ public sealed class CapturedSaveTests
         var fileUrl = new Uri(endpoint, "/shared/" + Uri.EscapeDataString(name + "." + type)).AbsoluteUri;
         var initial = await Send(Query());
         var index = ((QueryChangesSubResponseData)initial.SubResponses[0].Data!).StorageIndexExtendedGuid;
+        var expectedIndex = initial.DataElementPackage!.DataElements.Single(element => element.DataElementExtendedGuid.Equals(index));
         var knownIds = initial.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet();
         byte[]? first = null;
         foreach (var fixtureName in saves)
@@ -46,11 +47,15 @@ public sealed class CapturedSaveTests
             }
             var request = FsshttpbCellRequest.Deserialize(new BinaryReaderEx(binaryBytes));
             ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex = index;
+            // MS-FSSHTTPB 2.2.2.1.4 requires the expected index in the request package.
+            request.DataElementPackage!.DataElements.Add(expectedIndex);
             var saved = await Send(request);
             Assert.False(saved.SubResponses[0].Status, saved.SubResponses[0].Error?.ErrorMessage);
             var acknowledgement = Assert.IsType<PutChangesSubResponseData>(saved.SubResponses[0].Data);
             Assert.True(acknowledgement.PutChangesResponse!.AppliedStorageIndexID.IsNull);
-            var addedIds = request.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid)
+            var addedIds = request.DataElementPackage!.DataElements
+                .Where(element => element.DataElementType != DataElementType.StorageIndexDataElementData)
+                .Select(e => e.DataElementExtendedGuid)
                 .Where(id => !knownIds.Contains(id)).Distinct().ToArray();
             Assert.NotEmpty(addedIds);
             Assert.Equal(addedIds, acknowledgement.PutChangesResponse.DataElementAdded);
@@ -59,6 +64,7 @@ public sealed class CapturedSaveTests
             var reopened = await Send(Query());
             knownIds = reopened.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet();
             index = ((QueryChangesSubResponseData)reopened.SubResponses[0].Data!).StorageIndexExtendedGuid;
+            expectedIndex = reopened.DataElementPackage.DataElements.Single(element => element.DataElementExtendedGuid.Equals(index));
             var graph = PartitionGraphSnapshot.Create(reopened.DataElementPackage!.DataElements, index);
             var downloaded = await http.GetByteArrayAsync(fileUrl);
             Assert.Equal(graph.Materialize(), downloaded);
@@ -92,6 +98,8 @@ public sealed class CapturedSaveTests
             var decoded = FsshttpbResponse.Deserialize(new BinaryReaderEx(bytes));
             if (request.SubRequests[0].Data is PutChangesSubRequestData)
             {
+                Assert.False(Assert.Single(decoded.SubResponses).Status, decoded.SubResponses[0].Error?.ErrorMessage);
+                Assert.False(Assert.Single(independent.CellSubResponses).Status);
                 var put = Assert.IsType<Microsoft.Protocols.TestSuites.SharedAdapter.PutChangesSubResponseData>(
                     Assert.Single(independent.CellSubResponses).SubResponseData);
                 Assert.Equal(0u, put.PutChangesResponse.AppliedStorageIndexID.Type);

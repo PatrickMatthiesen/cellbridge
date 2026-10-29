@@ -9,8 +9,6 @@ public sealed record StorageLimits
     /// <summary>Logical reference slots across current and historical graphs, independent of membership sharing.</summary>
     public long MaxDecodedGraphMembershipBytes { get; init; } = 128L * 1024 * 1024;
     public long MaxDocumentStoredBytes { get; init; } = 1024L * 1024 * 1024;
-    public long MaxStoredBytes { get; init; } = 10L * 1024 * 1024 * 1024;
-    public int MaxDocuments { get; init; } = 10_000;
     public long MaxObjectBytes { get; init; } = 512L * 1024 * 1024;
     public int MaxSaveReceipts { get; init; } = 10_000;
     public int MaxPendingExternalRevisions { get; init; } = 128;
@@ -28,8 +26,6 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxGraphElements);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDecodedGraphMembershipBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocumentStoredBytes);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxStoredBytes);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocuments);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxObjectBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSaveReceipts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetainedStateSnapshots);

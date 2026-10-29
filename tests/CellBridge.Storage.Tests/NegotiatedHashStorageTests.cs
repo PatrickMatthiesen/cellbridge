@@ -17,7 +17,7 @@ public sealed class NegotiatedHashStorageTests
     private static readonly ProtocolHashingOptions Configuration = new(new byte[32]);
 
     [Fact]
-    public Task MemoryHashQueriesPreserveStorageAndReceiptIntegrity() => Check(new(new InMemoryStateStore(), new InMemoryContentStore()));
+    public Task MemoryHashQueriesPreserveStorageAndReceiptIntegrity() => Check(StorageTestDocuments.Memory());
 
     [PostgreSqlFact]
     public async Task PostgreSqlHashQueriesPreserveStorageAndReceiptIntegrity()
@@ -31,7 +31,7 @@ public sealed class NegotiatedHashStorageTests
         var service = new CellBridgeDocumentService(provider, hashing: Configuration);
         var initial = (await service.CreateAsync("/hash-" + Guid.NewGuid() + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var fixture = new GraphFixture([1, 2, 3]);
-        var upload = MetadataPublicationTests.Initial(fixture);
+        var upload = StorageTestDocuments.MetadataRequest(fixture);
         var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.Metadata, upload, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
         var before = JsonSerializer.Serialize(saved.State);
@@ -56,8 +56,8 @@ public sealed class NegotiatedHashStorageTests
         var replay = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.Metadata, upload, new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal(receiptBytes, replay.Response.ToByteArray());
         Assert.Equal(before, JsonSerializer.Serialize(replay.State));
-        foreach (var partition in replay.State.Partitions)
-            foreach (var element in partition.Elements) _ = await provider.Content.ReadVerifiedAsync(element.Payload);
+        foreach (var element in (await provider.Documents.ExportDocumentAsync(initial.ResourceId))!.Elements)
+            _ = await provider.Content.ReadVerifiedAsync(element.Element.Payload);
         var malformed = new FsshttpbCellRequest { HashOptions = new(2, true, true), DataElementPackage = upload.DataElementPackage,
             SubRequests = { upload.SubRequests[0], Query(7, Guid.Empty) } };
         var rejected = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.Metadata, malformed, new Dictionary<string, string>(), TestActor.Value);
@@ -67,7 +67,7 @@ public sealed class NegotiatedHashStorageTests
         Assert.Empty(rejected.AcceptedSaves);
         Assert.Equal(before, JsonSerializer.Serialize(rejected.State));
         // Hash-bearing and excluded uploads remain unsupported before publication.
-        var badUpload = MetadataPublicationTests.Initial(new GraphFixture([1, 2, 3]));
+        var badUpload = StorageTestDocuments.MetadataRequest(new GraphFixture([1, 2, 3]));
         var group = badUpload.DataElementPackage!.DataElements.First(e => e.DataElementType == DataElementType.ObjectGroupDataElementData);
         var projected = ObjectGroupWireHash.Project(group, new(HashesInsteadOfData: true), Configuration);
         group.Data = projected.Data;

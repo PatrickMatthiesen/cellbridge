@@ -54,7 +54,7 @@ public sealed class LoadIdentityTests(BenchmarkEnvironment fixture)
             });
             Assert.Equal(HttpStatusCode.Created, response.StatusCode);
             paths[index] = response.Headers.Location!.OriginalString;
-            var state = await provider.State.FindByPathKeyAsync(StorageIds.PathKey(paths[index]));
+            var state = await provider.Documents.FindAsync(new DocumentIdentity.Path(StorageIds.PathKey(paths[index])));
             Assert.NotNull(state);
             Assert.Equal(environment.GetUserIdentity(index).Subject, state.Security.Owner);
             Assert.Equal(environment.GetUserIdentity(index).Subject, state.Security.CreatedBy!.Subject);
@@ -74,8 +74,8 @@ public sealed class LoadIdentityTests(BenchmarkEnvironment fixture)
             }
         }
 
-        var before = (await provider.State.FindByPathKeyAsync(StorageIds.PathKey(paths[0])))!;
-        var restored = await StoredDocument.RestoreAsync(before, provider.Content);
+        var before = (await provider.Documents.FindAsync(new DocumentIdentity.Path(StorageIds.PathKey(paths[0]))))!;
+        var restored = await BenchmarkTestDocuments.GraphAsync(new CellBridgeDocumentService(provider), before, new(environment.GetUserIdentity(0)));
         var updatedBytes = MinimalDocx.Create("A save from the document owner");
         var request = SyntheticWorkload.Save(restored, updatedBytes, "full", 0, new Random(42));
         var endpoint = new Uri(environment.HttpEndpoint, "/_vti_bin/cellstorage.svc");
@@ -85,10 +85,10 @@ public sealed class LoadIdentityTests(BenchmarkEnvironment fixture)
         Assert.Equal(HttpStatusCode.OK, denied.StatusCode);
         Assert.Contains(XDocument.Parse(denied.Soap).Descendants().Attributes(), attribute =>
             attribute.Name.LocalName == "ErrorCode" && attribute.Value == "FileUnauthorizedAccess");
-        var unchanged = (await provider.State.FindByResourceIdAsync(before.ResourceId))!;
+        var unchanged = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         Assert.Equal(before.StateVersion, unchanged.StateVersion);
-        Assert.Equal(before.Content, unchanged.Content);
-        Assert.Equal(before.Receipts.Length, unchanged.Receipts.Length);
+        Assert.Equal(before.Package, unchanged.Package);
+        Assert.Equal(before.Counters.SaveReceipts, unchanged.Counters.SaveReceipts);
 
         // The same request must succeed for the owner, so denial is not caused by malformed save bytes.
         var accepted = await new CellStorageTransport(first, endpoint).SendCellAsync(fileUrl,
@@ -98,8 +98,8 @@ public sealed class LoadIdentityTests(BenchmarkEnvironment fixture)
         var result = FsshttpbResponse.Deserialize(new BinaryReaderEx(accepted.Binary));
         Assert.False(result.Status);
         Assert.False(Assert.Single(result.SubResponses).Status);
-        var changed = (await provider.State.FindByResourceIdAsync(before.ResourceId))!;
+        var changed = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         Assert.True(changed.StateVersion > before.StateVersion);
-        Assert.Equal(updatedBytes, await provider.Content.ReadVerifiedAsync(changed.Content));
+        Assert.Equal(updatedBytes, await BenchmarkTestDocuments.PackageAsync(provider, changed.Package));
     }
 }

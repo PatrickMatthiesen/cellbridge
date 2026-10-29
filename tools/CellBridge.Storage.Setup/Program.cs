@@ -12,7 +12,7 @@ using Microsoft.EntityFrameworkCore;
 
 var flags = new HashSet<string>(["--collect-orphans", "--apply", "--quiescent", "--initialize-lists"], StringComparer.Ordinal);
 if (args.Any(argument => !flags.Contains(argument)))
-    throw new ArgumentException("Supported options: --initialize-lists or --collect-orphans [--apply --quiescent]. Document initialization migrates PostgreSQL storage schema 3 through 6 to 7; older development schemas require recreation.");
+    throw new ArgumentException("Supported options: --initialize-lists or --collect-orphans [--apply --quiescent]. Document initialization migrates PostgreSQL storage schema 3 through 8 to 9; older development schemas require recreation.");
 var initializeLists = args.Contains("--initialize-lists", StringComparer.Ordinal);
 if (initializeLists && args.Length != 1)
     throw new ArgumentException("--initialize-lists cannot be combined with other options.");
@@ -87,13 +87,27 @@ if (sqlServer)
         GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_documents.recovery_receipts TO {{identifier}};
         GRANT SELECT,INSERT ON cellbridge_documents.objects TO {{identifier}};
         GRANT SELECT,INSERT ON cellbridge_documents.chunks TO {{identifier}};
-        GRANT SELECT ON cellbridge_documents.usage TO {{identifier}};
-        GRANT UPDATE (StoredBytes,DocumentCount) ON cellbridge_documents.usage TO {{identifier}};
-        GRANT SELECT ON cellbridge_documents.usage_buckets TO {{identifier}};
-        GRANT UPDATE (AvailableBytes) ON cellbridge_documents.usage_buckets TO {{identifier}};
         GRANT SELECT ON cellbridge_documents.schema_version TO {{identifier}};
         """;
     await using (var grant = new SqlCommand(grants, connection)) await grant.ExecuteNonQueryAsync();
+    if (!initializeLists)
+    {
+        foreach (var table in new[] { "heads", "coordination", "editors", "partitions", "bindings", "paths", "deliveries", "references", "mappings" })
+        {
+            await using var grant = new SqlCommand($"GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_documents.[repository_{table}] TO {identifier}", connection);
+            await grant.ExecuteNonQueryAsync();
+        }
+        foreach (var table in new[] { "elements", "graph", "binding_changes", "checkpoints", "revisions", "receipts", "deltas", "mapping_roots", "mapping_claims" })
+        {
+            await using var grant = new SqlCommand($"GRANT SELECT,INSERT ON cellbridge_documents.[repository_{table}] TO {identifier}", connection);
+            await grant.ExecuteNonQueryAsync();
+        }
+        await using var visibilityGrant = new SqlCommand($"GRANT SELECT,INSERT ON cellbridge_documents.repository_visibility TO {identifier}; GRANT UPDATE (EndSequence) ON cellbridge_documents.repository_visibility TO {identifier}", connection);
+        await visibilityGrant.ExecuteNonQueryAsync();
+        await using var mappingIntervalsGrant = new SqlCommand($"GRANT SELECT,INSERT ON cellbridge_documents.repository_mapping_intervals TO {identifier}; GRANT UPDATE (EndSequence) ON cellbridge_documents.repository_mapping_intervals TO {identifier}", connection);
+        await mappingIntervalsGrant.ExecuteNonQueryAsync();
+    }
+
     var runtimeConnection = new SqlConnectionStringBuilder(connectionString) { UserID = role, Password = password, IntegratedSecurity = false };
     if (initializeLists)
         await new SqlServerListEngine(new DbContextOptionsBuilder<SqlServerListDbContext>().UseSqlServer(runtimeConnection.ConnectionString).Options).CheckHealthAsync();
@@ -142,7 +156,9 @@ else if (args.Contains("--collect-orphans", StringComparer.Ordinal))
 }
 else
 {
-    await new PostgreSqlStorageMigrator(source, limits).MigrateAsync();
+    IContentStore? migrationContent = builder.Configuration["Storage:ContentRoot"] is { Length: > 0 } root
+        ? new PostgreSqlFileSystemContentStore(source, root, limits.MaxObjectBytes) : null;
+    await new PostgreSqlStorageMigrator(source, limits, migrationContent).MigrateAsync();
     await AuthenticationDatabase.InitializeAsync(connectionString);
-    Console.WriteLine("CellBridge storage schema version 7 and authentication schema version 1 are ready.");
+    Console.WriteLine("CellBridge storage schema version 9 and authentication schema version 1 are ready.");
 }

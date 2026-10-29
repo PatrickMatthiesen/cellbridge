@@ -16,7 +16,7 @@ public sealed class AsyncDocumentAuthorizationTests
     private static readonly DocumentAuthorizationScope Scope = new("tenant-a", "workspace-b");
 
     private static StorageProvider Memory(IContentStore? content = null) =>
-        new(new InMemoryStateStore(), content ?? new InMemoryContentStore());
+        StorageTestDocuments.Memory(content);
 
     [Fact]
     public async Task BoundDocumentUsesFreshAsyncDecisionsAndIgnoresTheStoredOwnerGrant()
@@ -115,7 +115,7 @@ public sealed class AsyncDocumentAuthorizationTests
         var original = await Import(service, []);
         var locks = new SharedDocumentLocks(service);
         Assert.True((await locks.ApplyAsync(original.ResourceId, HostLockOperation.Acquire, "lease", Reader)).Success);
-        original = (await service.Provider.State.FindByResourceIdAsync(original.ResourceId))!;
+        original = (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)))!;
         content.Pause = true;
         var saving = service.SaveWholeFileAsync(original.ResourceId,
             new MemoryStream(MinimalDocx.Create("stale")), "stale", Reader, "lease").AsTask();
@@ -123,15 +123,16 @@ public sealed class AsyncDocumentAuthorizationTests
 
         Assert.True(await service.BindExternalAuthorizationAsync(original.ResourceId, original.StateVersion,
             original.Security.AuthorizationPolicy, new("tenant-a", "workspace-c")));
-        var rebound = (await service.Provider.State.FindByResourceIdAsync(original.ResourceId))!;
+        var reboundControl = (await service.Provider.Documents.ReadControlAsync(original.ResourceId))!;
+        var rebound = reboundControl.Head;
         Assert.Equal("workspace-c", rebound.Security.AuthorizationPolicy!.WorkspaceId);
-        Assert.Empty(rebound.Editors);
-        Assert.Null(rebound.Coordination.HostLock);
-        Assert.Empty(rebound.Coordination.CoauthorClients);
+        Assert.Empty(reboundControl.Editors);
+        Assert.Null(reboundControl.Coordination.HostLock);
+        Assert.Empty(reboundControl.Coordination.CoauthorClients);
         content.Continue.SetResult();
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => saving);
-        var unchanged = (await service.Provider.State.FindByResourceIdAsync(original.ResourceId))!;
-        Assert.Equal(rebound.Content, unchanged.Content);
+        var unchanged = (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)))!;
+        Assert.Equal(rebound.Package, unchanged.Package);
         Assert.Equal(rebound.ContentVersion, unchanged.ContentVersion);
 
         Assert.False(await service.BindExternalAuthorizationAsync(original.ResourceId, original.StateVersion,
@@ -139,15 +140,16 @@ public sealed class AsyncDocumentAuthorizationTests
     }
 
     [Fact]
-    public async Task AsyncPolicyCallsRunOutsideDocumentStateTransitions()
+    public async Task AsyncPolicyCallsRunOutsideTypedRepositoryMutations()
     {
-        var state = new InMemoryStateStore();
+        var content = new InMemoryContentStore();
+        var state = new InMemoryDocumentRepository(content);
         var observedInsideTransition = 0;
         var measured = new MeasuringStateStore(state,
             value => Volatile.Write(ref observedInsideTransition, value ? 1 : 0));
         var provider = new Policy();
         provider.OnAuthorize = () => Assert.False(Volatile.Read(ref observedInsideTransition) != 0);
-        var service = new CellBridgeDocumentService(new(measured, new InMemoryContentStore()),
+        var service = new CellBridgeDocumentService(new(measured, content),
             documentAuthorizationProvider: provider);
         var stateDocument = await service.ImportExternalAsync(Guid.NewGuid(), "/measured.docx", [], Scope,
             Owner.Identity, Owner);
@@ -169,7 +171,7 @@ public sealed class AsyncDocumentAuthorizationTests
 
         var listing = service.ListRevisionsAsync(state.ResourceId, Reader).AsTask();
         await policy.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        var beforeSave = (await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var beforeSave = (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         var saved = await service.SaveWholeFileAsync(state.ResourceId,
             new MemoryStream(MinimalDocx.Create("content changed")), "content-update", Owner, lockToken.LockToken)
             .AsTask().WaitAsync(TimeSpan.FromSeconds(10));
@@ -180,7 +182,7 @@ public sealed class AsyncDocumentAuthorizationTests
         Assert.Contains(revisions, revision => revision.ContentVersion == saved.Revision.ContentVersion);
 
         policy.ResetGate();
-        var staleBinding = (await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var staleBinding = (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         var afterMigration = service.ListRevisionsAsync(state.ResourceId, Reader).AsTask();
         await policy.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.True(await service.BindExternalAuthorizationAsync(state.ResourceId, staleBinding.StateVersion,
@@ -219,9 +221,9 @@ public sealed class AsyncDocumentAuthorizationTests
         var policy = new Policy();
         var service = Service(policy);
         var state = await Import(service);
-        var before = (await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var before = (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         var path = before.Path;
-        var content = before.Content;
+        var content = before.Package;
         var version = before.ContentVersion;
         var writes = 0;
         policy.Decision = (request, _) =>
@@ -252,9 +254,9 @@ public sealed class AsyncDocumentAuthorizationTests
 
         Assert.Equal("FileUnauthorizedAccess", Assert.Single(Assert.Single(result.Response.Responses).SubResponses).ErrorCode);
         Assert.Equal(1, writes);
-        var after = (await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var after = (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         Assert.Equal(path, after.Path);
-        Assert.Equal(content, after.Content);
+        Assert.Equal(content, after.Package);
         Assert.Equal(version, after.ContentVersion);
     }
 
@@ -263,14 +265,11 @@ public sealed class AsyncDocumentAuthorizationTests
     {
         var policy = new Policy();
         var service = Service(policy);
-        var state = await Import(service);
-        await service.Provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-        {
-            Security = current.Security with
-            {
-                AuthorizationPolicy = new("tests:retired-domain", 2, 1) { TenantId = "tenant-a", WorkspaceId = "workspace-b" },
-            },
-        }, true));
+        var security = DocumentSecurity.Create(Owner.Identity) with
+            { AuthorizationPolicy = new("tests:retired-domain", 2, 1) { TenantId = "tenant-a", WorkspaceId = "workspace-b" } };
+        var prepared = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), "/invalid-binding.docx",
+            MinimalDocx.Create(), security, service.Provider.Content, service.Provider.Limits);
+        var state = (await service.Provider.Documents.CreateAsync(prepared)).Current!;
         var rename = HostIntegrationTests.File(state.ResourceId, SubRequestType.FileOperation);
         rename.SubRequests[0].SubRequestDataAttributes["FileOperation"] = "Rename";
         rename.SubRequests[0].SubRequestDataAttributes["NewFileName"] = "should-not-rename.docx";
@@ -282,7 +281,7 @@ public sealed class AsyncDocumentAuthorizationTests
         Assert.Equal("FileUnauthorizedAccess", fileResponse.ErrorCode);
         Assert.Equal("FileUnauthorizedAccess", Assert.Single(fileResponse.SubResponses).ErrorCode);
         Assert.Empty(policy.Requests);
-        Assert.Equal(state.Path, (await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!.Path);
+        Assert.Equal(state.Path, (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Path);
     }
 
     [Fact]
@@ -353,32 +352,33 @@ public sealed class AsyncDocumentAuthorizationTests
         var locks = new SharedDocumentLocks(service);
         var acquired = await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "lease", Owner);
         var token = Assert.IsType<HostWriteToken>(acquired.WriteToken);
-        var version = (await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!.StateVersion;
+        var control = (await service.Provider.Documents.ReadControlAsync(state.ResourceId))!;
+        var publication = RepositoryTestPublications.Receipt(control, Owner, token.LockToken);
 
         policy.OwnerAllowed = false;
-        Assert.False(await locks.TryCommitAsync(token, version, Owner, (current, _) => current with
-        { ModifiedUtc = current.ModifiedUtc.AddSeconds(1) }, Guid.NewGuid()));
-        var afterRevoke = (await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal("lease", afterRevoke.Coordination.HostLock!.Token);
+        Assert.False(await locks.TryCommitAsync(token, publication, Owner));
+        var afterRevokeControl = (await service.Provider.Documents.ReadControlAsync(state.ResourceId))!;
+        var afterRevoke = afterRevokeControl.Head;
+        Assert.Equal("lease", afterRevokeControl.Coordination.HostLock!.Token);
         Assert.False((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "other", Reader)).Success);
 
         Assert.True(await service.BindExternalAuthorizationAsync(state.ResourceId, afterRevoke.StateVersion,
             afterRevoke.Security.AuthorizationPolicy, new("tenant-a", "workspace-c")));
-        Assert.Null((await service.Provider.State.FindByResourceIdAsync(state.ResourceId))!.Coordination.HostLock);
+        Assert.Null((await service.Provider.Documents.ReadControlAsync(state.ResourceId))!.Coordination.HostLock);
         Assert.True((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "other", Reader)).Success);
     }
 
     private static CellBridgeDocumentService Service(IDocumentAuthorizationProvider policy, TimeProvider? time = null, IContentStore? content = null) =>
         new(Memory(content), documentAuthorizationProvider: policy, authorizationTimeProvider: time);
 
-    private static async Task<DocumentState> Import(CellBridgeDocumentService service, byte[]? bytes = null)
+    private static async Task<DocumentHead> Import(CellBridgeDocumentService service, byte[]? bytes = null)
     {
         var imported = await service.ImportExternalAsync(Guid.NewGuid(), "/external-" + Guid.NewGuid().ToString("N") + ".docx",
             bytes ?? MinimalDocx.Create("original"), Scope, Owner.Identity, Owner);
         return imported!;
     }
 
-    private static void AssertRequest(DocumentAuthorizationRequest request, DocumentState state,
+    private static void AssertRequest(DocumentAuthorizationRequest request, DocumentHead state,
         CellBridgeActor actor, DocumentAuthorizationScope scope)
     {
         Assert.Equal(actor.Identity.Subject, request.Subject);
@@ -488,25 +488,13 @@ public sealed class AsyncDocumentAuthorizationTests
             _inner.OpenReadAsync(handle, cancellationToken);
     }
 
-    private sealed class MeasuringStateStore(IDocumentStateStore inner, Action<bool> transitionFlag) : IDocumentStateStore
+    private sealed class MeasuringStateStore(IDocumentRepository inner, Action<bool> transitionFlag) : RepositoryTestProxy(inner)
     {
-        public bool Durable => inner.Durable;
-        public bool Shared => inner.Shared;
-        public ValueTask<DocumentState?> FindByResourceIdAsync(Guid resourceId, CancellationToken cancellationToken = default) =>
-            inner.FindByResourceIdAsync(resourceId, cancellationToken);
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string pathKey, CancellationToken cancellationToken = default) =>
-            inner.FindByPathKeyAsync(pathKey, cancellationToken);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken cancellationToken = default) =>
-            inner.ListAsync(offset, limit, cancellationToken);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default) =>
-            inner.TryCreateAsync(state, cancellationToken);
-        public ValueTask<T> TransitionAsync<T>(Guid resourceId, Func<DocumentState, DateTime, StateTransition<T>> transition,
-            CancellationToken cancellationToken = default) => inner.TransitionAsync(resourceId, (current, now) =>
-            {
-                transitionFlag(true);
-                try { return transition(current, now); }
-                finally { transitionFlag(false); }
-            }, cancellationToken);
-        public ValueTask CheckHealthAsync(CancellationToken cancellationToken = default) => inner.CheckHealthAsync(cancellationToken);
+        public override async ValueTask<CreateResult> CreateAsync(PreparedDocumentCreate create, CancellationToken ct = default)
+        { transitionFlag(true); try { return await Inner.CreateAsync(create, ct); } finally { transitionFlag(false); } }
+        public override async ValueTask<ControlResult> ExecuteControlAsync(DocumentControlCommand command, CancellationToken ct = default)
+        { transitionFlag(true); try { return await Inner.ExecuteControlAsync(command, ct); } finally { transitionFlag(false); } }
+        public override async ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken ct = default)
+        { transitionFlag(true); try { return await Inner.PublishAsync(publication, ct); } finally { transitionFlag(false); } }
     }
 }

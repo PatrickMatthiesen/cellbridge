@@ -92,24 +92,41 @@ public static class CellBridgeEndpoints
                     System.Globalization.CultureInfo.InvariantCulture, out var number)) return Results.NotFound();
                 var actor = CellBridgeActor.FromPrincipal(context.User);
                 if (actor is null) return Results.Unauthorized();
-                DocumentRevisionSummary revision;
-                try { revision = await service.GetRevisionSummaryAsync(resourceId, number, actor, context.RequestAborted); }
+                DocumentPackage package;
+                DateTime modifiedUtc;
+                Stream? content = null;
+                try
+                {
+                    if (HttpMethods.IsHead(context.Request.Method))
+                    {
+                        var revision = await service.GetRevisionSummaryAsync(resourceId, number, actor, context.RequestAborted);
+                        package = revision.Package;
+                        modifiedUtc = revision.CreatedUtc;
+                    }
+                    else
+                    {
+                        var download = await service.OpenDocumentAsync(new DocumentIdentity.Resource(resourceId), number, actor, context.RequestAborted);
+                        package = download.Package;
+                        modifiedUtc = download.ModifiedUtc;
+                        content = download.Content;
+                    }
+                }
                 catch (UnauthorizedAccessException) { return Results.NotFound(); }
                 catch (KeyNotFoundException) { return Results.NotFound(); }
-                if (revision.LifecycleGeneration != generation) return Results.NotFound();
-                context.Response.Headers.CacheControl = "private, no-store";
-                context.Response.Headers["X-Content-Type-Options"] = "nosniff";
-                context.Response.ContentType = "application/octet-stream";
-                context.Response.Headers.ContentDisposition = "attachment";
-                context.Response.Headers.ContentSecurityPolicy = "sandbox; default-src 'none'";
-                context.Response.ContentLength = revision.Content.Length;
-                context.Response.Headers.ETag = $"\"{resourceId:D}:{revision.LifecycleGeneration}:{number}\"";
-                context.Response.Headers.LastModified = revision.CreatedUtc.ToString("R");
-                if (!HttpMethods.IsHead(context.Request.Method))
+                try
                 {
-                    await using var source = await service.Provider.Content.OpenReadAsync(revision.Content, context.RequestAborted);
-                    await source.CopyToAsync(context.Response.Body, context.RequestAborted);
+                    if (package.LifecycleGeneration != generation) return Results.NotFound();
+                    context.Response.Headers.CacheControl = "private, no-store";
+                    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+                    context.Response.ContentType = "application/octet-stream";
+                    context.Response.Headers.ContentDisposition = "attachment";
+                    context.Response.Headers.ContentSecurityPolicy = "sandbox; default-src 'none'";
+                    context.Response.ContentLength = package.Length;
+                    context.Response.Headers.ETag = $"\"{resourceId:D}:{package.LifecycleGeneration}:{number}\"";
+                    context.Response.Headers.LastModified = modifiedUtc.ToString("R");
+                    if (content is not null) await content.CopyToAsync(context.Response.Body, context.RequestAborted);
                 }
+                finally { if (content is not null) await content.DisposeAsync(); }
                 return Results.Empty;
             });
         routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], (HttpContext context) =>
@@ -139,20 +156,38 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
     if (HttpMethods.IsPost(context.Request.Method)) return Results.NotFound();
     var actor = CellBridgeActor.FromPrincipal(context.User);
     if (actor is null) return Results.Unauthorized();
-    DocumentReadMetadata? state;
-    try { state = await service.FindDocumentMetadataByPathKeyAsync(StorageIds.PathKey(path), actor, context.RequestAborted); }
-    catch (UnauthorizedAccessException) { return Results.NotFound(); }
-    if (state is null) return Results.NotFound();
-    context.Response.Headers.CacheControl = "private, no-store";
-    context.Response.ContentLength = state.Content.Length;
-    context.Response.Headers.ETag = state.Etag;
-    context.Response.Headers.LastModified = state.ModifiedUtc.ToString("R");
-    DocumentDelivery.Apply(context, state.Path);
-    if (!HttpMethods.IsHead(context.Request.Method))
+    DocumentHead state;
+    DocumentPackage package;
+    Stream? content = null;
+    try
     {
-        await using var source = await service.Provider.Content.OpenReadAsync(state.Content, context.RequestAborted);
-        await source.CopyToAsync(context.Response.Body, context.RequestAborted);
+        if (HttpMethods.IsHead(context.Request.Method))
+        {
+            var metadata = await service.FindDocumentMetadataByPathKeyAsync(StorageIds.PathKey(path), actor, context.RequestAborted);
+            if (metadata is null) return Results.NotFound();
+            state = metadata;
+            package = metadata.Package;
+        }
+        else
+        {
+            var download = await service.OpenDocumentAsync(new DocumentIdentity.Path(StorageIds.PathKey(path)), null, actor, context.RequestAborted);
+            state = download.Current;
+            package = download.Package;
+            content = download.Content;
+        }
     }
+    catch (UnauthorizedAccessException) { return Results.NotFound(); }
+    catch (KeyNotFoundException) { return Results.NotFound(); }
+    try
+    {
+        context.Response.Headers.CacheControl = "private, no-store";
+        context.Response.ContentLength = package.Length;
+        context.Response.Headers.ETag = state.Etag;
+        context.Response.Headers.LastModified = state.ModifiedUtc.ToString("R");
+        DocumentDelivery.Apply(context, state.Path);
+        if (content is not null) await content.CopyToAsync(context.Response.Body, context.RequestAborted);
+    }
+    finally { if (content is not null) await content.DisposeAsync(); }
     return Results.Empty;
 
 }

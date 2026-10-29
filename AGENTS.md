@@ -71,8 +71,8 @@ aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-int
 - Resolve supplied resource IDs correctly. Do not create documents on SOAP lookup
   misses or hide unknown IDs with a URL fallback. See
   [document identity and save evidence](docs/demo-library.md).
-- Keep file-partition saves graph-aware through `FilePartitionSaveHandler` and
-  `PartitionGraphSnapshot`; never recover a file by selecting the largest BLOB.
+- Keep file-partition saves graph-aware through `IndexedPartitionSavePreparer` and
+  `IndexedDocumentGraph`; never recover a file by selecting the largest BLOB.
 - Preserve explicit errors for unsupported partial, multi-request and non-file
   partition uploads. Do not claim support from package creation or download alone.
 - Distinguish offline replay, local desktop package checks and live remote editing.

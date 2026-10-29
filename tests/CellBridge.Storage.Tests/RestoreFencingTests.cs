@@ -1,5 +1,9 @@
 using System.Collections.Immutable;
+using System.Text.Json;
 using CellBridge.AspNetCore;
+using CellBridge.FssHttp;
+using CellBridge.FssHttpB;
+using CellBridge.Tests;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
@@ -15,20 +19,18 @@ public sealed class RestoreFencingTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/host-lock.docx", MinimalDocx.Create(), TestActor.Value))!;
         var lease = new HostLease("host-token", TestActor.Value.Identity.Subject, DateTime.UtcNow.AddMinutes(1));
-        state = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
-        {
-            var next = current with { Coordination = current.Coordination with { HostLock = lease } };
-            return new StateTransition<DocumentState>(next, next);
-        });
-        state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        var document = StoredDocument.RestoreMetadata(state, DateTime.UtcNow);
-        Assert.Equal(lease, FssHttpLockCoordinator.Restore(document, state.Coordination).Capture().HostLock);
+        var leased = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetHostLease(state.ResourceId,
+            StorageTestDocuments.Admission(state), lease, null));
+        Assert.True(leased.Changed);
+        state = leased.Current.Head;
+        var document = StoredDocument.RestoreControl(leased.Current);
+        Assert.Equal(lease, FssHttpLockCoordinator.Restore(document, leased.Current.Coordination).Capture().HostLock);
         var denied = await Assert.ThrowsAsync<DocumentOperationLockException>(() => service.RestoreRevisionAsync(
             state.ResourceId, 1, 1, "host-locked", TestActor.Value).AsTask());
         Assert.Equal("FileAlreadyLockedOnServer", denied.ErrorCode);
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => service.RenameDocumentAsync(state.ResourceId,
             "renamed.docx", TestActor.Value).AsTask());
-        Assert.Equal(state, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Fact]
@@ -36,17 +38,17 @@ public sealed class RestoreFencingTests
     {
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/lost-ack.docx", MinimalDocx.Create(), TestActor.Value))!;
-        await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-        { Publication = new(Guid.NewGuid(), "external-id", "etag", 1, []) }, true));
-        var lost = new CellBridgeDocumentService(new(new LostReply(provider.State), provider.Content));
+        Assert.True((await provider.Documents.UpdateDeliveryAsync(new DocumentDeliveryCommand.Bind(state.ResourceId,
+            state.LifecycleGeneration, state.StateVersion, new(Guid.NewGuid(), "external-id", "etag", 1)))).Applied);
+        var lost = new CellBridgeDocumentService(new(new LostReply(provider.Documents), provider.Content));
         var result = await lost.RestoreRevisionAsync(state.ResourceId, 1, 1, "lost-reply", TestActor.Value);
         Assert.True(result.IsReplay);
-        var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(2, current.Revisions.Length); Assert.Single(current.RestoreReceipts);
-        var pending = Assert.Single(current.Publication!.Pending);
-        Assert.Equal(result.Revision.Content, pending.Content);
-        Assert.Contains(pending.Content, StorageReferences.Handles(current));
-        Assert.Equal(state.Coordination.Generation, current.Coordination.Generation);
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(2, current.Counters.Revisions); Assert.Equal(1, current.Counters.RestoreReceipts);
+        var pending = (await provider.Documents.ReadNextDeliveryAsync(state.ResourceId))!.Revision;
+        Assert.Equal(result.Revision.Package, pending.Package);
+        Assert.Equal(pending.Package.Length, (await StorageTestDocuments.PackageAsync(provider, pending.Package)).LongLength);
+        Assert.Equal(0, (await provider.Documents.ReadControlAsync(state.ResourceId))!.Coordination.Generation);
     }
 
     [Theory]
@@ -58,27 +60,34 @@ public sealed class RestoreFencingTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/fence.docx", MinimalDocx.Create(), TestActor.Value))!;
         var gate = new PausedRead(provider.Content);
-        var preparing = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
+        var preparing = new CellBridgeDocumentService(new(provider.Documents, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
             "fenced", TestActor.Value).AsTask();
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var changed = await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
+        switch (mutation)
         {
-            var next = mutation switch
-            {
-                "permission" => current with { Security = current.Security with { Owner = "revoked" } },
-                "metadata" => current with { Partitions = current.Partitions.Select(p => p.Kind == 1
-                    ? p with { Knowledge = p.Knowledge + 1, InlineContent = [42] } : p).ToImmutableArray() },
-                _ => current with { Coordination = current.Coordination with
-                    { Exclusive = new("lock", null, DateTime.UtcNow.AddMinutes(1), 0, null, TestActor.Value.Identity.Subject) } },
-            };
-            return new StateTransition<DocumentState>(next, next);
-        });
+            case "permission":
+                Assert.True((await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(state.ResourceId,
+                    StorageTestDocuments.Admission(state), state.Security with { Owner = "revoked" }, state.AuthorityGeneration))).Changed);
+                break;
+            case "metadata":
+                var metadata = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
+                    StorageTestDocuments.MetadataRequest(new GraphFixture([42])), new Dictionary<string, string>(), TestActor.Value);
+                Assert.False(Assert.Single(metadata.Response.SubResponses).Status);
+                break;
+            default:
+                await LockAsync(provider, state, "lock");
+                break;
+        }
+        var changed = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
         gate.Resume.TrySetResult();
         if (mutation == "permission") await Assert.ThrowsAsync<UnauthorizedAccessException>(() => preparing);
         else await Assert.ThrowsAnyAsync<InvalidOperationException>(() => preparing);
-        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(changed.ContentVersion, after.ContentVersion); Assert.Single(after.Revisions); Assert.Empty(after.RestoreReceipts);
-        Assert.Equal(changed.Partitions, after.Partitions);
+        var after = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(changed.Current.Head.ContentVersion, after.ContentVersion);
+        Assert.Equal(changed.Current.Head.Counters.Revisions, after.Counters.Revisions); Assert.Equal(0, after.Counters.RestoreReceipts);
+        var afterSnapshot = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
+        Assert.Equal(changed.Current.Head, afterSnapshot.Current.Head);
+        Assert.Equal(JsonSerializer.Serialize(changed.Current.Partitions), JsonSerializer.Serialize(afterSnapshot.Current.Partitions));
     }
 
     [Fact]
@@ -87,18 +96,18 @@ public sealed class RestoreFencingTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/retired-restore.docx", MinimalDocx.Create(), TestActor.Value))!;
         var gate = new PausedRead(provider.Content);
-        var preparing = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(
+        var preparing = new CellBridgeDocumentService(new(provider.Documents, gate)).RestoreRevisionAsync(
             state.ResourceId, 1, 1, "retired", TestActor.Value).AsTask();
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var lifecycle = (IDocumentLifecycleStore)provider.State;
-        Assert.True(await lifecycle.TryDeleteAsync(state.ResourceId, state.LifecycleGeneration, state.StateVersion));
+        var lifecycle = provider.Documents;
+        Assert.True((await lifecycle.ChangeLifecycleAsync(new DocumentLifecycleCommand.Delete(state.ResourceId, state.LifecycleGeneration, state.StateVersion))).Applied);
         gate.Resume.TrySetResult();
         await Assert.ThrowsAsync<KeyNotFoundException>(() => preparing);
-        var retired = (await lifecycle.FindLifecycleAsync(state.ResourceId))!;
+        var retired = (await lifecycle.FindAsync(new DocumentIdentity.Resource(state.ResourceId, true)))!;
         Assert.True(retired.IsDeleted);
         Assert.Equal(state.ContentVersion, retired.ContentVersion);
-        Assert.Single(retired.Revisions);
-        Assert.Empty(retired.RestoreReceipts);
+        Assert.Equal(1, retired.Counters.Revisions);
+        Assert.Equal(0, retired.Counters.RestoreReceipts);
     }
 
     [Fact]
@@ -107,56 +116,74 @@ public sealed class RestoreFencingTests
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/save-race.docx", MinimalDocx.Create(), TestActor.Value))!;
         var save = service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            RevisionHistoryTests.Request(state, MinimalDocx.Create("concurrent")), new Dictionary<string, string>(), TestActor.Value).AsTask();
+            await StorageTestDocuments.SaveRequestAsync(service, state, MinimalDocx.Create("concurrent")), new Dictionary<string, string>(), TestActor.Value).AsTask();
         var restore = service.RestoreRevisionAsync(state.ResourceId, 1, 1, "race", TestActor.Value).AsTask();
         CellExecution saved = await save;
         bool restoreSucceeded;
         try { await restore; restoreSucceeded = true; } catch (InvalidOperationException) { restoreSucceeded = false; }
         Assert.NotEqual(restoreSucceeded, !saved.Response.SubResponses[0].Status);
-        var final = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(2, final.Revisions.Length); Assert.Equal(2U, final.ContentVersion);
+        var final = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(2, final.Counters.Revisions); Assert.Equal(2U, final.ContentVersion);
     }
 
     [Fact]
     public async Task ActiveLeaseExpiryDuringPreparationCannotTurnRestoreIntoAnUnlockedWrite()
     {
-        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var clock = new ManualClock(); var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
+        var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/expiry.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var leaseExpires = DateTime.UtcNow.AddMilliseconds(300);
-        await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-        { Coordination = current.Coordination with { Exclusive = new("11111111-1111-1111-1111-111111111111", null, leaseExpires, 0, null, TestActor.Value.Identity.Subject) } }, true));
+        const string lockId = "11111111-1111-1111-1111-111111111111";
+        await LockAsync(provider, state, lockId, 60);
+        var leaseExpires = (await provider.Documents.ReadControlAsync(state.ResourceId))!.Coordination.Exclusive!.ExpiresUtc;
         var gate = new PausedRead(provider.Content);
-        var restoring = new CellBridgeDocumentService(new(provider.State, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
+        var restoring = new CellBridgeDocumentService(new(provider.Documents, gate)).RestoreRevisionAsync(state.ResourceId, 1, 1,
             "expires", TestActor.Value, new Dictionary<string, string>
             { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }).AsTask();
         await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
-            while (DateTime.UtcNow < leaseExpires) await Task.Delay(10, timeout.Token);
+        clock.Advance(TimeSpan.FromSeconds(61));
         gate.Resume.TrySetResult();
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => restoring);
-        Assert.Single((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Revisions);
+        Assert.Equal(1, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Counters.Revisions);
     }
 
     [Fact]
     public async Task RestoreExpiresEditorsAndPublishesMatchingEditorTableKnowledge()
     {
-        var provider = Memory(); var service = new CellBridgeDocumentService(provider);
+        var clock = new ManualClock(); var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
+        var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/editors-expiry.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var document = await StoredDocument.RestoreAsync(state, provider.Content);
-        document.JoinSession(Guid.NewGuid(), "expired-editor");
-        var joined = document.CaptureCoordination(state, state.Coordination);
-        joined = joined with { Editors = joined.Editors.Select(e => e with { ExpiresUtc = DateTime.UtcNow.AddMinutes(-1) }).ToImmutableArray() };
-        await provider.State.TransitionAsync(state.ResourceId, (_, _) => new StateTransition<bool>(joined, true));
+        var joined = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(state.ResourceId,
+            StorageTestDocuments.Admission(state), new() { Type = SubRequestType.EditorsTable, SubRequestDataAttributes =
+            { ["EditorsTableRequestType"] = "JoinEditingSession", ["ClientID"] = Guid.NewGuid().ToString(), ["Timeout"] = "60", ["AsEditor"] = "true" } }));
+        Assert.True(joined.Changed);
+        clock.Advance(TimeSpan.FromHours(1) + TimeSpan.FromSeconds(1));
         await service.RestoreRevisionAsync(state.ResourceId, 1, 1, "editor-expiry", TestActor.Value);
-        var restored = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var restored = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         Assert.Empty(restored.Editors);
-        var before = joined.Partitions.Single(p => p.Kind == 2);
+        var before = joined.Current.Partitions.Single(p => p.Kind == 2);
         var after = restored.Partitions.Single(p => p.Kind == 2);
         Assert.True(after.Knowledge > before.Knowledge);
         Assert.NotEqual(before.InlineContent, after.InlineContent);
     }
 
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
+    private static async Task LockAsync(StorageProvider provider, DocumentHead head, string id, int timeout = 3600)
+    {
+        var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(head.ResourceId,
+            StorageTestDocuments.Admission(head), new() { Type = SubRequestType.ExclusiveLock, SubRequestDataAttributes =
+            { ["ExclusiveLockRequestType"] = "GetLock", ["ExclusiveLockID"] = id, ["ClientID"] = "restore-client", ["Timeout"] = timeout.ToString() } }));
+        Assert.Null(result.ErrorCode); Assert.True(result.Changed);
+    }
+
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset now = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => now;
+        public void Advance(TimeSpan duration) => now += duration;
+    }
+
+    private static StorageProvider Memory() => StorageTestDocuments.Memory();
     private sealed class PausedRead(IContentStore inner) : IContentStore
     {
         private int _entered;
@@ -170,19 +197,12 @@ public sealed class RestoreFencingTests
             return await inner.OpenReadAsync(handle, ct);
         }
     }
-    private sealed class LostReply(IDocumentStateStore inner) : IDocumentStateStore
+    private sealed class LostReply(IDocumentRepository inner) : RepositoryTestProxy(inner)
     {
-        public bool Durable => false; public bool Shared => false;
-        public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken ct = default) => inner.FindByResourceIdAsync(id, ct);
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken ct = default) => inner.FindByPathKeyAsync(key, ct);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken ct = default) => inner.ListAsync(offset, limit, ct);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken ct = default) => inner.TryCreateAsync(state, ct);
-        public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
-        public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> callback, CancellationToken ct = default)
+        public override async ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken ct = default)
         {
-            bool committed = false;
-            var result = await inner.TransitionAsync(id, (state, now) => { var next = callback(state, now); committed = next.Next is not null; return next; }, ct);
-            if (committed) throw new StorageUnavailableException("Injected lost reply.");
+            var result = await Inner.PublishAsync(publication, ct);
+            if (result.Status == PublicationStatus.Accepted) throw new StorageUnavailableException("Injected lost reply.");
             return result;
         }
     }

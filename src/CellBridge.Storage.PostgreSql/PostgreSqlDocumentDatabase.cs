@@ -1,4 +1,3 @@
-using System.Data;
 using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -17,71 +16,16 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
     }
     public CellBridgeDbContext CreateContext() => factory?.CreateDbContext() ?? new(options);
     public IDocumentLocking<CellBridgeDbContext> Locks => this;
-    public Task<T> ReadAsync<T>(CellBridgeDbContext db, Func<Task<T>> action, bool coherent, CancellationToken ct) =>
-        coherent ? ReadSnapshotAsync(db, action, ct) : action();
-
-    private static async Task<T> ReadSnapshotAsync<T>(CellBridgeDbContext db, Func<Task<T>> action, CancellationToken ct)
-    {
-        // Only multi-statement health checks need a transaction. Ordinary reads
-        // already have PostgreSQL's statement snapshot and issue no setup commands.
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
-        await ConfigureSettingsAsync(db, ct);
-        var result = await action();
-        await transaction.CommitAsync(ct);
-        return result;
-    }
     public Task ConfigureAsync(CellBridgeDbContext db, CancellationToken ct) => ConfigureSettingsAsync(db, ct);
     public async Task CheckConfigurationAsync(CellBridgeDbContext db, CancellationToken ct)
     {
         if (!await ValidateDatabaseConfigurationAsync(db, ct))
-            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 7.");
+            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 9.");
     }
-    public Task CheckRecoveryAsync(CellBridgeDbContext db, CancellationToken ct) => CheckRecoverySchemaAsync(db, ct);
-    public Task<DateTime> ClockAsync(CellBridgeDbContext db, CancellationToken ct) =>
-        db.Database.SqlQueryRaw<DateTime>("SELECT clock_timestamp() AS \"Value\"").SingleAsync(ct);
     public bool IsDatabaseException(Exception ex) => PostgreSqlDatabase.IsDatabaseException(ex);
-    public bool IsUniqueViolation(Exception ex) => PostgreSqlDatabase.FindPostgresException(ex)?.SqlState == PostgresErrorCodes.UniqueViolation;
-    public IQueryable<DocumentRow> AtPath(IQueryable<DocumentRow> rows, string key) => rows.Where(row => row.PathKey == key);
-    public void SetNamespaceFields(DocumentRow row, DocumentState state) { }
-    public void ValidatePointer(DocumentRow row, DocumentState state) { }
     public void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state) { }
-    public Task VerifyReservationsAsync(CellBridgeDbContext db, IReadOnlyDictionary<Guid, DocumentNamespaceState> states, CancellationToken ct) => Task.CompletedTask;
-    public Task WriteReservationsAsync(CellBridgeDbContext db, DocumentState state, CancellationToken ct) => Task.CompletedTask;
-    public Task<bool> HasReservationsAsync(CellBridgeDbContext db, CancellationToken ct) => Task.FromResult(false);
-
-    public Task PublicationAsync(CellBridgeDbContext db, bool exclusive, CancellationToken ct) =>
-        AcquirePublicationAsync(db, exclusive, ct);
-
-    internal static async Task AcquirePublicationAsync(CellBridgeDbContext db, bool exclusive, CancellationToken ct)
-    {
-        // Advisory transaction locks coordinate publishers without requiring
-        // content-only users to lock the document tables. The filesystem backend
-        // takes this same lock before reserving an object in PostgreSQL.
-        var (connection, transaction) = PostgreSqlDatabase.GetTransaction(db);
-        await using var command = new NpgsqlCommand(exclusive
-            ? "SELECT pg_advisory_xact_lock(748219354)"
-            : "SELECT pg_advisory_xact_lock_shared(748219354)", connection, transaction);
-        await command.ExecuteNonQueryAsync(ct);
-    }
-    public Task NamespaceAsync(CellBridgeDbContext db, CancellationToken ct)
-    {
-        var (connection, transaction) = PostgreSqlDatabase.GetTransaction(db);
-        return PostgreSqlNamespaceLock.AcquireAsync(connection, transaction, ct);
-    }
-    public async Task DocumentAsync(CellBridgeDbContext db, Guid id, CancellationToken ct)
-    {
-        var (connection, transaction) = PostgreSqlDatabase.GetTransaction(db);
-        await using var command = new NpgsqlCommand("SELECT state_version FROM cellbridge_documents WHERE resource_id=$1 FOR UPDATE", connection, transaction);
-        command.Parameters.AddWithValue(id);
-        await command.ExecuteScalarAsync(ct);
-    }
-    public async Task ContentAsync(CellBridgeDbContext db, string key, CancellationToken ct)
-    {
-        var (connection, transaction) = PostgreSqlDatabase.GetTransaction(db);
-        await using var command = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended($1,748219353))", connection, transaction);
-        command.Parameters.AddWithValue(key);
-        await command.ExecuteNonQueryAsync(ct);
-    }
+    // INSERT ON CONFLICT waits on the exact unique object key. No advisory creation lock is needed.
+    public Task ContentAsync(CellBridgeDbContext db, string key, CancellationToken ct) => Task.CompletedTask;
     public async Task<bool> InsertObjectAsync(CellBridgeDbContext db, ContentHandle handle, CancellationToken ct)
     {
         var (connection, transaction) = PostgreSqlDatabase.GetTransaction(db);
@@ -90,14 +34,12 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
         command.Parameters.AddWithValue(handle.Length);
         return await command.ExecuteNonQueryAsync(ct) != 0;
     }
-    public Task<UsageRow> UsageAsync(CellBridgeDbContext db, CancellationToken ct) =>
-        PostgreSqlStorageBudget.LockUsageAsync(db, ct);
 
     internal static async Task ConfigureTransactionAsync(CellBridgeDbContext context, CancellationToken cancellationToken)
     {
         var valid = await ValidateDatabaseConfigurationAsync(context, cancellationToken);
         if (!valid)
-            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 7.");
+            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 9.");
         await ConfigureSettingsAsync(context, cancellationToken);
     }
 
@@ -111,23 +53,8 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
 
     private static Task<bool> ValidateDatabaseConfigurationAsync(CellBridgeDbContext context,
         CancellationToken cancellationToken) => context.Database.SqlQueryRaw<bool>("""
-            SELECT count(*) = 1 AND min(version) = 7 AND max(version) = 7
+            SELECT count(*) = 1 AND min(version) = 9 AND max(version) = 9
                 AND current_setting('fsync') = 'on' AS "Value"
             FROM cellbridge_schema
             """).SingleAsync(cancellationToken);
-    private static async Task CheckRecoverySchemaAsync(CellBridgeDbContext context,
-        CancellationToken cancellationToken)
-    {
-        var present = await context.Database.SqlQueryRaw<bool>("""
-            SELECT to_regclass('cellbridge_recovery_schema') IS NOT NULL
-                AND to_regclass('cellbridge_recovery_receipts') IS NOT NULL AS "Value"
-            """).SingleAsync(cancellationToken);
-        if (!present)
-            throw new StorageUnavailableException(
-                "Recovery schema is absent. Run explicit storage initialization with hosts stopped.");
-        var versions = await context.RecoverySchema.AsNoTracking().Select(row => row.Version).ToListAsync(cancellationToken);
-        if (versions.Count != 1 || versions[0] != 1)
-            throw new StorageUnavailableException("Unsupported recovery schema; version 1 is required.");
-    }
-
 }

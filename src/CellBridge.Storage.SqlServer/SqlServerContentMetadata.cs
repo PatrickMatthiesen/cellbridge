@@ -7,6 +7,8 @@ namespace CellBridge.Storage.SqlServer;
 internal sealed partial class SqlServerDocumentDatabase
 {
     public IQueryable<ObjectRow> ObjectsAtKeys(SqlServerDocumentDbContext db, IReadOnlyList<string> keys)
+        => QueryObjectsAtKeys(db, keys);
+    internal static IQueryable<ObjectRow> QueryObjectsAtKeys(SqlServerDocumentDbContext db, IReadOnlyList<string> keys)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan(keys.Count, 64);
         if (keys.Count == 0) return db.Set<ObjectRow>().AsNoTracking().Where(_ => false);

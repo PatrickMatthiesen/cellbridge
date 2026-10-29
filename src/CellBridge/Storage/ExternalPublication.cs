@@ -16,7 +16,7 @@ public sealed record ExternalPublicationState(Guid BindingId, string Destination
 
 public enum ExternalDeliveryStatus { Applied, Conflict, Stale }
 public sealed record ExternalDeliveryResult(ExternalDeliveryStatus Status, string? Revision = null);
-public sealed record ExternalDeliveryRequest(Guid BindingId, string Destination, string ExpectedRevision, ExternalRevision Revision);
+public sealed record ExternalDeliveryRequest(Guid BindingId, string Destination, string ExpectedRevision, DocumentDelivery Revision);
 
 /// <summary>
 /// The destination must atomically persist bytes, a non-reusable revision token and a durable
@@ -29,23 +29,4 @@ public interface IExternalRevisionDestination
 {
     ValueTask<ExternalDeliveryResult> CompareExchangeAsync(ExternalDeliveryRequest request, Stream verifiedContent,
         CancellationToken cancellationToken = default);
-}
-
-public static class ExternalPublication
-{
-    /// <summary>Call inside the same atomic transition that publishes the committed file content.</summary>
-    public static DocumentState Append(DocumentState current, DocumentState next, Guid operationId, StorageLimits limits)
-    {
-        if (next.Content != current.Content && next.ContentVersion != checked(current.ContentVersion + 1))
-            throw new InvalidOperationException("Changed external file bytes require the next content version.");
-        if (current.Publication is not { } publication || next.ContentVersion == current.ContentVersion) return next;
-        if (operationId == Guid.Empty) throw new ArgumentException("A stable publication operation identity is required.", nameof(operationId));
-        var entry = new ExternalRevision(operationId, next.ResourceId, next.LifecycleGeneration,
-            publication.NextSequence, next.ContentVersion, next.Content);
-        var pending = publication.Pending.Add(entry);
-        StorageLimits.Check("pending external revisions", pending.Length, limits.MaxPendingExternalRevisions);
-        StorageLimits.Check("pending external bytes", pending.Sum(r => r.Content.Length), limits.MaxPendingExternalBytes);
-        return next with { Publication = publication with
-        { Pending = pending, NextSequence = checked(publication.NextSequence + 1) } };
-    }
 }

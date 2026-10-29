@@ -43,21 +43,8 @@ internal sealed class ChunkRow
     public int Ordinal { get; set; }
     public required byte[] Bytes { get; set; }
 }
-internal sealed class UsageRow
-{
-    public bool Singleton { get; set; } = true;
-    // Charged capacity includes any unused durable bucket allowances. Reclaim
-    // allowances before using this as the exact inventory total.
-    public long ChargedBytes { get; set; }
-    public long DocumentCount { get; set; }
-    public long MaxStoredBytes { get; set; }
-    public long MaxDocuments { get; set; }
-}
-internal sealed class UsageAllowanceRow
-{
-    public int BucketId { get; set; }
-    public long AvailableBytes { get; set; }
-}
+
+
 internal sealed class RecoverySchemaRow { public int Version { get; set; } }
 internal sealed class RecoveryReceiptRow
 {

@@ -26,7 +26,7 @@ public sealed class DocumentWorkspace(CellBridgeDocumentService service)
         if (!result.Created) return new(StatusCodes.Status400BadRequest, null, result.Error);
         var document = detached.List().Single();
         var escaped = string.Join('/', document.Url.Split('/').Select(Uri.EscapeDataString));
-        DocumentState? created;
+        DocumentHead? created;
         try { created = await service.CreateAsync(escaped, document.Content, actor, cancellationToken); }
         catch (StorageQuotaExceededException exception)
         {

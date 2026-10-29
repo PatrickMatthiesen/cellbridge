@@ -13,28 +13,28 @@ namespace CellBridge.SqlServer.Tests;
 public sealed class SqlServerPreparationReadTests(SqlServerFixture fixture)
 {
     [Fact]
-    public async Task PreparationRetainsSerializableProtectionAndProviderClock()
+    public async Task PreparationUsesCoherentSnapshotAndProviderClock()
     {
         var database = await SqlServerDocuments.CreateAsync(fixture);
         var provider = database.Provider();
         var initial = (await new CellBridgeDocumentService(provider)
             .CreateAsync("/preparation.docx", MinimalDocx.Create(), SqlServerDocuments.Actor))!;
         var audit = new PreparationAudit();
-        var reader = new SqlServerStateStore(database.Options(false, audit));
+        var reader = database.Provider(audit).Documents;
         await using var admin = new SqlServerDocumentDbContext(database.Options(admin: true));
         var before = await admin.Database.SqlQueryRaw<DateTime>("SELECT SYSUTCDATETIME() AS Value").SingleAsync();
-        var view = (await reader.ReadPreparationAsync(initial.ResourceId))!;
+        var view = (await reader.ReadControlAsync(initial.ResourceId))!;
         var after = await admin.Database.SqlQueryRaw<DateTime>("SELECT SYSUTCDATETIME() AS Value").SingleAsync();
-        Assert.Equal(initial.StateVersion, view.State.StateVersion);
-        Assert.Equal(initial.Content, view.State.Content);
+        Assert.Equal(initial.StateVersion, view.Head.StateVersion);
+        Assert.Equal(initial.Package, view.Head.Package);
         Assert.Equal(DateTimeKind.Utc, view.UtcNow.Kind);
         Assert.InRange(view.UtcNow, DateTime.SpecifyKind(before, DateTimeKind.Utc), DateTime.SpecifyKind(after, DateTimeKind.Utc));
         Assert.Equal(1, audit.Reads);
-        Assert.Equal(IsolationLevel.Serializable, audit.Isolation);
-        Assert.Null(await reader.ReadPreparationAsync(Guid.NewGuid()));
+        Assert.Equal(IsolationLevel.Snapshot, audit.Isolation);
+        Assert.Null(await reader.ReadControlAsync(Guid.NewGuid()));
 
-        await admin.Snapshots.Where(row => row.ResourceId == initial.ResourceId).ExecuteDeleteAsync();
-        await Assert.ThrowsAsync<StorageCorruptionException>(() => reader.ReadPreparationAsync(initial.ResourceId).AsTask());
+        await admin.Database.ExecuteSqlRawAsync("UPDATE cellbridge_documents.repository_coordination SET Json=0xFF");
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => reader.ReadControlAsync(initial.ResourceId).AsTask());
     }
 
     private sealed class PreparationAudit : DbCommandInterceptor

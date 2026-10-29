@@ -2,7 +2,6 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using CellBridge.FssHttpB;
-using CellBridge.Storage;
 
 namespace CellBridge.TestFixtures;
 
@@ -32,9 +31,6 @@ public sealed class IncrementalOfficeWorkload
     }
 
     public byte[] CreateContent(int revision = 0) => BuildPackage(padding, revision).Bytes;
-
-    public IncrementalOfficeSave CreateSave(StoredDocument current, int revision) =>
-        CreateSave(current.FilePartition.FileGraph, revision);
 
     /// <summary>
     /// The first request installs independently reusable chunks. Later requests send only changed chunks,
@@ -100,6 +96,10 @@ public sealed class IncrementalOfficeWorkload
             StorageManifestBuilder.BuildStorageIndexDataElement(Id(5), Serial(5), Id(1), Serial(1),
                 cell, Id(2), Serial(2), Id(7), Id(3), Serial(3)),
         ]);
+        var expected = currentGraph.StorageIndexes.Single(element => element.DataElementExtendedGuid.Equals(currentGraph.StorageIndex));
+        package.DataElements.Add(new(expected.DataElementType,
+            new(expected.DataElementExtendedGuid.Value, expected.DataElementExtendedGuid.Guid),
+            new(expected.SerialNumber.Guid, expected.SerialNumber.Value)) { Data = expected.Data!.ToArray() });
         var request = new FsshttpbCellRequest { DataElementPackage = package };
         request.SubRequests.Add(new(RequestTypes.PutChanges)
         {

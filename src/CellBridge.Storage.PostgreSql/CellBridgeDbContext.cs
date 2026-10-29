@@ -13,7 +13,6 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
     internal DbSet<RevisionSummaryRow> RevisionSummaries => Set<RevisionSummaryRow>();
     internal DbSet<ObjectRow> Objects => Set<ObjectRow>();
     internal DbSet<ChunkRow> Chunks => Set<ChunkRow>();
-    internal DbSet<UsageRow> Usage => Set<UsageRow>();
     internal DbSet<RecoverySchemaRow> RecoverySchema => Set<RecoverySchemaRow>();
     internal DbSet<RecoveryReceiptRow> RecoveryReceipts => Set<RecoveryReceiptRow>();
     internal static int OctetLength(string value) => throw new InvalidOperationException("Database translation only.");
@@ -22,6 +21,7 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
 
     internal static void ConfigureModel(ModelBuilder modelBuilder)
     {
+        RepositoryModel.Configure(modelBuilder, true);
         modelBuilder.HasDbFunction(() => DocumentSql.ClockUtc())
             .HasName("clock_timestamp").IsBuiltIn();
         modelBuilder.HasDbFunction(() => DocumentSql.ByteLength(default!))
@@ -96,34 +96,8 @@ public sealed class CellBridgeDbContext(DbContextOptions<CellBridgeDbContext> op
             entity.HasOne<ObjectRow>().WithMany().HasForeignKey(row => row.ObjectKey)
                 .OnDelete(DeleteBehavior.NoAction).HasConstraintName("cellbridge_chunks_object_key_fkey");
         });
-        modelBuilder.Entity<UsageRow>(entity =>
-        {
-            entity.ToTable("cellbridge_usage", table =>
-            {
-                table.HasCheckConstraint("cellbridge_usage_singleton_check", "singleton");
-                table.HasCheckConstraint("cellbridge_usage_stored_bytes_check", "stored_bytes >= 0");
-                table.HasCheckConstraint("cellbridge_usage_document_count_check", "document_count >= 0");
-                table.HasCheckConstraint("cellbridge_usage_max_stored_bytes_check", "max_stored_bytes > 0");
-                table.HasCheckConstraint("cellbridge_usage_max_documents_check", "max_documents > 0");
-            });
-            entity.HasKey(row => row.Singleton).HasName("cellbridge_usage_pkey");
-            entity.Property(row => row.Singleton).HasColumnName("singleton");
-            entity.Property(row => row.ChargedBytes).HasColumnName("stored_bytes");
-            entity.Property(row => row.DocumentCount).HasColumnName("document_count");
-            entity.Property(row => row.MaxStoredBytes).HasColumnName("max_stored_bytes");
-            entity.Property(row => row.MaxDocuments).HasColumnName("max_documents");
-        });
-        modelBuilder.Entity<UsageAllowanceRow>(entity =>
-        {
-            entity.ToTable("cellbridge_usage_buckets", table =>
-            {
-                table.HasCheckConstraint("cellbridge_usage_bucket_id_check", "bucket_id BETWEEN 0 AND 63");
-                table.HasCheckConstraint("cellbridge_usage_bucket_bytes_check", "available_bytes >= 0");
-            });
-            entity.HasKey(row => row.BucketId).HasName("cellbridge_usage_buckets_pkey");
-            entity.Property(row => row.BucketId).HasColumnName("bucket_id").ValueGeneratedNever();
-            entity.Property(row => row.AvailableBytes).HasColumnName("available_bytes");
-        });
+
+
         modelBuilder.Entity<RecoverySchemaRow>(entity =>
         {
             entity.ToTable("cellbridge_recovery_schema");

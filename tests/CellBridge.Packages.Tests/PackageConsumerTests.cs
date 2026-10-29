@@ -17,7 +17,8 @@ public sealed class PackageConsumerTests
     [Fact]
     public async Task PackagedHostAppliesExternalAuthorizationInvalidationToDownloads()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var contentStore = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(contentStore), contentStore);
         var authority = new MutableDocumentAuthority();
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -64,7 +65,8 @@ public sealed class PackageConsumerTests
     [InlineData(true)]
     public async Task RequestByteLimitRejectsKnownAndStreamingBodiesBeforeProtocolParsing(bool unknownLength)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var contentStore = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(contentStore), contentStore);
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         TestActor.Register(builder.Services);
@@ -80,7 +82,7 @@ public sealed class PackageConsumerTests
         content.Headers.ContentType = new("text/xml");
         using var response = await client.PostAsync("/_vti_bin/cellstorage.svc", content);
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
-        Assert.Empty(await provider.State.ListAsync(0, 10));
+        Assert.Empty(await provider.Documents.ListAsync(0, 10));
         await app.StopAsync();
     }
 
@@ -103,9 +105,9 @@ public sealed class PackageConsumerTests
     [Fact]
     public async Task PackagedHostServesDiscoveryDownloadAndCellRequests()
     {
-        var provider = new StorageProvider(
-            new CustomStateProvider(),
-            new InMemoryContentStore());
+        var contentStore = new InMemoryContentStore();
+        var custom = new CustomDocumentRepository(contentStore);
+        var provider = new StorageProvider(custom, contentStore);
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -147,6 +149,8 @@ public sealed class PackageConsumerTests
         var direct = await processor.ExecuteAsync(parsed, "http://localhost", TestActor.Value);
         Assert.Equal(direct.Response.ToSoapEnvelope(), wire);
         Assert.Empty(direct.AcceptedSaves);
+        Assert.Equal(1, custom.Creates);
+        Assert.True(custom.Finds > 0);
         var readOnly = await processor.ExecuteAsync(parsed, "http://localhost", TestActor.Value with
             { AccessLimit = new(id, DocumentAccess.Read) });
         var binary = FsshttpbResponse.Deserialize(new BinaryReaderEx(readOnly.Response.Responses[0].SubResponses[0].SubResponseDataBase64!));

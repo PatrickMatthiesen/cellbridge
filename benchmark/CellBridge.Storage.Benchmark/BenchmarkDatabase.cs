@@ -18,13 +18,6 @@ internal sealed class BenchmarkDatabase(NpgsqlDataSource source) : IAsyncDisposa
                     cellbridge_recovery_receipts;
                 """))
                 await reset.ExecuteNonQueryAsync();
-            await using var quota = source.CreateCommand("""
-                UPDATE cellbridge_usage SET stored_bytes=0, document_count=0,
-                    max_stored_bytes=$1, max_documents=$2 WHERE singleton=true;
-                """);
-            quota.Parameters.AddWithValue(limits.MaxStoredBytes);
-            quota.Parameters.AddWithValue(limits.MaxDocuments);
-            await quota.ExecuteNonQueryAsync();
             return new(source);
         }
         catch

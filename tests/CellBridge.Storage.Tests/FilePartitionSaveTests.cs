@@ -23,12 +23,12 @@ public sealed class FilePartitionSaveTests
         Assert.Equal(0x09, put.Flags);
         Assert.Equal(0x8004, put.AdditionalFlagsBits);
         // The captured base identity belongs to a previous server.
-        put.ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
+        Rebase(request, document.Graph);
         var saved = await context.ExecuteAsync(document, request);
         AssertSucceeded(saved);
-        document = await context.ReadAsync(document.TransitionId);
-        Assert.Equal(2u, document.ContentVersion);
-        Assert.Equal(document.Content, document.FilePartition.FileGraph.Materialize());
+        document = await context.ReadAsync(document.Head.ResourceId);
+        Assert.Equal(2u, document.Head.ContentVersion);
+        Assert.Equal(document.Content, document.Graph.Materialize());
         using var workbook = DocumentFormat.OpenXml.Packaging.SpreadsheetDocument.Open(new MemoryStream(document.Content), false);
         Assert.Empty(new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(workbook));
         Assert.Contains("asdf", workbook.WorkbookPart!.SharedStringTablePart!.SharedStringTable.InnerText);
@@ -54,9 +54,9 @@ public sealed class FilePartitionSaveTests
         put.AdditionalFlagsBits = 0xffc0;
         put.ContentVersionCoherencyCheck = [1, 2, 3];
         AssertSucceeded(await context.ExecuteAsync(document, request));
-        var saved = await context.ReadAsync(document.TransitionId);
+        var saved = await context.ReadAsync(document.Head.ResourceId);
         Assert.Equal(next, saved.Content);
-        Assert.Equal(next, saved.FilePartition.FileGraph.Materialize());
+        Assert.Equal(next, saved.Graph.Materialize());
     }
 
     [Theory]
@@ -82,20 +82,17 @@ public sealed class FilePartitionSaveTests
             Path.Combine(AppContext.BaseDirectory, "Fixtures", "word-save-fresh-base.bin"))));
         var query = Assert.IsType<QueryChangesSubResponseData>(initial.SubResponses[0].Data);
         var graph = PartitionGraphSnapshot.Create(initial.DataElementPackage!.DataElements, query.StorageIndexExtendedGuid);
-        var document = await context.CreateAsync("/shared/save-test.docx", graph.Materialize());
-        // Seed the exact downloaded graph and knowledge used by the recorded desktop save.
-        document.CommitFileRevision(graph, graph.Materialize(), 73508);
-        var state = await document.CaptureAsync(context.Provider.Content);
-        state = RevisionHistory.Initialize(state with { Revisions = [] });
-        await context.Provider.State.TransitionAsync(document.TransitionId, (_, _) => new StateTransition<bool>(state, true));
-        document = await context.ReadAsync(document.TransitionId);
+        // This offline fixture stages the exact captured base graph before normal typed operations.
+        var document = await context.CreateRecordedAsync("/shared/save-test.docx", graph, 73508);
         var before = document.Content.ToArray();
-        var result = await context.ExecuteAsync(document, RecordedRequest("word-save-fresh.bin"));
+        var recorded = RecordedRequest("word-save-fresh.bin");
+        Rebase(recorded, document.Graph);
+        var result = await context.ExecuteAsync(document, recorded);
         AssertSucceeded(result);
-        var saved = await context.ReadAsync(document.TransitionId);
+        var saved = await context.ReadAsync(document.Head.ResourceId);
         Assert.False(before.SequenceEqual(saved.Content));
-        Assert.Equal(saved.Content, saved.FilePartition.FileGraph.Materialize());
-        Assert.True(saved.FilePartition.KnowledgeSequence > 73508);
+        Assert.Equal(saved.Content, saved.Graph.Materialize());
+        Assert.True(saved.Partition.Knowledge > 73508);
     }
 
     [Theory]
@@ -105,7 +102,7 @@ public sealed class FilePartitionSaveTests
     {
         await using var context = new ProviderContext(postgreSql);
         var document = await context.CreateAsync("/test.docx", MinimalDocx.Create());
-        var current = document.FilePartition.FileGraph;
+        var current = document.Graph;
         var index = current.Elements.Single(x => x.DataElementExtendedGuid.Equals(current.StorageIndex));
         var alias = new ExGuid(1, Guid.NewGuid());
         var next = MinimalDocx.Create("equivalent base");
@@ -114,7 +111,7 @@ public sealed class FilePartitionSaveTests
             alias, SerialNumber.Null) { Data = index.Data!.ToArray() });
         Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).ExpectedStorageIndex = alias;
         AssertSucceeded(await context.ExecuteAsync(document, request));
-        Assert.Equal(next, (await context.ReadAsync(document.TransitionId)).FilePartition.FileGraph.Materialize());
+        Assert.Equal(next, (await context.ReadAsync(document.Head.ResourceId)).Graph.Materialize());
     }
 
     [Theory]
@@ -130,10 +127,10 @@ public sealed class FilePartitionSaveTests
         var stale = await context.ExecuteAsync(document, request);
         Assert.Equal((ulong)CellErrorCode.CoherencyFailure, Assert.Single(stale.Response.SubResponses).Error!.ErrorCode);
         await AssertUnchangedAsync(context, document, before);
-        put.ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
+        Rebase(request, document.Graph);
         AssertSucceeded(await context.ExecuteAsync(document, request));
-        var saved = await context.ReadAsync(document.TransitionId);
-        Assert.Equal(saved.Content, saved.FilePartition.FileGraph.Materialize());
+        var saved = await context.ReadAsync(document.Head.ResourceId);
+        Assert.Equal(saved.Content, saved.Graph.Materialize());
     }
 
     [Theory]
@@ -146,9 +143,9 @@ public sealed class FilePartitionSaveTests
         var next = MinimalDocx.Create("after");
         var response = await context.ExecuteAsync(document, Proposal(document, next));
         AssertSucceeded(response);
-        var saved = await context.ReadAsync(document.TransitionId);
+        var saved = await context.ReadAsync(document.Head.ResourceId);
         Assert.Equal(next, saved.Content);
-        Assert.Equal(document.ContentVersion + 1, saved.ContentVersion);
+        Assert.Equal(document.Head.ContentVersion + 1, saved.Head.ContentVersion);
         var query = new FsshttpbCellRequest();
         query.SubRequests.Add(new FsshttpbCellSubRequest(RequestTypes.QueryChanges)
         {
@@ -172,7 +169,7 @@ public sealed class FilePartitionSaveTests
         var first = Proposal(document, MinimalDocx.Create("first"));
         var stale = Proposal(document, MinimalDocx.Create("stale"));
         AssertSucceeded(await context.ExecuteAsync(document, first));
-        var saved = await context.ReadAsync(document.TransitionId);
+        var saved = await context.ReadAsync(document.Head.ResourceId);
         var before = await context.StateJsonAsync(saved);
         var result = Assert.Single((await context.ExecuteAsync(saved, stale)).Response.SubResponses);
         Assert.True(result.Status);
@@ -188,13 +185,13 @@ public sealed class FilePartitionSaveTests
         await using var context = new ProviderContext(postgreSql);
         var document = await context.CreateAsync("/test.docx", MinimalDocx.Create());
         var request = Proposal(document, MinimalDocx.Create("saved"));
-        var existingIds = document.FilePartition.FileGraph.Elements.Select(e => e.DataElementExtendedGuid).ToHashSet();
-        var additions = request.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid)
+        var existingIds = document.Graph.Elements.Select(e => e.DataElementExtendedGuid).ToHashSet();
+        var additions = request.DataElementPackage!.DataElements.Where(e => e.DataElementType != DataElementType.StorageIndexDataElementData).Select(e => e.DataElementExtendedGuid)
             .Where(id => !existingIds.Contains(id)).Distinct().ToArray();
         var first = await context.ExecuteAsync(document, request);
         AssertSucceeded(first);
         Assert.False(Assert.Single(first.AcceptedSaves).IsReplay);
-        var saved = await context.ReadAsync(document.TransitionId);
+        var saved = await context.ReadAsync(document.Head.ResourceId);
         var before = await context.StateJsonAsync(saved);
         var second = await context.ExecuteAsync(saved, request);
         AssertSucceeded(second);
@@ -272,14 +269,14 @@ public sealed class FilePartitionSaveTests
             // The captures contain farm-specific expected indexes. Rebase each save
             // onto the accepted graph, retaining its objects for the next delta.
             var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
-            put.ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex;
-            var version = document.ContentVersion;
-            var knowledge = document.FilePartition.KnowledgeSequence;
+            Rebase(request, document.Graph);
+            var version = document.Head.ContentVersion;
+            var knowledge = document.Partition.Knowledge;
             AssertSucceeded(await context.ExecuteAsync(document, request));
-            document = await context.ReadAsync(document.TransitionId);
-            Assert.Equal(version + 1, document.ContentVersion);
-            Assert.True(document.FilePartition.KnowledgeSequence > knowledge);
-            Assert.Equal(document.Content, document.FilePartition.FileGraph.Materialize());
+            document = await context.ReadAsync(document.Head.ResourceId);
+            Assert.Equal(version + 1, document.Head.ContentVersion);
+            Assert.True(document.Partition.Knowledge > knowledge);
+            Assert.Equal(document.Content, document.Graph.Materialize());
             using var zip = new ZipArchive(new MemoryStream(document.Content));
             Assert.NotNull(zip.GetEntry("word/document.xml"));
             if (first is null) first = document.Content.ToArray();
@@ -326,21 +323,21 @@ public sealed class FilePartitionSaveTests
         Assert.False(response.Status, response.Error?.ErrorMessage);
     }
 
-    private static async Task AssertUnchangedAsync(ProviderContext context, StoredDocument before, string state)
+    private static async Task AssertUnchangedAsync(ProviderContext context, ClientDocument before, string state)
     {
         Assert.Equal(state, await context.StateJsonAsync(before));
-        var after = await context.ReadAsync(before.TransitionId);
+        var after = await context.ReadAsync(before.Head.ResourceId);
         Assert.Equal(before.Content, after.Content);
-        Assert.Equal(before.ContentVersion, after.ContentVersion);
-        Assert.Equal(before.FilePartition.KnowledgeSequence, after.FilePartition.KnowledgeSequence);
-        Assert.Equal(before.FilePartition.FileGraph.StorageIndex, after.FilePartition.FileGraph.StorageIndex);
-        Assert.Equal(before.FilePartition.FileGraph.Materialize(), after.FilePartition.FileGraph.Materialize());
+        Assert.Equal(before.Head.ContentVersion, after.Head.ContentVersion);
+        Assert.Equal(before.Partition.Knowledge, after.Partition.Knowledge);
+        Assert.Equal(before.Graph.StorageIndex, after.Graph.StorageIndex);
+        Assert.Equal(before.Graph.Materialize(), after.Graph.Materialize());
     }
 
     private static FsshttpbCellRequest RecordedRequest(string name) => FsshttpbCellRequest.Deserialize(new BinaryReaderEx(
         File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", name))));
 
-    private static FsshttpbCellRequest Proposal(StoredDocument document, byte[] bytes)
+    private static FsshttpbCellRequest Proposal(ClientDocument document, byte[] bytes)
     {
         var identity = DocumentStorageIdentity.Create();
         var stable = new StorageManifestBuilder.StableIdentity(identity.StorageManifestGuid, identity.CellManifestGuid,
@@ -353,12 +350,24 @@ public sealed class FilePartitionSaveTests
             RequestId = 1,
             Data = new PutChangesSubRequestData
             {
+                HasAdditionalFlags = true, AdditionalFlagsBits = 1,
                 StorageIndex = ((QueryChangesSubResponseData)generated.SubResponses[0].Data!).StorageIndexExtendedGuid,
-                ExpectedStorageIndex = document.FilePartition.FileGraph.StorageIndex,
+                ExpectedStorageIndex = document.Graph.StorageIndex,
             },
         });
+        Rebase(request, document.Graph);
         return request;
     }
+
+    private static void Rebase(FsshttpbCellRequest request, PartitionGraphSnapshot graph)
+    {
+        var expected = graph.Elements.Single(e => e.DataElementExtendedGuid.Equals(graph.StorageIndex));
+        if (!request.DataElementPackage!.DataElements.Any(e => e.DataElementExtendedGuid.Equals(graph.StorageIndex)))
+            request.DataElementPackage.DataElements.Add(expected);
+        Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).ExpectedStorageIndex = graph.StorageIndex;
+    }
+
+    private sealed record ClientDocument(DocumentHead Head, PartitionHead Partition, PartitionGraphSnapshot Graph, byte[] Content);
 
     private sealed class ProviderContext : IAsyncDisposable
     {
@@ -371,20 +380,42 @@ public sealed class FilePartitionSaveTests
             provider = ProtocolExecutionTestProvider.Create(postgreSql);
         }
 
-        public async Task<StoredDocument> CreateAsync(string path, byte[] bytes)
+        public async Task<ClientDocument> CreateAsync(string path, byte[] bytes)
         {
-            var state = (await new CellBridgeDocumentService(Provider).CreateAsync(pathPrefix + path, bytes, TestActor.Value))!;
+            var head = (await new CellBridgeDocumentService(Provider).CreateAsync(pathPrefix + path, bytes, TestActor.Value))!;
+            return await ReadAsync(head.ResourceId);
+        }
+
+        public async Task<ClientDocument> CreateRecordedAsync(string path, PartitionGraphSnapshot graph, ulong knowledge)
+        {
+            var legacy = new DocumentStore().Put(pathPrefix + path, graph.Materialize());
+            legacy.Security = DocumentSecurity.Create(TestActor.Value.Identity);
+            legacy.CommitFileRevision(graph, graph.Materialize(), knowledge);
+            var state = RevisionHistory.Initialize((await legacy.CaptureAsync(Provider.Content)) with { Revisions = [] });
+            var bundle = await LegacyDocumentProjection.PrepareAsync(state, Provider.Content, Provider.Limits);
+            var revision = Assert.Single(bundle.Revisions);
+            var prepared = bundle.Current with { Partitions = revision.Partitions.Add(bundle.Current.Partitions.Single(partition => partition.After.Kind == 2)), InitialRevision = revision.Revision,
+                Head = bundle.Current.Head with { Package = revision.Revision.Package } };
+            Assert.True((await Provider.Documents.CreateAsync(prepared)).Created);
             return await ReadAsync(state.ResourceId);
         }
 
-        public async Task<StoredDocument> ReadAsync(Guid id) => await StoredDocument.RestoreAsync(
-            (await Provider.State.FindByResourceIdAsync(id))!, Provider.Content);
+        public async Task<ClientDocument> ReadAsync(Guid id)
+        {
+            var head = (await Provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!;
+            var graph = await StorageTestDocuments.GraphAsync(new(Provider), head);
+            var partition = (await Provider.Documents.ReadPartitionAsync(id, new(0)))!.Partition;
+            return new(head, partition, graph, await StorageTestDocuments.PackageAsync(Provider, head.Package));
+        }
 
-        public async Task<string> StateJsonAsync(StoredDocument document) => JsonSerializer.Serialize(
-            await Provider.State.FindByResourceIdAsync(document.TransitionId));
+        public async Task<string> StateJsonAsync(ClientDocument document)
+        {
+            var snapshot = (await Provider.Documents.ExportDocumentAsync(document.Head.ResourceId))!;
+            return JsonSerializer.Serialize(snapshot with { Current = snapshot.Current with { UtcNow = DateTime.UnixEpoch } });
+        }
 
-        public ValueTask<CellExecution> ExecuteAsync(StoredDocument document, FsshttpbCellRequest request) =>
-            new CellBridgeDocumentService(Provider).ExecuteAsync(document.TransitionId, DocumentPartitionKind.FileContents,
+        public ValueTask<CellExecution> ExecuteAsync(ClientDocument document, FsshttpbCellRequest request) =>
+            new CellBridgeDocumentService(Provider).ExecuteAsync(document.Head.ResourceId, DocumentPartitionKind.FileContents,
                 request, new Dictionary<string, string>(), TestActor.Value);
 
         public ValueTask DisposeAsync() => provider.DisposeAsync();

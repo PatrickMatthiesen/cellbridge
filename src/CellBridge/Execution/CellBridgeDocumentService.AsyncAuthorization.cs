@@ -28,7 +28,7 @@ public sealed partial class CellBridgeDocumentService
     private static bool ValidScopeValue(string? value) => value is null ||
         value.Length is > 0 and <= 256 && !string.IsNullOrWhiteSpace(value) && !value.Any(char.IsControl);
 
-    private DocumentAccess AdmittedAccess(CellBridgeActor actor, DocumentState state)
+    private DocumentAccess AdmittedAccess(CellBridgeActor actor, DocumentHead state)
     {
         var admission = actor.Authorization;
         return IsExternalBinding(state.Security.AuthorizationPolicy) && admission is not null &&
@@ -45,7 +45,7 @@ public sealed partial class CellBridgeDocumentService
             await AuthorizeActorAsync(actor, await CurrentAsync(resourceId, cancellationToken), required, cancellationToken, fresh);
     }
 
-    internal ValueTask<CellBridgeActor> AuthorizeActorAsync(CellBridgeActor actor, DocumentState state,
+    internal ValueTask<CellBridgeActor> AuthorizeActorAsync(CellBridgeActor actor, DocumentHead state,
         DocumentAccess required, CancellationToken cancellationToken, bool fresh = false) =>
         AuthorizeReadIdentityAsync(actor, state.ResourceId, state.LifecycleGeneration, state.IsDeleted,
             state.Security.AuthorizationPolicy, required, cancellationToken, fresh);
@@ -91,24 +91,13 @@ public sealed partial class CellBridgeDocumentService
         }
     }
 
-    internal async ValueTask<DocumentState?> RevalidateReadStateAsync(DocumentState observed, CancellationToken cancellationToken)
+    internal async ValueTask<DocumentHead?> RevalidateReadStateAsync(DocumentHead observed, CancellationToken cancellationToken)
     {
-        if (_externalAuthorization is null) return observed;
-        if (SelectiveReads is { } reads)
-        {
-            var current = await reads.FindReadMetadataByResourceIdAsync(observed.ResourceId, cancellationToken);
-            if (current is null) return null;
-            // State versions identify immutable snapshots. An unchanged pointer lets
-            // graph-returning APIs retain their already decoded complete state.
-            if (current.StateVersion == observed.StateVersion && current.LifecycleGeneration == observed.LifecycleGeneration &&
-                current.Security.AuthorizationPolicy == observed.Security.AuthorizationPolicy)
-                return observed;
-        }
-        return await provider.State.FindByResourceIdAsync(observed.ResourceId, cancellationToken);
+        return await provider.Documents.FindAsync(new DocumentIdentity.Resource(observed.ResourceId), cancellationToken);
     }
 
     /// <summary>Evaluates a fresh operation-time decision. Synchronous Access remains fail-closed for external actors.</summary>
-    public async ValueTask<DocumentAccess> GetAccessAsync(CellBridgeActor actor, DocumentState state,
+    public async ValueTask<DocumentAccess> GetAccessAsync(CellBridgeActor actor, DocumentHead state,
         CancellationToken cancellationToken = default)
     {
         var admitted = await AuthorizeActorAsync(actor, state, DocumentAccess.None, cancellationToken, fresh: true);
@@ -126,19 +115,12 @@ public sealed partial class CellBridgeDocumentService
         CancellationToken cancellationToken = default)
     {
         var next = ExternalBinding(scope, checked((expectedBinding?.Revision ?? 0) + 1));
-        return await provider.State.TransitionAsync(resourceId, (current, _) =>
-        {
-            if (current.IsDeleted || current.StateVersion != expectedStateVersion || current.Security.AuthorizationPolicy != expectedBinding)
-                return new StateTransition<bool>(null, false);
-            var updated = current with
-            {
-                Security = current.Security with { AuthorizationPolicy = next },
-                Editors = [],
-                Coordination = CoordinationState.Empty with { Generation = checked(current.Coordination.Generation + 1) },
-            };
-            provider.Limits.CheckDocument(updated);
-            return new StateTransition<bool>(updated, true);
-        }, cancellationToken);
+        var current = await provider.Documents.ReadControlAsync(resourceId, cancellationToken) ?? throw MissingDocument();
+        if (current.Head.StateVersion != expectedStateVersion || current.Head.Security.AuthorizationPolicy != expectedBinding)
+            return false;
+        var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.BindAuthorization(
+            resourceId, expectedBinding, next, System.Collections.Immutable.ImmutableDictionary<string, DocumentAccess>.Empty) { ExpectedStateVersion = expectedStateVersion }, cancellationToken);
+        return result.Changed;
     }
 
     private DocumentAuthorizationBinding ExternalBinding(DocumentAuthorizationScope scope, long revision = 1)
@@ -152,7 +134,7 @@ public sealed partial class CellBridgeDocumentService
     }
 
     /// <summary>Creates a resource under an explicit trusted external scope after checking Create.</summary>
-    public async ValueTask<DocumentState?> CreateExternalAsync(Guid resourceId, string escapedPath, byte[] bytes,
+    public async ValueTask<DocumentHead?> CreateExternalAsync(Guid resourceId, string escapedPath, byte[] bytes,
         DocumentAuthorizationScope scope, CellBridgeActor actor, CancellationToken cancellationToken = default)
     {
         if (resourceId == Guid.Empty) throw new ArgumentException("A resource identifier is required.", nameof(resourceId));
@@ -177,7 +159,7 @@ public sealed partial class CellBridgeDocumentService
     }
 
     /// <summary>Trusted import under a host-selected scope. CanCreate is an explicit host import capability.</summary>
-    public ValueTask<DocumentState?> ImportExternalAsync(Guid resourceId, string escapedPath, byte[] bytes,
+    public ValueTask<DocumentHead?> ImportExternalAsync(Guid resourceId, string escapedPath, byte[] bytes,
         DocumentAuthorizationScope scope, SubjectIdentity owner, CellBridgeActor importer,
         CancellationToken cancellationToken = default)
     {

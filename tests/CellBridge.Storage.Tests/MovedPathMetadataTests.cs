@@ -20,7 +20,7 @@ public sealed class MovedPathMetadataTests
     {
         foreach (var name in new[] { "literal%2Fname.docx", "literal%20name.docx", "literal%23name.docx" })
         {
-            var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+            var provider = StorageTestDocuments.Memory();
             var service = new CellBridgeDocumentService(provider);
             var original = (await service.CreateAsync("/shared/original.docx", MinimalDocx.Create(), TestActor.Value))!;
             var moved = await service.MoveDocumentAsync(original.ResourceId, "/shared/team/" + name, TestActor.Value);
@@ -48,9 +48,9 @@ public sealed class MovedPathMetadataTests
             var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(
                 new() { Requests = { file } }, "https://host.test", TestActor.Value);
             Assert.Equal("Success", Assert.Single(Assert.Single(result.Response.Responses).SubResponses).ErrorCode);
-            var current = (await provider.State.FindByResourceIdAsync(original.ResourceId))!;
-            Assert.Equal(moved.Path, current.Path);
-            Assert.Equal(moved.Content, current.Content);
+            var current = (await provider.Documents.ReadControlAsync(original.ResourceId))!;
+            Assert.Equal(moved.Path, current.Head.Path);
+            Assert.Equal(moved.Package, current.Head.Package);
             if (type is SubRequestType.Coauth or SubRequestType.EditorsTable) Assert.Single(current.Editors);
             if (type is SubRequestType.Coauth or SubRequestType.SchemaLock) Assert.Single(current.Coordination.SchemaOwners);
         }
@@ -62,7 +62,7 @@ public sealed class MovedPathMetadataTests
     [InlineData("_CellBridge")]
     public async Task ApiAndProtocolRenameRejectReservedRouteNamesWithoutChangingState(string name)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var original = (await service.CreateAsync("/shared/team/file.docx", MinimalDocx.Create(), TestActor.Value))!;
         await Assert.ThrowsAsync<ArgumentException>(() => service.RenameDocumentAsync(original.ResourceId, name, TestActor.Value).AsTask());
@@ -72,7 +72,7 @@ public sealed class MovedPathMetadataTests
         var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(
             new() { Requests = { file } }, "https://host.test", TestActor.Value);
         Assert.Equal("InvalidArgument", Assert.Single(Assert.Single(result.Response.Responses).SubResponses).ErrorCode);
-        Assert.Equal(JsonSerializer.Serialize(original), JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(original.ResourceId)));
-        Assert.Equal(original.ResourceId, (await provider.State.FindByPathKeyAsync(original.PathKey))!.ResourceId);
+        Assert.Equal(JsonSerializer.Serialize(original), JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId))));
+        Assert.Equal(original.ResourceId, (await provider.Documents.FindAsync(new DocumentIdentity.Path(original.PathKey)))!.ResourceId);
     }
 }

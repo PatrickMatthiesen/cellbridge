@@ -36,23 +36,41 @@ public class StorageTests
     }
 
     [Fact]
-    public async Task AtomicCreationAndTransitionsPreventLostUpdates()
+    public async Task AtomicCreationAndIndependentEditorCommandsPreventLostUpdates()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => service.CreateAsync("/same.docx", MinimalDocx.Create(), TestActor.Value).AsTask()));
         var initial = Assert.Single(outcomes, x => x is not null)!;
-        await Task.WhenAll(Enumerable.Range(0, 32).Select(_ => provider.State.TransitionAsync(initial.ResourceId,
-            (current, _) => new StateTransition<bool>(current with { ContentVersion = current.ContentVersion + 1 }, true)).AsTask()));
-        var final = await provider.State.FindByResourceIdAsync(initial.ResourceId);
-        Assert.Equal(initial.ContentVersion + 32, final!.ContentVersion);
-        Assert.Equal(32, final.StateVersion);
+        var clients = Enumerable.Range(0, 32).Select(_ => Guid.NewGuid()).ToArray();
+        var results = await Task.WhenAll(clients.Select(async client =>
+        {
+            for (var attempt = 0; attempt < 64; attempt++)
+            {
+                var head = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)))!;
+                await Task.Yield();
+                var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(initial.ResourceId,
+                    StorageTestDocuments.Admission(head), new() { Type = SubRequestType.EditorsTable, SubRequestDataAttributes =
+                    { ["EditorsTableRequestType"] = "JoinEditingSession", ["ClientID"] = client.ToString(), ["Timeout"] = "3600", ["AsEditor"] = "true" } }));
+                if (result.Changed) return result;
+                Assert.Equal("FileUnauthorizedAccess", result.ErrorCode);
+                Assert.NotEqual(head.StateVersion, result.Current.Head.StateVersion);
+            }
+            throw new InvalidOperationException("The independent editor command could not obtain a current admission.");
+        }));
+        Assert.All(results, result => { Assert.Null(result.ErrorCode); Assert.True(result.Changed); });
+        var final = (await provider.Documents.ReadControlAsync(initial.ResourceId))!;
+        Assert.Equal(initial.ContentVersion, final.Head.ContentVersion);
+        Assert.Equal(32, final.Head.StateVersion);
+        Assert.Equal(clients.Order(), final.Editors.Select(editor => editor.ClientId).Order());
+        Assert.Equal(1, final.Head.Counters.Revisions);
+
     }
 
     [Fact]
     public async Task ReferenceSavesRetryAndContinueAfterRestoration()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         await CheckReferenceSaves(provider);
     }
 
@@ -62,64 +80,63 @@ public class StorageTests
         var state = (await service.CreateAsync("/shared/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var first = Fixture("save-first");
         var second = Fixture("save-second");
-        var initial = await StoredDocument.RestoreAsync(state, provider.Content);
-        ((PutChangesSubRequestData)first.SubRequests.Single().Data!).ExpectedStorageIndex = initial.FilePartition.FileGraph.StorageIndex;
+        Rebase(first, await StorageTestDocuments.GraphAsync(service, state));
         var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(saved.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(state.StateVersion + 1, saved.State.StateVersion);
-        Assert.Equal((await provider.State.FindByResourceIdAsync(state.ResourceId))!.StateVersion, saved.State.StateVersion);
+        Assert.Equal((await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.StateVersion, saved.State.StateVersion);
         var initialVersion = saved.State.ContentVersion;
         var retried = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(retried.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(initialVersion, retried.State.ContentVersion);
         Assert.Equal(saved.State.StateVersion, retried.State.StateVersion);
         Assert.Equal(saved.Response.ToByteArray(), retried.Response.ToByteArray());
+        Rebase(second, await StorageTestDocuments.GraphAsync(service, saved.State));
         var advanced = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, second, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(advanced.Response.SubResponses, r => Assert.False(r.Status));
         Assert.Equal(initialVersion + 1, advanced.State.ContentVersion);
         var delayed = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, first, new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(delayed.Response.SubResponses).Status);
         Assert.Equal((ulong)CellErrorCode.CoherencyFailure, delayed.Response.SubResponses[0].Error!.ErrorCode);
-        var final = await provider.State.FindByResourceIdAsync(state.ResourceId);
+        var final = await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId));
         Assert.Equal(final!.StateVersion, advanced.State.StateVersion);
-        var restored = await StoredDocument.RestoreAsync(final!, provider.Content);
-        Assert.Equal(advanced.State.ContentVersion, restored.ContentVersion);
-        Assert.Equal(restored.Content, restored.FilePartition.FileGraph.Materialize());
+        Assert.Equal(advanced.State.ContentVersion, final.ContentVersion);
+        Assert.Equal(await StorageTestDocuments.PackageAsync(provider, final.Package),
+            (await StorageTestDocuments.GraphAsync(service, final)).Materialize());
         Assert.Null(await service.ResolveAsync(new FssHttpRequest { ResourceId = Guid.NewGuid().ToString(), UseResourceId = true, Url = state.Path }, TestActor.Value));
     }
 
     [Fact]
     public async Task ContentFailureCannotPublishOrAcknowledgeASave()
     {
-        var state = new InMemoryStateStore();
         var blobs = new InMemoryContentStore();
+        var state = new InMemoryDocumentRepository(blobs);
         var service = new CellBridgeDocumentService(new(state, blobs));
         var document = (await service.CreateAsync("/failure.docx", MinimalDocx.Create(), TestActor.Value))!;
         var failed = new CellBridgeDocumentService(new(state, new FailingWrites(blobs)));
         var request = Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(document, blobs)).FilePartition.FileGraph.StorageIndex;
+        Rebase(request, await StorageTestDocuments.GraphAsync(service, document));
         await Assert.ThrowsAsync<IOException>(() => failed.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value).AsTask());
-        Assert.Equal(document.ContentVersion, (await state.FindByResourceIdAsync(document.ResourceId))!.ContentVersion);
+        Assert.Equal(document.ContentVersion, (await state.FindAsync(new DocumentIdentity.Resource(document.ResourceId)))!.ContentVersion);
     }
 
     [Fact]
     public async Task LostCommitReplyResolvesReceiptWithoutApplyingTwice()
     {
-        var inner = new InMemoryStateStore();
-        var provider = new StorageProvider(new LostReplyState(inner), new InMemoryContentStore());
+        var content = new InMemoryContentStore();
+        var inner = new InMemoryDocumentRepository(content);
+        var provider = new StorageProvider(new LostReplyState(inner), content);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/lost.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        Rebase(request, await StorageTestDocuments.GraphAsync(service, state));
         var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(saved.Response.SubResponses, r => Assert.False(r.Status));
-        Assert.Equal(state.ContentVersion + 1, (await inner.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
+        Assert.Equal(state.ContentVersion + 1, (await inner.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.ContentVersion);
         var receipt = Assert.Single(saved.AcceptedSaves);
         Assert.True(receipt.IsReplay);
-        Assert.Equal(saved.State.Content, receipt.Content);
+        Assert.Equal(saved.State.Package, receipt.Package);
         Assert.Equal(saved.State.ContentVersion, receipt.ContentVersion);
     }
 
@@ -149,7 +166,7 @@ public class StorageTests
     [Fact]
     public void CapabilitiesRejectVolatileOrUnsharedConfigurations()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         Assert.Throws<InvalidOperationException>(() => provider.Require(true, false));
         Assert.Throws<InvalidOperationException>(() => provider.Require(false, true));
     }
@@ -169,30 +186,27 @@ public class StorageTests
         public ValueTask<ContentHandle> WriteAsync(Stream source, CancellationToken cancellationToken = default) => throw new IOException("Injected flush failure.");
         public ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default) => inner.OpenReadAsync(handle, cancellationToken);
     }
-    private sealed class LostReplyState(IDocumentStateStore inner) : IDocumentStateStore
+    private sealed class LostReplyState(IDocumentRepository inner) : RepositoryTestProxy(inner)
     {
-        public bool Durable => false; public bool Shared => false;
-        public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken ct = default) => inner.FindByResourceIdAsync(id, ct);
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken ct = default) => inner.FindByPathKeyAsync(key, ct);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken ct = default) => inner.ListAsync(offset, limit, ct);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken ct = default) => inner.TryCreateAsync(state, ct);
-        public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
-        public async ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken ct = default)
+        public override async ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken cancellationToken = default)
         {
-            bool published = false;
-            var result = await inner.TransitionAsync(id, (state, now) =>
-            {
-                var change = transition(state, now);
-                published = change.Next is not null;
-                return change;
-            }, ct);
-            if (published) throw new StorageUnavailableException("Injected lost commit reply.");
+            var result = await Inner.PublishAsync(publication, cancellationToken);
+            if (result.Status == PublicationStatus.Accepted) throw new StorageUnavailableException("Injected lost commit reply.");
             return result;
         }
     }
+
+    internal static void Rebase(FsshttpbCellRequest request, PartitionGraphSnapshot graph)
+    {
+        var index = graph.Elements.Single(element => element.DataElementExtendedGuid.Equals(graph.StorageIndex));
+        if (!request.DataElementPackage!.DataElements.Any(element => element.DataElementExtendedGuid.Equals(graph.StorageIndex)))
+            request.DataElementPackage.DataElements.Add(index);
+        Assert.IsType<PutChangesSubRequestData>(request.SubRequests.Single(operation => operation.RequestType == RequestTypes.PutChanges).Data).ExpectedStorageIndex = graph.StorageIndex;
+    }
+
 }
 
-public sealed class PostgreSqlFactAttribute : FactAttribute;
+
 
 [Collection("PostgreSQL")]
 public sealed class PostgreSqlTests
@@ -202,18 +216,23 @@ public sealed class PostgreSqlTests
     {
         await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
         var state = new PostgreSqlStateStore(source);
-        await state.CheckHealthAsync();
+        await ((IDocumentRepository)state).CheckHealthAsync();
         await StorageTests.CheckReferenceSaves(new(state, new PostgreSqlContentStore(source)));
     }
 
     [PostgreSqlFact]
     public async Task FileSystemProviderUsesSameDurableStateContract()
     {
-        await using var source = NpgsqlDataSource.Create(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!);
         var root = Path.Combine(Path.GetTempPath(), "cellbridge-postgres-test-" + Guid.NewGuid().ToString("N"));
-        // Published test state permanently references these objects. Keep them in
-        // this disposable test root until the disposable test database is removed.
-        await StorageTests.CheckReferenceSaves(new(new PostgreSqlStateStore(source), new FileSystemContentStore(root)));
+        try
+        {
+            await RepositoryTestDatabase.WithDatabase(new(), async source =>
+            {
+                var content = new PostgreSqlFileSystemContentStore(source, root);
+                await StorageTests.CheckReferenceSaves(new(new PostgreSqlStateStore(source, validationContent: content), content));
+            });
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
     [PostgreSqlFact]
@@ -226,10 +245,9 @@ public sealed class PostgreSqlTests
         var second = (await service.CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         await using var connection = await source.OpenConnectionAsync();
         await using var transaction = await connection.BeginTransactionAsync();
-        await using var command = new NpgsqlCommand("SELECT resource_id FROM cellbridge_documents WHERE resource_id=$1 FOR UPDATE", connection, transaction);
+        await using var command = new NpgsqlCommand("SELECT \"ResourceId\" FROM cellbridge_repository_heads WHERE \"ResourceId\"=$1 FOR UPDATE", connection, transaction);
         command.Parameters.Add(new NpgsqlParameter { Value = first.ResourceId });
         await command.ExecuteScalarAsync();
-        await provider.State.TransitionAsync(second.ResourceId, (current, _) =>
-            new StateTransition<bool>(current with { ContentVersion = current.ContentVersion + 1 }, true)).AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+        await RevisionHistoryTests.Save(service, second, "independent row").WaitAsync(TimeSpan.FromSeconds(3));
     }
 }

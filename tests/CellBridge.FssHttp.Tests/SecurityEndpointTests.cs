@@ -230,7 +230,7 @@ public sealed class SecurityEndpointTests
         builder.Logging.ClearProviders();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["AllowedHosts"] = "*" });
         builder.Services.AddAuthentication("office").AddCookie("office", options => options.LoginPath = "/login");
-        builder.Services.AddCellBridge(new(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+        builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false);
         builder.Services.AddCellBridgeOfficeFormsAuthentication("office");
         await using var app = builder.Build();
         app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
@@ -318,7 +318,7 @@ public sealed class SecurityEndpointTests
             builder.Logging.ClearProviders();
             builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?> { ["AllowedHosts"] = allowedHosts });
             TestActor.Register(builder.Services);
-            builder.Services.AddCellBridge(new(new InMemoryStateStore(), new InMemoryContentStore()),
+            builder.Services.AddCellBridge(TestStorage.Memory(),
                 requireDurability: false, configure: configure);
             var app = builder.Build();
             var bodies = new ConcurrentDictionary<string, BlockingBody>();

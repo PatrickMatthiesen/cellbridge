@@ -1,5 +1,6 @@
 using CellBridge.FssHttp;
 using CellBridge.Storage;
+using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.AspNetCore;
 
@@ -31,6 +32,13 @@ public static class DocumentRequestResolver
         }
 
         return string.IsNullOrWhiteSpace(request.Url) ? null : store.Get(request.Url);
+    }
+
+    public static string CanonicalUrl(DocumentHead document, string publicOrigin)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentException.ThrowIfNullOrWhiteSpace(publicOrigin);
+        return publicOrigin.TrimEnd('/') + string.Join('/', document.Path.Split('/', StringSplitOptions.None).Select(Uri.EscapeDataString));
     }
 
     /// <summary>

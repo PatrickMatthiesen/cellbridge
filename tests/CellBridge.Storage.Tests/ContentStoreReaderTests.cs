@@ -15,7 +15,7 @@ public sealed class ContentStoreReaderTests
     public async Task HealthProbeRejectsOverlongProviderOutputAfterOneExtraByteAndDisposesSource()
     {
         var store = new TestContent([67, 66, 99, 100], writeHandle: Handle([67, 66]));
-        var provider = new StorageProvider(new InMemoryStateStore(), store);
+        var provider = StorageTestDocuments.Memory(store);
         await Assert.ThrowsAsync<StorageCorruptionException>(() => provider.CheckHealthAsync().AsTask());
         Assert.True(store.LastStream!.Disposed);
         Assert.Equal(3, store.LastStream.ReadCalls);
@@ -25,7 +25,7 @@ public sealed class ContentStoreReaderTests
     public async Task HealthProbeRejectsOversizedDeclaredHandleBeforeOpeningSource()
     {
         var store = new TestContent([], writeHandle: Handle([67, 66]) with { Length = 3 });
-        var provider = new StorageProvider(new InMemoryStateStore(), store);
+        var provider = StorageTestDocuments.Memory(store);
         await Assert.ThrowsAsync<StorageQuotaExceededException>(() => provider.CheckHealthAsync().AsTask());
         Assert.Null(store.LastStream);
     }
@@ -140,25 +140,33 @@ public sealed class ContentStoreReaderTests
     [InlineData(true)]
     public async Task RetryRejectsHashedMalformedOrTrailingResponseBytesWithoutPublishing(bool malformed)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/receipt.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
-            StorageIds.Restore(state.Partitions.Single(p => p.Kind == 0).StorageIndex!);
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service, state));
         var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request,
             new Dictionary<string, string>(), TestActor.Value);
-        var receipt = Assert.Single(saved.State.Receipts);
+        var receipt = Assert.Single((await provider.Documents.ExportDocumentAsync(state.ResourceId))!.Receipts);
         var response = await provider.Content.ReadVerifiedAsync(receipt.Response!);
         using var appended = new MemoryStream(malformed ? [1, 2, 3] : [..response, 0xff]);
         var corrupted = await provider.Content.WriteAsync(appended);
-        await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-            { Receipts = [receipt with { Response = corrupted }] }, true));
-        var before = await provider.State.FindByResourceIdAsync(state.ResourceId);
+        var corruptProvider = new StorageProvider(new CorruptReceipt(provider.Documents, corrupted), provider.Content);
+        service = new(corruptProvider);
+        var before = await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId));
         var error = await Assert.ThrowsAsync<StorageCorruptionException>(() => service.ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value).AsTask());
         if (malformed) Assert.NotNull(error.InnerException);
-        Assert.Equal(before, await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(before, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
+    }
+
+    private sealed class CorruptReceipt(IDocumentRepository inner, ContentHandle response) : RepositoryTestProxy(inner)
+    {
+        public override async ValueTask<SaveReceiptRead?> ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken ct = default)
+        {
+            var read = await Inner.ReadReceiptAsync(id, operation, ct);
+            return read?.Receipt is { } receipt ? read with { Receipt = receipt with { Response = response } } : read;
+        }
     }
 
     private static ContentHandle Handle(byte[] bytes) => new("key", bytes.LongLength, Convert.ToHexStringLower(SHA256.HashData(bytes)));

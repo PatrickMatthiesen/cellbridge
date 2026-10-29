@@ -59,7 +59,7 @@ public sealed class EfPostgreSqlModelTests
         Assert.Equal(modelConstraints, databaseConstraints);
 
         var modelIndexes = entities.SelectMany(entity => entity.GetIndexes())
-            .Select(index => index.GetDatabaseName()).Order().ToArray();
+            .Select(index => index.GetDatabaseName()).Order(StringComparer.Ordinal).ToArray();
         await using (var command = source.CreateCommand("""
             SELECT index_row.relname
             FROM pg_index definition
@@ -68,7 +68,7 @@ public sealed class EfPostgreSqlModelTests
             JOIN pg_namespace namespace_row ON namespace_row.oid = table_row.relnamespace
             WHERE namespace_row.nspname = current_schema() AND table_row.relname = ANY($1)
                 AND NOT definition.indisprimary
-            ORDER BY index_row.relname
+            ORDER BY index_row.relname COLLATE "C"
             """))
         {
             command.Parameters.AddWithValue(tables);
@@ -108,7 +108,7 @@ public sealed class EfPostgreSqlModelTests
     });
 
     [PostgreSqlFact]
-    public Task CancellationAcrossAContentBatchBoundaryRollsBackChunksAndAccounting() =>
+    public Task CancellationAcrossAContentBatchBoundaryRollsBackChunksAndObjects() =>
         WithEmptyDatabase(async source =>
         {
             await new PostgreSqlStorageMigrator(source).MigrateAsync();
@@ -130,8 +130,7 @@ public sealed class EfPostgreSqlModelTests
             await using (var empty = source.CreateCommand("""
                 SELECT (SELECT count(*) FROM cellbridge_objects),
                     (SELECT count(*) FROM cellbridge_chunks),
-                    stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint
-                FROM cellbridge_usage
+                    (SELECT COALESCE(SUM(length),0)::bigint FROM cellbridge_objects) + (SELECT COALESCE(SUM(octet_length(state_json)),0)::bigint FROM cellbridge_states) + (SELECT COALESCE(SUM(octet_length(receipt_json)),0)::bigint FROM cellbridge_recovery_receipts)
                 """))
             await using (var reader = await empty.ExecuteReaderAsync())
             {
@@ -152,71 +151,8 @@ public sealed class EfPostgreSqlModelTests
             Assert.Equal(bytes, await content.ReadVerifiedAsync(handle));
             var emptyHandle = await content.WriteAsync(Stream.Null);
             Assert.Empty(await content.ReadVerifiedAsync(emptyHandle));
-            await using var usage = source.CreateCommand("SELECT stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint FROM cellbridge_usage");
+            await using var usage = source.CreateCommand("SELECT (SELECT COALESCE(SUM(length),0)::bigint FROM cellbridge_objects) + (SELECT COALESCE(SUM(octet_length(state_json)),0)::bigint FROM cellbridge_states) + (SELECT COALESCE(SUM(octet_length(receipt_json)),0)::bigint FROM cellbridge_recovery_receipts)");
             Assert.Equal(bytes.LongLength, (long)(await usage.ExecuteScalarAsync())!);
-        });
-
-    [PostgreSqlFact]
-    public Task ContentQuotaRejectionRollsBackAllChunkBatchesAndAccounting() =>
-        WithEmptyDatabase(async source =>
-        {
-            const int chunkSize = 65536;
-            var bytes = new byte[17 * chunkSize];
-            await new PostgreSqlStorageMigrator(source,
-                new StorageLimits { MaxStoredBytes = bytes.LongLength - 1 }).MigrateAsync();
-            var interceptor = new CountSavesInterceptor();
-            var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
-                .UseNpgsql(source)
-                .AddInterceptors(interceptor)
-                .Options;
-            var content = new PostgreSqlContentStore(options);
-
-            var error = await Assert.ThrowsAsync<StorageQuotaExceededException>(() =>
-                content.WriteAsync(new MemoryStream(bytes, writable: false)).AsTask());
-
-            Assert.Equal("total stored bytes", error.Budget);
-            Assert.Equal(2, interceptor.Saves);
-            await AssertContentAccountingAsync(source, objects: 0, chunks: 0, bytes: 0);
-        });
-
-    [PostgreSqlFact]
-    public Task ConcurrentContentUploadsAdmitOnlyOneObjectWithinTheSharedQuota() =>
-        WithEmptyDatabase(async source =>
-        {
-            const int chunkSize = 65536;
-            var firstBytes = new byte[2 * chunkSize];
-            var secondBytes = new byte[firstBytes.Length];
-            secondBytes[^1] = 1;
-            await new PostgreSqlStorageMigrator(source,
-                new StorageLimits { MaxStoredBytes = firstBytes.LongLength }).MigrateAsync();
-            var barrier = new FirstChunkBatchBarrier();
-            var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
-                .UseNpgsql(source)
-                .AddInterceptors(barrier)
-                .Options;
-
-            // Separate stores exercise the database quota lock across hosts.
-            var writes = new[]
-            {
-                TryWriteAsync(new PostgreSqlContentStore(options), firstBytes),
-                TryWriteAsync(new PostgreSqlContentStore(options), secondBytes),
-            };
-            var handles = await Task.WhenAll(writes).WaitAsync(TimeSpan.FromSeconds(15));
-            var accepted = Assert.IsType<ContentHandle>(Assert.Single(handles, handle => handle is not null));
-            Assert.Single(handles, handle => handle is null);
-            var expected = handles[0] is not null ? firstBytes : secondBytes;
-            Assert.Equal(expected, await new PostgreSqlContentStore(source).ReadVerifiedAsync(accepted));
-            await AssertContentAccountingAsync(source, objects: 1, chunks: 2, bytes: expected.LongLength);
-
-            static async Task<ContentHandle?> TryWriteAsync(PostgreSqlContentStore content, byte[] bytes)
-            {
-                try { return await content.WriteAsync(new MemoryStream(bytes, writable: false)); }
-                catch (StorageQuotaExceededException error)
-                {
-                    Assert.Equal("total stored bytes", error.Budget);
-                    return null;
-                }
-            }
         });
 
     [PostgreSqlFact]
@@ -238,11 +174,11 @@ public sealed class EfPostgreSqlModelTests
             Assert.Equal(second, await content.ReadVerifiedAsync(handles[0]));
             Assert.Equal(first, await content.ReadVerifiedAsync(handles[1]));
             Assert.Empty(await content.ReadVerifiedAsync(handles[3]));
-            await AssertContentAccountingAsync(source, objects: 3, chunks: 2, bytes: 5);
+            await AssertContentInventoryAsync(source, objects: 3, chunks: 2, bytes: 5);
             metadata.Reads = 0;
             Assert.Equal(handles, await writer.WriteManyAsync(new ReadOnlyMemory<byte>[] { second, first, second, ReadOnlyMemory<byte>.Empty }));
             Assert.Equal(1, metadata.Reads);
-            await AssertContentAccountingAsync(source, objects: 3, chunks: 2, bytes: 5);
+            await AssertContentInventoryAsync(source, objects: 3, chunks: 2, bytes: 5);
 
             await using (var corrupt = source.CreateCommand("UPDATE cellbridge_chunks SET bytes=$1 WHERE object_key=$2"))
             {
@@ -252,7 +188,7 @@ public sealed class EfPostgreSqlModelTests
             }
             await Assert.ThrowsAsync<StorageCorruptionException>(() =>
                 writer.WriteManyAsync(new ReadOnlyMemory<byte>[] { first }).AsTask());
-            await AssertContentAccountingAsync(source, objects: 3, chunks: 2, bytes: 5);
+            await AssertContentInventoryAsync(source, objects: 3, chunks: 2, bytes: 5);
         });
 
     private sealed class CountBatchMetadataReads : DbCommandInterceptor
@@ -286,7 +222,7 @@ public sealed class EfPostgreSqlModelTests
             await Assert.ThrowsAsync<StorageCorruptionException>(() =>
                 content.WriteManyAsync(new ReadOnlyMemory<byte>[] { raced, other }).AsTask());
             Assert.True(injection.Injected);
-            await AssertContentAccountingAsync(source, objects: 1, chunks: 1, bytes: raced.Length);
+            await AssertContentInventoryAsync(source, objects: 1, chunks: 1, bytes: raced.Length);
         });
 
     private sealed class AfterInitialObjectLookup(Func<Task> action) : DbCommandInterceptor
@@ -307,23 +243,6 @@ public sealed class EfPostgreSqlModelTests
     }
 
     [PostgreSqlFact]
-    public Task BatchContentQuotaRejectionRollsBackEveryObjectAndChunk() =>
-        WithEmptyDatabase(async source =>
-        {
-            var bytes = new byte[17 * 65536];
-            byte[] other = [1];
-            await new PostgreSqlStorageMigrator(source,
-                new StorageLimits { MaxStoredBytes = bytes.LongLength }).MigrateAsync();
-            var writer = Assert.IsAssignableFrom<IContentBatchWriter>(new PostgreSqlContentStore(source));
-
-            var error = await Assert.ThrowsAsync<StorageQuotaExceededException>(() =>
-                writer.WriteManyAsync(new ReadOnlyMemory<byte>[] { bytes, other }).AsTask());
-
-            Assert.Equal("total stored bytes", error.Budget);
-            await AssertContentAccountingAsync(source, objects: 0, chunks: 0, bytes: 0);
-        });
-
-    [PostgreSqlFact]
     public Task BatchContentCancellationRollsBackPreviouslyInsertedChunkBatches() =>
         WithEmptyDatabase(async source =>
         {
@@ -340,7 +259,7 @@ public sealed class EfPostgreSqlModelTests
                 new ReadOnlyMemory<byte>[] { new byte[17 * 65536], new byte[] { 1 } }, cancellation.Token).AsTask());
 
             Assert.True(interceptor.Triggered);
-            await AssertContentAccountingAsync(source, objects: 0, chunks: 0, bytes: 0);
+            await AssertContentInventoryAsync(source, objects: 0, chunks: 0, bytes: 0);
         });
 
     [PostgreSqlFact]
@@ -359,7 +278,7 @@ public sealed class EfPostgreSqlModelTests
 
             Assert.Equal(handles[0][0], handles[1][1]);
             Assert.Equal(handles[0][1], handles[1][0]);
-            await AssertContentAccountingAsync(source, objects: 2, chunks: 2, bytes: 5);
+            await AssertContentInventoryAsync(source, objects: 2, chunks: 2, bytes: 5);
         });
 
     [PostgreSqlFact]
@@ -428,13 +347,12 @@ public sealed class EfPostgreSqlModelTests
 
     private sealed record SchemaConstraint(string Table, string Name, string Type, string DeleteAction);
 
-    private static async Task AssertContentAccountingAsync(NpgsqlDataSource source, long objects, long chunks, long bytes)
+    private static async Task AssertContentInventoryAsync(NpgsqlDataSource source, long objects, long chunks, long bytes)
     {
         await using var command = source.CreateCommand("""
             SELECT (SELECT count(*) FROM cellbridge_objects),
                 (SELECT count(*) FROM cellbridge_chunks),
-                stored_bytes-(SELECT COALESCE(SUM(available_bytes),0) FROM cellbridge_usage_buckets)::bigint, document_count
-            FROM cellbridge_usage
+                (SELECT COALESCE(SUM(length),0)::bigint FROM cellbridge_objects) + (SELECT COALESCE(SUM(octet_length(state_json)),0)::bigint FROM cellbridge_states) + (SELECT COALESCE(SUM(octet_length(receipt_json)),0)::bigint FROM cellbridge_recovery_receipts), (SELECT count(*) FROM cellbridge_documents)
             """);
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
@@ -444,31 +362,9 @@ public sealed class EfPostgreSqlModelTests
         Assert.Equal(0L, reader.GetInt64(3));
     }
 
-    private sealed class CountSavesInterceptor : SaveChangesInterceptor
-    {
-        public int Saves { get; private set; }
-        public override ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
-            CancellationToken cancellationToken = default)
-        {
-            Saves++;
-            return ValueTask.FromResult(result);
-        }
-    }
 
-    private sealed class FirstChunkBatchBarrier : SaveChangesInterceptor
-    {
-        private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private int batches;
 
-        public override async ValueTask<int> SavedChangesAsync(SaveChangesCompletedEventData eventData, int result,
-            CancellationToken cancellationToken = default)
-        {
-            var batch = Interlocked.Increment(ref batches);
-            if (batch == 2) ready.TrySetResult();
-            if (batch <= 2) await ready.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
-            return result;
-        }
-    }
+
 
     private sealed class CancelCommitInterceptor(CancellationTokenSource cancellation) : DbTransactionInterceptor
     {

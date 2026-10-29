@@ -13,11 +13,11 @@ public sealed class DocumentStateJsonContextTests
     [Fact]
     public async Task ConcurrentCodecOperationsAndFailuresCannotReuseAnotherDocumentsTable()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
-        var service = new CellBridgeDocumentService(provider);
-        var first = (await service.CreateAsync("/codec-first.docx", MinimalDocx.Create("first"), TestActor.Value))!;
-        var second = await RevisionHistoryTests.Save(service,
-            (await service.CreateAsync("/codec-second.docx", MinimalDocx.Create("second"), TestActor.Value))!, "second revision");
+        var content = new InMemoryContentStore();
+        var first = await LegacyStorageFixture.CreateAsync(content, "/codec-first.docx", MinimalDocx.Create("first"));
+        var second = (await LegacyStorageFixture.SaveAsync(
+            await LegacyStorageFixture.CreateAsync(content, "/codec-second.docx", MinimalDocx.Create("second")),
+            content, MinimalDocx.Create("second revision"))).State;
         var expected = new[] { JsonSerializer.Serialize(first), JsonSerializer.Serialize(second) };
         Parallel.For(0, 64, new ParallelOptions { MaxDegreeOfParallelism = 8 }, index =>
         {

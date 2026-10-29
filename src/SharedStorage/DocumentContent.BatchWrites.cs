@@ -1,3 +1,4 @@
+using CellBridge.Diagnostics;
 using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
 using Microsoft.EntityFrameworkCore;
@@ -9,10 +10,13 @@ internal sealed partial class DocumentContent<TContext> : IContentBatchWriter wh
     public async ValueTask<IReadOnlyList<ContentHandle>> WriteManyAsync(
         IReadOnlyList<ReadOnlyMemory<byte>> contents, CancellationToken cancellationToken = default)
     {
+        using var timing = CellBridgeMetrics.Measure(CellBridgePhase.ContentBatch);
         ValidateWriteBatch(contents, cancellationToken);
         if (contents.Count == 0) return Array.Empty<ContentHandle>();
-        await _writers.WaitAsync(cancellationToken);
+        using (CellBridgeMetrics.Measure(CellBridgePhase.ContentWriterWait))
+            await _writers.WaitAsync(cancellationToken);
         try { return await WriteManyCoreAsync(contents, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex) when (database.IsDatabaseException(ex))
         { throw new StorageUnavailableException("Content batch write failed or its commit outcome is unknown.", ex); }
         finally { _writers.Release(); }
@@ -21,22 +25,25 @@ internal sealed partial class DocumentContent<TContext> : IContentBatchWriter wh
     private async Task<IReadOnlyList<ContentHandle>> WriteManyCoreAsync(
         IReadOnlyList<ReadOnlyMemory<byte>> contents, CancellationToken cancellationToken)
     {
-        var prepared = PrepareWriteBatch(contents, cancellationToken);
+        PreparedWriteBatch prepared;
+        using (CellBridgeMetrics.Measure(CellBridgePhase.ContentHashing))
+            prepared = PrepareWriteBatch(contents, cancellationToken);
         await using var context = CreateContext();
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction openedTransaction;
+        using (CellBridgeMetrics.Measure(CellBridgePhase.ContentConnectionAndTransaction))
+            openedTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = openedTransaction;
         await database.ConfigureAsync(context, cancellationToken);
         await database.CheckConfigurationAsync(context, cancellationToken);
-        await database.Locks.PublicationAsync(context, false, cancellationToken);
-        var added = await WriteManyInTransactionAsync(context, prepared, cancellationToken);
-        if (added.InsertedAny)
-        {
-            // Admit all newly inserted objects atomically, holding the global
-            // usage row only after all content has been uploaded.
-            await DocumentBudget.AdjustAsync(database, context, added.Bytes, 0, cancellationToken);
-            await context.SaveChangesAsync(cancellationToken);
-        }
+        bool insertedAny;
+        using (CellBridgeMetrics.Measure(CellBridgePhase.ContentWrite))
+            insertedAny = await WriteManyInTransactionAsync(context, prepared, cancellationToken);
+        if (insertedAny)
+            using (CellBridgeMetrics.Measure(CellBridgePhase.ContentSaveChanges))
+                await context.SaveChangesAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        await transaction.CommitAsync(CancellationToken.None);
+        using (CellBridgeMetrics.Measure(CellBridgePhase.ContentCommit))
+            await transaction.CommitAsync(CancellationToken.None);
         return prepared.Handles;
     }
 
@@ -77,13 +84,13 @@ internal sealed partial class DocumentContent<TContext> : IContentBatchWriter wh
         return new(handles, unique.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => pair.Value).ToArray());
     }
 
-    // The caller owns transaction setup, quota admission and commit. Creation
+    // The caller owns transaction setup and commit. Creation
     // locks for missing objects remain held until that transaction ends.
-    internal async Task<(bool InsertedAny, long Bytes)> WriteManyInTransactionAsync(TContext context,
+    internal async Task<bool> WriteManyInTransactionAsync(TContext context,
         PreparedWriteBatch prepared, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (prepared.Unique.Count == 0) return (false, 0);
+        if (prepared.Unique.Count == 0) return false;
         // Existing objects remain immutable under the caller's publication gate.
         // A missing object may still race with another writer; verify that winner below.
         var keys = prepared.Unique.Select(item => item.Handle.Key).ToArray();
@@ -102,10 +109,9 @@ internal sealed partial class DocumentContent<TContext> : IContentBatchWriter wh
             missing.Add(item);
         }
         cancellationToken.ThrowIfCancellationRequested();
-        if (missing.Count == 0) return (false, 0);
+        if (missing.Count == 0) return false;
         // Preserve the prepared key order when batching creation locks and inserts.
         var inserted = await database.CreateObjectsAsync(context, missing.Select(item => item.Handle).ToArray(), cancellationToken);
-        long addedBytes = 0;
         var pending = new List<ChunkRow>(ChunksPerBatch);
         foreach (var item in missing)
         {
@@ -114,7 +120,6 @@ internal sealed partial class DocumentContent<TContext> : IContentBatchWriter wh
                 await VerifyExistingContentAsync(context, item.Handle, cancellationToken);
                 continue;
             }
-            addedBytes = checked(addedBytes + item.Handle.Length);
             var ordinal = 0;
             for (var offset = 0; offset < item.Bytes.Length;)
             {
@@ -133,7 +138,7 @@ internal sealed partial class DocumentContent<TContext> : IContentBatchWriter wh
         }
         if (pending.Count != 0) await SaveChunkBatchAsync(context, pending, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        return (inserted.Count != 0, addedBytes);
+        return inserted.Count != 0;
     }
 
     internal sealed record PreparedWriteBatch(ContentHandle[] Handles,

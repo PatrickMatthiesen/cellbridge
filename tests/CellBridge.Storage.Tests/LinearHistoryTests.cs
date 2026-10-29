@@ -56,23 +56,26 @@ public sealed class LinearHistoryTests
     }
 
     [Fact]
-    public async Task LibraryWholeFileAppendsShareRetainedMembershipPrefixes()
+    public async Task LibrarySavesRetainUniqueImmutableDescriptorsAndBoundedRevisionHeaders()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/shared-prefix.docx", MinimalDocx.Create("initial"), TestActor.Value))!;
         for (var index = 1; index <= 10; index++)
         {
-            var previous = state.Partitions.Single(p => p.Kind == 0).Elements;
-            state = await RevisionHistoryTests.Save(service, state, "revision " + index);
-            var current = state.Partitions.Single(p => p.Kind == 0).Elements;
-            Assert.True(current.Length > previous.Length);
-            Assert.Same(previous.Root, current.Root!.Left);
+            var previous = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
+            state = await RevisionHistoryTests.Save(service,state,"revision " + index);
+            var current = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
+            Assert.True(current.Elements.Length > previous.Elements.Length);
+            foreach (var element in previous.Elements)
+                Assert.Equal(element,current.Elements.Single(e => e.Scope == element.Scope && e.Element.Id == element.Element.Id));
+            Assert.All(current.ApplicationRevisions,revision => Assert.Equal(2,revision.Partitions.Length));
+            Assert.Equal(current.Elements.Length,current.Elements.Select(e => (e.Scope,e.Element.Id)).Distinct().Count());
         }
-        var memberships = state.Partitions.Concat(state.Revisions.SelectMany(r => r.Partitions))
-            .Where(p => p.Kind == 0).Select(p => p.Elements);
-        Assert.Equal(state.Partitions.Single(p => p.Kind == 0).Elements.Length,
-            GraphElementCollection.UniqueSegments(memberships).Sum(s => s.Length));
+        var history = (await provider.Documents.ReadRevisionsAsync(state.ResourceId,0,20))!;
+        Assert.Equal(11,history.Revisions.Length);
+        foreach (var revision in history.Revisions)
+            Assert.NotEmpty(await StorageTestDocuments.PackageAsync(provider,revision.Package));
     }
 
     [Fact]

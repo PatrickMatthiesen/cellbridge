@@ -19,9 +19,9 @@ public sealed class ExecutionPublicationTests
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/competing-" + Guid.NewGuid() + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var files = new[] { MinimalDocx.Create("first contender"), MinimalDocx.Create("second contender") };
-        var proposals = files.Select(bytes => Proposal(state, bytes)).ToArray();
-        var content = new RendezvousContent(provider.Content);
-        var competing = new StorageProvider(provider.State, content);
+        var graph = await StorageTestDocuments.GraphAsync(service, state);
+        var proposals = files.Select(bytes => SyntheticWorkload.Save(graph, bytes, "changed-full", 1, new Random(Random.Shared.Next()))).ToArray();
+        var competing = new StorageProvider(new RendezvousRepository(provider.Documents), provider.Content);
         var results = await Task.WhenAll(proposals.Select(request => new CellBridgeDocumentService(competing)
             .ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request,
                 new Dictionary<string, string>(), TestActor.Value).AsTask())).WaitAsync(TimeSpan.FromSeconds(30));
@@ -30,13 +30,13 @@ public sealed class ExecutionPublicationTests
         Assert.Equal((ulong)CellErrorCode.CoherencyFailure, loser.Response.SubResponses[0].Error!.ErrorCode);
         Assert.Empty(loser.AcceptedSaves);
         Assert.False(Assert.Single(winner.AcceptedSaves).IsReplay);
-        var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         Assert.Equal(state.ContentVersion + 1, current.ContentVersion);
-        Assert.Single(current.Receipts);
-        var actual = await provider.Content.ReadVerifiedAsync(current.Content);
+        Assert.Equal(1, current.Counters.SaveReceipts);
+        var actual = await StorageTestDocuments.PackageAsync(provider, current.Package);
         Assert.Equal(files[Array.IndexOf(results, winner)], actual);
-        var graph = await DocumentPartition.RestoreFileGraphAsync(current, provider.Content, provider.Limits);
-        Assert.Equal(actual, graph.Materialize());
+        var currentGraph = await StorageTestDocuments.GraphAsync(service, current);
+        Assert.Equal(actual, currentGraph.Materialize());
         var winnerIndex = Array.IndexOf(results, winner);
         var replay = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, proposals[winnerIndex],
             new Dictionary<string, string>(), TestActor.Value);
@@ -57,11 +57,11 @@ public sealed class ExecutionPublicationTests
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/interrupted-" + Guid.NewGuid() + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var bytes = MinimalDocx.Create("accepted before interruption");
-        var request = Proposal(state, bytes);
+        var request = await StorageTestDocuments.SaveRequestAsync(service, state, bytes);
         request.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 2,
             Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } });
         using var cancellation = new CancellationTokenSource();
-        var interrupted = new AfterSaveReadStore(provider.State, () =>
+        var interrupted = new AfterSaveReadStore(provider.Documents, () =>
         {
             if (cancel)
             {
@@ -92,10 +92,10 @@ public sealed class ExecutionPublicationTests
             Assert.False(accepted.IsReplay);
             Assert.Equal(state.ContentVersion + 1, accepted.ContentVersion);
         }
-        var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         Assert.Equal(state.ContentVersion + 1, current.ContentVersion);
-        Assert.Single(current.Receipts);
-        Assert.Equal(bytes, await provider.Content.ReadVerifiedAsync(current.Content));
+        Assert.Equal(1, current.Counters.SaveReceipts);
+        Assert.Equal(bytes, await StorageTestDocuments.PackageAsync(provider, current.Package));
         var retry = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(retry.Response.SubResponses, operation => Assert.False(operation.Status));
@@ -106,52 +106,29 @@ public sealed class ExecutionPublicationTests
         Assert.Equal(bytes, PartitionGraphSnapshot.Create(decoded.DataElementPackage!.DataElements, query.StorageIndexExtendedGuid).Materialize());
     }
 
-    private static FsshttpbCellRequest Proposal(DocumentState state, byte[] bytes)
-    {
-        var id = DocumentStorageIdentity.Create();
-        var identity = new StorageManifestBuilder.StableIdentity(id.StorageManifestGuid, id.CellManifestGuid,
-            id.RevisionManifestGuid, id.ObjectGroupGuid, id.ObjectDataBlobGuid, id.ObjectGuid,
-            id.RevisionId, id.CellId, id.SerialGuid);
-        var generated = FileContentPartitionBuilder.BuildQueryChangesResponse(1, bytes, identity, 1);
-        var index = Assert.IsType<QueryChangesSubResponseData>(generated.SubResponses[0].Data).StorageIndexExtendedGuid;
-        return new() { DataElementPackage = generated.DataElementPackage, SubRequests =
-        { new(RequestTypes.PutChanges) { RequestId = 1, Data = new PutChangesSubRequestData
-            { StorageIndex = index, ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!), Flags = 1 } } } };
-    }
-
-    private sealed class RendezvousContent(IContentStore inner) : IContentStore
+    private sealed class RendezvousRepository(IDocumentRepository inner) : RepositoryTestProxy(inner)
     {
         private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int arrivals;
-        public bool Durable => inner.Durable;
-        public bool Shared => inner.Shared;
-        public async ValueTask<ContentHandle> WriteAsync(Stream source, CancellationToken cancellationToken = default)
+        public override async ValueTask<SavePreparationRead?> PrepareSaveAsync(Guid id, SavePreparationRequest request, CancellationToken ct = default)
         {
-            if (source is FileStream && Interlocked.Increment(ref arrivals) <= 2)
+            var read = await Inner.PrepareSaveAsync(id, request, ct);
+            if (Interlocked.Increment(ref arrivals) <= 2)
             {
                 if (Volatile.Read(ref arrivals) == 2) ready.TrySetResult();
-                await ready.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken);
+                await ready.Task.WaitAsync(TimeSpan.FromSeconds(20), ct);
             }
-            return await inner.WriteAsync(source, cancellationToken);
+            return read;
         }
-        public ValueTask<Stream> OpenReadAsync(ContentHandle handle, CancellationToken cancellationToken = default) =>
-            inner.OpenReadAsync(handle, cancellationToken);
     }
 
-    private sealed class AfterSaveReadStore(IDocumentStateStore inner, Action interrupt) : IDocumentStateStore
+    private sealed class AfterSaveReadStore(IDocumentRepository inner, Action interrupt) : RepositoryTestProxy(inner)
     {
-        public bool Durable => inner.Durable;
-        public bool Shared => inner.Shared;
-        public async ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default)
+        public override async ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken ct = default)
         {
-            var state = await inner.FindByResourceIdAsync(id, cancellationToken);
-            if (state is { Receipts.IsEmpty: false }) interrupt();
-            return state;
+            var head = await Inner.FindAsync(identity, ct);
+            if (head is { Counters.SaveReceipts: > 0 }) interrupt();
+            return head;
         }
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken ct = default) => inner.FindByPathKeyAsync(key, ct);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken ct = default) => inner.ListAsync(offset, limit, ct);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken ct = default) => inner.TryCreateAsync(state, ct);
-        public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken ct = default) => inner.TransitionAsync(id, transition, ct);
-        public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
     }
 }

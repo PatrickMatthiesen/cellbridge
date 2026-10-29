@@ -14,10 +14,10 @@ internal static class PostgreSqlDatabase
         ArgumentNullException.ThrowIfNull(options);
         var normalized = new DbContextOptionsBuilder<CellBridgeDbContext>(options)
             .UseNpgsql(postgres => postgres.MigrationsHistoryTable(CellBridgeDbContext.MigrationsHistoryTable))
-            // Library-owned mutations and quota ledger updates require tracked rows.
+            // Library-owned mutations require tracked rows.
             .UseQueryTrackingBehavior(QueryTrackingBehavior.TrackAll)
             // Explicit initialization owns one transaction so legacy transforms, EF
-            // migrations, quota validation and the history record cannot diverge.
+            // migrations and the history record cannot diverge.
             .ConfigureWarnings(warnings =>
                 warnings.Ignore(RelationalEventId.MigrationsUserTransactionWarning))
             .Options;

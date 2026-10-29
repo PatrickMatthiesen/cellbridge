@@ -48,7 +48,7 @@ try
     if (args[0] == "restore-version")
     {
         var provider = Provider("cellbridge");
-        await provider.State.CheckHealthAsync();
+        await provider.Documents.CheckHealthAsync();
         var subject = Required("subject");
         // Trusted operator identifies the actor; the regular restore API still enforces stored Write access.
         var restored = await new CellBridgeDocumentService(provider).RestoreRevisionAsync(Guid.Parse(Required("resource-id")),

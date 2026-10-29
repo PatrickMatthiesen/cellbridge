@@ -42,10 +42,10 @@ public sealed class CellBinaryRequestExecutionTests
         var service = new CellBridgeDocumentService(provider);
         byte[] original = [9, 8, 7, 6];
         var document = (await service.CreateAsync($"/request-{Guid.NewGuid():N}.docx", original, TestActor.Value))!;
-        byte[] contentBefore = await provider.Content.ReadVerifiedAsync(document.Content);
+        byte[] contentBefore = await StorageTestDocuments.PackageAsync(provider,document.Package);
         uint contentVersionBefore = document.ContentVersion;
-        ulong fileKnowledgeBefore = document.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents).Knowledge;
-        ulong metadataKnowledgeBefore = document.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.Metadata).Knowledge;
+        ulong fileKnowledgeBefore = (await provider.Documents.ReadControlAsync(document.ResourceId))!.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents).Knowledge;
+        ulong metadataKnowledgeBefore = (await provider.Documents.ReadControlAsync(document.ResourceId))!.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.Metadata).Knowledge;
 
         var request = new FsshttpbCellRequest
         {
@@ -87,11 +87,11 @@ public sealed class CellBinaryRequestExecutionTests
         Assert.Equal(ErrorType.Cell, result.Error?.Type);
         Assert.Equal((ulong)CellErrorCode.RequestNotSupported, result.Error?.ErrorCode);
         Assert.Null(result.Data);
-        var persisted = (await provider.State.FindByResourceIdAsync(document.ResourceId))!;
-        Assert.Equal(contentBefore, await provider.Content.ReadVerifiedAsync(persisted.Content));
+        var persisted = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(document.ResourceId)))!;
+        Assert.Equal(contentBefore, await StorageTestDocuments.PackageAsync(provider,persisted.Package));
         Assert.Equal(contentVersionBefore, persisted.ContentVersion);
-        Assert.Equal(fileKnowledgeBefore, persisted.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents).Knowledge);
-        Assert.Equal(metadataKnowledgeBefore, persisted.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.Metadata).Knowledge);
+        Assert.Equal(fileKnowledgeBefore, (await provider.Documents.ReadControlAsync(persisted.ResourceId))!.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents).Knowledge);
+        Assert.Equal(metadataKnowledgeBefore, (await provider.Documents.ReadControlAsync(persisted.ResourceId))!.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.Metadata).Knowledge);
         Assert.Equal(document.StateVersion, persisted.StateVersion);
         Assert.Empty(execution.AcceptedSaves);
 

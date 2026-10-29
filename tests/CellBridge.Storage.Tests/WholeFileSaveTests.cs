@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Runtime.CompilerServices;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
@@ -14,7 +15,19 @@ namespace CellBridge.Storage.Tests;
 [Collection("PostgreSQL")]
 public sealed class WholeFileSaveTests
 {
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
+    private static readonly ConditionalWeakTable<StorageProvider, ManualClock> Clocks = new();
+    private static StorageProvider Memory()
+    {
+        var content = new InMemoryContentStore(); var clock = new ManualClock();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
+        Clocks.Add(provider, clock); return provider;
+    }
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset now = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => now;
+        public void Advance() => now += TimeSpan.FromDays(1);
+    }
 
     [Fact]
     public Task SaveReadBackHistoryAndReplay() => CheckHistory(Memory());
@@ -35,6 +48,8 @@ public sealed class WholeFileSaveTests
         var service = new CellBridgeDocumentService(provider);
         var before = (await service.CreateAsync("/whole-" + Guid.NewGuid().ToString("N") + ".docx",
             MinimalDocx.Create("original"), TestActor.Value))!;
+        var initialRevision = (await provider.Documents.ReadRevisionAsync(before.ResourceId, 1))!.Revision!;
+        var initialPartition = (await provider.Documents.ReadPartitionAsync(before.ResourceId, new(0) { IncludeCatalog = true }))!;
         var publisher = new ExternalRevisionPublisher(provider, new UnusedDestination());
         Assert.True(await publisher.BindAsync(before.ResourceId, before.LifecycleGeneration, before.StateVersion,
             Guid.NewGuid(), "external", "baseline"));
@@ -44,42 +59,44 @@ public sealed class WholeFileSaveTests
         var accepted = await Save(service, before.ResourceId, bytes, "first");
         Assert.False(accepted.IsReplay);
         Assert.Equal(before.ContentVersion + 1, accepted.Revision.ContentVersion);
-        var saved = (await peer.State.FindByResourceIdAsync(before.ResourceId))!;
-        Assert.Equal(bytes, await peer.Content.ReadVerifiedAsync(saved.Content));
-        Assert.Equal(bytes, (await DocumentPartition.RestoreFileGraphAsync(saved, peer.Content, peer.Limits)).Materialize());
-        var originalCell = (await DocumentPartition.RestoreFileGraphAsync(before, peer.Content, peer.Limits)).FileCell;
-        var selected = (await DocumentPartition.RestoreFileGraphAsync(saved, peer.Content, peer.Limits)).FileCell;
+        var saved = (await peer.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
+        Assert.Equal(bytes, await StorageTestDocuments.PackageAsync(peer, saved.Package));
+        Assert.Equal(bytes, (await StorageTestDocuments.GraphAsync(new(peer), saved)).Materialize());
+        var originalCell = IndexedDocumentGraph.Restore(before.Package.Root.Cell);
+        var selected = (await StorageTestDocuments.GraphAsync(new(peer), saved)).FileCell;
         Assert.Equal(originalCell, selected);
         var query = new FsshttpbCellRequest { SubRequests =
         { new(RequestTypes.QueryChanges) { RequestId = 1, Data = new QueryChangesSubRequestData { CellId = originalCell } } } };
         var queried = await new CellBridgeDocumentService(peer).ExecuteAsync(saved.ResourceId,
             DocumentPartitionKind.FileContents, query, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(queried.Response.SubResponses).Status);
-        Assert.Equal(2, saved.Revisions.Length);
-        Assert.Equal(JsonSerializer.Serialize(before.Revisions[0]), JsonSerializer.Serialize(saved.Revisions[0]));
-        Assert.All(before.Partitions[0].Elements, e => Assert.Contains(saved.Partitions[0].Elements,
-            x => x.Id == e.Id && x.Payload == e.Payload));
-        Assert.Equal(before.Partitions[0].Identity, saved.Partitions[0].Identity);
-        Assert.True(saved.Partitions[0].Knowledge > before.Partitions[0].Knowledge);
-        Assert.Single(saved.Publication!.Pending);
-        Assert.Single(saved.WholeFileSaveReceipts);
+        Assert.Equal(2, saved.Counters.Revisions);
+        Assert.Equal(JsonSerializer.Serialize(initialRevision), JsonSerializer.Serialize((await peer.Documents.ReadRevisionAsync(saved.ResourceId, 1))!.Revision));
+        var historical = (await peer.Documents.ExportDocumentAsync(saved.ResourceId))!;
+        Assert.All(initialPartition.Elements, e => Assert.Contains(historical.Elements,
+            x => x.Scope.TargetPartition == 0 && x.Element.Id == e.Id && x.Element.Payload == e.Payload));
+        var savedPartition = (await peer.Documents.ReadPartitionAsync(saved.ResourceId, new(0)))!.Partition;
+        Assert.Equal(initialPartition.Partition.Identity, savedPartition.Identity);
+        Assert.True(savedPartition.Knowledge > initialPartition.Partition.Knowledge);
+        Assert.Equal(1, saved.Counters.PendingDeliveries);
+        Assert.Equal(1, saved.Counters.WholeFileSaveReceipts);
         var laterBytes = MinimalDocx.Create("later");
         var later = await Save(new(peer), before.ResourceId, laterBytes, "second");
         var replay = await Save(new(peer), before.ResourceId, bytes, "first");
         Assert.True(replay.IsReplay);
         Assert.Equal(JsonSerializer.Serialize(accepted.Revision), JsonSerializer.Serialize(replay.Revision));
-        saved = (await peer.State.FindByResourceIdAsync(before.ResourceId))!;
+        saved = (await peer.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         Assert.Equal(later.Revision.ContentVersion, saved.ContentVersion);
-        Assert.Equal(3, saved.Revisions.Length);
-        Assert.Equal(2, saved.Publication!.Pending.Length);
+        Assert.Equal(3, saved.Counters.Revisions);
+        Assert.Equal(2, saved.Counters.PendingDeliveries);
         await Assert.ThrowsAsync<WholeFileSaveConflictException>(() => Save(service, before.ResourceId,
             MinimalDocx.Create("different retry"), "first"));
         var noOp = await Save(service, before.ResourceId, laterBytes, "no-op");
         Assert.Equal(later.Revision.ContentVersion, noOp.Revision.ContentVersion);
-        Assert.Equal(3, (await provider.State.FindByResourceIdAsync(before.ResourceId))!.Revisions.Length);
-        // A receipt replays after lock expiry without acquiring fresh write authority.
-        await provider.State.TransitionAsync(before.ResourceId, (s, now) => new StateTransition<bool>(s with
-        { Coordination = s.Coordination with { HostLock = s.Coordination.HostLock! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
+        Assert.Equal(3, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!.Counters.Revisions);
+        // Receipt replay does not require a currently active lease.
+        Assert.True((await new SharedDocumentLocks(service).ApplyAsync(before.ResourceId,
+            HostLockOperation.Release, "lock", TestActor.Value)).Success);
         Assert.True((await Save(service, before.ResourceId, bytes, "first")).IsReplay);
     }
 
@@ -94,7 +111,7 @@ public sealed class WholeFileSaveTests
         await new SharedDocumentLocks(service).ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value);
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => Save(service, state.ResourceId,
             MinimalDocx.Create("replacement"), "key", token));
-        Assert.Equal(state.Content, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.Content);
+        Assert.Equal(state.Package, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Package);
     }
 
     [Fact]
@@ -105,8 +122,7 @@ public sealed class WholeFileSaveTests
         var result = await Save(service, empty.ResourceId, MinimalDocx.Create(), "empty", null);
         Assert.Equal(2u, result.Revision.ContentVersion);
         await new SharedDocumentLocks(service).ApplyAsync(empty.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value);
-        await provider.State.TransitionAsync(empty.ResourceId, (s, now) => new StateTransition<bool>(s with
-        { Coordination = s.Coordination with { HostLock = s.Coordination.HostLock! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
+        Clocks.GetValue(provider, _ => throw new InvalidOperationException()).Advance();
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => Save(service, empty.ResourceId,
             MinimalDocx.Create("expired"), "expired"));
     }
@@ -137,15 +153,15 @@ public sealed class WholeFileSaveTests
         if (bytes.Length > 0)
             Assert.True((await new SharedDocumentLocks(service).ApplyAsync(state.ResourceId,
                 HostLockOperation.Acquire, "lock", TestActor.Value)).Success);
-        var before = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var before = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
 
         await Assert.ThrowsAsync<InvalidDataException>(() => Save(service, state.ResourceId, bytes, "new-no-op",
             bytes.Length == 0 ? null : "lock"));
 
-        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var after = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(after));
-        Assert.Empty(after.WholeFileSaveReceipts);
-        Assert.Empty(after.Publication!.Pending);
+        Assert.Equal(0, after.Counters.WholeFileSaveReceipts);
+        Assert.Equal(0, after.Counters.PendingDeliveries);
     }
 
     [Fact]
@@ -159,24 +175,24 @@ public sealed class WholeFileSaveTests
             state.ResourceId, state.LifecycleGeneration, state.StateVersion, Guid.NewGuid(), "external", "baseline"));
         Assert.True((await new SharedDocumentLocks(service).ApplyAsync(state.ResourceId,
             HostLockOperation.Acquire, "lock", TestActor.Value)).Success);
-        var before = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var before = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
 
+        var beforeSnapshot = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
         var accepted = await Save(service, state.ResourceId, bytes, "no-op");
 
         Assert.False(accepted.IsReplay);
-        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(before.Content, after.Content);
+        var after = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(before.Package, after.Package);
         Assert.Equal(before.ContentVersion, after.ContentVersion);
         Assert.Equal(before.ModifiedUtc, after.ModifiedUtc);
-        Assert.Equal(JsonSerializer.Serialize(before.Partitions), JsonSerializer.Serialize(after.Partitions));
-        Assert.Equal(JsonSerializer.Serialize(before.Revisions), JsonSerializer.Serialize(after.Revisions));
-        Assert.Equal(JsonSerializer.Serialize(before.Revisions[^1]), JsonSerializer.Serialize(accepted.Revision));
-        Assert.Single(after.WholeFileSaveReceipts);
-        Assert.Empty(after.Publication!.Pending);
+        Assert.Equal(JsonSerializer.Serialize(beforeSnapshot.Partitions), JsonSerializer.Serialize((await provider.Documents.ExportDocumentAsync(state.ResourceId))!.Partitions));
+        Assert.Equal(JsonSerializer.Serialize(beforeSnapshot.ApplicationRevisions), JsonSerializer.Serialize((await provider.Documents.ExportDocumentAsync(state.ResourceId))!.ApplicationRevisions));
+        Assert.Equal(JsonSerializer.Serialize(beforeSnapshot.ApplicationRevisions[^1]), JsonSerializer.Serialize(accepted.Revision));
+        Assert.Equal(1, after.Counters.WholeFileSaveReceipts);
+        Assert.Equal(0, after.Counters.PendingDeliveries);
 
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Coordination = current.Coordination with { HostLock = current.Coordination.HostLock! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
-        var expired = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        Clocks.GetValue(provider, _ => throw new InvalidOperationException()).Advance();
+        var expired = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         var replay = await Save(service, state.ResourceId, bytes, "no-op");
         Assert.True(replay.IsReplay);
         Assert.Equal(JsonSerializer.Serialize(accepted.Revision), JsonSerializer.Serialize(replay.Revision));
@@ -184,7 +200,7 @@ public sealed class WholeFileSaveTests
         await Assert.ThrowsAsync<WholeFileSaveConflictException>(() => Save(service, state.ResourceId, [], "no-op"));
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => Save(service, state.ResourceId, bytes, "new-no-op"));
         Assert.Equal(JsonSerializer.Serialize(expired),
-            JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId)));
+            JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId))));
     }
 
     [Theory]
@@ -200,7 +216,7 @@ public sealed class WholeFileSaveTests
         var locks = new SharedDocumentLocks(service);
         await locks.ApplyAsync(original.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value);
         var paused = new PausedContent(provider.Content);
-        var racing = Save(new(new(provider.State, paused)), original.ResourceId, MinimalDocx.Create("stale"), "stale");
+        var racing = Save(new(new(provider.Documents, paused)), original.ResourceId, MinimalDocx.Create("stale"), "stale");
         await paused.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
         if (change == "refresh") await locks.ApplyAsync(original.ResourceId, HostLockOperation.Refresh, "lock", TestActor.Value);
         if (change == "reacquire")
@@ -208,19 +224,17 @@ public sealed class WholeFileSaveTests
             await locks.ApplyAsync(original.ResourceId, HostLockOperation.Release, "lock", TestActor.Value);
             await locks.ApplyAsync(original.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value);
         }
-        if (change == "expire") await provider.State.TransitionAsync(original.ResourceId, (s, now) => new StateTransition<bool>(s with
-        { Coordination = s.Coordination with { HostLock = s.Coordination.HostLock! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
-        if (change == "revoke") await provider.State.TransitionAsync(original.ResourceId, (s, now) => new StateTransition<bool>(
-            DocumentPermissionUpdates.Apply(s, now, s.Security with { Owner = "revoked" }), true));
+        if (change == "expire") Clocks.GetValue(provider, _ => throw new InvalidOperationException()).Advance();
+        if (change == "revoke") await RevokeAsync(provider, original.ResourceId);
         if (change == "compete") await Save(service, original.ResourceId, MinimalDocx.Create("winner"), "winner");
-        var expected = (await provider.State.FindByResourceIdAsync(original.ResourceId))!;
+        var expected = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)))!;
         paused.Continue.SetResult();
         if (change == "revoke") await Assert.ThrowsAsync<UnauthorizedAccessException>(() => racing);
         else await Assert.ThrowsAnyAsync<InvalidOperationException>(() => racing);
-        var actual = (await provider.State.FindByResourceIdAsync(original.ResourceId))!;
-        Assert.Equal(expected.Content, actual.Content);
+        var actual = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)))!;
+        Assert.Equal(expected.Package, actual.Package);
         Assert.Equal(expected.ContentVersion, actual.ContentVersion);
-        Assert.Equal(expected.Revisions.Length, actual.Revisions.Length);
+        Assert.Equal(expected.Counters.Revisions, actual.Counters.Revisions);
     }
 
     [Fact]
@@ -234,8 +248,7 @@ public sealed class WholeFileSaveTests
         var limited = TestActor.Value with { AccessLimit = new(state.ResourceId, DocumentAccess.Read) };
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveWholeFileAsync(state.ResourceId,
             new MemoryStream(bytes), "accepted", limited, "lock").AsTask());
-        await provider.State.TransitionAsync(state.ResourceId, (s, _) => new StateTransition<bool>(s with
-            { Security = s.Security with { Owner = "other" } }, true));
+        await RevokeAsync(provider, state.ResourceId);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => Save(service, state.ResourceId, bytes, "accepted"));
     }
 
@@ -244,8 +257,9 @@ public sealed class WholeFileSaveTests
     {
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/foreign.docx", [], TestActor.Value))!;
-        await provider.State.TransitionAsync(state.ResourceId, (s, now) => new StateTransition<bool>(s with
-        { Coordination = s.Coordination with { Exclusive = new("foreign", null, now.AddMinutes(5), 0, null) } }, true));
+        Assert.True((await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(state.ResourceId,
+            StorageTestDocuments.Admission(state), new() { Type = SubRequestType.ExclusiveLock, SubRequestDataAttributes =
+            { ["ExclusiveLockRequestType"] = "GetLock", ["ExclusiveLockID"] = "foreign", ["ClientID"] = "client", ["Timeout"] = "3600" } }))).Changed);
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => Save(service, state.ResourceId,
             MinimalDocx.Create(), "foreign", null));
         await Assert.ThrowsAsync<DocumentOperationLockException>(() => Save(service, state.ResourceId,
@@ -255,18 +269,17 @@ public sealed class WholeFileSaveTests
     [Fact]
     public async Task ReceiptBudgetRejectsNewSavesWithoutDroppingRetryProtection()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore(),
-            new StorageLimits { MaxWholeFileSaveReceipts = 1 });
+        var provider = StorageTestDocuments.Memory(limits: new StorageLimits { MaxWholeFileSaveReceipts = 1 });
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/receipt-budget.docx", MinimalDocx.Create(), TestActor.Value))!;
         await new SharedDocumentLocks(service).ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value);
         var bytes = MinimalDocx.Create("accepted");
         await Save(service, state.ResourceId, bytes, "accepted");
-        var before = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var before = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         await Assert.ThrowsAsync<StorageQuotaExceededException>(() => Save(service, state.ResourceId,
             MinimalDocx.Create("rejected"), "new"));
         Assert.True((await Save(service, state.ResourceId, bytes, "accepted")).IsReplay);
-        Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await provider.State.FindByResourceIdAsync(state.ResourceId)));
+        Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId))));
     }
 
     [Fact]
@@ -274,20 +287,27 @@ public sealed class WholeFileSaveTests
     {
         var provider = Memory(); var service = new CellBridgeDocumentService(provider);
         var before = (await service.CreateAsync("/protocol-after-whole.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var stale = RevisionHistoryTests.Request(before, MinimalDocx.Create("stale protocol bytes"));
+        var stale = await StorageTestDocuments.SaveRequestAsync(service, before, MinimalDocx.Create("stale protocol bytes"));
         var locks = new SharedDocumentLocks(service);
         await locks.ApplyAsync(before.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value);
         await Save(service, before.ResourceId, MinimalDocx.Create("whole-file save"), "whole");
         await locks.ApplyAsync(before.ResourceId, HostLockOperation.Release, "lock", TestActor.Value);
-        var saved = (await provider.State.FindByResourceIdAsync(before.ResourceId))!;
+        var saved = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         var refused = await service.ExecuteAsync(before.ResourceId, DocumentPartitionKind.FileContents, stale,
             new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(refused.Response.SubResponses).Status);
-        Assert.Equal(saved.Content, refused.State.Content);
+        Assert.Equal(saved.Package, refused.State.Package);
         var final = await RevisionHistoryTests.Save(service, saved, "new protocol bytes");
-        Assert.Equal(3, final.Revisions.Length);
-        Assert.Equal(await provider.Content.ReadVerifiedAsync(final.Content),
-            (await DocumentPartition.RestoreFileGraphAsync(final, provider.Content, provider.Limits)).Materialize());
+        Assert.Equal(3, final.Counters.Revisions);
+        Assert.Equal(await StorageTestDocuments.PackageAsync(provider, final.Package),
+            (await StorageTestDocuments.GraphAsync(service, final)).Materialize());
+    }
+
+    private static async Task RevokeAsync(StorageProvider provider, Guid id)
+    {
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(id)))!;
+        Assert.True((await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(id,
+            StorageTestDocuments.Admission(current), current.Security with { Owner = "revoked" }, current.AuthorityGeneration))).Changed);
     }
 
     private static async Task<WholeFileSaveResult> Save(CellBridgeDocumentService service, Guid id, byte[] bytes,

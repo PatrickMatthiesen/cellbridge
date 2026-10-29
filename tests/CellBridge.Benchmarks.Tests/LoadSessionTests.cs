@@ -35,7 +35,7 @@ public sealed class LoadSessionTests(BenchmarkEnvironment fixture)
         Assert.Equal(HttpStatusCode.Created, created.StatusCode);
         var path = created.Headers.Location!.OriginalString;
         await using var source = NpgsqlDataSource.Create(environment.DocumentConnectionString);
-        var state = await new PostgreSqlStateStore(source).FindByPathKeyAsync(StorageIds.PathKey(path));
+        var state = await ((IDocumentRepository)new PostgreSqlStateStore(source)).FindAsync(new DocumentIdentity.Path(StorageIds.PathKey(path)));
         Assert.NotNull(state);
         Assert.Equal(environment.GetUserIdentity(1).Subject, state.Security.Owner);
         using var ownDownload = await owner.GetAsync(path);

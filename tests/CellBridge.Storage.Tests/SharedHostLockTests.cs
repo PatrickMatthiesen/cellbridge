@@ -15,7 +15,7 @@ namespace CellBridge.Storage.Tests;
 public sealed class SharedHostLockTests
 {
     [Fact]
-    public Task CompetingProtocolsRefreshReplaceReleaseAndFencedCommit() => CheckLocks(new(new InMemoryStateStore(), new InMemoryContentStore()));
+    public Task CompetingProtocolsRefreshReplaceReleaseAndFencedCommit() => CheckLocks(StorageTestDocuments.Memory());
 
     [PostgreSqlFact]
     public async Task PostgreSqlTwoHostsShareLockAuthority()
@@ -49,23 +49,25 @@ public sealed class SharedHostLockTests
         Assert.True(acquired.Success);
         Assert.Equal("FileAlreadyLockedOnServer", await ApplyFss(peer, state.ResourceId, "GetLock"));
         Assert.False((await other.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "casesensitive", TestActor.Value)).Success);
-        var current = (await peer.State.FindByResourceIdAsync(state.ResourceId))!;
-        var doc = StoredDocument.RestoreMetadata(current, DateTime.UtcNow);
-        var coordinator = FssHttpLockCoordinator.Restore(doc, current.Coordination, DateTime.UtcNow, TestActor.Value.Identity);
+        var current = (await peer.Documents.ReadControlAsync(state.ResourceId))!;
+        var doc = StoredDocument.RestoreControl(current);
+        var coordinator = FssHttpLockCoordinator.Restore(doc, current.Coordination, current.UtcNow, TestActor.Value.Identity);
         Assert.Equal(current.Coordination.HostLock, coordinator.Capture().HostLock);
         Assert.False(coordinator.ExecuteCellWrite(new Dictionary<string, string>(), () => true, out _, out var error));
         Assert.Equal("FileAlreadyLockedOnServer", error);
         var refresh = await other.ApplyAsync(state.ResourceId, HostLockOperation.Refresh, "CaseSensitive", TestActor.Value);
         Assert.True(refresh.Success);
-        Assert.False(await host.TryCommitAsync(acquired.WriteToken!, current.StateVersion, TestActor.Value, (c, _) => c, Guid.NewGuid()));
+        Assert.False(await host.TryCommitAsync(acquired.WriteToken!, RepositoryTestPublications.Receipt(current, TestActor.Value, acquired.WriteToken!.LockToken), TestActor.Value));
         var replaced = await host.ApplyAsync(state.ResourceId, HostLockOperation.Replace, "CaseSensitive", TestActor.Value, "replacement");
         Assert.True(replaced.Success);
         Assert.False((await other.ApplyAsync(state.ResourceId, HostLockOperation.Release, "CaseSensitive", TestActor.Value)).Success);
-        current = (await peer.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.True(await other.TryCommitAsync(replaced.WriteToken!, current.StateVersion, TestActor.Value,
-            (c, _) => c with { ContentVersion = c.ContentVersion + 1 }, Guid.NewGuid()));
+        current = (await peer.Documents.ReadControlAsync(state.ResourceId))!;
+        var prepared = RepositoryTestPublications.Receipt(current, TestActor.Value, replaced.WriteToken!.LockToken);
+        Assert.True(await other.TryCommitAsync(replaced.WriteToken!, prepared, TestActor.Value));
+        Assert.Equal(current.Head.Counters.WholeFileSaveReceipts + 1,
+            (await peer.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Counters.WholeFileSaveReceipts);
         Assert.True((await other.ApplyAsync(state.ResourceId, HostLockOperation.Release, "replacement", TestActor.Value)).Success);
-        Assert.False(await host.TryCommitAsync(replaced.WriteToken!, current.StateVersion, TestActor.Value, (c, _) => c, Guid.NewGuid()));
+        Assert.False(await host.TryCommitAsync(replaced.WriteToken!, RepositoryTestPublications.Receipt(current, TestActor.Value, replaced.WriteToken!.LockToken), TestActor.Value));
         Assert.Equal("Success", await ApplyFss(peer, state.ResourceId, "GetLock"));
         Assert.Equal("Success", await ApplyFss(peer, state.ResourceId, "ConvertToSchema"));
         Assert.Equal("Success", await ApplySchema(peer, state.ResourceId, "ReleaseLock"));
@@ -75,49 +77,54 @@ public sealed class SharedHostLockTests
     [Fact]
     public async Task ProviderTimeExpiryAndPermissionRevocationFenceHostWrite()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var clock = new ManualClock(); var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/expired.docx", MinimalDocx.Create(), TestActor.Value))!;
         var locks = new SharedDocumentLocks(service);
         var acquired = await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "a", TestActor.Value);
-        await provider.State.TransitionAsync(state.ResourceId, (c, now) => new StateTransition<bool>(c with
-        { Coordination = c.Coordination with { HostLock = c.Coordination.HostLock! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
-        state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.False(await locks.TryCommitAsync(acquired.WriteToken!, state.StateVersion, TestActor.Value, (c, _) => c, Guid.NewGuid()));
+        var prepared = RepositoryTestPublications.Receipt((await provider.Documents.ReadControlAsync(state.ResourceId))!, TestActor.Value, "a");
+        clock.Advance(TimeSpan.FromHours(1));
+        Assert.False(await locks.TryCommitAsync(acquired.WriteToken!, prepared, TestActor.Value));
         Assert.False((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Refresh, "a", TestActor.Value)).Success);
         var newOwner = await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "b", TestActor.Value);
         Assert.True(newOwner.Success);
-        await provider.State.TransitionAsync(state.ResourceId, (c, now) => new StateTransition<bool>(
-            DocumentPermissionUpdates.Apply(c, now, c.Security with { Owner = "different" }), true));
-        state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Null(state.Coordination.HostLock);
-        Assert.False(await locks.TryCommitAsync(newOwner.WriteToken!, state.StateVersion, TestActor.Value, (c, _) => c, Guid.NewGuid()));
+        prepared = RepositoryTestPublications.Receipt((await provider.Documents.ReadControlAsync(state.ResourceId))!, TestActor.Value, "b");
+        await TestStorage.SetPermissionsAsync(provider, state.ResourceId, state.Security with { Owner = "different" });
+        Assert.Null((await provider.Documents.ReadControlAsync(state.ResourceId))!.Coordination.HostLock);
+        Assert.False(await locks.TryCommitAsync(newOwner.WriteToken!, prepared, TestActor.Value));
+
     }
 
-    [Fact]
-    public async Task LockedFileSaveCannotDowngradeAfterExpiryOrReacquire()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LockedFileSaveCannotDowngradeAfterExpiryOrReacquire(bool refresh)
     {
-        var stateStore = new InMemoryStateStore();
+        var clock = new ManualClock();
         var content = new InMemoryContentStore();
+        var stateStore = new InMemoryDocumentRepository(content, clock: clock);
         var provider = new StorageProvider(stateStore, content);
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/stale-save.docx", MinimalDocx.Create(), TestActor.Value))!;
         Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
-        var before = (await stateStore.FindByResourceIdAsync(state.ResourceId))!;
-        var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(before, content)).FilePartition.FileGraph.StorageIndex;
+        var before = (await stateStore.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        var request = await StorageTestDocuments.SaveRequestAsync(new(provider), before, MinimalDocx.Create("saved"));
         var paused = new PausedWrites(content);
         var saved = new CellBridgeDocumentService(new(stateStore, paused)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, request, CellLock(), TestActor.Value).AsTask();
         await paused.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "ReleaseLock"));
-        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        clock.Advance(TimeSpan.FromSeconds(1));
+        if (refresh) Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "RefreshLock"));
+        else
+        {
+            Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "ReleaseLock"));
+            Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        }
         paused.Continue.SetResult();
         Assert.Equal("InvalidCoauthSession", (await saved).LockError);
-        Assert.Equal(before.ContentVersion, (await stateStore.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
+        Assert.Equal(before.ContentVersion, (await stateStore.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.ContentVersion);
         // An expired explicit lock is also rejected instead of becoming an unlocked write.
-        await stateStore.TransitionAsync(state.ResourceId, (c, now) => new StateTransition<bool>(c with
-        { Coordination = c.Coordination with { Exclusive = c.Coordination.Exclusive! with { ExpiresUtc = now.AddSeconds(-1) } } }, true));
+        clock.Advance(TimeSpan.FromHours(2));
         var expired = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
             request, CellLock(), TestActor.Value);
         Assert.Equal("InvalidCoauthSession", expired.LockError);
@@ -128,65 +135,117 @@ public sealed class SharedHostLockTests
     [InlineData(true)]
     public async Task UnclaimedSaveIsRejectedBeforeStagingUnderEitherLock(bool wopi)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/preflight.docx", MinimalDocx.Create(), TestActor.Value))!;
         if (wopi) Assert.True((await new SharedDocumentLocks(new(provider)).ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "host", TestActor.Value)).Success);
         else Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
-        var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        var request = await StorageTestDocuments.SaveRequestAsync(new(provider), state, MinimalDocx.Create("saved"));
         var paused = new PausedWrites(provider.Content);
-        var result = await new CellBridgeDocumentService(new(provider.State, paused)).ExecuteAsync(state.ResourceId,
+        var result = await new CellBridgeDocumentService(new(provider.Documents, paused)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal("FileAlreadyLockedOnServer", result.LockError);
         Assert.False(paused.Entered.Task.IsCompleted);
         Assert.Equal(state.ContentVersion, result.State.ContentVersion);
     }
 
-    [Fact]
-    public async Task SameTokenReacquisitionBeforePreflightCannotReplaceTheOriginalFence()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SameTokenReacquisitionBeforePreflightCannotReplaceTheOriginalFence(bool refresh)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var clock = new ManualClock(); var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/first-fence.docx", MinimalDocx.Create(), TestActor.Value))!;
         Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
-        var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
-        var reads = new PausedSaveRead(provider.State);
+        var request = await StorageTestDocuments.SaveRequestAsync(new(provider), state, MinimalDocx.Create("saved"));
+        var reads = new PausedSaveRead(provider.Documents);
         var writes = new PausedWrites(provider.Content);
         var save = new CellBridgeDocumentService(new(reads, writes)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, request, CellLock(), TestActor.Value).AsTask();
         await reads.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "ReleaseLock"));
-        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        clock.Advance(TimeSpan.FromSeconds(1));
+        if (refresh) Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "RefreshLock"));
+        else
+        {
+            Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "ReleaseLock"));
+            Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        }
         reads.Continue.SetResult();
-        Assert.Equal("InvalidCoauthSession", (await save).LockError);
+        try { Assert.Equal("InvalidCoauthSession", (await save.WaitAsync(TimeSpan.FromSeconds(5))).LockError); }
+        finally { writes.Continue.TrySetResult(); }
         Assert.False(writes.Entered.Task.IsCompleted);
-        Assert.Equal(state.ContentVersion, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
+        Assert.Equal(state.ContentVersion, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.ContentVersion);
     }
 
-    private sealed class PausedSaveRead(IDocumentStateStore inner) : IDocumentStateStore
+    [Fact]
+    public async Task AnotherOwnersExpiryCannotReplaceThePreparedAuthorityAfterAnUnrelatedRetry()
     {
-        private int _reads;
+        var clock = new ManualClock(); var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
+        var service = new CellBridgeDocumentService(provider);
+        var head = (await service.CreateAsync("/retry-authority.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var other = new CellBridgeActor(new("other:writer", "other", "Other writer"));
+        await TestStorage.SetPermissionsAsync(provider, head.ResourceId,
+            head.Security with { Grants = head.Security.Grants.Add(other.Identity.Subject, DocumentAccess.Write) });
+        var writerAttributes = LockInputValidationTests.Attributes(SubRequestType.SchemaLock, "GetLock");
+        writerAttributes["Timeout"] = "120000";
+        writerAttributes["SchemaLockID"] = Guid.NewGuid().ToString();
+        writerAttributes.Remove("ExclusiveLockID");
+        var otherAttributes = new Dictionary<string, string>(writerAttributes) { ["ClientID"] = Guid.NewGuid().ToString(), ["Timeout"] = "3600" };
+        var processor = new CellBridgeRequestProcessor(service);
+        foreach (var (attributes, actor) in new[] { (writerAttributes, TestActor.Value), (otherAttributes, other) })
+            Assert.Equal("Success", (await processor.ExecuteAsync(CellStorageRequestParser.Parse(
+                LockInputValidationTests.Soap(head.ResourceId, SubRequestType.SchemaLock, attributes)), "https://host.test", actor))
+                .Response.Responses[0].SubResponses[0].ErrorCode);
+        head = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(head.ResourceId)))!;
+        var before = (await provider.Documents.ReadControlAsync(head.ResourceId))!;
+        Assert.Equal(2, before.Coordination.SchemaOwners.Length);
+        var request = await StorageTestDocuments.SaveRequestAsync(service, head, MinimalDocx.Create("must not publish"));
+        var retry = new ExpireOtherOwnerOnPublish(provider.Documents, clock, writerAttributes);
+        var result = await new CellBridgeDocumentService(new(retry, content)).ExecuteAsync(head.ResourceId,
+            DocumentPartitionKind.FileContents, request, writerAttributes, TestActor.Value);
+        Assert.Equal("InvalidCoauthSession", result.LockError);
+        Assert.Empty(result.AcceptedSaves);
+        Assert.Equal(1, retry.Publications);
+        var current = (await provider.Documents.ReadControlAsync(head.ResourceId))!;
+        Assert.Equal(head.ContentVersion, current.Head.ContentVersion);
+        Assert.Equal(head.StateVersion + 1, current.Head.StateVersion);
+        Assert.Equal(head.CoordinationGeneration, current.Head.CoordinationGeneration);
+        Assert.Equal(0, current.Head.Counters.SaveReceipts);
+        Assert.Equal(head.Package, current.Head.Package);
+    }
+
+    private sealed class ExpireOtherOwnerOnPublish(IDocumentRepository inner, ManualClock clock,
+        IReadOnlyDictionary<string, string> attributes) : RepositoryTestProxy(inner)
+    {
+        public int Publications { get; private set; }
+        public override async ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken ct = default)
+        {
+            if (++Publications == 1)
+            {
+                var head = (await Inner.FindAsync(new DocumentIdentity.Resource(publication.ResourceId), ct))!;
+                Assert.True((await Inner.ChangePathAsync(new(head.ResourceId, TestStorage.Admit(head),
+                    "/unrelated-move.docx", "/UNRELATED-MOVE.DOCX", attributes.ToImmutableDictionary()), ct)).Changed);
+                clock.Advance(TimeSpan.FromHours(2));
+            }
+            return await Inner.PublishAsync(publication, ct);
+        }
+    }
+
+    private sealed class PausedSaveRead(IDocumentRepository inner) : RepositoryTestProxy(inner)
+    {
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Continue { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public bool Durable => inner.Durable;
-        public bool Shared => inner.Shared;
-        public async ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken cancellationToken = default)
+        public override async ValueTask<SavePreparationRead?> PrepareSaveAsync(Guid id, SavePreparationRequest request, CancellationToken ct = default)
         {
-            var state = await inner.FindByResourceIdAsync(id, cancellationToken);
-            if (Interlocked.Increment(ref _reads) == 2)
+            var state = await Inner.PrepareSaveAsync(id, request, ct);
+            if (!Entered.Task.IsCompleted)
             {
                 Entered.SetResult();
-                await Continue.Task.WaitAsync(cancellationToken);
+                await Continue.Task.WaitAsync(ct);
             }
             return state;
         }
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken cancellationToken = default) => inner.FindByPathKeyAsync(key, cancellationToken);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken cancellationToken = default) => inner.ListAsync(offset, limit, cancellationToken);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken cancellationToken = default) => inner.TryCreateAsync(state, cancellationToken);
-        public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken cancellationToken = default) => inner.TransitionAsync(id, transition, cancellationToken);
-        public ValueTask CheckHealthAsync(CancellationToken cancellationToken = default) => inner.CheckHealthAsync(cancellationToken);
     }
 
     [Theory]
@@ -194,20 +253,19 @@ public sealed class SharedHostLockTests
     [InlineData(true)]
     public async Task ReceiptReplayRechecksAuthorityAfterResponseContentRead(bool delete)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/receipt-race.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        var request = await StorageTestDocuments.SaveRequestAsync(new(provider), state, MinimalDocx.Create("saved"));
         var accepted = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
-        var paused = new PausedReceiptRead(provider.Content, accepted.State.Receipts[0].Response!);
-        var replay = new CellBridgeDocumentService(new(provider.State, paused)).ExecuteAsync(state.ResourceId,
+        var identity = IndexedPartitionSavePreparer.Identify(state.LifecycleGeneration, 0, request.SubRequests[0], request.DataElementPackage!);
+        var receipt = (await provider.Documents.ReadReceiptAsync(state.ResourceId, identity.Operation))!.Receipt!;
+        var paused = new PausedReceiptRead(provider.Content, receipt.Response!);
+        var replay = new CellBridgeDocumentService(new(provider.Documents, paused)).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value).AsTask();
         await paused.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (delete) Assert.True(await ((IDocumentLifecycleStore)provider.State).TryDeleteAsync(state.ResourceId, 1, accepted.State.StateVersion));
-        else await provider.State.TransitionAsync(state.ResourceId, (c, now) => new StateTransition<bool>(
-            DocumentPermissionUpdates.Apply(c, now, c.Security with { Owner = "different" }), true));
+        if (delete) Assert.True((await provider.Documents.ChangeLifecycleAsync(new DocumentLifecycleCommand.Delete(state.ResourceId, 1, accepted.State.StateVersion))).Applied);
+        else await TestStorage.SetPermissionsAsync(provider, state.ResourceId, state.Security with { Owner = "different" });
         paused.Continue.SetResult();
         if (delete) await Assert.ThrowsAsync<KeyNotFoundException>(() => replay);
         else
@@ -266,6 +324,13 @@ public sealed class SharedHostLockTests
         ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111",
         ["Timeout"] = "3600",
     };
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset _now = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan elapsed) => _now += elapsed;
+    }
+
     private sealed class PausedWrites(IContentStore inner) : IContentStore
     {
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

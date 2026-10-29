@@ -22,6 +22,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
     public int ProtocolConcurrencyPerSubject { get; }
     public bool QueryStatisticsEnabled { get; }
     public int? PostgreSqlPoolSize { get; }
+    public int? PostgreSqlMaxAutoPrepare { get; }
     public string Backend { get; }
     public Uri HttpEndpoint { get; }
     public string DocumentConnectionString { get; }
@@ -30,10 +31,23 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
     public string ListsConnectionString { get; }
     public string ListsRuntimeConnectionString { get; }
 
+    public OwnedWebDemoProcessProbe CreateWebDemoProcessProbe()
+    {
+        // Aspire.Hosting 17's KnownProperties.Executable.Pid is the snapshot key executable.pid.
+        if (!application.ResourceNotifications.TryGetCurrentState("webdemo", out var resource))
+            throw new InvalidOperationException("The owned WebDemo resource has no process snapshot.");
+        var value = resource.Snapshot.Properties.SingleOrDefault(property =>
+            string.Equals(property.Name, "executable.pid", StringComparison.OrdinalIgnoreCase))?.Value;
+        if (!int.TryParse(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture), out var pid) || pid <= 0)
+            throw new InvalidOperationException("The owned WebDemo resource has no executable process ID.");
+        return new OwnedWebDemoProcessProbe(pid);
+    }
+
     private LoadTestEnvironment(DistributedApplication application,
         IDistributedApplicationTestingBuilder builder, Uri endpoint, string documents, string postgreSqlDocuments, string filesystem,
         string lists, string runtime, string password, string backend, int userCount, LoadIdentitySessions? sessions,
-        int protocolConcurrency, int protocolConcurrencyPerSubject, bool queryStatisticsEnabled, int? postgreSqlPoolSize)
+        int protocolConcurrency, int protocolConcurrencyPerSubject, bool queryStatisticsEnabled, int? postgreSqlPoolSize,
+        int? postgreSqlMaxAutoPrepare)
     {
         this.application = application;
         this.builder = builder;
@@ -45,6 +59,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
         ProtocolConcurrencyPerSubject = protocolConcurrencyPerSubject;
         QueryStatisticsEnabled = queryStatisticsEnabled;
         PostgreSqlPoolSize = postgreSqlPoolSize;
+        PostgreSqlMaxAutoPrepare = postgreSqlMaxAutoPrepare;
         HttpEndpoint = endpoint;
         DocumentConnectionString = documents;
         PostgreSqlDocumentConnectionString = postgreSqlDocuments;
@@ -54,11 +69,9 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
     }
 
     public static async Task<LoadTestEnvironment> StartAsync(CancellationToken cancellationToken = default,
-        string backend = "postgresql", int userCount = 1, bool useDefaultAdmissionLimits = false,
-        int maxDocumentCount = 10_000)
+        string backend = "postgresql", int userCount = 1, bool useDefaultAdmissionLimits = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(userCount);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxDocumentCount);
         if (backend is not ("postgresql" or "sqlserver")) throw new ArgumentException("Unknown load-test backend.", nameof(backend));
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(5));
@@ -86,14 +99,19 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
             var configuredPoolSize = builder.Configuration.GetValue<int?>("Parameters:LoadPostgreSqlPoolSize");
             if (configuredPoolSize is { } poolSize) ArgumentOutOfRangeException.ThrowIfNegativeOrZero(poolSize);
             var postgreSqlPoolSize = backend == "postgresql" ? configuredPoolSize : null;
+            var configuredAutoPrepare = builder.Configuration.GetValue<int?>("Parameters:LoadPostgreSqlMaxAutoPrepare");
+            if (configuredAutoPrepare is { } autoPrepare) ArgumentOutOfRangeException.ThrowIfNegative(autoPrepare);
+            var postgreSqlMaxAutoPrepare = backend == "postgresql" ? configuredAutoPrepare : null;
+            var postgreSqlOverrides = new List<string>();
             if (postgreSqlPoolSize is { } webPoolSize)
+                postgreSqlOverrides.Add("Maximum Pool Size=" + webPoolSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (postgreSqlMaxAutoPrepare is { } webAutoPrepare)
+                postgreSqlOverrides.Add("Max Auto Prepare=" + webAutoPrepare.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (postgreSqlOverrides.Count != 0)
                 webdemo.WithEnvironment("ConnectionStrings__cellbridge", ReferenceExpression.Create(
-                    $"{database.Resource.ConnectionStringExpression};Maximum Pool Size={webPoolSize.ToString(System.Globalization.CultureInfo.InvariantCulture)}"));
+                    $"{database.Resource.ConnectionStringExpression};{string.Join(';', postgreSqlOverrides)}"));
             var protocolConcurrency = builder.Configuration.GetValue("Parameters:LoadMaxConcurrentRequests", useDefaultAdmissionLimits ? 8 : 16);
             var protocolConcurrencyPerSubject = builder.Configuration.GetValue("Parameters:LoadMaxConcurrentRequestsPerSubject", useDefaultAdmissionLimits ? 2 : 16);
-            var maxDocuments = maxDocumentCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            initialization.WithEnvironment("Storage__MaxDocuments", maxDocuments);
-            webdemo.WithEnvironment("Storage__MaxDocuments", maxDocuments);
             // Anchor configured paths before launching a process with another
             // working directory. Explicit blank settings select the library's
             // shared local default and override per-WebDemo configuration.
@@ -148,7 +166,6 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
                     .WithEnvironment("Storage__Provider", "SqlServer")
                     .WithEnvironment("Storage__RuntimeRole", documentRole)
                     .WithEnvironment("Storage__RuntimePassword", documentPassword)
-                    .WithEnvironment("Storage__MaxDocuments", maxDocuments)
                     .WithEnvironment("TMPDIR", temporaryDirectory)
                     .WithEnvironment("TMP", temporaryDirectory)
                     .WithEnvironment("TEMP", temporaryDirectory)
@@ -184,7 +201,6 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
                     Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../../tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj")),
                     options => options.ExcludeLaunchProfile = true)
                 .WithReference(filesystem, "cellbridge")
-                .WithEnvironment("Storage__MaxDocuments", maxDocuments)
                 .WithEnvironment("TMPDIR", temporaryDirectory)
                 .WithEnvironment("TMP", temporaryDirectory)
                 .WithEnvironment("TEMP", temporaryDirectory)
@@ -235,7 +251,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
                 (await application.GetConnectionStringAsync("lists", timeout.Token))!,
                 (await application.GetConnectionStringAsync("lists-runtime", timeout.Token))!,
                 password, backend, userCount, sessions, protocolConcurrency, protocolConcurrencyPerSubject,
-                queryStatisticsEnabled, postgreSqlPoolSize);
+                queryStatisticsEnabled, postgreSqlPoolSize, postgreSqlMaxAutoPrepare);
         }
         catch
         {

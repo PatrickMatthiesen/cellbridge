@@ -40,5 +40,5 @@ public sealed record PortableRecoveryLimits
 internal sealed record PortableManifest(int ArchiveVersion, Guid ArchiveId, RecoveryContext Context,
     ProviderSnapshot State, ImmutableArray<ContentHandle> Objects)
 {
-    public const int CurrentVersion = 1;
+    public const int CurrentVersion = 2;
 }
