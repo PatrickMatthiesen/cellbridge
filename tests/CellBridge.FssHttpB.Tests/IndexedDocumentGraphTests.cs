@@ -187,8 +187,10 @@ public sealed class IndexedDocumentGraphTests
         Assert.Throws<InvalidDataException>(() => IndexedDocumentGraph.ValidateIdentity(original, original with { Payload = original.Payload with { Sha256 = "other" } }));
     }
 
-    [Fact]
-    public async Task MigrationPreservesHistoryReceiptsDeliveriesAndCurrentIdentityWithoutWritingContent()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MigrationPreservesHistoryReceiptsDeliveriesAndCurrentIdentityWithoutWritingContent(bool renameBack)
     {
         var fixture = new GraphFixture("migrated exact bytes"u8.ToArray(), blob: true);
         var content = new TestContent();
@@ -213,7 +215,8 @@ public sealed class IndexedDocumentGraphTests
             package, [file, metadata, editors], [], CoordinationState.Empty,
             [new("save", "digest", 1, response, author.Subject)])
         {
-            Security = DocumentSecurity.Create(author), RetiredPathKeys = ["/RETIRED.DOCX"],
+            Security = DocumentSecurity.Create(author),
+            RetiredPathKeys = renameBack ? ["/FILE.DOCX", "/RETIRED.DOCX"] : ["/RETIRED.DOCX"],
             Revisions = [new(Scope.ResourceId, 1, 1, 1, now, author, package, [file, metadata]),
                 new(Scope.ResourceId, 1, 2, 2, now, author, package, [file, metadata])],
             RestoreReceipts = [new(1, author.Subject, "restore", "restore-digest", 2)],
@@ -227,7 +230,8 @@ public sealed class IndexedDocumentGraphTests
         Assert.Equal(2, result.Revisions.Length);
         Assert.Equal(3, result.Receipts.Length);
         Assert.Equal(25, result.Current.Head.StateVersion);
-        Assert.Equal(state.RetiredPathKeys, result.RetiredPathKeys);
+        Assert.Equal<string>(["/RETIRED.DOCX"], result.RetiredPathKeys);
+        Assert.Equal(1, result.Current.Head.Counters.RetiredPaths);
         Assert.Equal(1UL, Assert.Single(result.Deliveries).Package.RevisionNumber);
         Assert.Equal(3, result.Current.Partitions.Length);
         Assert.All(result.Revisions.SelectMany(revision => revision.Partitions), partition => Assert.NotNull(partition.Checkpoint));
