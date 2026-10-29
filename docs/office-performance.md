@@ -1,14 +1,57 @@
 # Measuring active Office user capacity
 
-The 10,000 successful commits/minute target remains unmet. On the original Linux host, the retained
-replacement acknowledged 4,854 saves inside a minute while offering 11,250,
-with HTTP 503 overload failures. A separate run offering 3,000 saves/minute
-passed without HTTP failures, with 2,992 acknowledged inside its minute.
-Both used 1,500 authenticated users and 15,000 documents.
+The 10,000 successful commits/minute target remains unmet on the local Linux
+host. The atomic SQL candidate acknowledged 5,295 saves inside a minute while
+offering 11,250, with HTTP 503 overload failures. Its matched preceding
+implementation acknowledged 4,576 in the same workload. Both used 1,500
+authenticated users and 15,000 documents. A retained lower-load run of the
+preceding implementation offered 3,000 saves/minute without HTTP failures.
 
 The archived implementation reached 8,151 inside a measured minute with HTTP
 failures. The rewrite has not demonstrated a throughput gain over that result.
 These synthetic workloads do not validate desktop Office capacity.
+
+## Atomic SQL publication experiment
+
+Commit `0b9a2d0` buffers up to 8 MiB and 64 provisional objects when SQL state
+and content share the same configured database. It validates the owned bytes
+before opening the write transaction, inserts content, then guards and publishes
+the affected document in that transaction. Rejection or replay rolls back
+speculative content. Larger saves and external content keep charged staging.
+The SQL Server implementation also uses its existing exact-key physical lookup;
+a generic scan caused a reproduced deadlock with uncommitted content inserts.
+
+The first local matched pair used the same 1,500-user AutoSave profile, 256 KiB
+packages, 16 KiB changed XML, pool/preparation caps of 64, admission 128/two per
+subject, durable PostgreSQL, 30 seconds warm-up and 60 seconds measurement.
+
+| Measurement | Preceding implementation | Atomic SQL candidate |
+| --- | ---: | ---: |
+| In-window acknowledgements/minute | 4,576 | 5,295 |
+| Excluded late acknowledgements | 116 | 112 |
+| Failed HTTP steps including warm-up/drain | 13,306 | 12,056 |
+| All acknowledgements including warm-up/drain | 6,786 | 7,767 |
+| Successful measured save-step p95 | 1,586 ms | 1,378 ms |
+| Successful measured query-step p95 | 656 ms | 691 ms |
+| WebDemo CPU cores during measurement | 1.49 | 1.57 |
+| Peak sampled measurement working set | 710 MiB | 725 MiB |
+| Workload-wide committed database transactions/all ACK | 57.69 | 47.72 |
+| Cluster WAL/all ACK | 49.62 KiB | 47.63 KiB |
+
+Both runs overloaded and neither missed a cadence slot. The first pair recorded
+15.7% more strict acknowledgements; it is not a repeated estimate or a
+failure-free capacity result. Query latency and sampled memory did not improve.
+Higher accepted work, provisional copies and ordinary run variation are not
+isolated by these two runs. Database/WAL ratios cover mixed queries, opens,
+authentication and warm-up/drain traffic; they are not transactions or bytes
+inside one save.
+
+After timing, each retained acknowledged package was materialized and hashed.
+The candidate additionally checks one-to-one acknowledgement/index coverage;
+the baseline used the first historical-byte verifier. Those untimed checks do
+not change the offered workload. Raw paired evidence is retained under
+`artifacts/office-atomic/`, including `local-comparison.json`, the baseline
+qualification patch and original CSV/pgstats files.
 
 ## Snowfall baseline
 
