@@ -101,7 +101,9 @@ public static class DocumentStagingScenario
         await service.SaveWholeFileAsync(head.ResourceId, input, "accepted", Actor, "host");
         var snapshot = (await provider.Documents.ExportDocumentAsync(head.ResourceId))!;
         Assert.DoesNotContain(snapshot.ContentReferences, reference => reference.IsPending);
-        Assert.Contains(snapshot.ContentReferences, reference => reference.AdmissionBytes > 0);
+        if (provider.Documents is IAtomicDocumentPublisher atomic && atomic.SupportsAtomicContent(provider.Content))
+            Assert.All(snapshot.ContentReferences, reference => Assert.Equal(0, reference.AdmissionBytes));
+        else Assert.Contains(snapshot.ContentReferences, reference => reference.AdmissionBytes > 0);
         Assert.Equal(snapshot.Current.Head.Counters.StoredBytes, NormalizedDocumentRecovery.StoredBytes(snapshot));
         var current = snapshot.Current.Head;
         using var retry = new MemoryStream(bytes);

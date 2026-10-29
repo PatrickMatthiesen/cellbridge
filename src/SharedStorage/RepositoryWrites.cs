@@ -8,7 +8,7 @@ namespace CellBridge.Storage.Shared;
 
 internal sealed partial class RelationalDocumentRepository<TContext> where TContext : DbContext
 {
-    private async ValueTask<T> MutateAsync<T>(Guid id, Func<TContext, RepositoryHeadRow?, DateTime, Task<T>> operation, CancellationToken ct, bool measurePublication = false)
+    private async ValueTask<T> MutateAsync<T>(Guid id, Func<TContext, RepositoryHeadRow?, DateTime, Task<T>> operation, CancellationToken ct, bool measurePublication = false, Func<TContext, Task>? beforeGuard = null, Func<T, bool>? shouldCommit = null)
     {
         using var timing = measurePublication ? CellBridgeMetrics.Measure(CellBridgePhase.GuardedPublication) : default;
         try
@@ -19,6 +19,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
                 openedTransaction = await db.Database.BeginTransactionAsync(ct);
             await using var transaction = openedTransaction;
             await database.ConfigureAsync(db, ct);
+            if (beforeGuard is not null) await beforeGuard(db);
             using (measurePublication ? CellBridgeMetrics.Measure(CellBridgePhase.DocumentGuard) : default)
                 await database.GuardAsync(db, id, ct);
             T result;
@@ -28,6 +29,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
                 result = await operation(db, row, await database.ClockAsync(db, ct));
             }
             ct.ThrowIfCancellationRequested();
+            if (shouldCommit is not null && !shouldCommit(result)) return result;
             using (measurePublication ? CellBridgeMetrics.Measure(CellBridgePhase.PublicationSaveChanges) : default)
                 await db.SaveChangesAsync(ct);
             try
@@ -81,8 +83,12 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
     {
         var unique = ValidateReferenceHandles(handles, ct, requireCanonicalKey: false);
         var keys = unique.Select(handle => handle.Key).ToArray();
-        var physical = await PrefetchAsync(db, db.Set<ObjectRow>().AsNoTracking(), keys,
-            key => row => row.ObjectKey == key, row => row.ObjectKey, _ => true, "physical-content", ct, includeTracked: false);
+        // Use the provider's exact immutable-key reads. A generic EF scan can
+        // wait on another atomic publication's unrelated uncommitted inserts.
+        var physical = keys.ToDictionary(key => key, _ => (ObjectRow?)null, StringComparer.Ordinal);
+        foreach (var batch in keys.Chunk(64))
+            foreach (var stored in await database.ObjectsAtKeys(db, batch).TagWith("CellBridge publication prefetch: physical-content").ToArrayAsync(ct))
+                physical[stored.ObjectKey] = stored;
         var references = await PrefetchAsync(db, db.Set<RepositoryReferenceRow>().Where(row => row.ResourceId == id), keys,
             key => row => row.ObjectKey == key, row => row.ObjectKey, row => row.ResourceId == id, "references", ct);
         long addedBytes = 0;
@@ -319,14 +325,14 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
             }
             return result;
         }, cancellationToken);
-    private async Task ValidatePayloadsAsync(IEnumerable<PreparedPartitionPublication> partitions, CancellationToken ct, bool initial = false)
+    private async Task ValidatePayloadsAsync(IEnumerable<PreparedPartitionPublication> partitions, CancellationToken ct, bool initial = false, IContentStore? provisional = null)
     {
         using var timing = CellBridgeMetrics.Measure(CellBridgePhase.ProviderPayloadValidation);
         await using var db = database.CreateContext();
         var reader = new RepositoryContentReader<TContext>(db, validationContent, limits.MaxObjectBytes, database);
         foreach (var partition in partitions)
         {
-            await DocumentPublicationRules.ValidatePartitionPayloadsAsync(partition, reader, limits, ct);
+            await DocumentPublicationRules.ValidatePartitionPayloadsAsync(partition, provisional ?? reader, limits, ct);
             if (partition.Checkpoint is not { } supplied) continue;
             var scope = partition.EffectiveChanges.Scope;
             var before = initial ? [] : await ReadAsync(async snapshot =>
@@ -345,7 +351,8 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         await ValidatePayloadsAsync(publication.Partitions, cancellationToken);
         return await PublishCoreAsync(publication, cancellationToken);
     }
-    private ValueTask<PublicationResult> PublishCoreAsync(PreparedDocumentPublication publication, CancellationToken cancellationToken) =>
+    private ValueTask<PublicationResult> PublishCoreAsync(PreparedDocumentPublication publication, CancellationToken cancellationToken,
+        Func<TContext, Task>? stageContent = null) =>
         MutateAsync(publication.ResourceId, async (db, row, now) =>
         {
             var head = row is null || row.IsDeleted ? throw new KeyNotFoundException("Document does not exist.") : Head(row);
@@ -418,5 +425,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
             DocumentPublicationRules.CheckLimits(next, limits);
             next = SetHead(row!, next);
             return new PublicationResult(PublicationStatus.Accepted, next) { Receipt = publication.Receipt };
-        }, cancellationToken, measurePublication: true);
+        }, cancellationToken, measurePublication: true,
+            beforeGuard: stageContent,
+            shouldCommit: stageContent is null ? null : result => result.Status == PublicationStatus.Accepted);
 }

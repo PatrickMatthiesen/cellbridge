@@ -515,10 +515,11 @@ internal sealed partial class DocumentLoadScenario(string backend, LoadResources
                 var revisions = snapshot.ApplicationRevisions.OrderBy(revision => revision.RevisionNumber).ToArray();
                 if (revisions.Zip(revisions.Skip(1)).Any(pair => pair.First.Package.Sha256 == pair.Second.Package.Sha256))
                     throw new InvalidDataException("Consecutive HTTP revisions contain unchanged payloads.");
+                await AcknowledgedRevisionVerifier.VerifyAsync(provider, revisions, document.Initial.LatestRevisionNumber, document.Committed);
             }
             Console.WriteLine($"Document HTTP validation totals including warm-up: commits={commits}, conflicts={conflicts}, replays={replays}, replay-conflicts={replayConflicts}.");
             var uniqueCommittedPayloads = httpDocuments.SelectMany(document => document.Committed.Values).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-            Console.WriteLine($"Document HTTP committed payload hashes including warm-up: unique={uniqueCommittedPayloads}, commits={commits}.");
+            Console.WriteLine($"Document HTTP byte-verified committed payload hashes including warm-up: unique={uniqueCommittedPayloads}, commits={commits}.");
             if (settings.UserModel) PrintUserMetrics();
         }
         else foreach (var entry in sessions.SelectMany(s => s.AllEntries)) await VerifyEntryAsync(entry);

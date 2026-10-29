@@ -20,9 +20,12 @@ public sealed partial class PostgreSqlStateStore
         this.options = PostgreSqlDatabase.NormalizeOptions(options);
         this.limits = limits;
         this.validationContent = validationContent;
+        using var identityContext = new CellBridgeDbContext(this.options);
+        databaseIdentity = identityContext.Database.GetConnectionString() ?? "";
         repository = new(new PostgreSqlRepositoryDatabase(this.options), limits, validationContent);
     }
 
+    private readonly string databaseIdentity;
     public bool Durable => repository.Durable;
     public bool Shared => repository.Shared;
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>

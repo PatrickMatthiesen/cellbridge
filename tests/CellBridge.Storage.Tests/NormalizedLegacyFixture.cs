@@ -95,6 +95,19 @@ public static class NormalizedLegacyFixture
         var space = version == 0 ? Guid.Parse("380c62e0-4cf5-4c48-839c-c6ae093778f0") : Guid.Parse("380c62e0-4cf5-4c48-839c-c6ae093778f1");
         var graph = new GraphFixture([(byte)version, 2, 3], blob: true, identity: value => new(value, space));
         var request = new FsshttpbCellRequest { DataElementPackage = new() };
+        // The first save maps an extra revision; the next explicitly clears it.
+        // The nil target still carries knowledge that a reconnecting client needs.
+        var writer = new BinaryWriterEx();
+        writer.WriteBytes(graph.Elements.Single(element => element.DataElementType == DataElementType.StorageIndexDataElementData).Data!);
+        GraphFixture.Record(writer, StreamObjectTypeHeaderStart.StorageIndexRevisionMapping, body =>
+        {
+            new ExGuid(500, Guid.Parse("bf02d933-55bb-4c5d-b378-e5ddd9377a41")).Serialize(body);
+            (version == 0 ? graph.RevisionElement : ExGuid.Null).Serialize(body);
+            new SerialNumber(space, 500).Serialize(body);
+        });
+        graph.Replace(new DataElement(DataElementType.StorageIndexDataElementData, graph.Index,
+            graph.Elements.Single(element => element.DataElementType == DataElementType.StorageIndexDataElementData).SerialNumber)
+            { Data = writer.ToArray() });
         request.DataElementPackage.DataElements.AddRange(graph.Elements);
         request.SubRequests.Add(new(RequestTypes.PutChanges) { RequestId = 1,
             Data = new PutChangesSubRequestData { StorageIndex = graph.Index } });
@@ -136,6 +149,32 @@ public static class NormalizedLegacyFixture
             var unchanged = (await NormalizedProviderScenarios.CheckSnapshotAsync(provider.Documents, original.ResourceId)).Current.Head;
             if (System.Text.Json.JsonSerializer.Serialize(unchanged) != System.Text.Json.JsonSerializer.Serialize(exported.Current.Head))
                 throw new InvalidOperationException("Metadata replay published another revision.");
+        }
+        // A warm client knows the legacy index bytes, not the freshly generated logical index.
+        foreach (var partition in original.Partitions.Where(partition => partition.StorageIndex is not null))
+        {
+            var serials = partition.Elements.Select(element => element.Serial)
+                .Concat(partition.Elements.SelectMany(element => element.MappingSerials));
+            var knowledge = ClientKnowledge.Deserialize(new BinaryReaderEx(BinaryKnowledgeBuilder.FromRanges(
+                serials.Select(serial => (serial.Guid, serial.Value, serial.Value)), ExGuid.Null, 0)));
+            var query = new FsshttpbCellRequest();
+            query.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 1,
+                Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true, Knowledge = knowledge } });
+            var response = await new CellBridgeDocumentService(provider).ExecuteAsync(original.ResourceId,
+                (DocumentPartitionKind)partition.Kind, query, ImmutableDictionary<string, string>.Empty,
+                new CellBridgeActor(original.Security.CreatedBy!, CanCreate: true));
+            var migrated = exported.Current.Partitions.Single(value => value.Kind == partition.Kind);
+            var index = response.Response.DataElementPackage?.DataElements.SingleOrDefault(element =>
+                IndexedDocumentGraph.Capture(element.DataElementExtendedGuid) == migrated.StorageIndex);
+            if (response.Response.SubResponses.Any(value => value.Status) || index is null || knowledge.Contains(index.SerialNumber))
+                throw new InvalidOperationException("A warm legacy client did not receive its new logical storage index.");
+            var legacyIndex = partition.Elements.Single(element => element.Id == partition.StorageIndex);
+            var expectedMappings = StorageIndexMappingSerials.ReadMappings(await originalContent.ReadVerifiedAsync(legacyIndex.Payload));
+            var actualMappings = StorageIndexMappingSerials.ReadMappings(index.Data!);
+            static IEnumerable<string> CanonicalMappings(IEnumerable<StorageIndexMapping> mappings) =>
+                mappings.Select(mapping => Convert.ToHexString(StorageIndexPatch.Serialize([mapping]))).Order(StringComparer.Ordinal);
+            if (!CanonicalMappings(expectedMappings).SequenceEqual(CanonicalMappings(actualMappings)))
+                throw new InvalidOperationException("Migration changed a storage-index mapping, including its nil target or serial.");
         }
         foreach (var revision in exported.ApplicationRevisions)
         {

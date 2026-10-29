@@ -3,8 +3,14 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.Storage.SqlServer;
 
-public sealed partial class SqlServerStateStore : IDocumentRepository, IIndexedSaveSource
+public sealed partial class SqlServerStateStore : IDocumentRepository, IIndexedSaveSource, IAtomicDocumentPublisher
 {
+    bool IAtomicDocumentPublisher.SupportsAtomicContent(IContentStore content) =>
+        content is SqlServerContentStore sql && sql.DatabaseIdentity.Length != 0 && sql.DatabaseIdentity == databaseIdentity;
+    ValueTask<PublicationResult> IAtomicDocumentPublisher.PublishWithContentAsync(PreparedDocumentPublication publication, IContentStore content,
+        IReadOnlyList<ReadOnlyMemory<byte>> contents, CancellationToken ct) => ((IAtomicDocumentPublisher)this).SupportsAtomicContent(content)
+            ? repository.PublishWithContentAsync(publication, contents, ((SqlServerContentStore)content).content, content, ct)
+            : throw new NotSupportedException("Atomic publication requires matching SQL state and content stores.");
     private readonly RelationalDocumentRepository<SqlServerDocumentDbContext> repository;
     ValueTask<DocumentHead?> IDocumentRepository.FindAsync(DocumentIdentity identity, CancellationToken ct) =>
         repository.FindAsync(identity, ct);

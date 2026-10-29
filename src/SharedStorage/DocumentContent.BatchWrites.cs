@@ -47,6 +47,7 @@ internal sealed partial class DocumentContent<TContext> : IContentBatchWriter wh
         return prepared.Handles;
     }
 
+    internal Task CheckTransactionConfigurationAsync(TContext context, CancellationToken ct) => database.CheckConfigurationAsync(context, ct);
     internal Task EnterWriterAsync(CancellationToken cancellationToken) => _writers.WaitAsync(cancellationToken);
     internal void ExitWriter() => _writers.Release();
 

@@ -18,6 +18,7 @@
     <ProjectReference Include="../../src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
     <Compile Include="../../benchmark/CellBridge.Lists.Benchmark/BenchmarkDatabase.cs" Link="Workloads/BenchmarkDatabase.cs" />
     <Compile Include="../../benchmark/CellBridge.Benchmarks/DatabaseActivitySampler.cs" Link="Workloads/DatabaseActivitySampler.cs" />
+    <Compile Include="../../benchmark/CellBridge.Benchmarks/AcknowledgedRevisionVerifier.cs" Link="Workloads/AcknowledgedRevisionVerifier.cs" />
     <Compile Include="../../benchmark/CellBridge.Benchmarks/BenchmarkClientGraph.cs" Link="Workloads/BenchmarkClientGraph.cs" />
     <Compile Include="../../benchmark/CellBridge.Benchmarks/WebDemoProcessSampler.cs" Link="Workloads/WebDemoProcessSampler.cs" />
     <Compile Include="../CellBridge.GraphFixture.cs" Link="GraphFixture.cs" />

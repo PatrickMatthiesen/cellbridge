@@ -56,7 +56,13 @@ public sealed class DatabaseRecoveryTests
                         { StoredBytes = snapshot.Current.Head.Counters.StoredBytes - snapshot.ContentReferences.Where(reference => reference.IsPending)
                             .Sum(reference => reference.Handle.Length + reference.AdmissionBytes) } } },
                 });
-                Assert.Contains(reserved.Snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences), reference => reference.IsPending);
+                if (filesystem)
+                    Assert.Contains(reserved.Snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences), reference => reference.IsPending);
+                else
+                {
+                    Assert.DoesNotContain(reserved.Snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences), reference => reference.IsPending);
+                    Assert.Equal(PortabilityTests.CanonicalSnapshots(before.Snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(reserved.Snapshot.Snapshots));
+                }
                 Assert.Equal(PortabilityTests.CanonicalSnapshots(before.Snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(unreserved));
                 await control.Kill();
                 gate.Continue.TrySetResult();

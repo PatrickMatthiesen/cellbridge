@@ -10,8 +10,11 @@ public sealed partial class SqlServerStateStore
         IContentStore? validationContent = null)
     {
         options = SqlServerDocumentDatabase.Normalize(options);
+        using var identityContext = new SqlServerDocumentDbContext(options);
+        databaseIdentity = identityContext.Database.GetConnectionString() ?? "";
         repository = new(new SqlServerRepositoryDatabase(options), limits, validationContent);
     }
+    private readonly string databaseIdentity;
     public bool Durable => repository.Durable;
     public bool Shared => repository.Shared;
 }

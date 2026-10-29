@@ -293,8 +293,17 @@ records and never return those stale aggregates as current state.
 
 ### Collect orphan content
 
-Office, whole-file and restore saves reserve capacity in the affected document
-before writing new physical content. Each unique handle and its ownership record
+When SQL state and content use the same configured database, Office, whole-file
+and restore saves buffer up to 8 MiB and 64 provisional objects in owned memory.
+The provider validates their graph records before opening the write transaction,
+inserts the payloads, then locks the affected document row and publishes its
+records, limits, receipt and delivery together. Rejection, replay or cancellation
+before commit rolls back tentative content. An uncertain commit still resolves
+through the operation receipt. No physical content becomes durable without its
+document ownership charge.
+
+External content stores and saves that exceed the provisional buffer instead
+reserve capacity in the affected document before writing new physical content. Each unique handle and its ownership record
 count toward `MaxDocumentStoredBytes`, including when the save later fails.
 Reservation takes that document's row lock and does not advance its version.
 Repeated attempts with the same handle reuse the charge. Publication completes
@@ -403,6 +412,11 @@ operation receipts and affected mapping preconditions. Invoke no arbitrary
 whole-history callback. `ReserveContentAsync` checks current write authority and
 charges new handles under the affected document guard before physical staging.
 Publication takes that guard again and commits the document records together.
+Matching SQL providers can also implement `IAtomicDocumentPublisher` to insert
+owned provisional content and publish the document in one transaction. They must
+roll back those inserts on every rejected or replayed publication, validate the
+supplied bytes before taking the document guard, and preserve content-key lock
+ordering. This optional operation does not replace external staging admission.
 Preserve pending reservations after cancellation or an uncertain commit; their
 bytes may already exist. Do not retry an arbitrary mutation after an unknown
 commit outcome.

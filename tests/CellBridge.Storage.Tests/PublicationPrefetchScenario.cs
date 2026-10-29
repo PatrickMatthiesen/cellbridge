@@ -126,7 +126,7 @@ public static class PublicationPrefetchScenario
     private static void AssertCounts(PreparedDocumentPublication publication, Commands commands, NormalizedDocumentSnapshot before)
     {
         var expected = new Dictionary<string, int>(StringComparer.Ordinal);
-        void Add(string key, int count) => expected[key] = expected.GetValueOrDefault(key) + (count + 255) / 256;
+        void Add(string key, int count, int batchSize = 256) => expected[key] = expected.GetValueOrDefault(key) + (count + batchSize - 1) / batchSize;
         foreach (var part in publication.Partitions)
         {
             Add("elements", part.AddedElements.Select(element => element.Id).Concat(part.RetiredElements)
@@ -141,7 +141,7 @@ public static class PublicationPrefetchScenario
         var handles = publication.NewDocumentReferences.Concat(publication.Partitions.SelectMany(part => part.AddedElements).Select(element => element.Payload));
         if (publication.Receipt.Response is { } response) handles = handles.Append(response);
         var references = handles.Select(handle => handle.Key).Distinct().Count();
-        Add("physical-content", references); Add("references", references);
+        Add("physical-content", references, 64); Add("references", references);
         Assert.Equal(expected.Where(pair => pair.Value != 0).OrderBy(pair => pair.Key),
             commands.Observed.GroupBy(command => command.Category).Select(group => KeyValuePair.Create(group.Key, group.Count())).OrderBy(pair => pair.Key));
         var expectedRows = new Dictionary<string, int>(StringComparer.Ordinal);

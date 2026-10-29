@@ -12,6 +12,8 @@ internal sealed class PendingSaveContent(long maxObjectBytes) : IContentStore, I
     private long bytes;
     public bool Durable => false;
     public bool Shared => false;
+    internal IReadOnlyList<ReadOnlyMemory<byte>> ContentsAt(HashSet<string> keys) => objects.Where(item => keys.Contains(item.Key)).Select(item => (ReadOnlyMemory<byte>)item.Value).ToArray();
+    internal bool Contains(string key) => objects.ContainsKey(key);
     internal IReadOnlyList<ReadOnlyMemory<byte>> Contents => objects.Values.Select(value => (ReadOnlyMemory<byte>)value).ToArray();
 
     public async ValueTask<ContentHandle> WriteAsync(Stream source, CancellationToken cancellationToken = default)

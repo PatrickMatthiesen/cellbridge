@@ -54,6 +54,7 @@ public sealed partial class CellBridgeDocumentService
         StorageLimits.Check("whole-file save receipts", before.Head.Counters.WholeFileSaveReceipts + 1L, provider.Limits.MaxWholeFileSaveReceipts);
         staged.Position = 0;
         await OfficePackageValidation.ValidateDocumentAsync(staged, before.Head.Path, provider.Limits.MaxDocumentBytes, cancellationToken);
+        using var stagingContent = new DocumentStagingContent(provider.Documents, provider.Content, Admission(actor, before.Head), provider.Limits);
         PreparedDocumentPublication publication;
         if (before.Head.Package.Length == length && before.Head.Package.Sha256 == sha256)
         {
@@ -95,7 +96,7 @@ public sealed partial class CellBridgeDocumentService
             {
                 prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, operation, package,
                     admission, ImmutableDictionary<string, string>.Empty, provider.Documents,
-                    new DocumentStagingContent(provider.Documents, provider.Content, admission, provider.Limits), provider.Limits,
+                    stagingContent, provider.Limits,
                     cancellationToken, new DocumentWriteContext(identity, digest, hostLockToken));
             }
             catch (StagingAdmissionChangedException)
@@ -114,7 +115,7 @@ public sealed partial class CellBridgeDocumentService
         }
 
         PublicationResult result;
-        try { result = await provider.Documents.PublishAsync(publication, cancellationToken); }
+        try { result = await stagingContent.PublishAsync(publication, cancellationToken); }
         catch (Exception error) when (error is StorageUnavailableException || error is OperationCanceledException && cancellationToken.IsCancellationRequested)
         {
             if (await ReplayAsync(CancellationToken.None) is { } accepted) return accepted;

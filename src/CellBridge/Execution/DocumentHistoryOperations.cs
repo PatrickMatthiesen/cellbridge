@@ -63,6 +63,7 @@ public sealed partial class CellBridgeDocumentService
             if (CoordinationFencing.Capture(originalAuthority with { Generation = 0 }, authority with { Generation = 0 }).Generation != 0 ||
                 current.Coordination.Generation != head.CoordinationGeneration)
                 throw new DocumentOperationLockException("InvalidCoauthSession");
+            using var stagingContent = new DocumentStagingContent(provider.Documents, provider.Content, Admission(actor, current.Head), provider.Limits);
             var plans = ImmutableArray.CreateBuilder<PreparedPartitionPublication>();
             DocumentPackage? package = null;
             foreach (var historical in selected.Partitions)
@@ -163,7 +164,7 @@ public sealed partial class CellBridgeDocumentService
                 try
                 {
                     prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, request, incoming, admission,
-                        attributes, provider.Documents, new DocumentStagingContent(provider.Documents, provider.Content, admission, provider.Limits),
+                        attributes, provider.Documents, stagingContent,
                         provider.Limits, cancellationToken, new DocumentWriteContext(operation, digest) { ExpectedRevisionNumber = expectedRevision });
                 }
                 catch (StagingAdmissionChangedException) { plans.Clear(); break; }
@@ -200,7 +201,7 @@ public sealed partial class CellBridgeDocumentService
             };
             try
             {
-                var result = await provider.Documents.PublishAsync(combined, cancellationToken);
+                var result = await stagingContent.PublishAsync(combined, cancellationToken);
                 if (result.Status == PublicationStatus.Reprepare) continue;
                 if (result.Status == PublicationStatus.Replay) return await RestoreReplayAsync(cancellationToken) ?? throw new StorageCorruptionException("Missing restore receipt.");
                 if (result.Status == PublicationStatus.ProtocolError) throw new DocumentOperationLockException(result.ErrorCode ?? "CoherencyFailure");

@@ -31,6 +31,10 @@ public sealed class AtomicFileSaveDatabaseTests
             var current = await StorageTestDocuments.GraphAsync(service, state);
             var expected = MinimalDocx.Create("saved atomically");
             var request = SyntheticWorkload.Save(current, expected, "full", 1, new Random(42));
+            var originalKeys = new List<string>();
+            await using (var originalObjects = source.CreateCommand("SELECT object_key FROM cellbridge_objects"))
+            await using (var rows = await originalObjects.ExecuteReaderAsync())
+                while (await rows.ReadAsync()) originalKeys.Add(rows.GetString(0));
             audit.Clear();
             var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
                 request, new Dictionary<string, string>(), TestActor.Value);
@@ -44,25 +48,27 @@ public sealed class AtomicFileSaveDatabaseTests
             Assert.Contains(writes, sql => sql.Contains("cellbridge_repository_bindings", StringComparison.Ordinal));
             Assert.DoesNotContain(writes, sql => sql.Contains("cellbridge_states", StringComparison.Ordinal));
             Assert.Equal(0, audit.WritesOutsideTransactions);
-            var reservation = Assert.Single(audit.Committed, transaction => transaction != publication && audit.Writes.GetValueOrDefault(transaction)?
-                .Any(sql => sql.Contains("cellbridge_repository_heads", StringComparison.Ordinal)) == true);
-            Assert.Contains(audit.Writes[reservation], sql => sql.Contains("cellbridge_repository_references", StringComparison.Ordinal));
-            Assert.DoesNotContain(audit.Writes[reservation], sql => sql.Contains("cellbridge_repository_revisions", StringComparison.Ordinal));
-            // Immutable physical objects are staged before the document guard. The current head,
-            // immutable application revision, receipt and binding delta become visible together.
+            Assert.Equal(publication, Assert.Single(audit.Committed, audit.HasWrites));
+            // New physical objects and their chunks commit together with the
+            // head, revision, receipt and graph records in this same transaction.
             await using (var command = source.CreateCommand("""
                 SELECT 'head',xmin::text FROM cellbridge_repository_heads WHERE "ResourceId"=$1
                 UNION ALL SELECT 'revision',xmin::text FROM cellbridge_repository_revisions WHERE "ResourceId"=$1 AND "RevisionNumber"=2
                 UNION ALL SELECT 'receipt',xmin::text FROM cellbridge_repository_receipts WHERE "ResourceId"=$1
                 UNION ALL SELECT 'delta-' || "Partition"::text,xmin::text FROM cellbridge_repository_deltas WHERE "ResourceId"=$1 AND "Sequence"=2
                 UNION ALL SELECT 'root-' || "Partition"::text,xmin::text FROM cellbridge_repository_mapping_roots WHERE "ResourceId"=$1 AND "Sequence"=2
+                UNION ALL SELECT 'physical-object',xmin::text FROM cellbridge_objects WHERE NOT (object_key=ANY($2))
+                UNION ALL SELECT 'physical-chunk',xmin::text FROM cellbridge_chunks WHERE NOT (object_key=ANY($2))
                 """))
             {
                 command.Parameters.AddWithValue(saved.State.ResourceId);
+                command.Parameters.AddWithValue(originalKeys.ToArray());
                 var rows = new List<(string Kind, string Transaction)>();
                 await using var persisted = await command.ExecuteReaderAsync();
                 while (await persisted.ReadAsync()) rows.Add((persisted.GetString(0), persisted.GetString(1)));
-                Assert.Equal(new[] { "delta-0", "delta-1", "head", "receipt", "revision", "root-0" }, rows.Select(row => row.Kind).Order(StringComparer.Ordinal));
+                Assert.Equal(new[] { "delta-0", "delta-1", "head", "receipt", "revision", "root-0" }, rows.Where(row => !row.Kind.StartsWith("physical-", StringComparison.Ordinal)).Select(row => row.Kind).Order(StringComparer.Ordinal));
+                Assert.Contains(rows, row => row.Kind == "physical-object");
+                Assert.Contains(rows, row => row.Kind == "physical-chunk");
                 Assert.Single(rows.Select(row => row.Transaction).Distinct());
             }
             Assert.Equal(state.ContentVersion + 1, saved.State.ContentVersion);

@@ -1,6 +1,6 @@
 # Measuring active Office user capacity
 
-The 10,000 successful commits/minute target remains unmet. The latest measured
+The 10,000 successful commits/minute target remains unmet. On the original Linux host, the retained
 replacement acknowledged 4,854 saves inside a minute while offering 11,250,
 with HTTP 503 overload failures. A separate run offering 3,000 saves/minute
 passed without HTTP failures, with 2,992 acknowledged inside its minute.
@@ -10,7 +10,33 @@ The archived implementation reached 8,151 inside a measured minute with HTTP
 failures. The rewrite has not demonstrated a throughput gain over that result.
 These synthetic workloads do not validate desktop Office capacity.
 
-## Document staging admission
+## Snowfall baseline
+
+The same application commit, `b41e42b`, was also measured on Snowfall before
+atomic SQL publication. Snowfall runs Windows with a Ryzen 7 9800X3D (8 cores,
+16 threads), 31.2 GiB RAM and PostgreSQL 18.3 through Docker Desktop. The
+benchmark retained the pool/preparation caps of 64, admission 128/two per subject,
+1,500 users, 15,000 documents, durable PostgreSQL settings and the same cadence.
+
+Primary acknowledged 2,995 saves inside its minute, with six late acknowledgements
+and no HTTP failures. AutoSave acknowledged 9,386 inside its minute, with 112 late
+acknowledgements and 1,745 measured save failures. It still failed the capacity
+gate. The different host, operating system and container environment prevent
+attributing this result to a specific hardware component.
+
+These baseline runs used the earlier verifier. It checked final packages,
+revision/receipt counts and distinct expected hashes, without reading every
+acknowledged historical package. The current verifier additionally materializes
+and hashes each acknowledged revision after measurement. That check is outside
+the measured window and database-statistics capture.
+
+Raw baseline and separate diagnostic evidence remain on Snowfall under
+`artifacts/office-snowfall-baseline/`. The diagnostic thread-stack samples include
+waits and are not scheduler CPU samples. Allocation ticks estimated 781 MB/s
+in the separate instrumented run; that rate is approximate and does not describe
+the untraced qualification runs.
+
+## Retained document staging admission measurements
 
 The security fix charges unique content handles and ownership metadata against
 the affected document before physical staging. A failed save keeps its pending
@@ -30,8 +56,10 @@ same 256 KiB package/16 KiB changed-XML workload, warm-up and measurement period
 | AutoSave, save every 8 seconds | 11,250 | 4,854 | 114 | Overload failures, HTTP 503 |
 
 Neither run missed a user cadence slot. All 4,483 primary and 7,024 AutoSave
-acknowledgements, including warm-up/drain, passed package, revision, receipt and
-distinct-payload verification. The AutoSave step totals, including warm-up/drain
+acknowledgements, including warm-up/drain, passed final-package, revision-count,
+receipt-count and distinct expected-payload-hash checks. These runs did not
+re-read every acknowledged historical package against its expected hash.
+The AutoSave step totals, including warm-up/drain
 and queries/opens, include 12,956 HTTP 503 responses; they are not a count confined
 to saves in the measured minute.
 
@@ -372,7 +400,8 @@ Only primary passed the check requiring no HTTP failures. All reported failures
 in these runs were HTTP 503 admission rejections. Late acknowledgements are
 successful commits outside the strict time window, counted separately from
 failures. All four runs reported zero missed cadence slots, and every acknowledged
-commit had a distinct verified payload hash. Primary's maximum action-start
+commit had a distinct expected payload hash. Validation checked final packages,
+revision metadata and receipt counts; it did not re-read every historical package. Primary's maximum action-start
 lateness was 22 ms. Mean serialized save sizes were 17,732 bytes for primary and
 stretch, 17,733 for frequent AutoSave and 17,770 for larger documents. All changed
 ZIP byte totals were 16,700 per save. The common unchanged package parts remained warm.
@@ -468,8 +497,9 @@ downloads, with 30 seconds of continuous warm-up and 60 seconds of measurement.
 | Combined publication read, reverted | 7,886 | 7,123 | `nbomber_report_2026-10-28--06-01-52.csv` |
 | Deferred initial binary read, reverted | 7,905 | 7,069 | `nbomber_report_2026-10-28--06-19-23.csv` |
 
-All runs overloaded. Every acknowledged payload hash was distinct and verified,
-and all runs reported zero missed cadence slots. The small differences in these
+All runs overloaded. Every acknowledged expected payload hash was distinct,
+and all runs reported zero missed cadence slots. Verification covered final
+packages and revision/receipt counts, not each historical package. The small differences in these
 single runs do not establish statistical significance. The last two read experiments
 did not improve throughput and were reverted. Shared memberships did not improve
 the young-document stress result on their own; their benefit appeared in the aged
@@ -484,8 +514,9 @@ The retained implementation was also checked below the overloaded stress rate:
 | 15 seconds | 5,994 | 5,998 | 4 | 0 | 133.63 ms | `nbomber_report_2026-10-28--06-44-45.csv` |
 | 12 seconds | 7,337 | 7,497 | 104 | 565 | 926.72 ms | `nbomber_report_2026-10-28--06-40-59.csv` |
 
-All retained-profile acknowledgements had distinct verified payload hashes and
-zero missed cadence slots. The 15-second profile offers 6,000 saves/minute; it
+All retained-profile acknowledgements had distinct expected payload hashes and
+zero missed cadence slots. These runs checked final packages and revision/receipt
+counts, not each historical package. The 15-second profile offers 6,000 saves/minute; it
 passed this bounded run, not a production SLA. The baseline was not measured at
 that cadence, so it is not evidence of a before/after capacity doubling. The
 12-second workload offers 7,500 saves/minute and did not pass the no-failures gate.

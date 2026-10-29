@@ -6,10 +6,13 @@ namespace CellBridge.Storage.SqlServer;
 /// <summary>Immutable SHA-256 content in bounded database chunks.</summary>
 public sealed class SqlServerContentStore : IContentStore, IContentBatchReader, IContentBatchWriter
 {
-    private readonly DocumentContent<SqlServerDocumentDbContext> content;
+    internal readonly DocumentContent<SqlServerDocumentDbContext> content;
+    internal string DatabaseIdentity { get; }
     public SqlServerContentStore(DbContextOptions<SqlServerDocumentDbContext> options, long maxObjectBytes = 512L * 1024 * 1024)
     {
         options = SqlServerDocumentDatabase.Normalize(options);
+        using var identityContext = new SqlServerDocumentDbContext(options);
+        DatabaseIdentity = identityContext.Database.GetConnectionString() ?? "";
         content = new(new SqlServerDocumentDatabase(options), maxObjectBytes);
     }
     public bool Durable => content.Durable;

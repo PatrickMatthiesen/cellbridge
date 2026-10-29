@@ -41,7 +41,19 @@ public static class LegacyDocumentProjection
             history.Any(revision => revision.ResourceId != state.ResourceId || revision.LifecycleGeneration != state.LifecycleGeneration || revision.RevisionNumber == 0) ||
             !history.Select(revision => revision.RevisionNumber).SequenceEqual(history.Select(revision => revision.RevisionNumber).Order()))
             throw new StorageCorruptionException("Legacy application revision identities are inconsistent.");
-        var converter = new Converter(state.ResourceId, state.LifecycleGeneration, content, limits, cancellationToken);
+        // New logical indexes must never reuse a serial the client can already know,
+        // including claims retained only in historical graphs.
+        var retainedPartitions = history.SelectMany(revision => revision.Partitions).Concat(state.Partitions).ToArray();
+        var serialWatermarks = new Dictionary<Guid, ulong>();
+        foreach (var partition in retainedPartitions)
+            Observe(partition.Identity.SerialGuid, partition.Knowledge);
+        foreach (var element in GraphElementCollection.UniqueElements(retainedPartitions.Select(partition => partition.Elements)))
+        {
+            Observe(element.Serial.Guid, element.Serial.Value);
+            foreach (var serial in element.MappingSerials) Observe(serial.Guid, serial.Value);
+        }
+        var converter = new Converter(state.ResourceId, state.LifecycleGeneration, content, limits, serialWatermarks, cancellationToken);
+        void Observe(Guid guid, ulong value) => serialWatermarks[guid] = Math.Max(serialWatermarks.GetValueOrDefault(guid), value);
         var revisions = ImmutableArray.CreateBuilder<MigratedDocumentRevision>();
         long sequence = 0;
         foreach (var revision in history)
@@ -145,7 +157,7 @@ public static class LegacyDocumentProjection
     }
 
     private sealed class Converter(Guid resourceId, long lifecycle, IContentStore content, StorageLimits limits,
-        CancellationToken cancellationToken)
+        Dictionary<Guid, ulong> serialWatermarks, CancellationToken cancellationToken)
     {
         private readonly Dictionary<(int Partition, ExtendedId Id), GraphElementState> identities = [];
         private readonly Dictionary<(int Partition, ExtendedId Id), IndexedElementMetadata> metadata = [];
@@ -203,9 +215,16 @@ public static class LegacyDocumentProjection
                 else if (!elements.IsEmpty) throw new StorageCorruptionException("A legacy graph has no selected storage index.");
                 ExtendedId? logicalIndex = partition.StorageIndex is null ? null : new(1, Guid.NewGuid());
                 if (logicalIndex is not null) legacyIndexes.Add(logicalIndex, partition.StorageIndex!);
-                var head = new PartitionHead(partition.Kind, partition.Identity, partition.Knowledge,
+                SerialId? indexSerial = null;
+                if (logicalIndex is not null)
+                {
+                    var nextSerial = checked(serialWatermarks.GetValueOrDefault(partition.Identity.SerialGuid) + 1);
+                    serialWatermarks[partition.Identity.SerialGuid] = nextSerial;
+                    indexSerial = new(partition.Identity.SerialGuid, nextSerial);
+                }
+                var head = new PartitionHead(partition.Kind, partition.Identity, indexSerial?.Value ?? partition.Knowledge,
                     logicalIndex, sequence, partition.InlineContent.IsDefault ? [] : partition.InlineContent)
-                { StorageIndexSerial = partition.StorageIndex is { } selectedIndex ? legacyElements.Single(element => element.Id == selectedIndex).Serial : null,
+                { StorageIndexSerial = indexSerial,
                     ElementCount = elements.Length, ElementBytes = elements.Sum(element => element.Payload.Length) };
                 var resolvedBindings = bindings.ToImmutable();
                 result.Add(new(head with { StorageIndex = null, PublicationSequence = 0, Knowledge = 0, ElementCount = 0, ElementBytes = 0, InlineContent = [] },
@@ -218,7 +237,7 @@ public static class LegacyDocumentProjection
                     Cells = records.Where(record => record.CellManifest is not null).Select(record => record.CellManifest!).ToImmutableArray(),
                     StorageManifests = records.Where(record => record.StorageManifest is not null).Select(record => record.StorageManifest!).ToImmutableArray(),
                     MappingChanges = records.SelectMany(record => record.Mappings).Where(mapping => mapping.StorageIndex == partition.StorageIndex)
-                        .Select(mapping => new IndexedMappingChange(mapping.Key, IsNull(mapping.Target) ? null : new(mapping.Target, mapping.Serial))).ToImmutableArray(),
+                        .Select(mapping => new IndexedMappingChange(mapping.Key, new(mapping.Target, mapping.Serial))).ToImmutableArray(),
                 });
             }
             return result.ToImmutable();

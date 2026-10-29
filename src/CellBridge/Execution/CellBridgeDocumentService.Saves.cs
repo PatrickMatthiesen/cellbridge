@@ -79,11 +79,12 @@ public sealed partial class CellBridgeDocumentService
                 if (beforeStaging.CoordinationGeneration != initial.CoordinationGeneration)
                     return await LostLeaseAsync(beforeStaging);
             }
+            using var stagingContent = new DocumentStagingContent(provider.Documents, provider.Content, admission, provider.Limits);
             IndexedPreparedSave prepared;
             try
             {
                 prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, operation, owned, admission,
-                    attributes, provider.Documents, new DocumentStagingContent(provider.Documents, provider.Content, admission, provider.Limits),
+                    attributes, provider.Documents, stagingContent,
                     provider.Limits, cancellationToken, canAppend: canAppend);
             }
             catch (StagingAdmissionChangedException) { continue; }
@@ -93,7 +94,7 @@ public sealed partial class CellBridgeDocumentService
             if (!canAppend(prepared.Response.DataElementPackage))
                 return Wrap(Failure(operation.RequestId, CellErrorCode.RequestNotSupported, "The save response exceeds the combined response budget."), head);
             PublicationResult result;
-            try { result = await provider.Documents.PublishAsync(publication, cancellationToken); }
+            try { result = await stagingContent.PublishAsync(publication, cancellationToken); }
             catch (Exception error) when (error is StorageUnavailableException || error is OperationCanceledException && cancellationToken.IsCancellationRequested)
             {
                 var receipt = await provider.Documents.ReadReceiptAsync(id, identity, CancellationToken.None);

@@ -6,12 +6,15 @@ namespace CellBridge.Storage.PostgreSql;
 /// <summary>Immutable SHA-256 content in bounded database chunks.</summary>
 public sealed class PostgreSqlContentStore : IContentStore, IContentBatchReader, IContentBatchWriter
 {
-    private readonly DocumentContent<CellBridgeDbContext> content;
+    internal readonly DocumentContent<CellBridgeDbContext> content;
+    internal string DatabaseIdentity { get; }
     public PostgreSqlContentStore(Npgsql.NpgsqlDataSource dataSource, long maxObjectBytes = 512L * 1024 * 1024)
         : this(PostgreSqlDatabase.CreateOptions(dataSource), maxObjectBytes) { }
     public PostgreSqlContentStore(DbContextOptions<CellBridgeDbContext> options, long maxObjectBytes = 512L * 1024 * 1024)
     {
         options = PostgreSqlDatabase.NormalizeOptions(options);
+        using var identityContext = new CellBridgeDbContext(options);
+        DatabaseIdentity = identityContext.Database.GetConnectionString() ?? "";
         content = new(new PostgreSqlDocumentDatabase(options), maxObjectBytes);
     }
     public bool Durable => content.Durable;
