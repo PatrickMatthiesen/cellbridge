@@ -49,7 +49,9 @@ public sealed class NormalizedPostgreSqlProviderTests
     public Task Schema8UpgradePreservesLegacySnapshotsHistoryReceiptsLeasesAndLedgerAndRollsBackRejectedMigration() => UpgradeLegacyAsync(false);
     [PostgreSqlFact]
     public Task Schema8UpgradePreservesRenameBackClaimsAndRecoveryAccounting() => UpgradeLegacyAsync(true);
-    private async Task UpgradeLegacyAsync(bool renameBack)
+    [PostgreSqlFact]
+    public Task Schema8UpgradeReplaysCurrentMetadataReceiptAndRejectsSupersededReceipt() => UpgradeLegacyAsync(false, true);
+    private async Task UpgradeLegacyAsync(bool renameBack, bool metadataReceipts = false)
     {
         var admin = Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!;
         await using var source = NpgsqlDataSource.Create(await CreateDatabaseAsync(admin));
@@ -58,7 +60,7 @@ public sealed class NormalizedPostgreSqlProviderTests
         await using (var context = new CellBridgeDbContext(options))
             await context.GetService<IMigrator>().MigrateAsync("20261028000200_RemoveSharedQuotas");
         var oldContent = new NormalizedLegacyDatabase.Content();
-        var legacy = await NormalizedLegacyFixture.CreateAsync(oldContent, renameBack);
+        var legacy = await NormalizedLegacyFixture.CreateAsync(oldContent, renameBack, metadataReceipts);
         string original;
         await using (var context = new CellBridgeDbContext(options))
         {

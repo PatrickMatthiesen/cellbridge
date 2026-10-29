@@ -62,14 +62,16 @@ public sealed class NormalizedSqlServerProviderTests(SqlServerFixture fixture)
     public Task Schema3UpgradePreservesLegacySnapshotsHistoryReceiptsLeasesAndLedgerAndRollsBackRejectedMigration() => UpgradeLegacyAsync(false);
     [Fact]
     public Task Schema3UpgradePreservesRenameBackClaimsAndRecoveryAccounting() => UpgradeLegacyAsync(true);
-    private async Task UpgradeLegacyAsync(bool renameBack)
+    [Fact]
+    public Task Schema3UpgradeReplaysCurrentMetadataReceiptAndRejectsSupersededReceipt() => UpgradeLegacyAsync(false, true);
+    private async Task UpgradeLegacyAsync(bool renameBack, bool metadataReceipts = false)
     {
         var options = new DbContextOptionsBuilder<SqlServerDocumentDbContext>().UseSqlServer(await fixture.CreateDatabaseAsync(),
             sql => sql.MigrationsHistoryTable(SqlServerDocumentDbContext.MigrationsHistoryTable, SqlServerDocumentDbContext.Schema)).Options;
         await using (var context = new SqlServerDocumentDbContext(options))
             await context.GetService<IMigrator>().MigrateAsync("20261028130000_RemoveSharedQuotas");
         var oldContent = new NormalizedLegacyDatabase.Content();
-        var legacy = await NormalizedLegacyFixture.CreateAsync(oldContent, renameBack);
+        var legacy = await NormalizedLegacyFixture.CreateAsync(oldContent, renameBack, metadataReceipts);
         string original;
         await using (var context = new SqlServerDocumentDbContext(options))
         {

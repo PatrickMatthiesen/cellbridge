@@ -82,6 +82,7 @@ public sealed partial class CellBridgeDocumentService
                 new(0, identity, keys) { IncludeBindings = true }, cancellationToken) ?? throw MissingDocument();
             if (preparation.Control.Head.StateVersion != before.Head.StateVersion)
             {
+                if (await ReplayAsync(cancellationToken) is { } acceptedRetry) return acceptedRetry;
                 Demand(actor, preparation.Control.Head, DocumentAccess.Write);
                 throw new WholeFileSaveConflictException("The document changed while preparing the whole-file save.");
             }
@@ -111,7 +112,10 @@ public sealed partial class CellBridgeDocumentService
         if (result.Status == PublicationStatus.Replay)
             return await ReplayAsync(cancellationToken) ?? throw new StorageCorruptionException("An accepted whole-file receipt is missing.");
         if (result.Status == PublicationStatus.Reprepare)
+        {
+            if (await ReplayAsync(cancellationToken) is { } acceptedRetry) return acceptedRetry;
             throw new WholeFileSaveConflictException("The document changed while preparing the whole-file save.");
+        }
         if (result.Status == PublicationStatus.ProtocolError)
         {
             if (result.ErrorCode == "FileUnauthorizedAccess") throw new UnauthorizedAccessException("Write access denied.");

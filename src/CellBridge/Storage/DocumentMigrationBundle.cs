@@ -73,9 +73,17 @@ public static class LegacyDocumentProjection
                 (receipt.PartitionKind != 1 || receipt.AcceptedStorageIndex is null ||
                  revision.Partitions.Any(partition => partition.Kind == 1 && partition.StorageIndex == receipt.AcceptedStorageIndex)));
             if (accepted is null) throw new StorageCorruptionException("Legacy save receipt has no retained application revision.");
+            var acceptedRoot = receipt.AcceptedStorageIndex;
+            if (receipt.PartitionKind == 1 && acceptedRoot is not null)
+            {
+                var acceptedPartitions = state.Partitions.Any(partition => partition.Kind == 1 && partition.StorageIndex == acceptedRoot)
+                    ? currentPartitions
+                    : revisions.Single(revision => revision.Revision.RevisionNumber == accepted.RevisionNumber).Partitions;
+                acceptedRoot = acceptedPartitions.Single(partition => partition.After.Kind == 1).After.StorageIndex;
+            }
             receipts.Add(new(new(receipt.LifecycleGeneration, SaveOperationFamily.Protocol, receipt.PartitionKind, receipt.OperationKey),
                 receipt.Digest, receipt.OwnerSubject, receipt.ContentVersion, accepted.RevisionNumber,
-                receipt.AcceptedStorageIndex, receipt.Response));
+                acceptedRoot, receipt.Response));
             if (receipt.Response is { } response) await converter.VerifyPhysicalAsync(response);
         }
         foreach (var receipt in state.RestoreReceipts)
