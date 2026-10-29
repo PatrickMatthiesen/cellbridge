@@ -43,7 +43,8 @@ public static class IndexedPartitionSavePreparer
     public static async ValueTask<IndexedPreparedSave> PrepareAsync(SavePreparationRead preparation,
         FsshttpbCellSubRequest operation, DataElementPackage package, DocumentActorAdmission admission,
         IReadOnlyDictionary<string, string> attributes, IIndexedSaveSource source, IContentStore content,
-        StorageLimits limits, CancellationToken cancellationToken = default, DocumentWriteContext? writeContext = null)
+        StorageLimits limits, CancellationToken cancellationToken = default, DocumentWriteContext? writeContext = null,
+        Func<DataElementPackage?, bool>? canAppend = null)
     {
         using var timing = CellBridgeMetrics.Measure(CellBridgePhase.GraphPreparation);
         var control = preparation.Control;
@@ -270,11 +271,32 @@ public static class IndexedPartitionSavePreparer
                 .Concat(updates.Where(mapping => !mapping.Serial.IsNull).Select(mapping => new GraphSerialRange(mapping.Serial.Guid, mapping.Serial.Value, mapping.Serial.Value)))
                 .Append(new(selected.SerialNumber.Guid, selected.SerialNumber.Value, selected.SerialNumber.Value)));
             var response = Response(operation.RequestId, before, put, selected, admitted, addedIds, ranges, knowledge);
+            if (canAppend is not null && !canAppend(response.DataElementPackage))
+                return Reject(operation.RequestId, CellErrorCode.RequestNotSupported, "The save response exceeds the combined response budget.");
             var responseBytes = response.ToByteArray();
             StorageLimits.Check("save receipt bytes", responseBytes.LongLength, limits.MaxObjectBytes);
             var modified = control.UtcNow;
             if (attributes.ContainsKey("LastModifiedTime") && !CellSubRequestDataValidation.TryGetLastModifiedTime(attributes, out modified))
                 return new(response, ErrorCode: "InvalidArgument");
+            // Reject known publication limits before reserving or writing physical content.
+            StorageLimits.Check("history revisions", head.Counters.Revisions + 1L, limits.MaxHistoryRevisions);
+            switch (identity.Operation.Family)
+            {
+                case SaveOperationFamily.Protocol:
+                    StorageLimits.Check("save receipts", head.Counters.SaveReceipts + 1L, limits.MaxSaveReceipts);
+                    break;
+                case SaveOperationFamily.WholeFile:
+                    StorageLimits.Check("whole-file save receipts", head.Counters.WholeFileSaveReceipts + 1L, limits.MaxWholeFileSaveReceipts);
+                    break;
+                case SaveOperationFamily.Restore:
+                    StorageLimits.Check("restore receipts", head.Counters.RestoreReceipts + 1L, limits.MaxRestoreReceipts);
+                    break;
+            }
+            if (before.Kind == 0 && head.Delivery is not null)
+            {
+                StorageLimits.Check("pending external revisions", head.Counters.PendingDeliveries + 1L, limits.MaxPendingExternalRevisions);
+                StorageLimits.Check("pending external bytes", checked(head.Counters.PendingDeliveryBytes + packageDescriptor!.Length), limits.MaxPendingExternalBytes);
+            }
             // These arrays are owned by this preparation. Validate the candidate before staging,
             // then let the content writer bound each physical transaction independently of publication.
             var newElements = incoming.Where(pair => pair.Value.DataElementType != DataElementType.StorageIndexDataElementData &&

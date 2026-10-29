@@ -50,15 +50,27 @@ public sealed class PostgreSqlAtomicDocumentSaveTests
         Assert.Equal(4096, (await provider.Content.ReadVerifiedAsync(common)).Length);
     });
     [PostgreSqlFact]
-    public Task RejectedPublicationKeepsTheHeadAndReceiptsWhileStagedContentRemainsAnOrphan() => WithDatabase(async source =>
+    public Task RejectedPublicationKeepsVersionsAndReceiptsWhileStagedContentRemainsCharged() => WithDatabase(async source =>
     {
         var provider = Provider(source); var head = await Locked(provider);
         var plan = await PublicationTestPlans.WholeFileAsync(provider, head.ResourceId, MinimalDocx.Create("rejected"));
         var before = await provider.Documents.ExportDocumentAsync(head.ResourceId);
+        var pending = before!.ContentReferences.Where(reference => reference.IsPending).ToArray();
+        Assert.NotEmpty(pending);
+        Assert.True(before.Current.Head.Counters.StoredBytes > head.Counters.StoredBytes);
+        Assert.Equal(head.StateVersion, before.Current.Head.StateVersion);
         IDocumentRepository restricted = new PostgreSqlStateStore(source, new() { MaxHistoryRevisions = 1 });
         await Assert.ThrowsAsync<StorageQuotaExceededException>(() => restricted.PublishAsync(plan).AsTask());
         Assert.Equal(PortabilityTests.CanonicalSnapshots([before!]), PortabilityTests.CanonicalSnapshots([(await provider.Documents.ExportDocumentAsync(head.ResourceId))!]));
         Assert.True((await new StorageMaintenance(source).CollectOrphansAsync()).OrphanObjects > 0);
+        Assert.Equal(pending.Length, (await provider.Documents.ExportDocumentAsync(head.ResourceId))!.ContentReferences.Count(reference => reference.IsPending));
+        await new StorageMaintenance(source).CollectOrphansAsync(true, true);
+        var collected = (await provider.Documents.ExportDocumentAsync(head.ResourceId))!;
+        Assert.DoesNotContain(collected.ContentReferences, reference => reference.IsPending);
+        Assert.Equal(head.StateVersion, collected.Current.Head.StateVersion);
+        Assert.Equal(head.ContentVersion, collected.Current.Head.ContentVersion);
+        Assert.Empty(collected.Receipts);
+        Assert.Equal(head.Counters.StoredBytes, collected.Current.Head.Counters.StoredBytes);
     });
     [PostgreSqlFact]
     public Task CancellationAfterHeadSqlRollsBackPublicationAndPreservesTheCallersToken() => WithDatabase(async source =>

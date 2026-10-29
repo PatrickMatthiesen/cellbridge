@@ -33,10 +33,10 @@ public sealed class SqlServerAtomicDocumentSaveTests(SqlServerFixture fixture)
         Assert.Equal(1,commits.Commits);
         Assert.Equal(accepted,SqlServerDocuments.SnapshotJson(await normal.Documents.ExportDocumentAsync(saved.ResourceId)));
         Assert.Equal(saved.StateVersion,(await normal.Documents.FindAsync(new DocumentIdentity.Resource(saved.ResourceId)))!.StateVersion);
-        // Physical candidates are staged before the document transaction and are
-        // reclaimed only by explicitly quiescent maintenance after rejection.
+        // The known receipt limit rejects before staging, so it creates no orphan payloads.
         var maintenance=new StorageMaintenance(database.Options(admin:true));
-        Assert.True((await maintenance.CollectOrphansAsync()).OrphanObjects>0);
+        Assert.Equal(0,(await maintenance.CollectOrphansAsync()).OrphanObjects);
+        Assert.DoesNotContain((await normal.Documents.ExportDocumentAsync(saved.ResourceId))!.ContentReferences, reference => reference.IsPending);
         await maintenance.CollectOrphansAsync(true,true);
         Assert.Equal(acceptedBytes,await SqlServerDocuments.PackageAsync(normal,saved.Package));
     }

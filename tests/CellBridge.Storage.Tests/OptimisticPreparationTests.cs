@@ -162,7 +162,13 @@ public sealed class OptimisticPreparationTests
 
         // The writer's lease remains valid. Only the detached authority comparison rejects this save.
         AssertRejected(result);
-        Assert.Equal(JsonSerializer.Serialize(before), JsonSerializer.Serialize(await fixture.CurrentAsync()));
+        var after = (await fixture.Inner.ExportDocumentAsync(fixture.Id))!;
+        var charge = after.ContentReferences.Where(reference => reference.IsPending)
+            .Sum(reference => reference.Handle.Length + reference.AdmissionBytes);
+        Assert.True(charge > 0);
+        Assert.Equal(JsonSerializer.Serialize(before with { Counters = before.Counters with
+            { StoredBytes = checked(before.Counters.StoredBytes + charge) } }), JsonSerializer.Serialize(after.Current.Head));
+        Assert.Equal(after.Current.Head.Counters.StoredBytes, NormalizedDocumentRecovery.StoredBytes(after));
     }
 
     [Theory]

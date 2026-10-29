@@ -293,9 +293,25 @@ records and never return those stale aggregates as current state.
 
 ### Collect orphan content
 
-Failed or cancelled staging can leave unreferenced physical objects. Interrupted
-filesystem writes can leave `.tmp` files. File age and the latest package alone
-cannot establish that an object is unreferenced.
+Office, whole-file and restore saves reserve capacity in the affected document
+before writing new physical content. Each unique handle and its ownership record
+count toward `MaxDocumentStoredBytes`, including when the save later fails.
+Reservation takes that document's row lock and does not advance its version.
+Repeated attempts with the same handle reuse the charge. Publication completes
+the ownership records in its transaction without charging the payload again.
+No provider-wide counter or bucket participates.
+
+A pending reservation may have complete bytes, partial external staging, or no
+physical object after cancellation or a failed write. Recovery preserves its
+descriptor and charge without treating it as published content. Only offline,
+quiescent collection releases unused reservations. Raw `IContentStore` writes
+are trusted storage operations outside this document admission contract. Fresh
+document creation remains a separate host-authorized operation with no global
+document-count limit.
+
+Failed staging can leave unreferenced physical objects. Interrupted filesystem
+writes can leave `.tmp` files. File age and the latest package alone cannot
+establish that an object is unreferenced.
 
 Preview PostgreSQL-backed inventory:
 
@@ -320,7 +336,8 @@ var preview = await maintenance.CollectOrphansAsync();
 var applied = await maintenance.CollectOrphansAsync(apply: true, quiescent: true);
 ```
 
-Apply deletes only unreferenced objects/chunks and does not prune graph history.
+Apply releases pending reservations and deletes only unreferenced objects/chunks.
+It does not prune graph history.
 Use maintenance credentials with content deletion rights. In-memory storage has
 no persistent collector.
 
@@ -357,7 +374,9 @@ process, retain matching content and never replace missing objects by reseeding.
    the old global quota tables. PostgreSQL schema 9 and SQL Server schema 4 create
    normalized records and backfill current controls and retained application
    revisions from validated legacy data. Filesystem upgrades require the matching
-   content reader/root. Existing data and consumer tables are preserved.
+   content reader/root. PostgreSQL schema 10 and SQL Server schema 5 add charged
+   staging reservations to document content ownership. Existing data and consumer
+   tables are preserved.
 5. Start one host and verify health, identities, permissions, downloads and a
    save/reopen cycle before enabling other writers or delivery workers.
 
@@ -381,9 +400,12 @@ unknown resource IDs cannot resolve through a URL fallback.
 Dispatch typed controls through `DocumentControlReducer`. Publication must honor
 actor/authority generations, lifecycle, coordination, prepared file versions,
 operation receipts and affected mapping preconditions. Invoke no arbitrary
-whole-history callback. Immutable content staging precedes the affected document
-guard; all admitted repository records commit together. Do not retry an arbitrary
-mutation after an unknown commit outcome.
+whole-history callback. `ReserveContentAsync` checks current write authority and
+charges new handles under the affected document guard before physical staging.
+Publication takes that guard again and commits the document records together.
+Preserve pending reservations after cancellation or an uncertain commit; their
+bytes may already exist. Do not retry an arbitrary mutation after an unknown
+commit outcome.
 
 Mapping serial claims retain their scoped key/target meaning. Mapping updates
 change only requested keys. Persist the current catalog's visibility intervals,
@@ -399,6 +421,13 @@ object is durable under the provider's declared guarantees. Never recycle keys o
 hide corruption. Check all aliases before caching or deduplicating a key.
 `IContentBatchReader` and `IContentBatchWriter` may batch object operations while
 preserving length/hash checks, cancellation and atomic batch failure.
+
+Stores used for ordinary document saves must return the lowercase SHA-256 digest
+as both `Key` and `Sha256` for new content. This lets the service reserve a known
+handle before any durable write. All bundled stores follow this rule. Trusted
+offline recovery can still remap provider-specific keys, and retained historical
+handles remain readable; that does not qualify an arbitrary-key writer for new
+document saves.
 
 `IDocumentPackageReader` reproduces one exact immutable package version and verifies
 its recorded digest and length. Package descriptors are not physical content keys.

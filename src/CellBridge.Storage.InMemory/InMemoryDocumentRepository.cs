@@ -39,6 +39,8 @@ public sealed partial class InMemoryDocumentRepository : IDocumentRepository, II
         public readonly Dictionary<SaveOperationIdentity, DocumentOperationReceipt> Receipts = [];
         public readonly Dictionary<string, ContentHandle> References = new(StringComparer.Ordinal);
         public readonly Dictionary<string, long> ReferenceCounts = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, long> AdmissionBytes = new(StringComparer.Ordinal);
+        public readonly HashSet<string> PendingReferences = new(StringComparer.Ordinal);
         public readonly HashSet<string> RetiredPaths = new(StringComparer.Ordinal);
         public readonly SortedList<long, DocumentDelivery> Deliveries = [];
         public readonly HashSet<string> OwnedPaths = new(StringComparer.Ordinal) { head.PathKey };

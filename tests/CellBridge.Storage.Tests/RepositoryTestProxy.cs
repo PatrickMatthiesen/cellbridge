@@ -17,6 +17,7 @@ internal abstract class RepositoryTestProxy(IDocumentRepository inner) : IDocume
     public virtual ValueTask<SaveReceiptRead?> ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken ct = default) => Inner.ReadReceiptAsync(id, operation, ct);
     public virtual ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken ct = default) => Inner.ReadPartitionAsync(id, request, ct);
     public virtual ValueTask<SavePreparationRead?> PrepareSaveAsync(Guid id, SavePreparationRequest request, CancellationToken ct = default) => Inner.PrepareSaveAsync(id, request, ct);
+    public virtual ValueTask<bool> ReserveContentAsync(DocumentActorAdmission admission, IReadOnlyCollection<ContentHandle> handles, CancellationToken ct = default) => Inner.ReserveContentAsync(admission, handles, ct);
     public virtual ValueTask<CreateResult> CreateAsync(PreparedDocumentCreate create, CancellationToken ct = default) => Inner.CreateAsync(create, ct);
     public virtual ValueTask<ControlResult> ExecuteControlAsync(DocumentControlCommand command, CancellationToken ct = default) => Inner.ExecuteControlAsync(command, ct);
     public virtual ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken ct = default) => Inner.PublishAsync(publication, ct);

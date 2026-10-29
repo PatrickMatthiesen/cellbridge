@@ -158,9 +158,15 @@ public sealed partial class CellBridgeDocumentService
                 if (preparation.Control.Head.StateVersion != current.Head.StateVersion) { plans.Clear(); break; }
                 var request = new FsshttpbCellSubRequest(RequestTypes.PutChanges)
                 { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = proposedIndex, ExpectedStorageIndex = expectedIndex } };
-                var prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, request, incoming, Admission(actor, current.Head),
-                    attributes, provider.Documents, provider.Content, provider.Limits, cancellationToken,
-                    new DocumentWriteContext(operation, digest) { ExpectedRevisionNumber = expectedRevision });
+                var admission = Admission(actor, current.Head);
+                IndexedPreparedSave prepared;
+                try
+                {
+                    prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, request, incoming, admission,
+                        attributes, provider.Documents, new DocumentStagingContent(provider.Documents, provider.Content, admission, provider.Limits),
+                        provider.Limits, cancellationToken, new DocumentWriteContext(operation, digest) { ExpectedRevisionNumber = expectedRevision });
+                }
+                catch (StagingAdmissionChangedException) { plans.Clear(); break; }
                 if (prepared.ErrorCode is not null || prepared.Publication is null)
                 {
                     // Another copy can publish after the coherent preparation

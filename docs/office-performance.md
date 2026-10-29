@@ -1,14 +1,58 @@
 # Measuring active Office user capacity
 
 The 10,000 successful commits/minute target remains unmet. The latest measured
-replacement acknowledged 5,286 saves inside a minute while offering 11,250,
+replacement acknowledged 4,854 saves inside a minute while offering 11,250,
 with HTTP 503 overload failures. A separate run offering 3,000 saves/minute
-passed without HTTP failures, with 2,994 acknowledged inside its minute.
+passed without HTTP failures, with 2,992 acknowledged inside its minute.
 Both used 1,500 authenticated users and 15,000 documents.
 
 The archived implementation reached 8,151 inside a measured minute with HTTP
 failures. The rewrite has not demonstrated a throughput gain over that result.
 These synthetic workloads do not validate desktop Office capacity.
+
+## Document staging admission
+
+The security fix charges unique content handles and ownership metadata against
+the affected document before physical staging. A failed save keeps its pending
+charge until successful publication or explicit quiescent collection. This adds
+one transaction under that document's row lock per content batch. Physical
+staging and final publication retain their separate transactions. It adds no
+provider-wide counter or bucket. Known revision, receipt and delivery limits,
+and the combined response-size limit, reject before physical staging.
+
+Fresh runs retained the pool cap of 64, automatic preparation cap of 64, durable
+PostgreSQL settings, request admission of 128 globally/two per subject, and the
+same 256 KiB package/16 KiB changed-XML workload, warm-up and measurement periods.
+
+| Profile | Offered saves/minute | In-window acknowledgements | Excluded late acknowledgements | HTTP result |
+| --- | ---: | ---: | ---: | --- |
+| Primary, save every 30 seconds | 3,000 | 2,992 | 7 | No failures |
+| AutoSave, save every 8 seconds | 11,250 | 4,854 | 114 | Overload failures, HTTP 503 |
+
+Neither run missed a user cadence slot. All 4,483 primary and 7,024 AutoSave
+acknowledgements, including warm-up/drain, passed package, revision, receipt and
+distinct-payload verification. The AutoSave step totals, including warm-up/drain
+and queries/opens, include 12,956 HTTP 503 responses; they are not a count confined
+to saves in the measured minute.
+
+The AutoSave result is about 8% below the earlier 5,286 run. These single local
+runs do not isolate the exact cost of the added transaction. The primary workload
+still passed at 3,000 offered saves/minute; it does not establish the target
+capacity. The earlier measurements below precede this staging-admission fix.
+
+During measurement WebDemo used 135% of one logical CPU and at most 596,426,752
+sampled RSS bytes in the primary run. AutoSave used 156% and 755,703,808 bytes.
+These are process observations, not allocation or managed-heap measurements.
+The PostgreSQL sampler observed no blocked backends in either run; its 250 ms
+sampling can miss short waits. Physical object growth remained about 17.47 KiB
+per acknowledgement. Document charged bytes grew about 33.55 KiB per
+acknowledgement, including the new ownership metadata; this is not physical
+database or WAL growth.
+
+The retained reports are
+`artifacts/load-tests/office-users-1500-20261029T0658326926623Z-bce1fe02890940d2afdaf6ce8eb9fdb9.pgstats.json`
+and
+`artifacts/load-tests/office-users-1500-20261029T0703328924140Z-b302b928a68e47ab9e5401d527833992.pgstats.json`.
 
 ## Initial replacement measurements
 

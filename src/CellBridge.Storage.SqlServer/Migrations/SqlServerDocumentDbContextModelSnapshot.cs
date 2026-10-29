@@ -16,7 +16,7 @@ partial class SqlServerDocumentDbContextModelSnapshot : ModelSnapshot
     // If you encounter a merge conflict in the line below, it means you need to
     // discard one of the migration branches and recreate its migrations on top of
     // the other branch. See https://aka.ms/efcore-docs-migrations-conflicts for more info.
-    public override string LastMigrationId => "20261028140000_NormalizedDocumentRepository";
+    public override string LastMigrationId => "20261029120000_DocumentContentStaging";
 
     protected override void BuildModel(ModelBuilder modelBuilder)
     {
@@ -665,6 +665,16 @@ partial class SqlServerDocumentDbContextModelSnapshot : ModelSnapshot
 
         modelBuilder.Entity("CellBridge.Storage.Shared.RepositoryReferenceRow", b =>
             {
+                b.Property<long>("AdmissionBytes")
+                    .ValueGeneratedOnAdd()
+                    .HasColumnType("bigint")
+                    .HasDefaultValue(0L);
+
+                b.Property<bool>("IsPending")
+                    .ValueGeneratedOnAdd()
+                    .HasColumnType("bit")
+                    .HasDefaultValue(false);
+
                 b.Property<Guid>("ResourceId")
                     .HasColumnType("uniqueidentifier");
 
@@ -812,7 +822,7 @@ partial class SqlServerDocumentDbContextModelSnapshot : ModelSnapshot
                     new
                     {
                         Id = 1,
-                        Version = 4
+                        Version = 5
                     });
             });
 

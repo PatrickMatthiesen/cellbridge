@@ -21,6 +21,7 @@ internal sealed class CustomDocumentRepository(IContentStore content) : IDocumen
     public ValueTask<SaveReceiptRead?> ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken ct = default) => Inner.ReadReceiptAsync(id, operation, ct);
     public ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken ct = default) => Inner.ReadPartitionAsync(id, request, ct);
     public ValueTask<SavePreparationRead?> PrepareSaveAsync(Guid id, SavePreparationRequest request, CancellationToken ct = default) => Inner.PrepareSaveAsync(id, request, ct);
+    public ValueTask<bool> ReserveContentAsync(DocumentActorAdmission admission, IReadOnlyCollection<ContentHandle> handles, CancellationToken ct = default) => Inner.ReserveContentAsync(admission, handles, ct);
     public ValueTask<CreateResult> CreateAsync(PreparedDocumentCreate create, CancellationToken ct = default)
     { Creates++; return Inner.CreateAsync(create, ct); }
     public ValueTask<ControlResult> ExecuteControlAsync(DocumentControlCommand command, CancellationToken ct = default) => Inner.ExecuteControlAsync(command, ct);

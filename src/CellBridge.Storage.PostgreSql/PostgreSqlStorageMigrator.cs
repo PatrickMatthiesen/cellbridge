@@ -81,13 +81,14 @@ public sealed class PostgreSqlStorageMigrator
                 ? "Missing storage schema version."
                 : "Multiple storage schema versions.");
         var previousSchema = versions[0];
-        if (previousSchema is not (3 or 4 or 5 or 6 or 7 or 8 or 9))
+        if (previousSchema is not (3 or 4 or 5 or 6 or 7 or 8 or 9 or 10))
             throw new StorageUnavailableException(
-                "Unsupported storage schema. Only schema 3 through 9 initialization is supported; persisted data was not changed.");
+                "Unsupported storage schema. Only schema 3 through 10 initialization is supported; persisted data was not changed.");
 
         await CreateHistoryTableAsync(connection, npgsqlTransaction, cancellationToken);
         await ValidateHistoryAsync(connection, npgsqlTransaction, previousSchema >= 6, cancellationToken,
-            allowAllowances: previousSchema >= 7, allowRemoval: previousSchema >= 8, allowNormalized: previousSchema >= 9);
+            allowAllowances: previousSchema >= 7, allowRemoval: previousSchema >= 8, allowNormalized: previousSchema >= 9,
+            allowContentStaging: previousSchema >= 10);
 
         if (previousSchema <= 5)
         {
@@ -126,7 +127,8 @@ public sealed class PostgreSqlStorageMigrator
             cancellationToken);
 
     private static async Task ValidateHistoryAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        bool allowBaseline, CancellationToken cancellationToken, bool allowAllowances = false, bool allowRemoval = false, bool allowNormalized = false)
+        bool allowBaseline, CancellationToken cancellationToken, bool allowAllowances = false, bool allowRemoval = false,
+        bool allowNormalized = false, bool allowContentStaging = false)
     {
         await using var command = new NpgsqlCommand(
             $"SELECT \"MigrationId\" FROM \"{CellBridgeDbContext.MigrationsHistoryTable}\"", connection, transaction);
@@ -139,9 +141,12 @@ public sealed class PostgreSqlStorageMigrator
             if (!(allowBaseline && migration == BaselineSchema6.MigrationId) &&
                 !(allowAllowances && migration == UsageAllowanceMigration.MigrationId) &&
                 !(allowRemoval && migration == RemoveSharedQuotas.MigrationId) &&
-                !(allowNormalized && migration == NormalizedDocumentRepository.MigrationId))
+                !(allowNormalized && migration == NormalizedDocumentRepository.MigrationId) &&
+                !(allowContentStaging && migration == DocumentContentStaging.MigrationId))
                 throw new StorageUnavailableException("Unsupported or inconsistent document migration history; persisted data was not changed.");
         }
+        if (allowContentStaging && !applied.Contains(DocumentContentStaging.MigrationId))
+            throw new StorageUnavailableException("The document content staging schema is missing its migration history.");
         if (allowNormalized && !applied.Contains(NormalizedDocumentRepository.MigrationId))
             throw new StorageUnavailableException("The normalized document schema is missing its migration history.");
         if (allowRemoval && !applied.Contains(RemoveSharedQuotas.MigrationId))

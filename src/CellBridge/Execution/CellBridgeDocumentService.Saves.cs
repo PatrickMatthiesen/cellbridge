@@ -79,8 +79,14 @@ public sealed partial class CellBridgeDocumentService
                 if (beforeStaging.CoordinationGeneration != initial.CoordinationGeneration)
                     return await LostLeaseAsync(beforeStaging);
             }
-            var prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, operation, owned, Admission(actor, head),
-                attributes, provider.Documents, provider.Content, provider.Limits, cancellationToken);
+            IndexedPreparedSave prepared;
+            try
+            {
+                prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, operation, owned, admission,
+                    attributes, provider.Documents, new DocumentStagingContent(provider.Documents, provider.Content, admission, provider.Limits),
+                    provider.Limits, cancellationToken, canAppend: canAppend);
+            }
+            catch (StagingAdmissionChangedException) { continue; }
             if (prepared.ErrorCode is { } preparationError) return new(prepared.Response, head, preparationError);
             if (prepared.Publication is not { } publication) return new(prepared.Response, head);
             publication = publication with { Fence = publication.Fence with { PreparedCoordination = originalCoordination } };

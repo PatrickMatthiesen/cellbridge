@@ -7,6 +7,7 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="11.0.0-rc.2.26504.105" />
     <ProjectReference Include="../CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.SqlServer/CellBridge.Storage.SqlServer.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <ProjectReference Include="../../src/CellBridge.Lists.SqlServer/CellBridge.Lists.SqlServer.csproj" />
     <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
     <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
@@ -18,6 +19,7 @@
     <Compile Include="../CellBridge.Storage.Tests/NormalizedLegacyFixture.cs" Link="NormalizedLegacyFixture.cs" />
     <Compile Include="../CellBridge.Storage.Tests/NormalizedLegacyDatabase.cs" Link="NormalizedLegacyDatabase.cs" />
     <Compile Include="../CellBridge.Storage.Tests/RepositoryTestProxy.cs" Link="RepositoryTestProxy.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/DocumentStagingScenario.cs" Link="DocumentStagingScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/ImmutableIndexedReadScenario.cs" Link="ImmutableIndexedReadScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/PublicationContentReadScenario.cs" Link="PublicationContentReadScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/CurrentMetadataReadScenario.cs" Link="CurrentMetadataReadScenario.cs" />

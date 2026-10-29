@@ -244,6 +244,9 @@ public interface IDocumentRepository : IIndexedSaveSource, IIndexedRepositoryRec
     ValueTask<SaveReceiptRead?> ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken cancellationToken = default);
     ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken cancellationToken = default);
     ValueTask<SavePreparationRead?> PrepareSaveAsync(Guid id, SavePreparationRequest request, CancellationToken cancellationToken = default);
+    /// <summary>Reserves document capacity for at most 64 handles before physical staging. False means current write authority changed.
+    /// Reservations charge unique handles and their ownership metadata, survive failed writes, and do not advance document versions.</summary>
+    ValueTask<bool> ReserveContentAsync(DocumentActorAdmission admission, IReadOnlyCollection<ContentHandle> handles, CancellationToken cancellationToken = default);
     ValueTask<CreateResult> CreateAsync(PreparedDocumentCreate create, CancellationToken cancellationToken = default);
     ValueTask<ControlResult> ExecuteControlAsync(DocumentControlCommand command, CancellationToken cancellationToken = default);
     ValueTask<PublicationResult> PublishAsync(PreparedDocumentPublication publication, CancellationToken cancellationToken = default);

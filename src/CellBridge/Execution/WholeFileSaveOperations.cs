@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using CellBridge.FssHttpB;
+using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.AspNetCore;
@@ -88,10 +89,20 @@ public sealed partial class CellBridgeDocumentService
             }
             var operation = new FsshttpbCellSubRequest(RequestTypes.PutChanges)
             { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = index } };
-            var prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, operation, package,
-                Admission(actor, before.Head), ImmutableDictionary<string, string>.Empty,
-                provider.Documents, provider.Content, provider.Limits, cancellationToken,
-                new DocumentWriteContext(identity, digest, hostLockToken));
+            var admission = Admission(actor, before.Head);
+            IndexedPreparedSave prepared;
+            try
+            {
+                prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, operation, package,
+                    admission, ImmutableDictionary<string, string>.Empty, provider.Documents,
+                    new DocumentStagingContent(provider.Documents, provider.Content, admission, provider.Limits), provider.Limits,
+                    cancellationToken, new DocumentWriteContext(identity, digest, hostLockToken));
+            }
+            catch (StagingAdmissionChangedException)
+            {
+                if (await ReplayAsync(cancellationToken) is { } acceptedRetry) return acceptedRetry;
+                throw new WholeFileSaveConflictException("The document changed while admitting whole-file content.");
+            }
             if (prepared.ErrorCode is { } error)
             {
                 if (error == "FileUnauthorizedAccess") throw new UnauthorizedAccessException("Write access denied.");

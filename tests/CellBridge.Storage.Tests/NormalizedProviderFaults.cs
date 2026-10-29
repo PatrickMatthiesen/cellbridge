@@ -18,6 +18,7 @@ public sealed class NormalizedHeadPause(Guid resourceId) : DbCommandInterceptor
     {
         if (command.Transaction is { } transaction && command.CommandText.Contains("UPDATE", StringComparison.OrdinalIgnoreCase) &&
             command.CommandText.Contains("repository_heads", StringComparison.OrdinalIgnoreCase) &&
+            command.CommandText.Contains("StateVersion", StringComparison.OrdinalIgnoreCase) &&
             command.Parameters.Cast<DbParameter>().Any(parameter => parameter.Value is Guid id && id == resourceId))
         {
             transactions.TryAdd(transaction, 0); Entered.TrySetResult();

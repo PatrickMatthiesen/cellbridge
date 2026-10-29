@@ -59,7 +59,7 @@ public sealed class StreamedSaveTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task FailureOrCancellationDuringContentIngestionDeletesStagingAndPreservesState(bool cancel)
+    public async Task FailureOrCancellationDuringContentIngestionKeepsThePublicationAndChargesStaging(bool cancel)
     {
         using var cancellation = new CancellationTokenSource();
         var tracking = new TrackingContent(new InMemoryContentStore());
@@ -74,7 +74,12 @@ public sealed class StreamedSaveTests
             new Dictionary<string, string>(), TestActor.Value, cancellation.Token).AsTask();
         if (cancel) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => saving);
         else await Assert.ThrowsAsync<IOException>(() => saving);
-        Assert.Equal(state, await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
+        var after = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
+        var charge = after.ContentReferences.Where(reference => reference.IsPending)
+            .Sum(reference => reference.Handle.Length + reference.AdmissionBytes);
+        Assert.True(charge > 0);
+        Assert.Equal(state with { Counters = state.Counters with { StoredBytes = checked(state.Counters.StoredBytes + charge) } }, after.Current.Head);
+        Assert.Equal(after.Current.Head.Counters.StoredBytes, NormalizedDocumentRecovery.StoredBytes(after));
         Assert.Equal(1, tracking.StagedWrites);
         Assert.Equal(0, tracking.FileWrites);
     }

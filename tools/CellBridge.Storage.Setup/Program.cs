@@ -160,5 +160,5 @@ else
         ? new PostgreSqlFileSystemContentStore(source, root, limits.MaxObjectBytes) : null;
     await new PostgreSqlStorageMigrator(source, limits, migrationContent).MigrateAsync();
     await AuthenticationDatabase.InitializeAsync(connectionString);
-    Console.WriteLine("CellBridge storage schema version 9 and authentication schema version 1 are ready.");
+    Console.WriteLine("CellBridge storage schema version 10 and authentication schema version 1 are ready.");
 }

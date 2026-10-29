@@ -43,7 +43,8 @@ public sealed partial class InMemoryDocumentRepository
             parts.SelectMany(partition => partition.Checkpoints.Values).ToImmutableArray(),
             entry.Revisions.Values.ToImmutableArray(), entry.Receipts.Values.ToImmutableArray(), entry.Deliveries.Values.ToImmutableArray(),
             entry.OwnedPaths.Order(StringComparer.Ordinal).ToImmutableArray(), entry.References.Values.Select(handle =>
-                new NormalizedContentReference(handle, entry.ReferenceCounts[handle.Key])).ToImmutableArray());
+                new NormalizedContentReference(handle, entry.ReferenceCounts[handle.Key])
+                { IsPending = entry.PendingReferences.Contains(handle.Key), AdmissionBytes = entry.AdmissionBytes.GetValueOrDefault(handle.Key) }).ToImmutableArray());
     }
 
     public async ValueTask<NormalizedDocumentSnapshot?> ExportDocumentAsync(Guid resourceId, CancellationToken cancellationToken = default)
@@ -153,7 +154,12 @@ public sealed partial class InMemoryDocumentRepository
         entry.OwnedPaths.Clear(); entry.OwnedPaths.UnionWith(snapshot.PathClaims);
         entry.RetiredPaths.UnionWith(snapshot.PathClaims.Where(path => path != entry.Head.PathKey));
         foreach (var reference in snapshot.ContentReferences)
-        { entry.References.Add(reference.Handle.Key, reference.Handle); entry.ReferenceCounts.Add(reference.Handle.Key, reference.ReferenceCount); }
+        {
+            entry.References.Add(reference.Handle.Key, reference.Handle);
+            entry.ReferenceCounts.Add(reference.Handle.Key, reference.ReferenceCount);
+            if (reference.AdmissionBytes != 0) entry.AdmissionBytes.Add(reference.Handle.Key, reference.AdmissionBytes);
+            if (reference.IsPending) entry.PendingReferences.Add(reference.Handle.Key);
+        }
         foreach (var root in snapshot.Partitions)
         {
             var part = new Partition(root.Head) { ReplayPosition = root.ReplayPosition };
@@ -187,7 +193,7 @@ public sealed partial class InMemoryDocumentRepository
             entry.Partitions.Add(root.Head.Kind, part);
         }
         var elementKeys = snapshot.Elements.Select(value => value.Element.Payload.Key).ToHashSet(StringComparer.Ordinal);
-        await VerifyReferencesAsync(snapshot.ContentReferences.Where(value => !elementKeys.Contains(value.Handle.Key)).Select(value => value.Handle), cancellationToken);
+        await VerifyReferencesAsync(snapshot.ContentReferences.Where(value => !value.IsPending && !elementKeys.Contains(value.Handle.Key)).Select(value => value.Handle), cancellationToken);
         foreach (var revision in snapshot.ApplicationRevisions.OrderBy(value => value.RevisionNumber)) entry.Revisions.Add(revision.RevisionNumber, revision);
         foreach (var value in snapshot.Receipts) entry.Receipts.Add(value.Operation, value);
         foreach (var delivery in snapshot.Deliveries.OrderBy(value => value.Sequence)) entry.Deliveries.Add(delivery.Sequence, delivery);

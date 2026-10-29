@@ -34,6 +34,8 @@ public sealed class EfPostgreSqlMigrationTests
             context.GetService<IMigrationsAssembly>().FindMigrationId("NormalizedDocumentRepository"));
         Assert.Equal("20261028000200_RemoveSharedQuotas",
             context.GetService<IMigrationsAssembly>().FindMigrationId("RemoveSharedQuotas"));
+        Assert.Equal("20261029000100_DocumentContentStaging",
+            context.GetService<IMigrationsAssembly>().FindMigrationId("DocumentContentStaging"));
     }
 
     [Fact]
@@ -59,7 +61,7 @@ public sealed class EfPostgreSqlMigrationTests
             await future.ExecuteNonQueryAsync();
         await Assert.ThrowsAsync<StorageUnavailableException>(() => migrator.MigrateAsync());
         await using var count = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\"");
-        Assert.Equal(5L, await count.ExecuteScalarAsync());
+        Assert.Equal(6L, await count.ExecuteScalarAsync());
     });
 
     [PostgreSqlFact]
@@ -74,7 +76,7 @@ public sealed class EfPostgreSqlMigrationTests
         await store.InitializeAsync();
         await ((IDocumentRepository)store).CheckHealthAsync();
         await using (var history = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\""))
-            Assert.Equal(4L, await history.ExecuteScalarAsync());
+            Assert.Equal(5L, await history.ExecuteScalarAsync());
         var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
         var created = (await service.CreateAsync("/empty-ef.docx", MinimalDocx.Create("EF"), TestActor.Value))!;
         await store.InitializeAsync();
@@ -393,9 +395,9 @@ public sealed class EfPostgreSqlMigrationTests
         await store.InitializeAsync();
         Assert.Equal(before, await Rows(source));
         await using (var schema = source.CreateCommand("SELECT version FROM cellbridge_schema"))
-            Assert.Equal(9, await schema.ExecuteScalarAsync());
+            Assert.Equal(10, await schema.ExecuteScalarAsync());
         await using (var history = source.CreateCommand("SELECT count(*) FROM \"__CellBridgeDocumentMigrationsHistory\""))
-            Assert.Equal(4L, await history.ExecuteScalarAsync());
+            Assert.Equal(5L, await history.ExecuteScalarAsync());
         await using (var removed = source.CreateCommand("SELECT to_regclass('cellbridge_usage') IS NULL AND to_regclass('cellbridge_usage_buckets') IS NULL"))
             Assert.Equal(true, await removed.ExecuteScalarAsync());
         var repository = (IDocumentRepository)store;

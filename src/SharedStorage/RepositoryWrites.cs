@@ -79,13 +79,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
     }
     private async Task<long> AddReferencesAsync(TContext db, Guid id, IEnumerable<ContentHandle> handles, CancellationToken ct)
     {
-        var unique = handles.GroupBy(handle => handle.Key, StringComparer.Ordinal).Select(group =>
-        {
-            var handle = group.First();
-            if (group.Any(value => value != handle)) throw new StorageCorruptionException("Conflicting content descriptors in one publication.");
-            StorageLimits.Check("object bytes", handle.Length, limits.MaxObjectBytes);
-            return handle;
-        }).ToArray();
+        var unique = ValidateReferenceHandles(handles, ct, requireCanonicalKey: false);
         var keys = unique.Select(handle => handle.Key).ToArray();
         var physical = await PrefetchAsync(db, db.Set<ObjectRow>().AsNoTracking(), keys,
             key => row => row.ObjectKey == key, row => row.ObjectKey, _ => true, "physical-content", ct, includeTracked: false);
@@ -110,10 +104,79 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
             {
                 if (existing.Length != handle.Length || existing.Sha256 != handle.Sha256)
                     throw new StorageCorruptionException("Document content reference metadata changed.");
-                existing.ReferenceCount = checked(existing.ReferenceCount + 1);
+                if (existing.IsPending) existing.IsPending = false;
+                else existing.ReferenceCount = checked(existing.ReferenceCount + 1);
             }
         }
         return addedBytes;
+    }
+    private ContentHandle[] ValidateReferenceHandles(IEnumerable<ContentHandle> handles, CancellationToken ct, bool requireCanonicalKey = true)
+    {
+        ArgumentNullException.ThrowIfNull(handles);
+        var unique = ContentStoreReader.UniqueHandles(handles).ToArray();
+        foreach (var handle in unique)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (handle.Length < 0 || handle.Length > Array.MaxLength || requireCanonicalKey &&
+                (handle.Sha256.Length != 64 || handle.Key != handle.Sha256 || handle.Sha256.Any(c => !(c is >= '0' and <= '9' or >= 'a' and <= 'f'))))
+                throw new StorageCorruptionException("Invalid content staging descriptor.");
+            StorageLimits.Check("object bytes", handle.Length, limits.MaxObjectBytes);
+        }
+        return unique;
+    }
+    public ValueTask<bool> ReserveContentAsync(DocumentActorAdmission admission, IReadOnlyCollection<ContentHandle> handles,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handles);
+        if (handles.Count > 64) throw new ArgumentOutOfRangeException(nameof(handles), "A staging reservation accepts at most 64 handles.");
+        var unique = ValidateReferenceHandles(handles, cancellationToken);
+        return MutateAsync(admission.ResourceId, async (db, row, now) =>
+        {
+            if (row is null || row.IsDeleted) return false;
+            var head = Head(row);
+            if (!DocumentControlReducer.Access(head, admission).HasFlag(DocumentAccess.Write)) return false;
+            var references = await PrefetchAsync(db, db.Set<RepositoryReferenceRow>().Where(value => value.ResourceId == head.ResourceId),
+                unique.Select(handle => handle.Key).ToArray(), key => value => value.ObjectKey == key,
+                value => value.ObjectKey, value => value.ResourceId == head.ResourceId, "staging-references", cancellationToken);
+            long addedBytes = 0;
+            foreach (var handle in unique)
+            {
+                if (references[handle.Key] is { } existing)
+                {
+                    if (existing.Length != handle.Length || existing.Sha256 != handle.Sha256)
+                        throw new StorageCorruptionException("Document content reference metadata changed.");
+                    continue;
+                }
+                var metadata = NormalizedContentReference.StagingMetadataBytes(handle);
+                db.Set<RepositoryReferenceRow>().Add(new() { ResourceId = head.ResourceId, ObjectKey = handle.Key,
+                    Length = handle.Length, Sha256 = handle.Sha256, ReferenceCount = 1, IsPending = true, AdmissionBytes = metadata });
+                addedBytes = checked(addedBytes + handle.Length + metadata);
+            }
+            if (addedBytes != 0)
+            {
+                var next = SetHead(row, head with { Counters = head.Counters with { StoredBytes = checked(head.Counters.StoredBytes + addedBytes) } });
+                DocumentPublicationRules.CheckLimits(next, limits);
+            }
+            return true;
+        }, cancellationToken);
+    }
+
+    // Explicit quiescent maintenance owns this transaction and has validated the inventory.
+    internal async Task DiscardPendingReferencesAsync(TContext db, CancellationToken ct)
+    {
+        var pending = await db.Set<RepositoryReferenceRow>().Where(row => row.IsPending).ToArrayAsync(ct);
+        foreach (var owner in pending.GroupBy(row => row.ResourceId))
+        {
+            var row = await HeadRowAsync(db, owner.Key, ct)
+                ?? throw new StorageCorruptionException("A pending content reservation has no document owner.");
+            var head = Head(row);
+            long released = 0;
+            foreach (var reference in owner) released = checked(released + reference.Length + reference.AdmissionBytes);
+            var remaining = checked(head.Counters.StoredBytes - released);
+            if (remaining < 0) throw new StorageCorruptionException("Pending content reservations exceed their owner's stored-byte charge.");
+            SetHead(row, head with { Counters = head.Counters with { StoredBytes = remaining } });
+        }
+        db.Set<RepositoryReferenceRow>().RemoveRange(pending);
     }
     private static async Task<long> AddReceiptAsync(TContext db, Guid id, DocumentOperationReceipt receipt, CancellationToken ct, bool allowOwnerless = false)
     {

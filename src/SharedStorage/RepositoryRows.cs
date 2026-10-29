@@ -127,6 +127,8 @@ internal sealed class RepositoryReferenceRow
     public long Length { get; set; }
     public required string Sha256 { get; set; }
     public long ReferenceCount { get; set; }
+    public bool IsPending { get; set; }
+    public long AdmissionBytes { get; set; }
 }
 internal sealed class RepositoryDeltaRow
 {

@@ -332,6 +332,14 @@ migrations remain intact, with new migrations retiring the accounting tables.
 The alternatives above record why the removed policy had shared coordination;
 they are not runtime modes to implement in this rewrite.
 
+Document limits also cover content prepared by saves that fail to publish.
+Before writing each batch, a save reserves its unique content handles and their
+ownership metadata under the affected document row. Pending records remain
+charged after interruption; successful publication marks referenced content
+complete. Offline quiescent collection releases unused reservations. This adds
+one document transaction per content batch, without coordinating unrelated
+documents or scanning history. It does not restore provider-wide admission.
+
 ## Counterexamples that the recommendation must survive
 
 | Challenge | Required answer before implementation is considered complete |

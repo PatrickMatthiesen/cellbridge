@@ -43,8 +43,8 @@ internal sealed partial class SqlServerDocumentDatabase : IDocumentDatabase<SqlS
     public static async Task CheckConfigurationAsync(SqlServerDocumentDbContext db, CancellationToken ct)
     {
         var versions = await db.SchemaVersions.AsNoTracking().Select(row => row.Version).ToListAsync(ct);
-        if (versions.Count != 1 || versions[0] != 4)
-            throw new StorageUnavailableException("Document schema version 4 is required. Run explicit storage initialization.");
+        if (versions.Count != 1 || versions[0] != 5)
+            throw new StorageUnavailableException("Document schema version 5 is required. Run explicit storage initialization.");
         await CheckDurabilityAsync(db, ct);
     }
 

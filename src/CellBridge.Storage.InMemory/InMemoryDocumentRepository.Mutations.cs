@@ -7,6 +7,49 @@ namespace CellBridge.Storage.InMemory;
 
 public sealed partial class InMemoryDocumentRepository
 {
+    public async ValueTask<bool> ReserveContentAsync(DocumentActorAdmission admission,
+        IReadOnlyCollection<ContentHandle> handles, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(handles);
+        if (handles.Count > IContentBatchWriter.MaxBatchObjects)
+            throw new ArgumentOutOfRangeException(nameof(handles), "Document staging admits at most 64 handles.");
+        var references = ContentStoreReader.UniqueHandles(handles);
+        foreach (var reference in references)
+        {
+            if (reference.Key != reference.Sha256 || reference.Length < 0 || reference.Length > Array.MaxLength || reference.Sha256.Length != 64 ||
+                reference.Sha256.Any(value => value is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+                throw new StorageCorruptionException("Invalid staging content descriptor.");
+            StorageLimits.Check("object bytes", reference.Length, _limits.MaxObjectBytes);
+        }
+        if (!TryDocument(admission.ResourceId, cancellationToken, out var entry)) return false;
+        await entry.Guard.WaitAsync(cancellationToken);
+        try
+        {
+            if (!DocumentControlReducer.Access(entry.Head, admission).HasFlag(DocumentAccess.Write)) return false;
+            foreach (var reference in references)
+                if (entry.References.TryGetValue(reference.Key, out var existing) && existing != reference)
+                    throw new StorageCorruptionException("Conflicting document content descriptors share a key.");
+            var added = references.Where(reference => !entry.References.ContainsKey(reference.Key)).ToArray();
+            var physicalBytes = added.Sum(reference => reference.Length);
+            var metadataBytes = added.Sum(NormalizedContentReference.StagingMetadataBytes);
+            var next = AccountedHead(entry, entry.Head, metadataBytes, physicalBytes);
+            DocumentPublicationRules.CheckLimits(next, _limits);
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var reference in added)
+            {
+                entry.References.Add(reference.Key, reference);
+                entry.ReferenceCounts.Add(reference.Key, 1);
+                entry.AdmissionBytes.Add(reference.Key, NormalizedContentReference.StagingMetadataBytes(reference));
+                entry.PendingReferences.Add(reference.Key);
+            }
+            entry.MetadataBytes = checked(entry.MetadataBytes + metadataBytes);
+            entry.PhysicalBytes = checked(entry.PhysicalBytes + physicalBytes);
+            Volatile.Write(ref entry.Head, next);
+            return true;
+        }
+        finally { entry.Guard.Release(); }
+    }
+
     public async ValueTask<CreateResult> CreateAsync(PreparedDocumentCreate create, CancellationToken cancellationToken = default)
     {
         EnsureOnline(cancellationToken);
@@ -201,7 +244,9 @@ public sealed partial class InMemoryDocumentRepository
             foreach (var reference in references)
             {
                 entry.References.TryAdd(reference.Key, reference);
-                entry.ReferenceCounts[reference.Key] = checked(entry.ReferenceCounts.GetValueOrDefault(reference.Key) + 1);
+                if (!entry.PendingReferences.Contains(reference.Key))
+                    entry.ReferenceCounts[reference.Key] = checked(entry.ReferenceCounts.GetValueOrDefault(reference.Key) + 1);
+                entry.PendingReferences.Remove(reference.Key);
             }
             if (publication.Revision is { } accepted) entry.Revisions.Add(accepted.RevisionNumber, accepted);
             entry.Receipts.Add(publication.Receipt.Operation, publication.Receipt);

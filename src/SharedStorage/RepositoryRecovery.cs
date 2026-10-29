@@ -99,7 +99,8 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
             roots.Select(row => new NormalizedMappingRoot(RowScope(id, row.Lifecycle, row.Partition), ParseElementKey(row.IndexKey), new(row.SerialGuid, (ulong)row.SerialValue), row.Sequence) { Head = Decode<PartitionHead>(row.Json) }).ToImmutableArray(),
             claims.Select(Decode<IndexedStorageMapping>).ToImmutableArray(), bindings.Select(Decode<IndexedObjectBinding>).ToImmutableArray(), deltaRecords.ToImmutable(), checkpointRecords.ToImmutable(),
             revisions.Select(Decode<DocumentRevisionRecord>).ToImmutableArray(), receipts.Select(Decode<DocumentOperationReceipt>).ToImmutableArray(),
-            deliveries.Select(Decode<DocumentDelivery>).ToImmutableArray(), paths.ToImmutableArray(), references.Select(row => new NormalizedContentReference(new(row.ObjectKey, row.Length, row.Sha256), row.ReferenceCount)).ToImmutableArray());
+            deliveries.Select(Decode<DocumentDelivery>).ToImmutableArray(), paths.ToImmutableArray(), references.Select(row => new NormalizedContentReference(new(row.ObjectKey, row.Length, row.Sha256), row.ReferenceCount)
+                { IsPending = row.IsPending, AdmissionBytes = row.AdmissionBytes }).ToImmutableArray());
         NormalizedDocumentRecovery.Validate(snapshot, limits, checkpointPolicy);
         var actualMappings = await db.Set<RepositoryMappingRow>().AsNoTracking().Where(row => row.ResourceId == id).ToArrayAsync(ct);
         var expectedMappings = intervals.Where(interval => interval.EndSequence is null).ToDictionary(interval => (interval.Lifecycle, interval.Partition, interval.MappingKey));
@@ -144,7 +145,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         {
             var content = new RepositoryContentReader<TContext>(verification, validationContent, limits.MaxObjectBytes, database);
             await using var verified = await RecoveryContentSpool.CreateAsync(content,
-                snapshot.Snapshots.SelectMany(document => document.ContentReferences).Select(value => value.Handle),
+                snapshot.Snapshots.SelectMany(document => document.ContentReferences).Where(value => !value.IsPending).Select(value => value.Handle),
                 limits.MaxObjectBytes, cancellationToken);
             foreach (var document in snapshot.Snapshots) await ValidatePhysicalSnapshotAsync(document, verified, cancellationToken);
         }
@@ -280,7 +281,8 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         foreach (var value in snapshot.Deliveries) yield return new RepositoryDeliveryRow { ResourceId = id, OperationId = value.OperationId, Sequence = value.Sequence, Json = Encode(value) };
         foreach (var path in snapshot.PathClaims) yield return new RepositoryPathRow { ResourceId = id, PathHash = Hash(path), PathKey = path };
         foreach (var value in snapshot.ContentReferences) yield return new RepositoryReferenceRow { ResourceId = id, ObjectKey = value.Handle.Key,
-            Length = value.Handle.Length, Sha256 = value.Handle.Sha256, ReferenceCount = value.ReferenceCount };
+            Length = value.Handle.Length, Sha256 = value.Handle.Sha256, ReferenceCount = value.ReferenceCount,
+            IsPending = value.IsPending, AdmissionBytes = value.AdmissionBytes };
 
         static RepositoryGraphRow Graph(IndexedGraphScope scope, string kind, string owner, string key, string json) => new()
         { ResourceId = scope.ResourceId, Lifecycle = scope.LifecycleGeneration, Partition = scope.TargetPartition, Kind = kind, OwnerKey = owner, RecordKey = key, Json = json };

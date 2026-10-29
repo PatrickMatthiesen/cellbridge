@@ -51,7 +51,7 @@ public sealed class StorageInitializationTests
             var after = await provider.Documents.FindAsync(new DocumentIdentity.Resource(document.ResourceId));
             Assert.Equal(JsonSerializer.Serialize(document), JsonSerializer.Serialize(after));
             await using var version = source.CreateCommand("SELECT version FROM cellbridge_schema");
-            Assert.Equal(9, await version.ExecuteScalarAsync());
+            Assert.Equal(10, await version.ExecuteScalarAsync());
         });
 
     [PostgreSqlFact]

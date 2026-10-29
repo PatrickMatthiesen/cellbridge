@@ -16,7 +16,7 @@ partial class CellBridgeDbContextModelSnapshot : ModelSnapshot
     // If you encounter a merge conflict in the line below, it means you need to
     // discard one of the migration branches and recreate its migrations on top of
     // the other branch. See https://aka.ms/efcore-docs-migrations-conflicts for more info.
-    public override string LastMigrationId => "20261028000300_NormalizedDocumentRepository";
+    public override string LastMigrationId => "20261029000100_DocumentContentStaging";
 
     protected override void BuildModel(ModelBuilder modelBuilder)
     {
@@ -681,6 +681,16 @@ partial class CellBridgeDbContextModelSnapshot : ModelSnapshot
 
         modelBuilder.Entity("CellBridge.Storage.Shared.RepositoryReferenceRow", b =>
             {
+                b.Property<long>("AdmissionBytes")
+                    .ValueGeneratedOnAdd()
+                    .HasColumnType("bigint")
+                    .HasDefaultValue(0L);
+
+                b.Property<bool>("IsPending")
+                    .ValueGeneratedOnAdd()
+                    .HasColumnType("boolean")
+                    .HasDefaultValue(false);
+
                 b.Property<Guid>("ResourceId")
                     .HasColumnType("uuid");
 

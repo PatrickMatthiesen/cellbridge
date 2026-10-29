@@ -75,6 +75,8 @@ internal static class RepositoryModel
         model.Entity<RepositoryDeliveryRow>().HasKey(x => new { x.ResourceId, x.OperationId });
         model.Entity<RepositoryDeliveryRow>().HasIndex(x => new { x.ResourceId, x.Sequence }).HasDatabaseName("IX_repository_deliveries_0").IsUnique();
         model.Entity<RepositoryReferenceRow>().HasKey(x => new { x.ResourceId, x.ObjectKey });
+        model.Entity<RepositoryReferenceRow>().Property(x => x.IsPending).HasDefaultValue(false);
+        model.Entity<RepositoryReferenceRow>().Property(x => x.AdmissionBytes).HasDefaultValue(0L);
         foreach (var (type, table) in Tables)
         {
             var key = model.Model.FindEntityType(type)!.FindPrimaryKey()!;

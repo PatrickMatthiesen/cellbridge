@@ -19,7 +19,7 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
         var recovery = RecoveryStore(source);
         await recovery.CheckRecoveryAsync(cancellationToken);
         var snapshot = await recovery.CaptureRecoveryAsync(cancellationToken);
-        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences.Select(reference => reference.Handle)))
+        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences.Where(reference => !reference.IsPending).Select(reference => reference.Handle)))
             .OrderBy(h => h.Key, StringComparer.Ordinal).ToImmutableArray();
         var manifest = new PortableManifest(PortableManifest.CurrentVersion, Guid.NewGuid(), context, snapshot, handles);
         CheckManifest(manifest);
@@ -159,7 +159,7 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
         ProviderRecovery.CheckAdmission(manifest.State, _storage, DateTime.MinValue, requireExpired: false);
         if (manifest.State.Receipts.Any(r => r.OperationId == manifest.ArchiveId))
             throw new StorageCorruptionException("Archive identity collides with retained receipt.");
-        var required = ContentStoreReader.UniqueHandles(manifest.State.Snapshots.SelectMany(snapshot => snapshot.ContentReferences.Select(reference => reference.Handle)))
+        var required = ContentStoreReader.UniqueHandles(manifest.State.Snapshots.SelectMany(snapshot => snapshot.ContentReferences.Where(reference => !reference.IsPending).Select(reference => reference.Handle)))
             .ToDictionary(h => h.Key, StringComparer.Ordinal);
         if (manifest.Objects.Select(h => h.Key).Distinct(StringComparer.Ordinal).Count() != manifest.Objects.Length ||
             required.Count != manifest.Objects.Length || manifest.Objects.Any(h => !required.TryGetValue(h.Key, out var expected) || expected != h ||
@@ -253,11 +253,15 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
             {
                 Elements = document.Elements.Select(element => element with { Element = element.Element with { Payload = Map(element.Element.Payload) } }).ToImmutableArray(),
                 Receipts = document.Receipts.Select(receipt => receipt with { Response = receipt.Response is null ? null : Map(receipt.Response) }).ToImmutableArray(),
-                ContentReferences = document.ContentReferences.Select(reference => reference with { Handle = Map(reference.Handle) })
+                ContentReferences = document.ContentReferences.Select(reference =>
+                {
+                    var handle = reference.IsPending ? reference.Handle : Map(reference.Handle);
+                    return reference with { Handle = handle, AdmissionBytes = reference.AdmissionBytes == 0 ? 0 : NormalizedContentReference.StagingMetadataBytes(handle) };
+                })
                     .GroupBy(reference => reference.Handle.Key, StringComparer.Ordinal).Select(group =>
                     {
                         var first = group.First();
-                        if (group.Any(reference => reference.Handle != first.Handle))
+                        if (group.Any(reference => reference.Handle != first.Handle || reference.IsPending != first.IsPending || reference.AdmissionBytes != first.AdmissionBytes))
                             throw new StorageCorruptionException("Destination content keys conflict after remapping.");
                         return first with { ReferenceCount = group.Aggregate(0L, (count, reference) => checked(count + reference.ReferenceCount)) };
                     }).ToImmutableArray(),

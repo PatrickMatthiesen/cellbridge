@@ -20,7 +20,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
     public async Task CheckConfigurationAsync(CellBridgeDbContext db, CancellationToken ct)
     {
         if (!await ValidateDatabaseConfigurationAsync(db, ct))
-            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 9.");
+            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 10.");
     }
     public bool IsDatabaseException(Exception ex) => PostgreSqlDatabase.IsDatabaseException(ex);
     public void ValidateNamespaceFields(DocumentRow row, DocumentNamespaceState state) { }
@@ -39,7 +39,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
     {
         var valid = await ValidateDatabaseConfigurationAsync(context, cancellationToken);
         if (!valid)
-            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 9.");
+            throw new StorageUnavailableException("Storage requires fsync=on and exactly schema version 10.");
         await ConfigureSettingsAsync(context, cancellationToken);
     }
 
@@ -53,7 +53,7 @@ internal sealed partial class PostgreSqlDocumentDatabase : IDocumentDatabase<Cel
 
     private static Task<bool> ValidateDatabaseConfigurationAsync(CellBridgeDbContext context,
         CancellationToken cancellationToken) => context.Database.SqlQueryRaw<bool>("""
-            SELECT count(*) = 1 AND min(version) = 9 AND max(version) = 9
+            SELECT count(*) = 1 AND min(version) = 10 AND max(version) = 10
                 AND current_setting('fsync') = 'on' AS "Value"
             FROM cellbridge_schema
             """).SingleAsync(cancellationToken);

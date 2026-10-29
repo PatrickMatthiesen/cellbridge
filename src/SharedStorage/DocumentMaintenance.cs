@@ -54,13 +54,16 @@ internal sealed class DocumentMaintenance<TContext>(IDocumentDatabase<TContext> 
             // of the retained legacy recovery snapshots.
             var normalizedIds = await db.Set<RepositoryHeadRow>().AsNoTracking().Select(row => row.ResourceId).ToArrayAsync(cancellationToken);
             var normalizedOwners = normalizedIds.ToHashSet();
+            var descriptors = new Dictionary<string, ContentHandle>(references, StringComparer.Ordinal);
             await foreach (var row in db.Set<RepositoryReferenceRow>().AsNoTracking().AsAsyncEnumerable().WithCancellation(cancellationToken))
             {
                 if (!normalizedOwners.Contains(row.ResourceId)) throw new StorageCorruptionException("A normalized content reference has no document owner.");
                 if (row.ReferenceCount <= 0) throw new StorageCorruptionException("A normalized document content root has a non-positive reference count.");
                 var handle = new ContentHandle(row.ObjectKey, row.Length, row.Sha256);
-                if (references.TryGetValue(handle.Key, out var other) && handle != other)
+                if (descriptors.TryGetValue(handle.Key, out var other) && handle != other)
                     throw new StorageCorruptionException("Normalized document content metadata conflicts with another retained root.");
+                descriptors[handle.Key] = handle;
+                if (row.IsPending) continue;
                 references[handle.Key] = handle;
             }
             var orphans = new List<ContentHandle>();
@@ -79,10 +82,10 @@ internal sealed class DocumentMaintenance<TContext>(IDocumentDatabase<TContext> 
             // Recovery receipts have no content handles. Preserve their rows and
             // include their bytes together with every retained snapshot and object.
             var receiptBytes = await db.Set<RecoveryReceiptRow>().SumAsync(row => (long?)DocumentSql.ByteLength(row.ReceiptJson), cancellationToken) ?? 0;
-            var normalizedBytes = await RepositoryInventory.JsonBytesAsync(db, cancellationToken);
             var orphanBytes = orphans.Sum(handle => handle.Length);
             if (apply)
             {
+                await repository.DiscardPendingReferencesAsync(db, cancellationToken);
                 foreach (var orphan in orphans)
                 {
                     deleteFile?.Invoke(orphan.Key);
@@ -91,6 +94,7 @@ internal sealed class DocumentMaintenance<TContext>(IDocumentDatabase<TContext> 
                 }
                 await db.SaveChangesAsync(cancellationToken);
             }
+            var normalizedBytes = await RepositoryInventory.JsonBytesAsync(db, cancellationToken);
             await transaction.CommitAsync(CancellationToken.None);
             return new(checked(objectBytes + snapshotBytes + receiptBytes + normalizedBytes - (apply ? orphanBytes : 0)), pointers.Keys.Union(normalizedIds).LongCount(), snapshots, objectCount - orphans.Count,
                 orphans.Count, orphanBytes, apply);

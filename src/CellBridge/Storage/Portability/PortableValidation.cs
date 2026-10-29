@@ -17,7 +17,7 @@ public sealed partial class PortableArchive
                 ct.ThrowIfCancellationRequested();
                 CheckStateShape(snapshot);
                 NormalizedDocumentRecovery.Validate(snapshot, _storage);
-                foreach (var reference in snapshot.ContentReferences)
+                foreach (var reference in snapshot.ContentReferences.Where(reference => !reference.IsPending))
                 {
                     await using var bytes = await content.OpenReadAsync(reference.Handle, ct);
                     await CopyVerifiedAsync(bytes, Stream.Null, reference.Handle, ct);

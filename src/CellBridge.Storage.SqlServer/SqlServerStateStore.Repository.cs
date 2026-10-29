@@ -26,6 +26,8 @@ public sealed partial class SqlServerStateStore : IDocumentRepository, IIndexedS
         repository.CreateAsync(create, ct);
     ValueTask<ControlResult> IDocumentRepository.ExecuteControlAsync(DocumentControlCommand command, CancellationToken ct) =>
         repository.ExecuteControlAsync(command, ct);
+    ValueTask<bool> IDocumentRepository.ReserveContentAsync(DocumentActorAdmission admission, IReadOnlyCollection<ContentHandle> handles, CancellationToken ct) =>
+        repository.ReserveContentAsync(admission, handles, ct);
     ValueTask<PublicationResult> IDocumentRepository.PublishAsync(PreparedDocumentPublication publication, CancellationToken ct) =>
         repository.PublishAsync(publication, ct);
     ValueTask<PathChangeResult> IDocumentRepository.ChangePathAsync(DocumentPathCommand command, CancellationToken ct) =>

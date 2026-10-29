@@ -34,9 +34,10 @@ public static class DocumentControlReducer
         return Finish(current, document.CaptureControl(current, coordination));
     }
 
-    public static DocumentAccess Access(DocumentControlRead current, DocumentActorAdmission admission)
+    public static DocumentAccess Access(DocumentControlRead current, DocumentActorAdmission admission) => Access(current.Head, admission);
+
+    public static DocumentAccess Access(DocumentHead head, DocumentActorAdmission admission)
     {
-        var head = current.Head;
         if (head.IsDeleted || admission.ResourceId != head.ResourceId ||
             admission.LifecycleGeneration != head.LifecycleGeneration ||
             admission.Binding != head.Security.AuthorizationPolicy ||

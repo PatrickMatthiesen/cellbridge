@@ -53,6 +53,7 @@ internal static class RepositoryInventory
         bytes = checked(bytes + await JsonBytesAsync<RepositoryMappingIntervalRow>(db, ct));
         bytes = checked(bytes + await JsonBytesAsync<RepositoryMappingClaimRow>(db, ct));
         bytes = checked(bytes + await JsonBytesAsync<RepositoryMappingRootRow>(db, ct));
+        bytes = checked(bytes + (await db.Set<RepositoryReferenceRow>().SumAsync(row => (long?)row.AdmissionBytes, ct) ?? 0));
         return bytes;
     }
 }

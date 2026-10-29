@@ -105,7 +105,7 @@ public sealed partial class SqlServerDocumentDbContext(DbContextOptions<SqlServe
             entity.ToTable("schema_version", table => table.HasCheckConstraint("schema_singleton", "[Id] = 1"));
             entity.HasKey(row => row.Id);
             entity.Property(row => row.Id).ValueGeneratedNever();
-            entity.HasData(new DocumentSchema { Id = 1, Version = 4 });
+            entity.HasData(new DocumentSchema { Id = 1, Version = 5 });
         });
     }
 }

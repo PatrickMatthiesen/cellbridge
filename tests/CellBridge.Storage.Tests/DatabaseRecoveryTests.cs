@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Cryptography;
@@ -43,9 +44,20 @@ public sealed class DatabaseRecoveryTests
             // The test interceptor pauses after actual normalized-head UPDATE SQL and before COMMIT.
             var save = Task.Run(async () => await interrupted.ExecuteAsync(initial.ResourceId,
                 DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value));
+            var reserved = before;
             try
             {
                 await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                reserved = await Capture(provider);
+                var unreserved = reserved.Snapshot.Snapshots.Select(snapshot => snapshot with
+                {
+                    ContentReferences = snapshot.ContentReferences.Where(reference => !reference.IsPending).ToImmutableArray(),
+                    Current = snapshot.Current with { Head = snapshot.Current.Head with { Counters = snapshot.Current.Head.Counters with
+                        { StoredBytes = snapshot.Current.Head.Counters.StoredBytes - snapshot.ContentReferences.Where(reference => reference.IsPending)
+                            .Sum(reference => reference.Handle.Length + reference.AdmissionBytes) } } },
+                });
+                Assert.Contains(reserved.Snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences), reference => reference.IsPending);
+                Assert.Equal(PortabilityTests.CanonicalSnapshots(before.Snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(unreserved));
                 await control.Kill();
                 gate.Continue.TrySetResult();
                 await Assert.ThrowsAsync<StorageUnavailableException>(() => save.WaitAsync(TimeSpan.FromSeconds(30)));
@@ -60,9 +72,9 @@ public sealed class DatabaseRecoveryTests
                 await control.Start();
             }
             // Check both the existing pool and a fresh pool BEFORE retry, without initialization or pool clearing.
-            await Verify(provider, before);
+            await Verify(provider, reserved);
             await using var fresh = Reopen(db);
-            await Verify(Provider(fresh, root), before);
+            await Verify(Provider(fresh, root), reserved);
             Assert.Null(await provider.Documents.FindAsync(new DocumentIdentity.Path("/OUTAGE-MUST-NOT-EXIST.DOCX")));
             await VerifyInventory(db);
             var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
@@ -258,7 +270,7 @@ public sealed class DatabaseRecoveryTests
     private static async Task<Expected> Capture(StorageProvider provider)
     {
         var snapshot = await ((IProviderRecoveryStore)provider.Documents).CaptureRecoveryAsync();
-        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(document => document.ContentReferences.Select(reference => reference.Handle))).ToArray();
+        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(document => document.ContentReferences.Where(reference => !reference.IsPending).Select(reference => reference.Handle))).ToArray();
         var bytes = new Dictionary<string, byte[]>();
         foreach (var handle in handles) bytes.Add(handle.Key, await provider.Content.ReadVerifiedAsync(handle));
         var decoders = snapshot.Snapshots.SelectMany(s => s.Receipts).Where(r => r.Response is not null)

@@ -13,7 +13,15 @@ public sealed record NormalizedMappingRoot(IndexedGraphScope Scope, ExtendedId I
 {
     public required PartitionHead Head { get; init; }
 }
-public sealed record NormalizedContentReference(ContentHandle Handle, long ReferenceCount);
+public sealed record NormalizedContentReference(ContentHandle Handle, long ReferenceCount)
+{
+    /// <summary>A charged staging reservation; its physical bytes may not exist yet.</summary>
+    public bool IsPending { get; init; }
+    /// <summary>Logical ownership metadata charged when content enters through document staging.</summary>
+    public long AdmissionBytes { get; init; }
+    public static long StagingMetadataBytes(ContentHandle handle) =>
+        checked(NormalizedDocumentRecovery.SerializedBytes(handle) + 16 + sizeof(long) * 2 + sizeof(bool));
+}
 
 /// <summary>Complete logical state for one document, including intermediate protocol publications.</summary>
 public sealed record NormalizedDocumentSnapshot(DocumentControlRead Current,
@@ -59,7 +67,7 @@ public static class NormalizedDocumentRecovery
     /// <summary>Logical UTF-8 JSON and path data plus uniquely owned physical references. Row/index overhead is excluded.</summary>
     public static long StoredBytes(NormalizedDocumentSnapshot snapshot)
     {
-        long total = snapshot.ContentReferences.Sum(reference => reference.Handle.Length);
+        long total = snapshot.ContentReferences.Sum(reference => checked(reference.Handle.Length + reference.AdmissionBytes));
         total = checked(total + CanonicalHeadBytes(snapshot.Current.Head) + Bytes(snapshot.Current.Coordination));
         foreach (var editor in snapshot.Current.Editors) total = checked(total + Bytes(editor));
         foreach (var partition in snapshot.Partitions) total = checked(total + Bytes(partition.Head));
@@ -120,11 +128,14 @@ public static class NormalizedDocumentRecovery
         {
             if (reference.ReferenceCount <= 0 || reference.Handle.Length < 0 || string.IsNullOrEmpty(reference.Handle.Key) || reference.Handle.Sha256.Length != 64)
                 throw new StorageCorruptionException("Invalid document content reference.");
+            if (reference.AdmissionBytes != 0 && reference.AdmissionBytes != NormalizedContentReference.StagingMetadataBytes(reference.Handle) ||
+                reference.IsPending && reference.AdmissionBytes == 0)
+                throw new StorageCorruptionException("Invalid document staging metadata charge.");
             StorageLimits.Check("object bytes", reference.Handle.Length, limits.MaxObjectBytes);
         }
         void Reference(ContentHandle handle)
         {
-            if (!references.TryGetValue(handle.Key, out var reference) || reference.Handle != handle)
+            if (!references.TryGetValue(handle.Key, out var reference) || reference.Handle != handle || reference.IsPending)
                 throw new StorageCorruptionException("A recovery record references absent or inconsistent physical content.");
         }
         foreach (var element in snapshot.Elements)

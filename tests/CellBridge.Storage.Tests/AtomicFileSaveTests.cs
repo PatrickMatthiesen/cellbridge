@@ -36,13 +36,18 @@ public sealed class AtomicFileSaveDatabaseTests
                 request, new Dictionary<string, string>(), TestActor.Value);
             Assert.False(Assert.Single(saved.Response.SubResponses).Status);
             var publication = Assert.Single(audit.Committed, transaction => audit.Writes.GetValueOrDefault(transaction)?
-                .Any(sql => sql.Contains("cellbridge_repository_heads", StringComparison.Ordinal)) == true);
+                .Any(sql => sql.Contains("cellbridge_repository_receipts", StringComparison.Ordinal)) == true);
             var writes = audit.Writes[publication];
+            Assert.Contains(writes, sql => sql.Contains("cellbridge_repository_heads", StringComparison.Ordinal));
             Assert.Contains(writes, sql => sql.Contains("cellbridge_repository_revisions", StringComparison.Ordinal));
             Assert.Contains(writes, sql => sql.Contains("cellbridge_repository_receipts", StringComparison.Ordinal));
             Assert.Contains(writes, sql => sql.Contains("cellbridge_repository_bindings", StringComparison.Ordinal));
             Assert.DoesNotContain(writes, sql => sql.Contains("cellbridge_states", StringComparison.Ordinal));
             Assert.Equal(0, audit.WritesOutsideTransactions);
+            var reservation = Assert.Single(audit.Committed, transaction => transaction != publication && audit.Writes.GetValueOrDefault(transaction)?
+                .Any(sql => sql.Contains("cellbridge_repository_heads", StringComparison.Ordinal)) == true);
+            Assert.Contains(audit.Writes[reservation], sql => sql.Contains("cellbridge_repository_references", StringComparison.Ordinal));
+            Assert.DoesNotContain(audit.Writes[reservation], sql => sql.Contains("cellbridge_repository_revisions", StringComparison.Ordinal));
             // Immutable physical objects are staged before the document guard. The current head,
             // immutable application revision, receipt and binding delta become visible together.
             await using (var command = source.CreateCommand("""

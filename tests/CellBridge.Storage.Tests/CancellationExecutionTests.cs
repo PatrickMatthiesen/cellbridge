@@ -71,7 +71,13 @@ public sealed class CancellationExecutionTests
         Assert.True(triggered);
         Assert.Equal(0, state.Mutations);
         if (beforeCommit) Assert.True(content.Writes > 0);
-        await Unchanged(test.Provider, before);
+        var snapshot = (await test.Provider.Documents.ExportDocumentAsync(before.ResourceId))!;
+        var charge = snapshot.ContentReferences.Where(reference => reference.IsPending)
+            .Sum(reference => reference.Handle.Length + reference.AdmissionBytes);
+        if (beforeCommit) Assert.True(charge > 0);
+        else Assert.Equal(0, charge);
+        Assert.Equal(snapshot.Current.Head.Counters.StoredBytes, NormalizedDocumentRecovery.StoredBytes(snapshot));
+        await Unchanged(test.Provider, before with { Counters = before.Counters with { StoredBytes = checked(before.Counters.StoredBytes + charge) } });
     }
 
     [Theory]
