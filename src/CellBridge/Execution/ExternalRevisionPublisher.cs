@@ -4,7 +4,7 @@ namespace CellBridge.AspNetCore;
 
 public enum PublicationAttempt { NoWork, Delivered, Superseded, Blocked, Conflict, ContentUnavailable, TransientFailure }
 
-/// <summary>Delivers the oldest accepted package through indexed durable delivery records.</summary>
+/// <summary>Delivers the oldest accepted package through indexed delivery records.</summary>
 public sealed class ExternalRevisionPublisher(StorageProvider provider, IExternalRevisionDestination destination)
 {
     public async ValueTask<bool> BindAsync(Guid resourceId, long generation, long stateVersion, Guid bindingId,

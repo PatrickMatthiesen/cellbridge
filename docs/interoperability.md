@@ -17,7 +17,7 @@ operations.
 | --- | --- |
 | Read/write permissions | Binary `QueryAccess` reports the caller's access. |
 | Read changes | `QueryChanges` supports repeated and mixed file, metadata and editor queries with independent knowledge/errors and one shared data package. Explicit binary targets override the SOAP default. Mapped file-cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
-| Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Complete application metadata graphs publish atomically with key-level coherency. Requested applied-index entries are returned and preserved in durable receipts. |
+| Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Complete application metadata graphs publish atomically with key-level coherency. Requested applied-index entries are returned and preserved in stored receipts. |
 | Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
 | Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` and `Versioning/GetVersionList` report servable history. |
 
@@ -50,10 +50,10 @@ SOAP dependencies determine which subsequent operations execute.
   documents retention, retry guarantees and remaining reference/desktop gates.
 - Lock conversions and transition acknowledgement are implemented with persisted
   coauthor membership. Native desktop transition behavior still needs qualification.
-- The generic graph resolver has durable capture/restore codecs. File saves can
+- The generic graph resolver has capture/restore codecs. File saves can
   resolve inherited objects and declared BLOBs by identity, keeping object
-  partitions and cells separate. Complete application metadata graphs have durable
-  publication. OneNote adapters and notebook/page synchronization remain unimplemented. Reference captures for
+  partitions and cells separate. Complete application metadata graphs are persisted
+  atomically. OneNote adapters and notebook/page synchronization remain unimplemented. Reference captures for
   the new graph shapes and scoped queries remain required.
 - Automatic graph pruning is disabled. The host retains graph and save identities
   and rejects growth at its [storage limits](storage-providers.md#limits-and-qualification).
@@ -84,7 +84,7 @@ Self-contained legacy file graphs retain their existing reconstruction path.
 Strict scoped resolution can reject incomplete unused ancestry in those graphs;
 only that query receives an unsupported error. Storage corruption and I/O
 failures remain distinct. Each query's byte constraint applies before package
-union; the union also has a server byte budget. Unscoped/single-cell durable
+union; the union also has a server byte budget. Unscoped/single-cell
 queries verify the selected index and manifest before reading unknown payloads,
 so fully known queries read these two scope records but no file/object/BLOB data.
 Explicit multi-cell scopes currently load the retained graph for validation even

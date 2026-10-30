@@ -69,7 +69,7 @@ Four histories have different purposes and retention rules:
 | --- | --- | --- |
 | Application versions | User-visible versions, authorized downloads and restore | Removing an old version does not prove its protocol data is unused. |
 | Protocol revision/base graph | Resolve inherited object data and client knowledge | A linked list in the wire model does not require linear database lookup. |
-| Provider recovery snapshots | Capture coherent durable state for recovery/export | Each foreground edit need not serialize the complete recovery inventory. |
+| Provider recovery snapshots | Capture coherent persisted state for recovery/export | Each foreground edit need not serialize the complete recovery inventory. |
 | Database WAL/transaction log | Atomic commit and crash recovery | It is not a document version API or a portable export format. |
 
 The main workload is many distinct users. For planning, 1,500 users saving every
@@ -173,7 +173,7 @@ the insertion cost alone.
 
 For the first prototype, publish checkpoints synchronously when either the
 configured change-count or accumulated effective-delta-byte threshold is reached.
-Prepare and durably stage that checkpoint before taking the document guard, then
+Prepare and persist that checkpoint before taking the document guard, then
 recheck its expected head at publication. Include checkpoint construction and
 persistence in that save's latency. Numerical thresholds are experiment inputs
 to select from measured cold-read and tail-latency costs, not protocol constants.
@@ -210,7 +210,7 @@ The existing save materializes a complete package, validates it, then stores it.
 The observed roughly 304 KiB/save is net logical object/state growth in one
 fixture. It is not physical I/O, nor a maximum or average Office edit size.
 
-| Representation | Durable writes per edit | Cost and objection |
+| Representation | Database writes per edit | Cost and objection |
 | --- | --- | --- |
 | Canonical protocol graph, derived package produced on demand and cached by immutable version | New graph payloads, references and receipt; no mandatory second full package in the database | Cold downloads resolve selected graph metadata and read its payload closure before producing `D` bytes. Historical reconstruction also reads its checkpoint and replays effective deltas. Those costs can exceed `D`. A cache must not become an unaccounted second canonical store. |
 | Canonical graph plus deduplicated package manifests | New unique package chunks and changed manifest metadata, in addition to graph records | Preserves direct downloads but duplicates some representation and needs chunk boundaries, exact-byte reconstruction, integrity and collection. |
@@ -252,11 +252,11 @@ keeps this critical section small. A branch switch or restore that changes `L`
 current bindings can hold it for `O(L log L)` index maintenance; it is not
 guaranteed short. Persistent root publication is the comparator if that matters.
 
-Prepare, validate and durably stage new immutable payloads and any checkpoint
+Prepare, validate and persist new immutable payloads and any checkpoint
 before taking the guard. Then begin a transaction, lock the document row, obtain
 authoritative time, recheck authority/lifecycle/expected affected mappings, update
 current bindings and atomically publish revision, receipt and required outbox
-references. No acknowledged head may reference incompletely durable content.
+references. No acknowledged head may reference incompletely stored content.
 Failed publication can leave unreachable staged objects for quiescent collection.
 A head change is an internal concurrency event, not automatically a protocol
 coherency error. Rebase/reprepare when necessary. Do not overwrite a concurrent
@@ -320,7 +320,7 @@ updates to one shared counter independent.
 
 | Policy | Coordination implication | Decision needed |
 | --- | --- | --- |
-| Exact provider-wide hard cap | Coordinated admission or durable reservations; a shared dependency remains | Preserve only if this exact policy is required; disclose its cost. |
+| Exact provider-wide hard cap | Coordinated admission or reservations persisted in shared storage; a shared dependency remains | Preserve only if this exact policy is required; disclose its cost. |
 | Exact cap per genuinely independent workspace | Coordination within that workspace | A workspace is a product boundary, not automatically a user or server. |
 | Global monitoring/soft admission threshold, bounded individual operations | No exact global counter in every save; overshoot becomes an explicit policy | Recommended for the minimal-lock design if a hard global cap is not required. This changes existing behavior. |
 
@@ -351,7 +351,7 @@ documents or scanning history. It does not restore provider-wide admission.
 | Knowledge consists of many disjoint ranges or asks for whole-cell rounding | Charge range/selection/output work; do not claim constant queries. |
 | A checkpoint worker falls behind or a revision branches from an old base | Enforce the promised replay bound or report foreground checkpoint/backpressure costs. |
 | A small edit changes ZIP offsets or compression layout | Measure actual reuse and full validation work; the tail-edit fixture is insufficient. |
-| A save commits but its HTTP response is lost | Durable actor/lifecycle/digest-bound receipt makes retry resolve the accepted outcome. |
+| A save commits but its HTTP response is lost | Stored receipt bound to actor, lifecycle and digest makes retry resolve the accepted outcome. |
 | A collector runs while an old version is downloading | Use existing quiescence initially; online collection requires a separately designed publication/read lifetime rule. |
 | External authorization or external file publication is enabled | Define fencing and accepted-save/outbox semantics explicitly; local row transactions alone do not bind an external service. |
 
@@ -379,7 +379,7 @@ unavoidable graph validation and growing response output.
 The selected quota policy above removes the shared admission dependency.
 
 The bounded [publication state machine](../models/README.md) checks document
-guards, current authority, keywise coherency, durable staging and atomic receipts.
+guards, current authority, keywise coherency, staging that survives a crash and atomic receipts.
 Four safe configurations passed exhaustive TLC exploration; deliberately omitted
 authority/root checks produced counterexamples. Its guide maps the abstract
 transitions to transaction tests and states the assumptions. It does not prove

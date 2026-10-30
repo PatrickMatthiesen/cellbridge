@@ -33,7 +33,7 @@ The snippets below show the CellBridge integration in an existing application.
 The [DocumentLibrary example](../examples/DocumentLibrary/README.md) is a small
 package-only host that maps Documents and Lists from one authenticated principal.
 It uses volatile document storage and a preprovisioned PostgreSQL Lists database;
-it is not a durable document-management application.
+it is not a document-management application.
 
 ## Use the built-in login pages
 
@@ -189,14 +189,14 @@ singleton factory is reused. The helper registers a shared `ExternalRevisionPubl
 and `ExternalRevisionPublicationWorker`. Do not register competing publishers or
 destinations or additional hosted workers, including opaque factories. No directory, permissions or document bindings are created for you.
 Bind each document explicitly with `ExternalRevisionPublisher.BindAsync`; the
-[external publication contract](external-host-reliability.md) describes durable receipts,
+[external publication contract](external-host-reliability.md) describes stored receipts,
 conflicts and recovery.
 
 The worker polls retained pending revisions after startup and retries transient
 failures. `Wake()` requests a pass after a save; concurrent requests coalesce.
 `PublishPendingOnceAsync()` runs one serialized scan, attempting at most one queued
 revision per document. Serialization is local to that worker instance. Multiple
-hosts still require durable destination receipts and the provider's atomic state
+hosts still require stored destination receipts and the provider's atomic state
 transitions. Initialize the destination and permissions before starting the host.
 Polling intervals must be at least one millisecond and fit a timer. Transient
 failures delay background retries by that interval, including when wakes arrive. Stopping the worker cancels
@@ -296,7 +296,7 @@ string responseXml = execution.Response.ToSoapEnvelope();
 
 The processor uses the same implementation as `/_vti_bin/cellstorage.svc`,
 including supported metadata, editor/session, lock and Cell operations, ordered
-subrequest dependencies, current-state authorization and durable provider
+subrequest dependencies, current-state authorization and provider
 coordination. Unsupported operations retain explicit protocol errors.
 
 For decoded binary Cell requests, call `CellBridgeDocumentService.ExecuteAsync`
@@ -411,7 +411,7 @@ Accepted receipts provide a narrower alternative to comparing version counters;
 they are not a reliable post-publication callback.
 
 Hosts can opt into shared base-lock authority, recoverable publication
-and lifecycle operations. The host must supply destination CAS and durable receipts.
+and lifecycle operations. The host must supply destination CAS and stored receipts.
 Do not expose conflicting write paths outside that authority. Testing the existing WopiHost adapter against
 CellBridge packages establishes package compatibility, not Office Online Server
 editing qualification or that WopiHost has adopted these new APIs upstream.

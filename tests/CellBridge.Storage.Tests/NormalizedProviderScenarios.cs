@@ -32,7 +32,7 @@ public static class NormalizedProviderScenarios
         var metadata = await service.ExecuteAsync(created.ResourceId, DocumentPartitionKind.Metadata, request, NoLocks, Owner);
         Require(metadata.Response.SubResponses.All(response => !response.Status) && metadata.AcceptedSaves.IsEmpty, "Metadata save failed or emitted a file delivery notification.");
         var afterMetadata = (await repository.ReadControlAsync(created.ResourceId))!.Head;
-        Require(afterMetadata.Counters.SaveReceipts == 1, "Metadata save lost its durable protocol receipt.");
+        Require(afterMetadata.Counters.SaveReceipts == 1, "Metadata save lost its protocol receipt.");
         Require(afterMetadata.ContentVersion == created.ContentVersion && afterMetadata.ModifiedUtc == created.ModifiedUtc &&
             afterMetadata.Security.ModifiedBy == created.Security.ModifiedBy && afterMetadata.Package.Root == created.Package.Root &&
             afterMetadata.LatestRevisionNumber == 2, "Metadata save changed file properties or lost history.");

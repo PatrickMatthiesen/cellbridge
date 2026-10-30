@@ -55,7 +55,7 @@ builder.Services.AddCellBridge(provider, configure: options =>
 Use `ProtocolHashingOptions.Disabled` to select no groups while still validating
 negotiation. Direct document-service and standalone-executor callers can supply
 the same immutable configuration. No secret is written to protocol diagnostics.
-Storage integrity checks and durable receipt identities continue to use their own
+Storage integrity checks and stored receipt identities continue to use their own
 SHA-256 calculations independently.
 
 Response assembly compares the original immutable elements before projection.

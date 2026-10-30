@@ -1,6 +1,6 @@
 # Measuring active Office user capacity
 
-The retained candidate reached 11,234 successful durable saves in a measured
+The retained candidate reached 11,234 successful saves in a measured
 Snowfall minute with direct PostgreSQL and proxied HTTPS, with no measured HTTP
 failures. All 16,760 acknowledgments passed final historical verification.
 Warm-up still had 49 HTTP 503s. This is a bounded synthetic result, not production
@@ -179,7 +179,7 @@ all need consideration before another access change. Small database execution
 means do not include connection acquisition, transport or application delays.
 Further capacity qualification must preserve these distinctions and the final
 historical verifier. Feature development can use the current contracts while
-the 10,000 successful durable saves/minute requirement remains unqualified.
+the 10,000 successful saves/minute requirement remains unqualified.
 
 ## Database transaction and connection audit
 
@@ -227,7 +227,7 @@ historical verification. The remaining blocks resolve the path, prepare a
 coherent snapshot, check visibility, validate a checkpoint and publish atomically.
 The trace covers captured document-backend bursts and excludes other backends;
 it is not a universal statement count for every HTTP save. Reset messages and
-standalone statements are not reported as durable write transactions.
+standalone statements are not reported as committed write transactions.
 
 ### Fresh lower-load control
 
@@ -364,7 +364,7 @@ setting changed between the following two target offers.
 
 All 16,760 direct-run acknowledgments passed final historical SHA-256 and
 one-to-one accepted-index verification. The measured minute exceeded 10,000
-successful durable saves with no measured HTTP failures. Warm-up still failed
+successful saves with no measured HTTP failures. Warm-up still failed
 40 saves, three queries and six downloads, all 503, so the whole run exited one.
 There were no database rollbacks or deadlocks. Container/process gaps were at
 most 1.022/1.167 seconds; allocation uses 59 interior counter intervals.
@@ -435,7 +435,7 @@ a generic scan caused a reproduced deadlock with uncommitted content inserts.
 
 The first local matched pair used the same 1,500-user AutoSave profile, 256 KiB
 packages, 16 KiB changed XML, pool/preparation caps of 64, admission 128/two per
-subject, durable PostgreSQL, 30 seconds warm-up and 60 seconds measurement.
+subject, PostgreSQL, 30 seconds warm-up and 60 seconds measurement.
 
 | Measurement | Preceding implementation | Atomic SQL candidate |
 | --- | ---: | ---: |
@@ -468,7 +468,7 @@ qualification patch and original CSV/pgstats files.
 ## Coherent control-read batching experiment
 
 The next local pair compared `e147d204` with control-read batching, keeping the
-same atomic SQL save path, workload, durable database settings and verifier.
+same atomic SQL save path, workload, database settings and verifier.
 One tagged command returns coordination, editors, partition heads and optional
 database time. It returns separate rows rather than multiplying editors by
 partitions. Preparation reuses the partition rows it already read. Mutations
@@ -538,7 +538,7 @@ The same application commit, `b41e42b`, was also measured on Snowfall before
 atomic SQL publication. Snowfall runs Windows with a Ryzen 7 9800X3D (8 cores,
 16 threads), 31.2 GiB RAM and PostgreSQL 18.3 through Docker Desktop. The
 benchmark retained the pool/preparation caps of 64, admission 128/two per subject,
-1,500 users, 15,000 documents, durable PostgreSQL settings and the same cadence.
+1,500 users, 15,000 documents, PostgreSQL settings and the same cadence.
 
 Primary acknowledged 2,995 saves inside its minute, with six late acknowledgements
 and no HTTP failures. AutoSave acknowledged 9,386 inside its minute, with 112 late
@@ -671,7 +671,7 @@ retained on Snowfall under `artifacts/office-snowfall-2025796/`.
 
 Commit `91bcf77` compared the default Aspire HTTPS proxy (A) with the owned
 loopback HTTPS listener (B). Four fixed runs used A/B/B/A order and an 8,800 ms
-save interval, with the same users, document sizes, admission limits, durable
+save interval, with the same users, document sizes, admission limits,
 PostgreSQL configuration and application code. PostgreSQL routing stayed unchanged.
 
 | Run | In-window ACK/minute | Late ACK | Measured save failures | All HTTP failures | Historical ACKs verified |
@@ -804,7 +804,7 @@ staging and final publication retain their separate transactions. It adds no
 provider-wide counter or bucket. Known revision, receipt and delivery limits,
 and the combined response-size limit, reject before physical staging.
 
-Fresh runs retained the pool cap of 64, automatic preparation cap of 64, durable
+Fresh runs retained the pool cap of 64, automatic preparation cap of 64,
 PostgreSQL settings, request admission of 128 globally/two per subject, and the
 same 256 KiB package/16 KiB changed-XML workload, warm-up and measurement periods.
 
@@ -1076,7 +1076,7 @@ measured admission, pool and WAL settings; it overrides the shipping defaults.
 The runner owns disposable Aspire PostgreSQL and WebDemo resources. Without
 overrides, admission defaults to eight requests globally and two per subject.
 `Parameters__LoadPostgreSqlMaxWalSizeMiB` optionally changes the disposable
-server's WAL allowance while retaining durable commit settings. PostgreSQL explains
+server's WAL allowance while retaining settings for commit persistence. PostgreSQL explains
 [how frequent checkpoints increase I/O](https://www.postgresql.org/docs/18/wal-configuration.html).
 `Parameters__LoadPostgreSqlPoolSize` bounds each WebDemo document and Identity
 pool separately. Account for both pools and other clients in the server connection
@@ -1199,7 +1199,7 @@ current package validation and response serialization.
 | Approach | Intended metadata work per save | Status |
 | --- | --- | --- |
 | Shared graph memberships | `O(g + n)` for normal append histories | Implemented and measured |
-| Durable persistent graph and revision trees | Approximately `O(delta log g + log n)` | Design only; requires durable root publication and collection |
+| Persisted graph and revision trees | Approximately `O(delta log g + log n)` | Design only; requires root publication and collection |
 | Relational immutable revisions with a small current-state record | Approximately `O(delta log g + log n)` with the necessary indexes | Preferred longer-term design; requires new bounded mutation and response contracts |
 | Append log with bounded checkpoints | `O(delta)` foreground append, plus checkpoint and index costs | Design only; checkpoint work and cold replay still need measurement |
 
@@ -1320,10 +1320,10 @@ logical quota boundaries and allocation growth through 1,000 revisions. These
 results support the normal append-history improvement; they do not remove the
 linear metadata work or the arbitrary-membership fallback described above.
 
-## Durable quota allowances and chunk inserts
+## Quota allowances and chunk inserts
 
 The next experiment reduced contention on the global storage quota row. PostgreSQL
-and SQL Server now keep 64 durable allowance buckets, selected by hashing all bytes
+and SQL Server now keep 64 allowance buckets stored in the database, selected by hashing all bytes
 of the document ID. A normal positive atomic save consumes its bucket's allowance
 in the same transaction as publication. The slow path locks the global ledger and
 then the buckets in a fixed order, admits the save and tops its bucket up toward
@@ -1333,7 +1333,7 @@ If `C` is globally charged capacity and `R` is each bucket's unused allowance,
 exact retained usage is `C - SUM(R)`. Reservations consume quota headroom rather
 than permitting an overshoot. Near the limit, the slow path reclaims unused
 allowances before checking admission. Deletion, pruning and other ordinary quota
-writers also reclaim allowances under the same lock order. Durable rows and
+writers also reclaim allowances under the same lock order. Database rows and
 transaction rollback preserve accounting across restart and failed publication.
 Both SQL providers use this accounting; the throughput measurements below used
 PostgreSQL only.
@@ -1353,7 +1353,7 @@ without changing chunk size or stored bytes. Consumer EF customizations and
 `SaveChanges` hooks retain the tracked insert path.
 
 The exploratory comparison on 2026-10-28 used the same shared four-CPU,
-approximately 13 GiB host, durable database settings and admission configuration
+approximately 13 GiB host, database settings and admission configuration
 as above. Each run had 1,500 users, 15,000 documents, 30 seconds of warm-up and
 60 seconds of measurement. The eight-second cadence offered 11,250 saves/minute.
 Packages were synthetic 256 KiB DOCX files with shared padding and a fixed-size

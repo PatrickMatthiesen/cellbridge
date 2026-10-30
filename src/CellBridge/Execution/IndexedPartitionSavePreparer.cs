@@ -105,7 +105,7 @@ public static class IndexedPartitionSavePreparer
             StorageLimits.Check("graph elements", head.Counters.GraphElements + (long)addedIds.Length, limits.MaxGraphElements);
             StorageLimits.Check("graph bytes", head.Counters.GraphBytes + addedIds.Sum(id => incoming[id].Data!.LongLength), limits.MaxGraphBytes);
             // MS-FSSHTTPB 2.2.2.1.4 applies only the selected index. Expected mappings
-            // constrain target coherency; they do not introduce durable serial claims.
+            // constrain target coherency; they do not create stored serial claims.
             var claims = graphRead?.MappingClaims ?? await source.ReadMappingClaimsAsync(scope, updates.Where(mapping => !mapping.Serial.IsNull)
                 .Select(mapping => new SerialId(mapping.Serial.Guid, mapping.Serial.Value)).Distinct().ToArray(), cancellationToken);
             ValidateMappingClaims(updates, claims);

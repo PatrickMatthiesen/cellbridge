@@ -96,7 +96,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         {
             var stored = physical[handle.Key];
             if (stored is null || stored.Length != handle.Length || stored.Sha256 != handle.Sha256)
-                throw new StorageCorruptionException("Publication references missing or inconsistent durable content.");
+                throw new StorageCorruptionException("Publication references missing or inconsistent stored content.");
             var existing = references[handle.Key];
             if (existing is null)
             {

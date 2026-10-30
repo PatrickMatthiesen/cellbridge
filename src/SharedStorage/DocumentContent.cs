@@ -13,7 +13,7 @@ internal sealed partial class DocumentContent<TContext> : IContentStore where TC
     private readonly IDocumentDatabase<TContext> database;
     private readonly long _maxObjectBytes;
     // Bound chunk staging while allowing independent document transactions to
-    // overlap database round trips and durable commits.
+    // overlap database round trips and commits.
     private readonly SemaphoreSlim _writers = new(16);
     // Delegates belong to this store's options, not a process-wide default model.
     private IModel? _queryModel;

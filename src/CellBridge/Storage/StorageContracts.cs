@@ -82,7 +82,7 @@ public sealed record DocumentSummary(Guid ResourceId, string Path, long Length,
     public string? DeliveryBlock { get; init; }
 }
 
-/// <summary>Content writes must complete durably before their handles can be published.</summary>
+/// <summary>Content writes must satisfy the store's declared persistence guarantees before their handles can be published.</summary>
 public interface IContentStore
 {
     bool Durable { get; }

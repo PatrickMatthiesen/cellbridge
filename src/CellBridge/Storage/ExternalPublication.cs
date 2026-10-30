@@ -19,7 +19,7 @@ public sealed record ExternalDeliveryResult(ExternalDeliveryStatus Status, strin
 public sealed record ExternalDeliveryRequest(Guid BindingId, string Destination, string ExpectedRevision, DocumentDelivery Revision);
 
 /// <summary>
-/// The destination must atomically persist bytes, a non-reusable revision token and a durable
+/// The destination must atomically persist bytes, a non-reusable revision token and a replayable
 /// receipt keyed by binding/operation, validating the complete immutable request fingerprint.
 /// Retry returns the original resulting revision without writing again. Old compacted receipts
 /// must return Stale, never reapply. Deduplication must survive deletion/recreation and rebinding.
