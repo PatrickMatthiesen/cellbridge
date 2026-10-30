@@ -28,7 +28,7 @@ public sealed partial class CellBridgeDocumentService
         }
         var request = operation.Data as QueryChangesSubRequestData;
         var read = await provider.Documents.ReadPartitionAsync(id,
-            new((int)kind) { IncludeCatalog = true, IncludeBindings = FileQueryResponseBuilder.IsScoped(request) }, cancellationToken) ?? throw MissingDocument();
+            new((int)kind) { IncludeCatalog = true, IncludeBindings = FileQueryResponseBuilder.IsScoped(request), IncludeMappings = true }, cancellationToken) ?? throw MissingDocument();
         Demand(actor, read.Current, DocumentAccess.Read);
         var partition = read.Partition;
         if (partition.StorageIndex is null)
@@ -42,7 +42,7 @@ public sealed partial class CellBridgeDocumentService
         }
         var scope = new IndexedGraphScope(id, read.Current.LifecycleGeneration, (int)kind);
         var indexId = partition.StorageIndex ?? throw new StorageCorruptionException("Missing selected storage index.");
-        var mappings = await provider.Documents.ReadMappingsAsync(scope, partition.PublicationSequence, cancellationToken);
+        var mappings = read.Mappings;
         var index = new DataElement(DataElementType.StorageIndexDataElementData, StorageIds.Restore(indexId),
             partition.StorageIndexSerial is { } serial ? new(serial.Guid, serial.Value) : throw new StorageCorruptionException("Missing server index serial."))
         { Data = StorageIndexPatch.Serialize(mappings.Select(RestoreMapping)) };

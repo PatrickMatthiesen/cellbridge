@@ -151,6 +151,39 @@ mean, compression ratio and edit/changed-part distributions before weighting cos
 
 ## Costs of the replacement implementation
 
+### Database operation accounting
+
+Database-wide `pg_stat_database.xact_commit` includes explicit transactions and
+implicit statement transactions. A mixed-load total divided by successful saves
+also includes reads, authentication, pooled connection reset SQL, health checks,
+diagnostics, warm-up and drain. It is not the number of write transactions or
+durability flushes per save. SQL log records are not network round trips either;
+publication batches contain many statements inside one write transaction.
+
+The isolated HTTP attribution in [Office performance](office-performance.md)
+showed avoidable connection and transaction overhead in save preparation.
+Submitted immutable descriptors, selected mapping serial claims, current binding
+group descriptors and object definitions now share the existing preparation
+snapshot through `SavePreparationRequest.Graph`. This projection loads metadata,
+not every retained payload. Element and owner queries use batches of at most 256
+keys. File reconstruction batches only stored file groups selected by the
+effective file bindings, using the existing verified content reader. Unknown or
+historical references retain their ordinary lookup path.
+`SavePreparationRead.PreparedMappingKeys` preserves which keys the snapshot
+checked, including absent mappings, so graph resolution does not query known
+absence again. Keys outside that set still require a provider lookup.
+
+`PartitionReadRequest.IncludeMappings` returns mappings with the selected head,
+partition and catalog snapshot. QueryChanges uses those mappings instead of
+opening another coherent read. The provider reuses the already selected current
+sequence; historical selections still resolve the matching mapping intervals.
+These changes preserve fresh authorization reads, document-scoped staging,
+payload hash checks and the final locked publication fence. They do not make
+complete saves proportional only to changed bytes or remove history-dependent
+query work.
+
+### Work and working memory
+
 These are source-based bounds, not measured latency. SQL indexes add logarithmic
 lookup/index-maintenance costs. Let `L` count current resolved object bindings,
 `M` count selected storage-index mappings, `A` count serialized permission bytes,

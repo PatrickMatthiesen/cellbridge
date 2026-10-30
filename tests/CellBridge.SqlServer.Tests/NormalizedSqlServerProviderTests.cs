@@ -11,6 +11,13 @@ namespace CellBridge.SqlServer.Tests;
 public sealed class NormalizedSqlServerProviderTests(SqlServerFixture fixture)
 {
     [Fact]
+    public async Task ReadPartitionKeepsCatalogAndMappingsOnOneCoherentSnapshot()
+    {
+        var database = await SqlServerDocuments.CreateAsync(fixture);
+        await CoherentPartitionMappingScenario.RunAsync(database.Provider(), interceptors => database.Provider(interceptors).Documents);
+    }
+
+    [Fact]
     public async Task ResourceLookupReadsOneCoherentHeadWithoutAnExplicitTransaction()
     {
         var database = await SqlServerDocuments.CreateAsync(fixture);

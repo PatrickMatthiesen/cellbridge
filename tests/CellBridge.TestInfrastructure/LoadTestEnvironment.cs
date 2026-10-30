@@ -84,6 +84,13 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
         try
         {
             var storage = builder.CreateResourceBuilder<PostgresServerResource>("storage");
+            var directPostgreSql = builder.Configuration.GetValue("Parameters:LoadDirectPostgreSql", false);
+            if (directPostgreSql)
+                storage.WithEndpoint("tcp", endpoint =>
+                {
+                    endpoint.IsProxied = false;
+                    endpoint.TargetHost = IPAddress.Loopback.ToString();
+                });
             var queryStatisticsRequested = builder.Configuration.GetValue("Parameters:LoadQueryStatistics", false);
             var queryStatisticsEnabled = queryStatisticsRequested && backend == "postgresql";
             if (queryStatisticsRequested && !queryStatisticsEnabled)
@@ -243,6 +250,17 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
             await application.ResourceNotifications.WaitForResourceHealthyAsync("webdemo", timeout.Token);
             var endpoint = application.GetEndpoint("webdemo", "https");
             var httpsEndpointInfo = ReadHttpsEndpoint(webdemo.GetEndpoint("https"), endpoint, directHttps);
+            var postgresEndpoint = application.GetEndpoint("storage", "tcp");
+            var postgresProxied = storage.GetEndpoint("tcp").EndpointAnnotation.IsProxied;
+            if (!postgresEndpoint.IsLoopback || postgresProxied == directPostgreSql)
+                throw new InvalidOperationException("The allocated load PostgreSQL endpoint does not match the requested private transport mode.");
+            if (directPostgreSql)
+            {
+                var targetHost = storage.GetEndpoint("tcp").EndpointAnnotation.TargetHost;
+                if (!IPAddress.TryParse(targetHost, out var address) || !IPAddress.IsLoopback(address))
+                    throw new InvalidOperationException("The direct load PostgreSQL published host binding is not loopback.");
+            }
+            Console.WriteLine($"Load PostgreSQL: mode={(postgresProxied ? "proxied" : "direct")}, service={postgresEndpoint.Host}:{postgresEndpoint.Port}, loopback binding requested={directPostgreSql}.");
             var identityConnection = (await application.GetConnectionStringAsync("cellbridge", timeout.Token))!;
             if (queryStatisticsEnabled)
             {

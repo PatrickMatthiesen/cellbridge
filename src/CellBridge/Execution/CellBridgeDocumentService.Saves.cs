@@ -30,12 +30,21 @@ public sealed partial class CellBridgeDocumentService
         SaveOperationIdentity identity;
         string digest;
         ImmutableArray<IndexedMappingKey> keys;
+        SaveGraphReadRequest graphRequest;
         try
         {
             (identity, digest) = IndexedPartitionSavePreparer.Identify(initial.LifecycleGeneration, (int)kind, operation, owned);
             var proposed = owned.DataElements.FirstOrDefault(element => element.DataElementExtendedGuid.Equals(put.StorageIndex));
             var scope = new IndexedGraphScope(id, initial.LifecycleGeneration, (int)kind);
             keys = proposed is null ? [] : IndexedDocumentGraph.ReadMetadata(scope, proposed).Mappings.Select(mapping => mapping.Key).Distinct().ToImmutableArray();
+            if (kind == DocumentPartitionKind.FileContents && proposed is not null)
+                keys = keys.Add(new(IndexedMappingKind.Manifest)).Distinct().ToImmutableArray();
+            graphRequest = new(
+                owned.DataElements.Select(element => IndexedDocumentGraph.Capture(element.DataElementExtendedGuid)).Distinct().ToImmutableArray(),
+                proposed?.Data is { } indexBytes
+                    ? StorageIndexMappingSerials.Read(indexBytes).Select(serial => new SerialId(serial.Guid, serial.Value))
+                        .Where(serial => serial.Guid != Guid.Empty || serial.Value != 0).Distinct().ToImmutableArray()
+                    : []);
         }
         catch (Exception error) when (error is InvalidDataException or ArgumentException or OverflowException)
         { return Wrap(Failure(operation.RequestId, CellErrorCode.InvalidObject, error.Message), initial); }
@@ -46,7 +55,7 @@ public sealed partial class CellBridgeDocumentService
             SavePreparationRead preparation;
             using (CellBridgeMetrics.Measure(CellBridgePhase.CoherentPrepare))
                 preparation = await provider.Documents.PrepareSaveAsync(id,
-                    new((int)kind, identity, keys) { IncludeBindings = true }, cancellationToken) ?? throw MissingDocument();
+                    new((int)kind, identity, keys) { IncludeBindings = true, Graph = graphRequest }, cancellationToken) ?? throw MissingDocument();
             var head = preparation.Control.Head;
             actor = await AuthorizeActorAsync(actor, head, DocumentAccess.Write, cancellationToken);
             if (!Access(actor, head).HasFlag(DocumentAccess.Write)) return Wrap(CellBridgeAuthorization.Denied(operation), head);

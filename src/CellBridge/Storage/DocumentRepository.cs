@@ -91,6 +91,7 @@ public sealed record PartitionReadRequest(int PartitionKind)
     public ImmutableArray<GraphSerialRange> SerialRanges { get; init; } = [];
     public bool IncludeCatalog { get; init; }
     public bool IncludeBindings { get; init; }
+    public bool IncludeMappings { get; init; }
 }
 public sealed record GraphSerialRange(Guid Namespace, ulong First, ulong Last);
 
@@ -107,11 +108,22 @@ public sealed record SavePreparationRequest(int PartitionKind, SaveOperationIden
 {
     public bool IncludeCatalog { get; init; }
     public bool IncludeBindings { get; init; }
+    public SaveGraphReadRequest? Graph { get; init; }
 }
+
+public sealed record SaveGraphReadRequest(ImmutableArray<ExtendedId> SubmittedElementIds,
+    ImmutableArray<SerialId> MappingSerials);
+public sealed record SaveGraphRead(ImmutableArray<GraphElementState> SubmittedElements,
+    ImmutableArray<IndexedStorageMapping> MappingClaims, ImmutableArray<GraphElementState> CurrentElements,
+    ImmutableArray<IndexedObjectDefinition> CurrentObjects);
+
 public sealed record SavePreparationRead(DocumentControlRead Control, PartitionRead Partition,
     DocumentOperationReceipt? Receipt)
 {
     public required IndexedReplayPosition ReplayPosition { get; init; }
+    public SaveGraphRead? Graph { get; init; }
+    /// <summary>Keys checked at the selected partition root; keys absent from Mappings are known absent.</summary>
+    public ImmutableArray<IndexedMappingKey> PreparedMappingKeys { get; init; } = [];
 }
 
 /// <summary>The expected value is null when a mapping must not exist.</summary>

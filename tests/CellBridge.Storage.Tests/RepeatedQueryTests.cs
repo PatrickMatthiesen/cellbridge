@@ -40,6 +40,36 @@ public class RepeatedQueryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task QueryChangesUsesMappingsFromItsPartitionRead(bool postgreSql)
+    {
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
+        var state = await PublishGraph(provider);
+        var partition = (await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0)))!.Partition;
+        var scope = new IndexedGraphScope(state.ResourceId, state.LifecycleGeneration, 0);
+        var expected = await provider.Documents.ReadMappingsAsync(scope, partition.PublicationSequence);
+        Assert.NotEmpty(expected);
+        var old = (await provider.Documents.ReadPartitionAsync(state.ResourceId,
+            new(0) { RevisionNumber = 1, IncludeMappings = true }))!;
+        Assert.Equal((await provider.Documents.ReadMappingsAsync(scope, old.Partition.PublicationSequence)).ToHashSet(), old.Mappings.ToHashSet());
+        var oldIndex = (await provider.Documents.ReadPartitionAsync(state.ResourceId,
+            new(0) { StorageIndex = old.Partition.StorageIndex, IncludeMappings = true }))!;
+        Assert.Equal((await provider.Documents.ReadMappingsAsync(scope, oldIndex.Partition.PublicationSequence)).ToHashSet(), oldIndex.Mappings.ToHashSet());
+
+        var repository = new CoherentMappingReadRepository(provider.Documents);
+        var queryProvider = new StorageProvider(repository, provider.Content, provider.Limits);
+        var result = await new CellBridgeDocumentService(queryProvider).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents, Query(1), new Dictionary<string, string>(), TestActor.Value);
+
+        Assert.False(Assert.Single(result.Response.SubResponses).Status);
+        Assert.True(repository.SawMappingsRequest);
+        Assert.Equal(expected.ToHashSet(), repository.Mappings.ToHashSet());
+        Assert.All(repository.Mappings, mapping => Assert.Equal(scope, mapping.Scope));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AggregateBudgetRejectsLaterCellWithoutDiscardingEarlierPayload(bool postgreSql)
     {
         await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
@@ -212,6 +242,24 @@ public class RepeatedQueryTests
             var read = await base.ReadPartitionAsync(resourceId,request,cancellationToken);
             return read is null ? null : read with { Elements = read.Elements.Select(element => element.Id == id ? element with { Serial = serial } : element).ToImmutableArray() };
         }
+    }
+    private sealed class CoherentMappingReadRepository(IDocumentRepository inner) : RepositoryTestProxy(inner)
+    {
+        public bool SawMappingsRequest { get; private set; }
+        public ImmutableArray<IndexedStorageMapping> Mappings { get; private set; } = [];
+
+        public override async ValueTask<PartitionRead?> ReadPartitionAsync(Guid resourceId, PartitionReadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            SawMappingsRequest |= request.IncludeMappings;
+            var read = await base.ReadPartitionAsync(resourceId, request, cancellationToken);
+            if (request.IncludeMappings && read is not null) Mappings = read.Mappings;
+            return read;
+        }
+
+        public override ValueTask<ImmutableArray<IndexedStorageMapping>> ReadMappingsAsync(IndexedGraphScope scope,
+            long sequence, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("QueryChanges must use mappings from its coherent partition read.");
     }
     private static FsshttpbCellRequest Query(ulong id, ClientKnowledge? knowledge = null, ulong? maximum = null, CellId? cell = null) => new()
     { SubRequests = { new(RequestTypes.QueryChanges) { RequestId = id, Data = new QueryChangesSubRequestData

@@ -1,4 +1,5 @@
 using CellBridge.Storage.Abstractions;
+using CellBridge.Storage;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.Storage.FileSystem;
 using CellBridge.Tests;
@@ -13,6 +14,16 @@ namespace CellBridge.Storage.Tests;
 [Collection("PostgreSQL")]
 public sealed class NormalizedPostgreSqlProviderTests
 {
+    [PostgreSqlFact]
+    public Task ReadPartitionKeepsCatalogAndMappingsOnOneCoherentSnapshot() => BudgetAndQueryTests.WithDatabase(new(), async source =>
+    {
+        var content = new PostgreSqlContentStore(source);
+        var provider = new StorageProvider(new PostgreSqlStateStore(source, validationContent: content), content);
+        await CoherentPartitionMappingScenario.RunAsync(provider, interceptors =>
+            new PostgreSqlStateStore(new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source)
+                .AddInterceptors(interceptors).Options, validationContent: content));
+    });
+
     [PostgreSqlFact]
     public async Task FreshSchemaMatchesModelAndTypedSaveHistoryOutboxRecoveryRoundTrip()
     {

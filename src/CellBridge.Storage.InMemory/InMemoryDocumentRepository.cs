@@ -184,13 +184,43 @@ public sealed partial class InMemoryDocumentRepository : IDocumentRepository, II
         try
         {
             if (entry.Head.IsDeleted) return null;
+            var requestedMappings = request.AffectedMappings.IsDefaultOrEmpty
+                ? ImmutableArray<IndexedMappingKey>.Empty : request.AffectedMappings.Distinct().ToImmutableArray();
             var read = SelectPartition(entry, new(request.PartitionKind)
-                { IncludeCatalog = request.IncludeCatalog, IncludeBindings = request.IncludeBindings }, request.AffectedMappings);
-            return read is null ? null : new(Control(entry), read, entry.Receipts.GetValueOrDefault(request.Operation))
-                { ReplayPosition = entry.Partitions[request.PartitionKind].ReplayPosition };
+                { IncludeCatalog = request.IncludeCatalog, IncludeBindings = request.IncludeBindings }, requestedMappings);
+            if (read is null) return null;
+            var receipt = entry.Receipts.GetValueOrDefault(request.Operation);
+            var graph = request.Graph is not null && receipt is null
+                ? ReadSaveGraph(entry, read, request.Graph)
+                : null;
+            return new SavePreparationRead(Control(entry), read, receipt)
+                {
+                    ReplayPosition = entry.Partitions[request.PartitionKind].ReplayPosition,
+                    Graph = graph,
+                    PreparedMappingKeys = requestedMappings,
+                };
         }
         finally { entry.Guard.Release(); }
     }
+
+    private static SaveGraphRead ReadSaveGraph(Entry entry, PartitionRead partition, SaveGraphReadRequest request)
+    {
+        var scope = new IndexedGraphScope(entry.Head.ResourceId, entry.Head.LifecycleGeneration, partition.Partition.Kind);
+        ExtendedId[] submittedIds = request.SubmittedElementIds.IsDefaultOrEmpty ? [] : request.SubmittedElementIds.Distinct().ToArray();
+        SerialId[] mappingSerials = request.MappingSerials.IsDefaultOrEmpty ? [] : request.MappingSerials.Distinct().ToArray();
+        var groupIds = partition.Bindings.Select(binding => binding.GroupElement).Distinct().ToArray();
+        var currentIds = groupIds.Concat(partition.Mappings.Where(mapping => !IsNull(mapping.Target)).Select(mapping => mapping.Target))
+            .Distinct().ToArray();
+        var selectedPartition = entry.Partitions[partition.Partition.Kind];
+        return new(
+            submittedIds.Where(selectedPartition.Elements.ContainsKey).Select(id => selectedPartition.Elements[id]).ToImmutableArray(),
+            mappingSerials.Where(selectedPartition.MappingClaims.ContainsKey)
+                .SelectMany(serial => selectedPartition.MappingClaims[serial].Values).ToImmutableArray(),
+            currentIds.Where(selectedPartition.Elements.ContainsKey).Select(id => selectedPartition.Elements[id]).ToImmutableArray(),
+            groupIds.Where(selectedPartition.Groups.ContainsKey).SelectMany(group => selectedPartition.Groups[group]).ToImmutableArray());
+    }
+
+    private static bool IsNull(ExtendedId id) => id.Guid == Guid.Empty && id.Value == 0;
 
     private PartitionRead? SelectPartition(Entry entry, PartitionReadRequest request, IEnumerable<IndexedMappingKey>? mappingKeys = null)
     {
@@ -219,12 +249,21 @@ public sealed partial class InMemoryDocumentRepository : IDocumentRepository, II
         var elements = ids.Where(id => Visible(partition, id, selected.PublicationSequence))
             .Select(id => partition.Elements[id]).ToImmutableArray();
         var bindings = request.IncludeBindings ? BindingsAt(partition, selected.PublicationSequence) : [];
+        ImmutableArray<IndexedStorageMapping> mappings = [];
+        if (selected.StorageIndex is { } mappingRoot && partition.MappingRoots.TryGetValue(selected.PublicationSequence, out var indexMappings))
+        {
+            if (request.IncludeMappings)
+                mappings = indexMappings.Select(pair => new IndexedStorageMapping(
+                    new(entry.Head.ResourceId, entry.Head.LifecycleGeneration, selected.Kind), mappingRoot,
+                    pair.Key, pair.Value.Target, pair.Value.Serial)).ToImmutableArray();
+            else if (mappingKeys is not null)
+                mappings = mappingKeys.Distinct().Where(indexMappings.ContainsKey).Select(key =>
+                    new IndexedStorageMapping(new(entry.Head.ResourceId, entry.Head.LifecycleGeneration, selected.Kind),
+                        mappingRoot, key, indexMappings[key].Target, indexMappings[key].Serial)).ToImmutableArray();
+        }
         return new(entry.Head, selected, elements, bindings)
         {
-            Mappings = mappingKeys is not null && selected.StorageIndex is { } root && partition.MappingRoots.TryGetValue(selected.PublicationSequence, out var indexMappings)
-                ? mappingKeys.Distinct().Where(indexMappings.ContainsKey).Select(key =>
-                    new IndexedStorageMapping(new(entry.Head.ResourceId, entry.Head.LifecycleGeneration, selected.Kind),
-                        root, key, indexMappings[key].Target, indexMappings[key].Serial)).ToImmutableArray() : [],
+            Mappings = mappings,
             Revisions = elements.Where(e => partition.Revisions.ContainsKey(e.Id)).Select(e => partition.Revisions[e.Id]).ToImmutableArray(),
         };
     }

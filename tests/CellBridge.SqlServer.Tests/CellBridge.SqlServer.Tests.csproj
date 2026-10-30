@@ -21,6 +21,7 @@
     <Compile Include="../CellBridge.Storage.Tests/RepositoryTestProxy.cs" Link="RepositoryTestProxy.cs" />
     <Compile Include="../CellBridge.Storage.Tests/DocumentStagingScenario.cs" Link="DocumentStagingScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/ImmutableIndexedReadScenario.cs" Link="ImmutableIndexedReadScenario.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/CoherentPartitionMappingScenario.cs" Link="CoherentPartitionMappingScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/PublicationContentReadScenario.cs" Link="PublicationContentReadScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/CurrentMetadataReadScenario.cs" Link="CurrentMetadataReadScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/StableHistoryScenario.cs" Link="StableHistoryScenario.cs" />

@@ -73,10 +73,15 @@ public static class IndexedPartitionSavePreparer
             if (identity.Operation.LifecycleGeneration != head.LifecycleGeneration || identity.Operation.Family != SaveOperationFamily.Restore && identity.Operation.PartitionKind != before.Kind)
                 throw new ArgumentException("The trusted write identity belongs to another document incarnation or partition.");
             var scope = new IndexedGraphScope(head.ResourceId, head.LifecycleGeneration, before.Kind);
-            var currentSource = new PreparedGraphSource(scope, before.StorageIndex, preparation.Partition.Mappings, source);
-            var descriptors = await source.ReadElementsAsync(scope, incoming.Keys.ToArray(), cancellationToken);
+            var graphRead = preparation.Graph;
+            var currentGroupIds = preparation.Partition.Bindings.Select(binding => binding.GroupElement).Distinct();
+            var currentSource = new PreparedGraphSource(scope, before.StorageIndex, preparation.Partition.Mappings,
+                source, graphRead, currentGroupIds, preparation.PreparedMappingKeys);
+            var descriptors = graphRead?.SubmittedElements ??
+                await source.ReadElementsAsync(scope, incoming.Keys.ToArray(), cancellationToken);
             var existing = descriptors.ToDictionary(element => element.Id);
-            var loader = new Loader(scope, source, content, limits, incoming, descriptors);
+            var knownDescriptors = MergeKnownElements(descriptors, graphRead?.CurrentElements ?? []);
+            var loader = new Loader(scope, source, content, limits, incoming, knownDescriptors);
             if (!incoming.TryGetValue(IndexedDocumentGraph.Capture(put.StorageIndex), out var proposed))
                 return Reject(operation.RequestId, CellErrorCode.ReferencedDataElementNotFound, "Missing uploaded storage index.");
             var updates = StorageIndexPatch.Read(proposed);
@@ -101,7 +106,7 @@ public static class IndexedPartitionSavePreparer
             StorageLimits.Check("graph bytes", head.Counters.GraphBytes + addedIds.Sum(id => incoming[id].Data!.LongLength), limits.MaxGraphBytes);
             // MS-FSSHTTPB 2.2.2.1.4 applies only the selected index. Expected mappings
             // constrain target coherency; they do not introduce durable serial claims.
-            var claims = await source.ReadMappingClaimsAsync(scope, updates.Where(mapping => !mapping.Serial.IsNull)
+            var claims = graphRead?.MappingClaims ?? await source.ReadMappingClaimsAsync(scope, updates.Where(mapping => !mapping.Serial.IsNull)
                 .Select(mapping => new SerialId(mapping.Serial.Guid, mapping.Serial.Value)).Distinct().ToArray(), cancellationToken);
             ValidateMappingClaims(updates, claims);
             ulong knowledge = before.Knowledge;
@@ -222,6 +227,7 @@ public static class IndexedPartitionSavePreparer
                 if (!resolvedCells.TryGetValue(fileCell, out var resolved)) throw new InvalidDataException("Unmapped file cell.");
                 var root = resolved.Roots.Single(root => root.Root == IndexedDocumentGraph.Capture(storageRoot.Root));
                 var packageRoot = new DocumentPackageRoot(scope, index, fileCell, resolved.Revision, root.Object);
+                await loader.PrefetchFileGroupsAsync(effectiveBindings, fileCell, cancellationToken);
                 var file = await IndexedDocumentGraph.LoadFileAsync(packageRoot, effectiveBindings,
                     (_, id, ct) => loader.ReadAsync(id, ct), cancellationToken);
                 await using var scratch = OpenScratch();
@@ -410,6 +416,18 @@ public static class IndexedPartitionSavePreparer
     private static DataElement WithSerial(DataElement element, SerialNumber serial) =>
         new(element.DataElementType, element.DataElementExtendedGuid, serial) { Data = element.Data };
 
+    private static ImmutableArray<GraphElementState> MergeKnownElements(IEnumerable<GraphElementState> submitted,
+        IEnumerable<GraphElementState> current)
+    {
+        var result = new Dictionary<ExtendedId, GraphElementState>();
+        foreach (var element in submitted.Concat(current))
+        {
+            if (result.TryGetValue(element.Id, out var existing)) IndexedDocumentGraph.ValidateIdentity(existing, element);
+            else result.Add(element.Id, element);
+        }
+        return result.Values.ToImmutableArray();
+    }
+
     private static IndexedMappingKey Key(StorageIndexMapping mapping) => new(
         mapping.Type == StreamObjectTypeHeaderStart.StorageIndexManifestMapping ? IndexedMappingKind.Manifest :
         mapping.Type == StreamObjectTypeHeaderStart.StorageIndexCellMapping ? IndexedMappingKind.Cell : IndexedMappingKind.Revision,
@@ -429,11 +447,22 @@ public static class IndexedPartitionSavePreparer
     // Preparation contains only affected keys. Missing entries still require a provider lookup;
     // successful lookups (including absence) are stable under this immutable logical index.
     private sealed class PreparedGraphSource(IndexedGraphScope scope, ExtendedId? index,
-        ImmutableArray<IndexedStorageMapping> prepared, IIndexedGraphSource source) : IIndexedGraphSource
+        ImmutableArray<IndexedStorageMapping> prepared, IIndexedGraphSource source, SaveGraphRead? graph,
+        IEnumerable<ExtendedId> currentGroupIds, ImmutableArray<IndexedMappingKey> preparedKeys) : IIndexedGraphSource
     {
-        private readonly Dictionary<IndexedMappingKey, IndexedStorageMapping?> mappings = prepared
-            .Where(mapping => mapping.Scope == scope && mapping.StorageIndex == index)
-            .ToDictionary(mapping => mapping.Key, mapping => (IndexedStorageMapping?)mapping);
+        private readonly Dictionary<IndexedMappingKey, IndexedStorageMapping?> mappings = SeedMappings(scope, index, prepared, preparedKeys);
+        private readonly Dictionary<ExtendedId, ImmutableArray<IndexedObjectDefinition>> groups = SeedGroups(graph, currentGroupIds);
+
+        private static Dictionary<IndexedMappingKey, IndexedStorageMapping?> SeedMappings(IndexedGraphScope scope,
+            ExtendedId? index, ImmutableArray<IndexedStorageMapping> prepared, ImmutableArray<IndexedMappingKey> preparedKeys)
+        {
+            var seeded = new Dictionary<IndexedMappingKey, IndexedStorageMapping?>();
+            if (!preparedKeys.IsDefaultOrEmpty)
+                foreach (var key in preparedKeys.Distinct()) seeded[key] = null;
+            foreach (var mapping in prepared.Where(mapping => mapping.Scope == scope && mapping.StorageIndex == index))
+                seeded[mapping.Key] = mapping;
+            return seeded;
+        }
 
         public async ValueTask<IndexedStorageMapping?> FindMappingAsync(IndexedGraphScope requestedScope, ExtendedId selectedIndex,
             IndexedMappingKey key, CancellationToken cancellationToken = default)
@@ -450,7 +479,20 @@ public static class IndexedPartitionSavePreparer
         // Successful immutable metadata can be shared by resolution and closure validation.
         // Keep the provider's arrays directly; absent records are never memoized.
         private Dictionary<ExtendedId, IndexedRevisionManifest>? revisions;
-        private Dictionary<ExtendedId, ImmutableArray<IndexedObjectDefinition>>? groups;
+        private static Dictionary<ExtendedId, ImmutableArray<IndexedObjectDefinition>> SeedGroups(SaveGraphRead? graph,
+            IEnumerable<ExtendedId> currentGroupIds)
+        {
+            var seeded = new Dictionary<ExtendedId, ImmutableArray<IndexedObjectDefinition>>();
+            if (graph is null) return seeded;
+            var headers = graph.CurrentElements.Where(element => element.Type == (uint)DataElementType.ObjectGroupDataElementData)
+                .ToDictionary(element => element.Id);
+            var objects = graph.CurrentObjects.GroupBy(obj => obj.GroupElement)
+                .ToDictionary(group => group.Key, group => group.ToImmutableArray());
+            foreach (var group in currentGroupIds.Distinct())
+                if (headers.ContainsKey(group))
+                    seeded.Add(group, objects.GetValueOrDefault(group, []));
+            return seeded;
+        }
 
         public async ValueTask<IndexedRevisionManifest?> ReadRevisionAsync(IndexedGraphScope requestedScope, ExtendedId manifest,
             CancellationToken cancellationToken = default)
@@ -469,9 +511,9 @@ public static class IndexedPartitionSavePreparer
             cancellationToken.ThrowIfCancellationRequested();
             if (requestedScope != scope)
                 return await source.ReadGroupAsync(requestedScope, group, cancellationToken);
-            if (groups is not null && groups.TryGetValue(group, out var cached)) return cached;
+            if (groups.TryGetValue(group, out var cached)) return cached;
             var value = await source.ReadGroupAsync(scope, group, cancellationToken);
-            if (!value.IsDefault) (groups ??= []).Add(group, value);
+            if (!value.IsDefault) groups.Add(group, value);
             return value;
         }
     }
@@ -612,6 +654,56 @@ public static class IndexedPartitionSavePreparer
         public IEnumerable<ExtendedId> LoadedIds => loaded.Keys;
         public ValueTask<DataElement> ReadAsync(ExtendedId id, CancellationToken ct) => incoming.TryGetValue(id, out var element)
             ? ValueTask.FromResult(element) : ReadStoredAsync(id, ct);
+
+        public async ValueTask PrefetchFileGroupsAsync(IEnumerable<IndexedObjectBinding> bindings,
+            IndexedCellId fileCell, CancellationToken ct)
+        {
+            var ids = bindings.Where(binding => binding.Key.Cell == fileCell && binding.Key.ObjectPartitionId == 1)
+                .Select(binding => binding.GroupElement).Distinct()
+                .Where(id => !incoming.ContainsKey(id) && !loaded.ContainsKey(id)).ToArray();
+            if (ids.Length == 0) return;
+
+            var missingDescriptors = ids.Where(id => !descriptors.ContainsKey(id)).ToArray();
+            if (missingDescriptors.Length > 0)
+            {
+                var requested = missingDescriptors.ToHashSet();
+                var returned = await source.ReadElementsAsync(scope, missingDescriptors, ct);
+                var byId = new Dictionary<ExtendedId, GraphElementState>(returned.Length);
+                foreach (var descriptor in returned)
+                {
+                    if (!requested.Contains(descriptor.Id) || !byId.TryAdd(descriptor.Id, descriptor))
+                        throw new InvalidDataException("Immutable element lookup returned an unexpected identity.");
+                }
+                foreach (var id in missingDescriptors)
+                {
+                    if (!byId.TryGetValue(id, out var descriptor))
+                        throw new InvalidDataException("Missing referenced immutable graph element.");
+                    descriptors.Add(id, descriptor);
+                }
+            }
+
+            var pending = ids.Select(id => (Id: id, Descriptor: descriptors[id])).ToArray();
+            long payloadBytes = 0;
+            foreach (var (_, descriptor) in pending)
+            {
+                if (descriptor.Type != (uint)DataElementType.ObjectGroupDataElementData)
+                    throw new StorageCorruptionException("Immutable element lookup returned the wrong identity or type.");
+                payloadBytes = checked(payloadBytes + descriptor.Payload.Length);
+            }
+            StorageLimits.Check("graph bytes", payloadBytes, limits.MaxGraphBytes);
+
+            var payloads = await content.ReadManyVerifiedAsync(pending.Select(item => item.Descriptor.Payload),
+                limits.MaxObjectBytes, ct);
+            foreach (var (id, descriptor) in pending)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!payloads.TryGetValue(descriptor.Payload.Key, out var bytes))
+                    throw new StorageCorruptionException("Content batch did not return exactly the requested objects.");
+                loaded.Add(id, new((DataElementType)descriptor.Type, IndexedDocumentGraph.Restore(id),
+                    new(descriptor.Serial.Guid, descriptor.Serial.Value)) { Data = bytes });
+            }
+        }
+
         public async ValueTask<DataElement> ReadStoredAsync(ExtendedId id, CancellationToken ct)
         {
             if (loaded.TryGetValue(id, out var element)) return element;

@@ -61,6 +61,14 @@ public sealed class DocumentStagingTests
             var maintenance = new StorageMaintenance(source, provider.Limits);
             await maintenance.CollectOrphansAsync(fileSystemRoot: filesystem ? root : null);
             Assert.Equal(pending, (await provider.Documents.CaptureRecoveryAsync()).Snapshots.Sum(snapshot => snapshot.ContentReferences.Count(reference => reference.IsPending)));
+            if (filesystem && !OperatingSystem.IsLinux())
+            {
+                await Assert.ThrowsAsync<PlatformNotSupportedException>(() => maintenance.CollectOrphansAsync(true, true, root));
+                var unchanged = await provider.Documents.CaptureRecoveryAsync();
+                Assert.Equal(before.Snapshots[0].Current.Head, unchanged.Snapshots[0].Current.Head);
+                Assert.Equal(pending, unchanged.Snapshots.Sum(snapshot => snapshot.ContentReferences.Count(reference => reference.IsPending)));
+                return;
+            }
             await maintenance.CollectOrphansAsync(true, true, filesystem ? root : null);
             var after = await provider.Documents.CaptureRecoveryAsync();
             Assert.All(after.Snapshots, snapshot => Assert.DoesNotContain(snapshot.ContentReferences, reference => reference.IsPending));

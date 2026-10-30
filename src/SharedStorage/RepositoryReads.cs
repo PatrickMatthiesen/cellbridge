@@ -278,7 +278,10 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
                 { var element = Decode<GraphElementState>(json); selected[ElementKey(element.Id)] = element; }
         }
         var bindings = request.IncludeBindings ? await BindingsAsync(db, scope, sequence, ct, knownCurrentSequence) : [];
-        return new(head, partition, selected.Values.ToImmutableArray(), bindings);
+        var mappings = request.IncludeMappings && partition.StorageIndex is not null
+            ? await MappingsAsync(db, scope, sequence, ct, knownCurrentSequence)
+            : [];
+        return new(head, partition, selected.Values.ToImmutableArray(), bindings) { Mappings = mappings };
     }
     public ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken cancellationToken = default) =>
         ReadAsync(async db => await HeadAsync(db, id, cancellationToken) is { } head && (!head.IsDeleted || request.RevisionNumber is not null)
@@ -293,12 +296,22 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
             var selected = control.Partitions.SingleOrDefault(partition => partition.Kind == request.PartitionKind);
             if (selected is null) return null;
             var position = rows.Single(row => row.Partition == request.PartitionKind);
+            var requestedMappings = request.AffectedMappings.IsDefaultOrEmpty
+                ? ImmutableArray<IndexedMappingKey>.Empty : request.AffectedMappings.Distinct().ToImmutableArray();
             var partition = (await ProjectPartitionAsync(db, head, selected, new(request.PartitionKind)
                 { IncludeCatalog = request.IncludeCatalog, IncludeBindings = request.IncludeBindings }, cancellationToken, position.Sequence))!;
-            var mappings = await CurrentMappingsAsync(db, Scope(head, selected.Kind), selected, request.AffectedMappings, cancellationToken);
-            partition = partition with { Mappings = request.AffectedMappings.Select(key => mappings[key]).OfType<IndexedStorageMapping>().ToImmutableArray() };
-            return new SavePreparationRead(control, partition, await ReceiptAsync(db, id, request.Operation, cancellationToken))
-                { ReplayPosition = new(position.CheckpointSequence, position.ReplayChanges, position.ReplayBytes) };
+            var mappings = await CurrentMappingsAsync(db, Scope(head, selected.Kind), selected, requestedMappings, cancellationToken);
+            partition = partition with { Mappings = requestedMappings.Select(key => mappings[key]).OfType<IndexedStorageMapping>().ToImmutableArray() };
+            var receipt = await ReceiptAsync(db, id, request.Operation, cancellationToken);
+            var graph = request.Graph is not null && receipt is null
+                ? await ReadSaveGraphAsync(db, Scope(head, selected.Kind), partition.Bindings, partition.Mappings, request.Graph, cancellationToken)
+                : null;
+            return new SavePreparationRead(control, partition, receipt)
+                {
+                    ReplayPosition = new(position.CheckpointSequence, position.ReplayChanges, position.ReplayBytes),
+                    Graph = graph,
+                    PreparedMappingKeys = requestedMappings,
+                };
         }, cancellationToken);
     private async Task<ImmutableArray<IndexedObjectBinding>> BindingsAsync(TContext db, IndexedGraphScope scope, long sequence, CancellationToken ct,
         long? knownCurrentSequence = null)

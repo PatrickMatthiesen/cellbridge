@@ -72,19 +72,24 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         ArgumentNullException.ThrowIfNull(serials);
         cancellationToken.ThrowIfCancellationRequested();
         if (serials.Count == 0) return ValueTask.FromResult(ImmutableArray<IndexedStorageMapping>.Empty);
-        return ReadWithoutTransactionAsync(async db =>
+        return ReadWithoutTransactionAsync(db => MappingClaimsAsync(db, scope, serials, cancellationToken), cancellationToken);
+    }
+
+    private static async Task<ImmutableArray<IndexedStorageMapping>> MappingClaimsAsync(TContext db, IndexedGraphScope scope,
+        IReadOnlyCollection<SerialId> serials, CancellationToken cancellationToken)
+    {
+        var result = ImmutableArray.CreateBuilder<IndexedStorageMapping>();
+        foreach (var group in serials.Distinct().GroupBy(serial => serial.Guid))
         {
-            var result = ImmutableArray.CreateBuilder<IndexedStorageMapping>();
-            foreach (var group in serials.Distinct().GroupBy(serial => serial.Guid))
-                foreach (var batch in group.Chunk(256))
-                {
-                    var values = batch.Select(serial => (decimal?)serial.Value).ToArray();
-                    var json = await db.Set<RepositoryMappingClaimRow>().AsNoTracking().Where(row => row.ResourceId == scope.ResourceId &&
-                        row.Lifecycle == scope.LifecycleGeneration && row.Partition == scope.TargetPartition &&
-                        row.SerialGuid == group.Key && values.Contains(row.SerialValue)).Select(row => row.Json).ToArrayAsync(cancellationToken);
-                    result.AddRange(json.Select(Decode<IndexedStorageMapping>));
-                }
-            return result.ToImmutable();
-        }, cancellationToken);
+            foreach (var batch in group.Chunk(256))
+            {
+                var values = batch.Select(serial => (decimal?)serial.Value).ToArray();
+                var json = await db.Set<RepositoryMappingClaimRow>().AsNoTracking().Where(row => row.ResourceId == scope.ResourceId &&
+                    row.Lifecycle == scope.LifecycleGeneration && row.Partition == scope.TargetPartition &&
+                    row.SerialGuid == group.Key && values.Contains(row.SerialValue)).Select(row => row.Json).ToArrayAsync(cancellationToken);
+                result.AddRange(json.Select(Decode<IndexedStorageMapping>));
+            }
+        }
+        return result.ToImmutable();
     }
 }

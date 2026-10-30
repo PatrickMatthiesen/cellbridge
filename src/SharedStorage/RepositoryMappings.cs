@@ -65,9 +65,10 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         if (mapping.Key != key || mapping.Scope != scope) throw new StorageCorruptionException("A mapping key hash collision was detected.");
         return mapping with { StorageIndex = index };
     }
-    private static async Task<ImmutableArray<IndexedStorageMapping>> MappingsAsync(TContext db, IndexedGraphScope scope, long sequence, CancellationToken ct)
+    private static async Task<ImmutableArray<IndexedStorageMapping>> MappingsAsync(TContext db, IndexedGraphScope scope, long sequence,
+        CancellationToken ct, long? knownCurrentSequence = null)
     {
-        var current = await db.Set<RepositoryPartitionRow>().AsNoTracking().Where(row => row.ResourceId == scope.ResourceId &&
+        var current = knownCurrentSequence ?? await db.Set<RepositoryPartitionRow>().AsNoTracking().Where(row => row.ResourceId == scope.ResourceId &&
             row.Lifecycle == scope.LifecycleGeneration && row.Partition == scope.TargetPartition).Select(row => (long?)row.Sequence).SingleOrDefaultAsync(ct);
         var json = current == sequence
             ? await db.Set<RepositoryMappingRow>().AsNoTracking().Where(row => row.ResourceId == scope.ResourceId && row.Lifecycle == scope.LifecycleGeneration &&

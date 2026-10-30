@@ -1,14 +1,17 @@
 # Measuring active Office user capacity
 
-The 10,000 successful commits/minute target remains unmet. Exact-current
-Snowfall measurements at `fd6b8e0` are recorded below. The latest local
-Linux candidate with control-read batching and native JSON decoding acknowledged
-5,863 saves inside a minute while offering 11,250, with HTTP 503 overload
-failures. Batching alone acknowledged 5,813, compared with its matched atomic SQL
-baseline of 5,519. These runs used 1,500 authenticated users and 15,000
-documents. A retained lower-load run of the preceding implementation offered
-3,000 saves/minute without HTTP failures. Snowfall results and their comparison
-limits are recorded below.
+The retained candidate reached 11,234 successful durable saves in a measured
+Snowfall minute with direct PostgreSQL and proxied HTTPS, with no measured HTTP
+failures. All 16,760 acknowledgments passed final historical verification.
+Warm-up still had 49 HTTP 503s. This is a bounded synthetic result, not production
+or near-limit history qualification. The [database audit](#database-transaction-and-connection-audit)
+records the separate code improvement and endpoint-control results.
+
+Earlier exact-current Snowfall measurements at `fd6b8e0` and local Linux runs are
+retained below. The Linux control-read/native-JSON candidate acknowledged 5,863
+saves/minute under overload; batching alone reached 5,813 against 5,519. Those
+runs used 1,500 authenticated users and 15,000 documents. They are not matched
+comparisons with the later Snowfall endpoint control.
 
 The archived implementation reached 8,151 inside a measured minute with HTTP
 failures. The rewrite has not demonstrated a throughput gain over that result.
@@ -177,6 +180,248 @@ means do not include connection acquisition, transport or application delays.
 Further capacity qualification must preserve these distinctions and the final
 historical verifier. Feature development can use the current contracts while
 the 10,000 successful durable saves/minute requirement remains unqualified.
+
+## Database transaction and connection audit
+
+The mixed target's 608,963 committed database transactions divided by 13,223
+acknowledged saves is 46.05. This is not 46 write transactions per save. The
+counter includes implicit statement transactions, read traffic, Identity,
+connection reset SQL, health checks, diagnostics, warm-up and drain. Dividing the
+lower-load total by its fewer saves produces an even larger ratio. The activity
+collector issued 378 queries, so it does not explain most of this work.
+
+The replacement split large state reads into bounded repository APIs, but callers
+still combined many separately leased reads. Earlier reports recorded this
+chatter without establishing an operation-level connection or transaction budget.
+That was a gap in the performance audit. Correctness and history-scaling checks
+did not establish efficient composition of the read APIs.
+
+Attribution reused the existing authenticated HTTP workload with one user and
+one document. Saves, queries and opens ran separately every five seconds, with
+the other action intervals disabled. The existing 30-second warm-up and
+60-second measurement remained. SQL statement logging began after setup, only on
+the owned disposable PostgreSQL container, with bind parameter logging disabled.
+The twelve measured save starts all acknowledged successfully; all 18
+acknowledgments including warm-up passed final historical verification.
+
+An ordinary baseline save burst contained 168 SQL log records, seven explicit
+transaction blocks and 17 pooled connection resets. These are separate units.
+Most publication statements share one write transaction and batches; neither
+168 records nor the database-wide ratio is a network round-trip count. A periodic
+query contained three explicit blocks and ten resets. An open's download plus
+query contained six blocks and twenty resets. Larger periodic bursts also
+contain background work and are not used as isolated save counts.
+
+A first candidate folded immutable metadata into the existing preparation
+snapshot and batched selected file-group payload reads. Its ordinary save trace
+had 156 log records, six explicit blocks and twelve resets. A further fix retains
+the exact checked mapping-key set, including known absence, so graph resolution
+does not re-query a newly introduced revision key. QueryChanges also obtains its
+mappings in the partition snapshot. Unknown keys retain their provider lookup.
+Fresh authorization, visibility checks, checkpoint validation and the final
+publication fence remain.
+
+The final isolated trace confirmed 148 records, five explicit blocks and eleven
+connection resets on an ordinary save. All 18 acknowledgments passed final
+historical verification. The remaining blocks resolve the path, prepare a
+coherent snapshot, check visibility, validate a checkpoint and publish atomically.
+The trace covers captured document-backend bursts and excludes other backends;
+it is not a universal statement count for every HTTP save. Reset messages and
+standalone statements are not reported as durable write transactions.
+
+### Fresh lower-load control
+
+Both runs below used the same 1,500-user mixed workload, 30-second saves and fixed
+overrides from the exact-current qualification. The control restored the retained
+clean `f548a89` Release benchmark and WebDemo outputs and verified every benchmark
+DLL hash before launch. The working-tree candidate did not execute in that
+control. The candidate then used its separately built and hashed Release outputs.
+Both enabled the same one-second runtime, process and container collectors, with
+no phase tracing or SQL statement logging during timing.
+
+| Measurement | Baseline | Candidate |
+| --- | ---: | ---: |
+| Strict ACK/minute | 2,973 | 2,999 |
+| Late ACK excluded | 26 | 2 |
+| Measured HTTP failures | 0 | 0 |
+| Save p50 / p95 / p99, ms | 46.62 / 390.14 / 631.81 | 44.29 / 376.06 / 498.94 |
+| WebDemo CPU equivalents | 1.982 | 2.156 |
+| PostgreSQL CPU equivalents | 0.886 | 0.872 |
+| Owned DCP CPU equivalents | 1.570 | 1.919 |
+| Generator CPU equivalents | 0.319 | 0.320 |
+| Managed allocation, MB/s | 395.11 | 388.67 |
+| Mixed successful HTTP steps | 7,499 | 7,501 |
+| WebDemo CPU ms/successful HTTP step | 15.86 | 17.25 |
+| PostgreSQL CPU ms/successful HTTP step | 7.09 | 6.98 |
+| Managed MB/successful HTTP step | 3.161 | 3.109 |
+
+All 4,482/4,483 acknowledged revisions passed historical SHA-256 and one-to-one
+accepted-index verification after timing. Both processes exited zero. Strict
+ACK boundaries and NBomber step boundaries differ slightly, so the mixed-step
+resource ratios are approximate. External resource samples exclude boundary
+samples and approximately align with the measurement minute. They include the
+whole workload, not isolated save costs. Allocation rates use 59 interior
+one-second intervals; allocation is not working set. Container samples had
+maximum gaps of 1.019/1.027 seconds. PostgreSQL CPU is already part of WSL/host
+CPU and must not be added to host totals again.
+
+This single pair does not demonstrate a clear efficiency win. Save p95 fell 3.6%
+and mixed-request allocations fell 1.7%, while application CPU per completed step
+rose 8.8%. PostgreSQL CPU changed little. The connection-count reduction alone
+does not qualify the target or establish that PostgreSQL is the sole bottleneck.
+
+### Six-thousand-save offer
+
+Two fresh baseline controls at 6,000 offered saves/minute returned 5,598/5,797
+strict ACKs, 397/198 measured save failures and five late ACKs each. The second
+control and candidate used the same runtime and external collectors. The first
+control had only the fixture's verified application process measurements and is
+not an allocation comparison. Both controls used the clean retained baseline
+binaries; source edits present during the second control did not execute.
+
+| Measurement | Instrumented baseline | Candidate |
+| --- | ---: | ---: |
+| Strict ACK/minute | 5,797 | 5,994 |
+| Late ACK excluded | 5 | 6 |
+| Measured save failures | 198 | 0 |
+| Measured query / download / open-query failures | 96 / 17 / 9 | 0 / 0 / 0 |
+| Save p50 / p95 / p99, ms | 68.99 / 1,049.60 / 1,408.00 | 53.92 / 440.57 / 623.10 |
+| WebDemo CPU equivalents | 3.474 | 3.187 |
+| PostgreSQL CPU equivalents | 2.145 | 1.805 |
+| Owned DCP CPU equivalents | 2.609 | 2.227 |
+| Generator CPU equivalents | 0.455 | 0.393 |
+| Managed allocation, MB/s | 571.73 | 594.70 |
+| Mixed successful HTTP steps | 10,164 | 10,500 |
+| WebDemo CPU ms/successful HTTP step | 20.55 | 18.21 |
+| PostgreSQL CPU ms/successful HTTP step | 12.66 | 10.31 |
+| Managed MB/successful HTTP step | 3.375 | 3.398 |
+
+In this pair strict ACKs rose 3.4%, save p95 fell 58.0%, and the candidate
+completed all measured HTTP steps successfully. Application/PostgreSQL CPU per
+successful mixed step fell 11.4%/18.5%. Managed allocation per successful mixed
+step rose 0.7%; there is no demonstrated allocation saving at this load. This is
+one instrumented pair, not a maximum-capacity result or a production SLA. The
+lower-load CPU regression remains part of the evidence.
+All 8,371/8,747 baseline and 8,963 candidate acknowledgments passed final
+historical SHA-256 and one-to-one accepted-index verification. The controls
+exited one because of overload; the candidate exited zero.
+
+The database-wide counter fell from 462,797 to 364,592 committed transactions
+across warm-up, measurement and drain. This 21.2% decrease includes reads and
+background work, and must not be presented as a per-save write-transaction count.
+Both runs recorded zero database rollbacks and deadlocks. Container sampling had
+maximum gaps of 1.049/1.022 seconds; process sampling had gaps of 1.146/1.161
+seconds. These counters measure CPU time, not SQL execution time or wall stacks.
+
+### Candidate at the target offer
+
+The same retained candidate offered 11,250 saves/minute with the original
+proxied endpoints. It completed 7,776 strict ACKs and 62 late ACKs, with 3,404
+measured save failures and 853/210/45 query/download/open-query failures. All
+HTTP failures were 503. Successful save p50/p95/p99 was
+314.62/1,897.47/2,185.22 ms. All 12,106 acknowledgments, including warm-up and
+drain, passed final historical SHA-256 and accepted-index verification. The run
+exited one because of overload. No database deadlock or rollback was recorded.
+
+WebDemo/PostgreSQL/DCP/generator CPU was 3.804/3.718/3.525/0.768 equivalents.
+Managed allocation was 635.79 MB/s, about 3.462 MB per successful mixed HTTP step.
+WebDemo and PostgreSQL CPU per successful mixed step were 20.71/20.24 ms. These
+ratios include failed-request work. Container/process sample gaps were at most
+1.044/1.182 seconds. Mean sampled GC pause was 4.5% of wall time; this is not GC's
+share of application CPU. The 10,000-save requirement remains unmet in this run.
+It is not a matched target-rate comparison with the earlier 8,483-ACK result.
+
+The fixture runs Release binaries through Hosting.Testing, with WebDemo's
+development environment and DCP proxies. It is not an `aspire deploy` deployment.
+Runtime endpoint logging confirmed that PostgreSQL, as well as HTTPS, was
+proxied. DCP's measured CPU therefore cannot be assigned solely to HTTPS.
+
+### PostgreSQL endpoint control
+
+`Parameters__LoadDirectPostgreSql=true` selects Aspire's supported
+[proxyless endpoint](https://aspire.dev/fundamentals/networking-overview/#proxyless-endpoints)
+for the disposable load database. The default remains proxied. The fixture
+explicitly requests `127.0.0.1`; an independent Docker inspection confirmed the
+published host IP and port matched the allocated endpoint before load. HTTPS
+remained proxied. No application code, workload, admission, pool, WAL or durability
+setting changed between the following two target offers.
+
+| Target offer measurement | Proxied PostgreSQL | Direct PostgreSQL |
+| --- | ---: | ---: |
+| Strict ACK/minute | 7,776 | 11,234 |
+| Late ACK excluded | 62 | 9 |
+| Measured save failures | 3,404 | 0 |
+| Measured query / download / open-query failures | 853 / 210 / 45 | 0 / 0 / 0 |
+| Save p50 / p95 / p99, ms | 314.62 / 1,897.47 / 2,185.22 | 94.91 / 323.33 / 387.33 |
+| WebDemo CPU equivalents | 3.804 | 5.146 |
+| PostgreSQL CPU equivalents | 3.718 | 3.677 |
+| Owned DCP CPU equivalents | 3.525 | 0.390 |
+| Generator CPU equivalents | 0.768 | 0.701 |
+| Managed allocation, MB/s | 635.79 | 927.12 |
+| WebDemo CPU ms/successful mixed HTTP step | 20.71 | 19.61 |
+| PostgreSQL CPU ms/successful mixed HTTP step | 20.24 | 14.02 |
+| Managed MB/successful mixed HTTP step | 3.462 | 3.534 |
+
+All 16,760 direct-run acknowledgments passed final historical SHA-256 and
+one-to-one accepted-index verification. The measured minute exceeded 10,000
+successful durable saves with no measured HTTP failures. Warm-up still failed
+40 saves, three queries and six downloads, all 503, so the whole run exited one.
+There were no database rollbacks or deadlocks. Container/process gaps were at
+most 1.022/1.167 seconds; allocation uses 59 interior counter intervals.
+
+This single endpoint-control pair increased strict ACKs by 44.5% and reduced DCP
+CPU by 88.9% while PostgreSQL CPU stayed near 3.7 equivalents. It identifies the
+development PostgreSQL proxy as a major fixture bottleneck. It is a transport
+configuration result, not a code speedup or an `aspire deploy` result. Application
+CPU and allocation rates rose as more operations completed; allocation per
+successful mixed step rose 2.1%. The separate 6,000-save pair tests the retained
+code improvement. Neither pair establishes production or near-limit history
+capacity.
+
+Three preliminary direct-endpoint attempts stopped during setup because a
+native Windows listener probe could not observe Docker's published NAT endpoint.
+They contain no load result. The corrected control checks the explicit loopback
+endpoint model and retains Docker's actual port-binding inspection. Its preceding
+single-user smoke verified all 18 acknowledgments. No probe was repaired by
+restarting or truncating a measured workload.
+
+### Early-history HTTP qualification
+
+One further existing-workload profile kept 1,500 authenticated users and the
+same save/query/open intervals, package, changed XML, transport and overrides.
+It used one document per user and 120 seconds of internal warm-up before the
+60-second measurement. A read-only PostgreSQL sample just before the window
+found 1,500 documents at revision numbers 12 through 16, median 15. The sample
+ran during warm-up; runtime counters covered the full extended run and their
+analysis selected the later measurement window. This is an early-history check,
+not a matched comparison with the ten-document-per-user profile or qualification
+near 250/1,000 revisions.
+
+The run completed 10,613 strict ACKs, with 37 late ACKs excluded. It failed 604
+measured saves and 110/34/14 queries/downloads/open queries, all 503. Successful
+save p50/p95/p99 was 181.25/741.38/806.40 ms. All 32,244 acknowledgments passed
+final historical SHA-256 and one-to-one accepted-index verification. Warm-up
+also failed 835 saves, 161 queries, 48 downloads and 32 open queries. The process
+exited one; there were no database rollbacks or deadlocks.
+
+WebDemo/PostgreSQL/DCP/generator CPU was 5.457/4.333/0.737/0.747 equivalents.
+Managed allocation was 1,028.95 MB/s. Per successful mixed HTTP step, WebDemo and
+PostgreSQL CPU were 21.89/17.38 ms and managed allocation was 4.128 MB. Allocation
+used 59 interior intervals. Container/process sample gaps were at most
+1.019/1.183 seconds. These ratios include failed-request work and do not isolate
+the effect of history from the different document count and longer warm-up.
+
+The fresh direct-endpoint minute clears the numerical target without measured
+failures. The early-history run clears the ACK target but still has failures.
+Failure-free aged capacity, longer-duration stability and production deployment
+remain unqualified. The indexed/immutable architecture and durability contracts
+can support other feature work while those capacity gates remain explicit. The
+retained access changes add no migration or global coordination mechanism.
+
+Raw controls, candidate source patches, binary hashes, isolated SQL logs,
+collector sources, profiles, reports and final verification output remain under
+`artifacts/office-db-attribution/` on Snowfall. The profiles use the existing
+NBomber generator and verifier; they are not a new benchmark framework.
 
 ## Atomic SQL publication experiment
 
