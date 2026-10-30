@@ -6,6 +6,10 @@ using CellBridge.TestFixtures;
 
 public sealed class MetadataVersioningResponseBuilderTests
 {
+    private static readonly OfficeDocumentLibrary Library = new(
+        Guid.Parse("71c8b3ae-3fd1-4f8c-b3aa-06316ab9cf55"),
+        "https://example.test/settings?library=a&mode=view");
+
     [Fact]
     public void GetDocMetaInfo_UsesDerivedDocumentPropertiesInsideSubResponseData()
     {
@@ -44,7 +48,7 @@ public sealed class MetadataVersioningResponseBuilderTests
         document.SetContent(new byte[] { 5, 6 });
 
         var subResponse = MetadataVersioningResponseBuilder.BuildGetVersions(
-            document, "https://example.test", "test-user");
+            document, "https://example.test", Library, "test-user");
         var envelope = new CellStorageResponse
         {
             WebUrl = "https://example.test",
@@ -59,15 +63,22 @@ public sealed class MetadataVersioningResponseBuilderTests
         }.ToSoapEnvelope();
 
         var xml = XDocument.Parse(envelope);
-        var result = xml.Descendants().Single(e => e.Name.LocalName == "result");
+        var results = xml.Descendants().Single(e => e.Name.LocalName == "results");
+        Assert.Equal(
+            ["list", "versioning", "settings", "result"],
+            results.Elements().Select(e => e.Name.LocalName).ToArray());
 
+        var list = results.Elements().First();
+        var settings = results.Elements().ElementAt(2);
+        var result = results.Elements().Last();
+
+        Assert.Equal(Library.Id, Guid.Parse(list.Attribute("id")!.Value));
+        Assert.Equal(Library.SettingsUrl, (string?)settings.Attribute("url"));
         Assert.Equal("@2.0", (string?)result.Attribute("version"));
         Assert.Equal("https://example.test/shared/test.docx", (string?)result.Attribute("url"));
         Assert.Equal("2", (string?)result.Attribute("size"));
         Assert.Equal("test-user", (string?)result.Attribute("createdBy"));
-        Assert.Equal("0", (string?)xml.Descendants().Single(e => e.Name.LocalName == "versioning").Attribute("enabled"));
-        Assert.DoesNotContain(xml.Descendants(), e => e.Name.LocalName == "list");
-        Assert.DoesNotContain(xml.Descendants(), e => e.Name.LocalName == "settings");
+        Assert.Equal("0", (string?)results.Elements().ElementAt(1).Attribute("enabled"));
     }
 
     [Fact]
@@ -77,7 +88,7 @@ public sealed class MetadataVersioningResponseBuilderTests
         var document = store.Put("/shared/a&b.docx", new byte[] { 1 });
 
         var subResponse = MetadataVersioningResponseBuilder.BuildGetVersions(
-            document, "https://example.test/root", "a&b");
+            document, "https://example.test/root", Library, "a&b");
         var envelope = new CellStorageResponse
         {
             WebUrl = "https://example.test",
@@ -89,8 +100,13 @@ public sealed class MetadataVersioningResponseBuilderTests
 
         var xml = XDocument.Parse(envelope);
         var result = xml.Descendants().Single(e => e.Name.LocalName == "result");
+        var list = xml.Descendants().Single(e => e.Name.LocalName == "list");
+        var settings = xml.Descendants().Single(e => e.Name.LocalName == "settings");
         Assert.Equal("https://example.test/root/shared/a%26b.docx", (string?)result.Attribute("url"));
         Assert.Equal("a&b", (string?)result.Attribute("createdBy"));
+        Assert.Equal(Library.Id, Guid.Parse(list.Attribute("id")!.Value));
+        Assert.Equal(Library.SettingsUrl, (string?)settings.Attribute("url"));
+        Assert.Contains("library=a&amp;mode=view", subResponse.SubResponseXml, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -110,7 +126,8 @@ public sealed class MetadataVersioningResponseBuilderTests
             Url = "https://example.test/stale-name.docx",
         });
         Assert.Same(document, resolved);
-        var response = MetadataVersioningResponseBuilder.BuildGetVersions(resolved!, "https://example.test/root/");
+        var response = MetadataVersioningResponseBuilder.BuildGetVersions(
+            resolved!, "https://example.test/root/", Library);
         var xml = XElement.Parse(response.SubResponseXml!);
         var url = (string?)xml.Descendants("result").Single().Attribute("url");
         Assert.Equal("https://example.test/root/shared/" + escaped, url);

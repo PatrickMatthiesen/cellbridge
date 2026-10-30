@@ -18,6 +18,7 @@ namespace CellBridge.Storage.Tests;
 public sealed class NestedPathPostgreSqlTests
 {
     private static readonly XNamespace Protocol = "http://schemas.microsoft.com/sharepoint/soap/";
+    private static readonly Guid DocumentLibraryId = Guid.Parse("c4aa42f0-0c5c-4b8d-a3cf-733ff51ed962");
 
     [PostgreSqlFact]
     public async Task SavedDocumentMovesToNestedUrlAcrossProviderRestart()
@@ -60,7 +61,8 @@ public sealed class NestedPathPostgreSqlTests
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(policy);
-        builder.Services.AddCellBridge<MoveEndpointPolicy>(reopenedProvider);
+        builder.Services.AddCellBridge<MoveEndpointPolicy>(reopenedProvider,
+            configure: options => options.DocumentLibraryId = DocumentLibraryId);
         TestActor.Register(builder.Services);
         await using var app = builder.Build();
         app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();

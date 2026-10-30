@@ -19,16 +19,18 @@ public sealed class AuthorizationEndpointTests
     private static readonly XNamespace Protocol = CellStorageRequest.Namespace;
 
     [Theory]
-    [InlineData("writer")]
-    [InlineData("reader")]
-    public async Task AuthenticatedDiscoveryAdvertisesTheSelectedProtocol(string user)
+    [InlineData("writer", "/shared")]
+    [InlineData("reader", "/shared")]
+    [InlineData("writer", "/")]
+    [InlineData("reader", "/")]
+    public async Task AuthenticatedDiscoveryAdvertisesTheSelectedProtocol(string user, string path)
     {
         await using var fixture = await Fixture.Start();
         using var client = fixture.CreateClient(user);
-        using var request = new HttpRequestMessage(HttpMethod.Options, "/shared");
+        using var request = new HttpRequestMessage(HttpMethod.Options, path);
         using var result = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.OK, result.StatusCode);
-        Assert.Equal("1.0", Assert.Single(result.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Equal("1.5", Assert.Single(result.Headers.GetValues("X-MSFSSHTTP")));
         Assert.Equal("http://localhost/shared/", Assert.Single(result.Headers.GetValues("X-MSGETWEBURL")));
     }
 
@@ -36,6 +38,8 @@ public sealed class AuthorizationEndpointTests
     [InlineData("GET", "/shared/secret.bin")]
     [InlineData("HEAD", "/shared/secret.bin")]
     [InlineData("OPTIONS", "/shared")]
+    [InlineData("OPTIONS", "/")]
+    [InlineData("GET", "/_cellbridge/history/settings")]
     [InlineData("POST", "/_vti_bin/cellstorage.svc")]
     [InlineData("POST", "/shared/secret.bin/_vti_bin/cellstorage.svc")]
     public async Task AnonymousRequestsAreChallengedBeforeBodyParsing(string method, string path)
@@ -44,6 +48,34 @@ public sealed class AuthorizationEndpointTests
         using var request = new HttpRequestMessage(new(method), path) { Content = new StringContent("invalid SOAP") };
         using var result = await fixture.Client.SendAsync(request);
         Assert.Equal(HttpStatusCode.Unauthorized, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConfiguredHistorySettingsDescribeThePublicationLimitWithoutOfferingMutation()
+    {
+        await using var fixture = await Fixture.Start(configure: options =>
+            options.DocumentLibraryId = Guid.Parse("8c51b086-c566-4b12-b4d2-d37847129acc"));
+        using var client = fixture.CreateClient("reader");
+        using var result = await client.GetAsync("/_cellbridge/history/settings");
+        Assert.Equal(HttpStatusCode.OK, result.StatusCode);
+        Assert.Equal("text/html", result.Content.Headers.ContentType?.MediaType);
+        Assert.True(result.Headers.CacheControl?.NoStore);
+        var html = await result.Content.ReadAsStringAsync();
+        Assert.Contains($"up to {fixture.Provider.Limits.MaxHistoryRevisions} saved revisions", html);
+        Assert.Contains("does not automatically delete older revisions", html);
+        Assert.DoesNotContain("<form", html);
+    }
+
+    [Fact]
+    public async Task UnconfiguredCatalogDoesNotInventLibraryMetadata()
+    {
+        await using var fixture = await Fixture.Start();
+        using var client = fixture.CreateClient("reader");
+        using var settings = await client.GetAsync("/_cellbridge/history/settings");
+        Assert.Equal(HttpStatusCode.NotFound, settings.StatusCode);
+        var xml = await fixture.Send("reader", new FssHttpSubRequest { Type = SubRequestType.GetVersions });
+        Assert.Equal("RequestNotSupported", Error(xml));
+        Assert.DoesNotContain(xml.Descendants(), x => x.Name.LocalName == "list");
     }
 
     [Theory]

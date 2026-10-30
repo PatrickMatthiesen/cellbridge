@@ -17,12 +17,14 @@ types have no subtype. [Outer types][O2.2.5.11], [binary types][B2.2.1.6].
 
 ## Scope and status
 
-CellBridge advertises HTTP discovery `X-MSFSSHTTP: 1.0`, outer SOAP 2.0, and binary
-responses 13/11; its standalone binary library defaults to 12/11. Binary requests
-12/13/14 are accepted within the selected common subset, with minimum version 11.
+CellBridge advertises HTTP discovery `X-MSFSSHTTP: 1.5`, outer SOAP 2.0, and binary
+responses 13/11; discovery is separate from the inner binary profile. Its
+standalone binary library defaults to 12/11. Binary requests 12/13/14 are accepted
+within the selected common subset, with minimum version 11.
 Accepting a version number does not implement every feature of every product
-using that version. SharePoint 2010/2013 exceptions determine selected fallbacks,
-including current-only binary version queries and priority handling.
+using that version. SharePoint 2010/2013 product notes still determine selected
+fallbacks such as priority handling. Historical version queries instead use the
+bounded selectors described in [revision history](revision-history.md).
 [Request syntax][B2.2.2], [product behavior][BAppendix].
 
 `Implemented` below means that a dispatch/handler exists for the described subset.
@@ -250,7 +252,7 @@ graph membership count and knowledge-range count are independent workload axes.
 | Include filtered-out elements in knowledge / round to whole-cell changes | Flag bits | Can enlarge `K` or `D`; supported selected knowledge/cell behavior. | [Query flags][B2.2.2.1.3] |
 | Exclude Object Data / Check For File Exists | Flag bits | Defined as ignored by server; do not assume a cheap probe or guaranteed payload exclusion. | [Query flags][B2.2.2.1.3] |
 | Return File Hash | Flag bit | Optional file hash; selected SharePoint profile ignores it. Separate from negotiated data-element hashes. | [Query flags][B2.2.2.1.3], [product notes][BAppendix] |
-| QueryChangesVersioning / User Content Equivalent Version Ok | Major/minor or opaque token; optional substitution flag | Current-only selected profile ignores version selector; no historical binary read or waterline-as-version behavior. | [Version fields][B2.2.2.1.3], [product notes][BAppendix] |
+| QueryChangesVersioning / User Content Equivalent Version Ok | Eight-byte numeric major/minor or opaque token; optional substitution flag | `N.0` selects persisted revision N and `0.0` selects current. Office16.0.20527 compact tokens work only for exact observed canonical major/minor/zero forms. Unsupported token/minor rejects without current fallback; no Version Token Knowledge generation or waterline-as-version behavior. | [Version fields][B2.2.2.1.3], [bounded history behavior](revision-history.md), [product notes][BAppendix] |
 | Request hashing schema 1, hashes with/instead of data | Request-level flags/schema; compact declaration | Chosen inline object groups may replace/include data with MS-PCCRC information and excluded-data records. Hash size follows content/block structure, not a constant SHA-256 field. Unselected/BLOB groups remain full. | [Hash declaration][B2.2.2], [hash processing][BHash] |
 | Cell Roundtrip Options | Version-token-knowledge request and non-generic-schema hint | Profile-specific options; no advertised higher version-token support. | [Request options][B2.2.2], [product notes][BAppendix] |
 

@@ -35,8 +35,9 @@ SOAP dependencies determine which subsequent operations execute.
   still reuse unchanged file parts. Complete saves accept `MultiRequestPutHint`
   as a coalescing hint. Unsupported partial operations do not cancel independent
   operations in the same binary request.
-- Historical binary version-token selectors, unmapped cell scopes, waterline-only query controls
-  and some filters are unsupported. Optional unsupported filters fall back to
+- Historical queries accept numeric versions and the compact version-token form
+  observed from Microsoft 365 16.0.20527. Other token formats, unmapped cell scopes,
+  waterline-only query controls and some filters are unsupported. Optional unsupported filters fall back to
   more data. CellBridge returns an error when `FailIfUnsupported` permits failure.
 - Mixed and repeated queries deduplicate immutable elements. A later failure
   preserves earlier payloads and save acknowledgements. Metadata starts as a
@@ -98,6 +99,7 @@ when client knowledge is complete. Reducing those reads is performance work #33.
 | Word permissions | Manual sign-in, writer saves, reader read-only open and Write revocation while editing tested. |
 | Excel save and reopen | Authenticated desktop saves and reopen tested on the current PostgreSQL host. Captured saves also run in automated replay. |
 | PowerPoint save and reopen | Manually tested, including complex Copilot-generated slides. |
+| Native Version History | Word, Excel and PowerPoint 16.0.20527 listed persisted revisions, opened older content and restored it as a new revision. Fresh processes repeated listing and historical open after server restart. |
 | Blank Office file creation | Automated package checks. |
 | Two service instances | Automated identity, shared lease and protocol routing checks against one database. |
 | Two desktop clients coauthoring | Unverified, including simultaneous changes and reconnect/recovery. |
@@ -122,6 +124,18 @@ files had content versions 4 and 3 respectively; both passed ZIP integrity
 and XML parsing checks. The maintainer confirmed that edits remained in both
 documents after fully closing and reopening them from the library. This was
 a single-desktop test, with no coauthoring transition qualification.
+
+On 2026-10-30, native Microsoft 365 Word, Excel and PowerPoint `16.0.20527`
+were tested against an authenticated localhost HTTPS host backed by PostgreSQL.
+Each document had an original revision and a saved revision with a distinct
+marker. Each app listed both revisions, opened the original content and used its
+native Restore command. Server captures recorded successful `RestoreVersion`
+requests. Authenticated downloads confirmed that the new third revision matched
+the original file's SHA-256 and that the second revision retained its marker.
+After stopping and restarting the host, all nine revision downloads retained
+their hashes. Fresh Office processes listed all three revisions and opened the
+second revision with its saved marker. This was a single-user trial on one
+Windows desktop. It does not qualify other Office builds or coauthoring.
 
 ## Automated checks
 

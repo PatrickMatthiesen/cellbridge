@@ -19,6 +19,7 @@ namespace CellBridge.Storage.Tests;
 [Collection("PostgreSQL")]
 public sealed class OuterDocumentOperationTests
 {
+    private static readonly Guid DocumentLibraryId = Guid.Parse("c4aa42f0-0c5c-4b8d-a3cf-733ff51ed962");
     [Fact]
     public async Task CoalescedFileSavePublishesTheCanonicalGraphWithoutASecondPackageCopy()
     {
@@ -103,14 +104,18 @@ public sealed class OuterDocumentOperationTests
         var state = (await service.CreateAsync(originalUrl, originalBytes, TestActor.Value))!;
         state = await RepositoryTestPublications.SaveAsync(service, state, MinimalDocx.Create("second"));
         var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
-        builder.Services.AddCellBridge(provider, requireDurability: false); TestActor.Register(builder.Services);
+        builder.Services.AddCellBridge(provider, requireDurability: false,
+            configure: options => options.DocumentLibraryId = DocumentLibraryId); TestActor.Register(builder.Services);
         await using var app = builder.Build(); app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge(); await app.StartAsync();
         using var client = TestActor.CreateClient(app.GetTestServer(), "writer");
-        var processor = new CellBridgeRequestProcessor(service);
+        var processor = new CellBridgeRequestProcessor(service, options: new() { DocumentLibraryId = DocumentLibraryId });
         var history = await Call(processor, state.ResourceId, SubRequestType.GetVersions);
         var results = XElement.Parse(history.SubResponseXml!).Descendants("result").ToArray();
         Assert.Equal(2, results.Length);
         Assert.Equal("1", (string?)XElement.Parse(history.SubResponseXml!).Descendants("versioning").Single().Attribute("enabled"));
+        Assert.Equal(DocumentLibraryId.ToString("B"), (string?)XElement.Parse(history.SubResponseXml!).Descendants("list").Single().Attribute("id"));
+        Assert.Equal("https://host.test/_cellbridge/history/settings",
+            (string?)XElement.Parse(history.SubResponseXml!).Descendants("settings").Single().Attribute("url"));
         foreach (var result in results)
         {
             var url = new Uri((string)result.Attribute("url")!);

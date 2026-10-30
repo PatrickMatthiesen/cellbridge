@@ -47,6 +47,8 @@ webdemo.WithEnvironment(context =>
 webdemo.WithEnvironment("Authentication__ApplicationName", builder.AddParameter("ApplicationName",
     () => builder.Configuration["Parameters:ApplicationName"] ?? "CellBridge"));
 webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.Configuration["Parameters:WireCaptureDirectory"] ?? "");
+if (builder.Configuration["Parameters:DocumentLibraryId"] is { Length: > 0 } libraryId)
+    webdemo.WithEnvironment("Protocol__DocumentLibraryId", libraryId);
 
 // Capture is available on demand and keeps mitmproxy's direct TLS listener.
 // Python is required by mitmproxy, rather than used to own .NET app lifecycles.

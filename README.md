@@ -42,7 +42,7 @@ provide their own customer lifecycle and user interface.
 | Document library | Create blank Office files, import existing documents and download saved files. |
 | Accounts and permissions | Local sign-in, document ownership, read-only/editing access and revocation. |
 | Persistent storage | PostgreSQL document state with PostgreSQL or filesystem file content. |
-| Revision history | Authorized version listing/download and graph-aware restore through SOAP and reusable APIs. |
+| Revision history | Native Word, Excel and PowerPoint version listing, historical open and restore tested on Microsoft 365 16.0.20527. Authorized SOAP and reusable APIs use the same persisted history. |
 | Incremental transfers | Reuse stored file parts and send parts the client does not already have. |
 | Coauthoring | Editor sessions and locks are implemented; two-desktop editing remains unverified. |
 
@@ -74,6 +74,10 @@ Aspire starts durable PostgreSQL, initializes the schema and then starts WebDemo
 [Provision an account](docs/authentication.md#first-setup), then open
 the HTTPS endpoint shown for `webdemo`, followed by `/library`. Sign in, create
 a document and use its Office open link to edit and save it.
+
+For native Version History, configure one stable catalog GUID through
+`Parameters__DocumentLibraryId`. See [revision history](docs/revision-history.md)
+for reusable-host configuration, retention limits and tested client behavior.
 
 For another computer, set `Parameters__PublicOrigin` to an HTTPS origin that
 Office can reach and trust. The [demo guide](docs/demo-library.md) covers imports

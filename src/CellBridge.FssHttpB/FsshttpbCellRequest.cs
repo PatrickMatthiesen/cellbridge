@@ -581,16 +581,19 @@ public sealed class QueryAccessSubRequestData : ISubRequestData
 }
 
 /// <summary>
-/// Query Changes sub-request data. [MS-FSSHTTPB] section 2.2.2.1.3.
+/// Numeric version or opaque token carried by Query Changes. MS-FSSHTTPB 2.2.2.1.3.
 /// </summary>
+public sealed record QueryChangesVersion(uint? MajorVersion, uint? MinorVersion, byte[] VersionToken);
+
+/// <summary>Query Changes sub-request data. MS-FSSHTTPB 2.2.2.1.3.</summary>
 public sealed class QueryChangesSubRequestData : ISubRequestData
 {
     public ClientKnowledge? Knowledge { get; set; }
     public bool IncludeFilteredOutDataElementsInKnowledge { get; set; }
     public bool RoundKnowledgeToWholeCellChanges { get; set; }
     public bool HasUnsupportedQueryControls { get; private set; }
-    /// <summary>The SharePoint 2010/2013 profile ignores this extension; it never selects a historical revision.</summary>
-    public bool IgnoredQueryChangesVersioning { get; private set; }
+    /// <summary>The numeric document version or opaque version token selected by Query Changes.</summary>
+    public QueryChangesVersion? Version { get; set; }
     /// <summary>Whether the response should include the storage manifest.</summary>
     public bool IncludeStorageManifest { get; set; }
 
@@ -612,7 +615,7 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
     /// <summary>Optional maximum serialized data-element size in bytes.</summary>
     public ulong? MaxDataElements { get; set; }
 
-    /// <summary>Legacy field. Waterline selectors are unsupported; the selected profile ignores the bounded QueryChangesVersioning extension.</summary>
+    /// <summary>Legacy waterline field. It is not a Query Changes version selector and cannot be serialized.</summary>
     public ulong? Waterline { get; set; }
 
     /// <summary>Serializes the payload to the writer.</summary>
@@ -645,6 +648,28 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
             var constraintHeader = new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.QueryChangesDataConstraint, constraint.Length);
             constraintHeader.Serialize(writer);
             writer.WriteBytes(constraint.ToArray());
+        }
+
+        if (Version is { } version)
+        {
+            var selector = new BinaryWriterEx();
+            if (version.MajorVersion is { } major && version.MinorVersion is { } minor)
+            {
+                if (version.VersionToken.Length != 0)
+                    throw new InvalidDataException("Numeric Query Changes versions cannot include a version token.");
+                selector.WriteUInt32(major);
+                selector.WriteUInt32(minor);
+            }
+            else if (version.MajorVersion is null && version.MinorVersion is null)
+            {
+                if (version.VersionToken.Length == sizeof(uint) * 2)
+                    throw new InvalidDataException("An eight-byte Query Changes selector is reserved for numeric versions.");
+                selector.WriteBytes(version.VersionToken);
+            }
+            else throw new InvalidDataException("Query Changes major and minor versions must be specified together.");
+            new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.QueryChangesVersioning, selector.Length)
+                .Serialize(writer);
+            writer.WriteBytes(selector.ToArray());
         }
 
         Knowledge?.Serialize(writer);
@@ -735,10 +760,15 @@ public sealed class QueryChangesSubRequestData : ISubRequestData
                 case StreamObjectTypeHeaderStart.QueryChangesVersioning:
                     if (hasVersioning) throw new InvalidDataException("Duplicate Query Changes versioning object.");
                     hasVersioning = true;
-                    // MS-FSSHTTPB product behavior note 17: SharePoint 2010/2013
-                    // ignore this field. This server follows that versioning profile.
-                    data.IgnoredQueryChangesVersioning = true;
-                    SkipObject(reader, header);
+                    if (header.HeaderType != StreamObjectHeaderStart.HeaderType16Bit || header.Compound != 0)
+                        throw new InvalidDataException("Invalid Query Changes versioning object.");
+                    var payload = reader.ReadBytes(header.Length);
+                    if (header.Length == sizeof(uint) * 2)
+                    {
+                        var versionReader = new BinaryReaderEx(payload);
+                        data.Version = new(versionReader.ReadUInt32(), versionReader.ReadUInt32(), []);
+                    }
+                    else data.Version = new(null, null, payload);
                     break;
 
                 case StreamObjectTypeHeaderStart.Knowledge:

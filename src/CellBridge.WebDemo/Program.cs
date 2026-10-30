@@ -61,6 +61,7 @@ builder.Services.AddCellBridge(provider, requireDurability: !storageKind.Equals(
         options.MaxConcurrentRequestsPerSubject = builder.Configuration.GetValue("Protocol:MaxConcurrentRequestsPerSubject", options.MaxConcurrentRequestsPerSubject);
         options.RequestTimeout = builder.Configuration.GetValue("Protocol:RequestTimeout", options.RequestTimeout);
         options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"];
+        options.DocumentLibraryId = builder.Configuration.GetValue<Guid?>("Protocol:DocumentLibraryId");
         options.MaxCaptureBytes = builder.Configuration.GetValue("Protocol:MaxCaptureBytes", options.MaxCaptureBytes);
         options.MaxMtomParts = builder.Configuration.GetValue("Protocol:MaxMtomParts", options.MaxMtomParts);
         options.MaxMtomHeaderBytes = builder.Configuration.GetValue("Protocol:MaxMtomHeaderBytes", options.MaxMtomHeaderBytes);

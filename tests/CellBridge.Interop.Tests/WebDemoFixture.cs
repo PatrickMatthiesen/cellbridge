@@ -65,6 +65,7 @@ public sealed class WebDemoFixture : IAsyncLifetime
         foreach (var host in new[] { primary, peer })
         {
             host.WithEnvironment("Storage__MultipleInstances", "true")
+                .WithEnvironment("Protocol__DocumentLibraryId", "80548d11-8ec4-4f88-91fd-885ce8cad658")
                 .WithEnvironment("Authentication__PublicOrigin", "https://cellbridge.test")
                 .WithEnvironment("Protocol__PublicOrigin", "https://cellbridge.test")
                 .WithEnvironment("Protocol__MaxConcurrentRequests", "32")

@@ -40,7 +40,7 @@ public sealed partial class CellBridgeDocumentService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationKey);
         if (operationKey.Length > 256) throw new ArgumentException("The restore key exceeds 256 characters.", nameof(operationKey));
-        var attributes = lockAttributes ?? ImmutableDictionary<string, string>.Empty;
+        var suppliedAttributes = lockAttributes ?? ImmutableDictionary<string, string>.Empty;
         var head = await CurrentAsync(resourceId, cancellationToken);
         var operation = new SaveOperationIdentity(head.LifecycleGeneration, SaveOperationFamily.Restore, 0, operationKey);
         var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -60,6 +60,7 @@ public sealed partial class CellBridgeDocumentService
             if (current.Head.LifecycleGeneration != operation.LifecycleGeneration) throw new InvalidOperationException("The document lifecycle changed.");
             if (await RestoreReplayAsync(cancellationToken) is { } replay) return replay;
             if (current.Head.LatestRevisionNumber != expectedRevision) throw new InvalidOperationException("The current revision changed.");
+            var attributes = RestoreLockAttributes(current, actor, suppliedAttributes);
             if (DocumentControlReducer.ValidateWrite(current, Admission(actor, current.Head), attributes) is { } error)
                 throw new DocumentOperationLockException(error);
             var authority = DocumentControlReducer.ExpireForPublication(current).Current.Coordination;
@@ -230,7 +231,29 @@ public sealed partial class CellBridgeDocumentService
         }
     }
 
-
+    private static IReadOnlyDictionary<string, string> RestoreLockAttributes(DocumentControlRead current,
+        CellBridgeActor actor, IReadOnlyDictionary<string, string> supplied)
+    {
+        // Microsoft 365's observed RestoreVersion request sends the reserved
+        // schema marker as LockID, without the editing session's actual ID.
+        // Resolve only a sole active schema lease owned by this subject. The
+        // derived IDs still pass ordinary write validation and commit fences.
+        if (supplied.GetValueOrDefault("VersioningRequestType") != "RestoreVersion" ||
+            !Guid.TryParse(supplied.GetValueOrDefault("LockID"), out var marker) ||
+            marker != new Guid("29358ec1-e813-4793-8e70-ed0344e7b73c") ||
+            supplied.ContainsKey("SchemaLockID") || supplied.ContainsKey("ExclusiveLockID") || supplied.ContainsKey("ClientID") ||
+            current.Coordination.Exclusive is { } exclusive && exclusive.ExpiresUtc > current.UtcNow ||
+            current.Coordination.HostLock is { } host && host.ExpiresUtc > current.UtcNow)
+            return supplied;
+        var owners = current.Coordination.SchemaOwners.Where(owner => owner.ExpiresUtc > current.UtcNow).ToArray();
+        if (owners.Length != 1 || owners[0].OwnerSubject != actor.Identity.Subject ||
+            owners[0].Client is not { Length: > 0 } client || current.Coordination.SchemaId is not { } schemaId)
+            return supplied;
+        var resolved = supplied.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        resolved["SchemaLockID"] = schemaId;
+        resolved["ClientID"] = client;
+        return resolved;
+    }
 }
 
 public sealed class DocumentOperationLockException(string errorCode) : InvalidOperationException(errorCode)

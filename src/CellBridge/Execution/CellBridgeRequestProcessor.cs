@@ -18,7 +18,7 @@ public sealed record CellStorageExecution(CellStorageResponse Response, Immutabl
 
 /// <summary>Executes parsed MS-FSSHTTP requests without an HTTP endpoint or transport dependency.</summary>
 public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service,
-    ILogger<CellBridgeRequestProcessor>? logger = null)
+    ILogger<CellBridgeRequestProcessor>? logger = null, CellBridgeOptions? options = null)
 {
     /// <summary>Executes requests against existing documents, checking permissions and dependencies before saving changes.</summary>
     public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, string publicOrigin,
@@ -146,7 +146,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         }
                         else if (OuterDocumentOperations.Handles(subRequest.Type))
                             await OuterDocumentOperations.ExecuteAsync(service, doc.ResourceId, subRequest, subResponse,
-                                publicBase, operationActor, cancellationToken);
+                                publicBase, operationActor, cancellationToken, options?.DocumentLibrary(publicBase));
                         else
                         {
                             var result = await service.ExecuteControlAsync(doc.ResourceId, subRequest, operationActor, cancellationToken);
@@ -728,8 +728,8 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 break;
 
             case SubRequestType.GetVersions:
-                subResponse.SubResponseXml = MetadataVersioningResponseBuilder
-                    .BuildGetVersions(doc, publicOrigin).SubResponseXml;
+                // Detached control execution has no host catalog identity or settings page.
+                subResponse.ErrorCode = "RequestNotSupported";
                 break;
 
             case SubRequestType.ExclusiveLock:

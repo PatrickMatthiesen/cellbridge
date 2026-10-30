@@ -40,6 +40,10 @@ public sealed class RevisionHistoryInteropTests
             return XDocument.Parse(await response.Content.ReadAsStringAsync()).Descendants(ns + "Response").Single();
         }
         var listed = await Send(first, endpoint, "GetVersions");
+        var peerListed = await Send(second, peer, "GetVersions");
+        Assert.Equal(
+            (string?)listed.Descendants().Single(e => e.Name.LocalName == "list").Attribute("id"),
+            (string?)peerListed.Descendants().Single(e => e.Name.LocalName == "list").Attribute("id"));
         var id = (string)listed.Attribute("ResourceID")!;
         var result = listed.Descendants().Single(e => e.Name.LocalName == "result");
         var oldPath = new Uri((string)result.Attribute("url")!).PathAndQuery;

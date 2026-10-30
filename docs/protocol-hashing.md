@@ -88,6 +88,10 @@ content integrity on in-memory and disposable PostgreSQL providers. These are
 synthetic protocol checks. No new SharePoint capture, desktop hash negotiation,
 OneNote, two-desktop editing or external-host qualification is claimed.
 
-`ReturnFileHash` and `QueryChangesVersioning` use the separate SP2010/2013 ignore
-exceptions in [product notes 13 and 17](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/d006ebd9-c3df-4ef5-8be0-1c1db78c6d2c).
-Those exceptions do not remove the conditional MUSTs for selected hashed groups.
+`ReturnFileHash` uses the SP2010/2013 ignore exception in [product note 13](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/d006ebd9-c3df-4ef5-8be0-1c1db78c6d2c).
+The bounded historical `QueryChangesVersioning` behavior is documented in the
+[revision history guide](revision-history.md). It supports numeric `N.0` and
+`0.0`, plus exact observed Office16.0.20527 canonical compact tokens. Unsupported
+selectors reject without current fallback. The query does not generate Version
+Token Knowledge. These version rules do not remove the conditional MUSTs for
+selected hashed groups.

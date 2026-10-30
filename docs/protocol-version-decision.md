@@ -6,6 +6,13 @@ how Office discovers and uses these protocols. The
 from conditional facilities and the remaining audit. SharePoint lists, search and
 unrelated APIs are outside this project's scope.
 
+Authenticated root and document-directory OPTIONS advertise `X-MSFSSHTTP: 1.5`.
+Microsoft 365 16.0.20527 used that discovery version for its native history workflow
+in the observed OneDrive traffic and CellBridge tests. This HTTP discovery value
+is separate from the inner binary protocol version below. `GetVersions` requires
+at least 1.1 according to MS-FSSHTTP section 3.1.4.10. See
+[revision history](revision-history.md) for catalog configuration and selectors.
+
 ## Outer SOAP protocol
 
 MS-FSSHTTP defines the endpoint `/_vti_bin/cellstorage.svc`, the
