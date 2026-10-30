@@ -15,8 +15,21 @@ public sealed class OwnedWebDemoProcessProbe
 
     internal OwnedWebDemoProcessProbe(int resourceProcessId)
     {
+        if (OperatingSystem.IsWindows())
+        {
+            using var process = Process.GetProcessById(resourceProcessId);
+            var executable = process.MainModule?.FileName;
+            if (Path.GetFileName(executable) is not "CellBridge.WebDemo.exe")
+                throw new PlatformNotSupportedException("The Aspire WebDemo resource does not expose a directly verifiable WebDemo executable on Windows.");
+            var expectedAssembly = Path.Combine(Path.GetDirectoryName(executable)!, "CellBridge.WebDemo.dll");
+            if (!File.Exists(expectedAssembly))
+                throw new InvalidOperationException("The Aspire WebDemo executable has no adjacent CellBridge.WebDemo assembly.");
+            ancestry = [(resourceProcessId, process.StartTime.ToUniversalTime())];
+            Read();
+            return;
+        }
         if (!OperatingSystem.IsLinux())
-            throw new PlatformNotSupportedException("Owned WebDemo command-line verification currently requires Linux procfs.");
+            throw new PlatformNotSupportedException("Owned WebDemo process verification requires Linux or Windows.");
         // Aspire may expose a launcher. Follow only its explicit children, never a system process search.
         var pending = new Queue<(int Id, (int Id, DateTime StartUtc)[] Parents)>();
         pending.Enqueue((resourceProcessId, []));

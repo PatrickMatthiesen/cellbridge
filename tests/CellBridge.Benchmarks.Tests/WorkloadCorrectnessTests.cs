@@ -24,7 +24,12 @@ public sealed class SyntheticWorkloadTests
         var payload = StorageBenchmarkInputs.Package(1, 42);
 
         Assert.Equal(1_050_773, payload.Length);
-        Assert.Equal("83eaba2676ad6a42bfe7e60be47b3b66be8d2a17bb6a85f97a992d7a3dd85e19",
+        // ZipArchive records the creator OS and Unix file permissions in its
+        // central directory. XML and entry sizes remain the same on both hosts.
+        var expectedHash = OperatingSystem.IsWindows()
+            ? "a0047c783bbdf8aabc961cf1b59d43bcfe740b013df617d8136f778a05ed5b54"
+            : "83eaba2676ad6a42bfe7e60be47b3b66be8d2a17bb6a85f97a992d7a3dd85e19";
+        Assert.Equal(expectedHash,
             Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(payload)));
     }
 

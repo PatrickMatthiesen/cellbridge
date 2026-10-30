@@ -1,6 +1,7 @@
 # Measuring active Office user capacity
 
-The 10,000 successful commits/minute target remains unmet. The latest local
+The 10,000 successful commits/minute target remains unmet. Exact-current
+Snowfall measurements at `fd6b8e0` are recorded below. The latest local
 Linux candidate with control-read batching and native JSON decoding acknowledged
 5,863 saves inside a minute while offering 11,250, with HTTP 503 overload
 failures. Batching alone acknowledged 5,813, compared with its matched atomic SQL
@@ -13,10 +14,169 @@ The archived implementation reached 8,151 inside a measured minute with HTTP
 failures. The rewrite has not demonstrated a throughput gain over that result.
 These synthetic workloads do not validate desktop Office capacity.
 
-The retained runs below predate shared download admission. Their document GETs
+The earlier retained runs below predate shared download admission. Their document GETs
 did not consume the SOAP concurrency budget or use its deadline. Current GETs
 share that budget through reconstruction and transfer. Qualification of this
-combined request policy requires a new exact-commit run.
+combined request policy is included in the exact-current Snowfall runs.
+
+## Exact-current Snowfall qualification
+
+On 2026-10-30, the clean isolated Windows checkout matched
+`fd6b8e012dedd0e354be2383efc35d2149d6f561` before building or measuring.
+The private SDK was `11.0.100-rc.3.26522.148`. PostgreSQL 18.3 ran in Docker
+Desktop. The existing NBomber HTTP workload used 1,500 authenticated users,
+15,000 documents, 256 KiB packages, 16 KiB changed XML, no retries, seed 42,
+30 seconds warm-up and 60 seconds measurement. Queries remained at 30 seconds
+and opens at 120 seconds. Admission 128/two per subject, pool/preparation caps
+64/64, 4 GiB WAL and query statistics were benchmark overrides throughout.
+HTTPS remained proxied. PostgreSQL confirmed fsync, synchronous_commit and
+full_page_writes enabled.
+
+| Exact-current run | Offered saves/minute | Strict ACK/minute | Late ACK | Measured save failures | Save p50/p95/p99, ms |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Primary, 30-second saves | 3,000 | 2,997 | 3 | 0 | 50.66 / 477.95 / 658.94 |
+| Target, eight-second saves | 11,250 | 8,483 | 106 | 2,653 | 428.54 / 1,615.87 / 2,244.61 |
+
+Primary had no HTTP failures, including warm-up. Target also failed 647 measured
+periodic queries, 164 open downloads and 41 open queries. Successful target
+query/download/open-query p95 was 1,039.87/912.38/470.78 ms. Neither run missed a
+cadence slot. After timing, all 4,483/13,223 acknowledged revisions, including
+warm-up and drain, passed historical package SHA-256 and one-to-one accepted-index
+verification. Primary exited zero; target exited one because of overload.
+Strict ACKs must start and finish within the minute. Successful save-step counts
+of 3,000/8,589 also include the excluded late ACKs.
+
+The current Windows process probe previously rejected every sample. It now
+accepts only the direct Aspire resource PID running `CellBridge.WebDemo.exe`
+with its adjacent assembly, and checks PID/start-time identity on each sample.
+The target run verified this exact resource/application PID and collected 240
+measurement samples. A launcher PID still fails closed. This instrumentation
+change does not change the application or its persistence contract.
+
+| Measurement CPU equivalents | Primary | Target |
+| --- | ---: | ---: |
+| WebDemo | 2.15 | 4.16 |
+| Generator | 0.31 | 0.75 |
+| Owned DCP processes | 1.82 | 3.01 |
+| PostgreSQL container | 0.99 | 4.56 |
+
+Primary process counters were external, with approximately aligned boundary
+samples. Target WebDemo counters came from the fixture's verified process;
+generator/DCP counters were external. DCP includes controller and proxy work,
+not isolated HTTPS proxy CPU. Container CPU is already part of WSL/host totals.
+Do not add it again to host CPU. These are CPU-time deltas, not wall-stack
+percentages. Target WebDemo sampled peak working set was 651 MiB; container
+memory is a different measurement and includes its filesystem cache.
+
+A single persistent `docker exec` collector read the owned container's cumulative
+cgroup CPU and memory counters. Received timestamps advanced with guest sample
+timestamps. Primary/target retained 59 measurement samples each, with maximum
+gaps of 1.034/1.038 seconds. This avoids the delayed Docker statistics reader in
+the earlier HTTPS experiment. PostgreSQL activity sampling retained 378 samples
+per run, with maximum gaps of 317/366 ms. Both runs recorded zero deadlocks and
+rollbacks. These samples can miss short waits.
+
+### Allocation diagnostic and rejected serialization candidate
+
+A separate retained-code primary run enabled runtime counters and phase metrics,
+with a 30-second GC allocation trace during measurement. It completed 2,997
+strict ACKs, three late ACKs and no HTTP failures; all 4,482 ACKs passed final
+historical verification. Save p50/p95/p99 was 49.85/69.63/86.66 ms. This substantial
+variation from the first primary run prevents attributing latency changes from
+single runs to code alone.
+
+Across 59 interior one-second counter intervals, managed allocations averaged
+393.8 MB/s. Normalized to this mixture's approximately 125 completed HTTP requests
+per second, that is about 3.15 MB/request. WebDemo used 1.97 CPU equivalents,
+about 15.8 CPU ms/completed mixed request. These ratios include save, query and
+download work; they are not isolated per-save costs. Allocation counters measure
+allocated bytes, not RSS. A 30-second host counter window was 45.9% busy and the
+generator used 0.33 CPU equivalents. Moving the generator is not justified by
+this lower-load observation alone.
+
+The trace estimated 11.90 GB of weighted allocations, including 7.03 GB of byte
+arrays. The first CellBridge frame was data-element package serialization for
+2.30 GB, chiefly query response serialization. It lost no events and had no
+missing allocation stacks or decoder depth-cap drops. Allocation samples do not
+assign CPU percentages to those methods. Capture-level stack truncation was not
+separately assessed.
+
+A bounded experiment measured package length before serialization and reserved
+the writer buffer once. All 335 binary tests passed. Its primary HTTP diagnostic
+completed 2,992 strict ACKs and eight late ACKs with no measured HTTP failures.
+Allocation counters averaged 389.4 MB/s, only 1.1% below the preceding diagnostic.
+WebDemo CPU rose to 2.21 equivalents; save p50/p95/p99 was
+51.68/579.58/738.30 ms. These single runs demonstrate no useful endpoint/resource
+gain. The reservation code was removed. An initial component control measured
+response construction rather than serialization, so its numbers do not measure
+the proposed optimization and are excluded from the decision. All 4,483 candidate
+ACKs passed final historical verification, and its process exited zero.
+
+### Retained-code aged component check
+
+The existing history-scaling diagnostic checked 1, 250 and 999 retained revisions,
+with five measured operations per stage after ten warm-ups and tiering disabled.
+It used a tiny valid DOCX, in-memory state and shared warm content. Each measured
+save started from the same aged state and passed content/revision verification
+outside timing. These are library allocations, not aged PostgreSQL/HTTP capacity.
+The run overlapped untimed candidate verification, so short wall/CPU samples
+cannot establish isolated performance changes. CPU counters were often below
+the Windows counter resolution; zero samples do not mean zero CPU work.
+
+| Median allocated bytes/operation | 1 revision | 250 revisions | 999 revisions |
+| --- | ---: | ---: | ---: |
+| Current head read | 40 | 40 | 40 |
+| Current partition metadata read | 624 | 624 | 624 |
+| Whole query and client graph | 47,672 | 5,636,168 | 20,890,592 |
+| Full-package save | 817,720 | 1,086,080 | 1,926,784 |
+
+The current-record bound holds in this fixture. Complete queries and saves still
+grow with retained protocol data. Aged HTTP qualification remains outstanding.
+The offline snapshot grew from 27,707 to 17,909,891 bytes; offline export is not
+the representation loaded by a current head read.
+
+Final benchmark tests also exposed a preserved-input bug: source checkout CRLF
+characters appeared in `MinimalDocx` XML copied into `StorageBenchmarkInputs`.
+The supposedly fixed 1 MiB benchmark package was 17 bytes larger on Windows.
+Normalizing those XML parts to LF restores the existing size. ZIP creator OS
+and file-permission attributes still differ by platform, so the test preserves
+an explicit hash for each. Changing only those central-directory fields in the
+Windows diagnostic copy reproduced the original Linux SHA-256 exactly.
+This changes the separate provider benchmark fixture, not the Office-user
+HTTP corpus used for these measurements.
+
+Raw commands, profiles, source/binary hashes, candidate patch, counters, trace,
+reports, collector sources and final verifier logs remain in the ignored
+`artifacts/office-snowfall-current/` directory. The candidate is not a shipping
+change. No archived implementation comparison was rerun.
+
+### Architecture and remaining capacity work
+
+The current-code audit agrees with the replacement cost table. Current heads,
+controls, bindings and affected mapping keys avoid unrelated application history
+on ordinary publication. Immutable elements, visibility intervals, revisions,
+receipts and checkpoints retain their separate roles. Final publication rechecks
+authority under the affected document guard; matching SQL state/content writes
+remain atomic. No provider-wide quota or publication lock was introduced.
+
+Complete saves still load selected graph payloads, reconstruct/validate the ZIP
+and hash the complete package. QueryChanges still enumerates selected catalog
+and mapping metadata. Historical downloads resolve a checkpoint and bounded tail
+plus the selected payload closure. These are stable contracts with explicit
+remaining costs, not claims that saves are `O(delta)` or all operations are
+history-independent.
+
+The 3,000-save offer passed this bounded synthetic run. The 11,250-save offer
+failed at 8,483 strict ACKs with failures across writes and reads. This brackets
+two fixture outcomes; it does not establish the maximum clean rate, an intrinsic
+server limit or a production SLA. The target mixed workload recorded 608,963
+database transactions across warm-up, measurement and drain for 13,223 ACKs.
+That ratio is not a per-save transaction count. App, PostgreSQL and DCP costs
+all need consideration before another access change. Small database execution
+means do not include connection acquisition, transport or application delays.
+Further capacity qualification must preserve these distinctions and the final
+historical verifier. Feature development can use the current contracts while
+the 10,000 successful durable saves/minute requirement remains unqualified.
 
 ## Atomic SQL publication experiment
 
