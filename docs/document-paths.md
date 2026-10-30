@@ -79,7 +79,7 @@ move have both automated protocol coverage and the bounded live evidence below.
 
 Retired paths remain reserved against use by a different resource, including
 after soft deletion. A host cannot rename `a.docx` to `b.docx` and then give
-`a.docx` to a new document. Existing durable retired-path reservations remain
+`a.docx` to a new document. Existing retired-path reservations remain
 effective without a schema migration. Hosts that need name reuse should choose
 an additional stable namespace in their paths and explain these restrictions
 to users. Do not reuse a reserved URL to bypass the protection.

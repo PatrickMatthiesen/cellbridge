@@ -1,6 +1,6 @@
 # Complete graph uploads and application metadata
 
-The durable document service accepts complete, non-coalescing application metadata
+The document service backed by persistent storage accepts complete, non-coalescing application metadata
 graphs through the existing Cell SOAP endpoint and the application metadata
 partition selector. The file adapter and EditorsTable remain separate. Metadata
 bytes are opaque object partitions; no Office ZIP format is imposed on them.
@@ -46,7 +46,7 @@ Mandatory data is checked against response-package identity and byte limits befo
 commit. The complete persisted acknowledgement also must fit MaxObjectBytes,
 which is the same bound used when loading it for replay.
 
-Durable receipts are scoped by partition and owner. Metadata retry identity uses
+Stored receipts are scoped by partition and owner. Metadata retry identity uses
 the uploaded index ID plus a normalized operation digest. Exact retries reproduce
 the stored acknowledgement after provider recreation. Reusing an accepted identity
 for different changes fails; superseded metadata receipts fail coherency. File and
@@ -61,7 +61,7 @@ Unpublished immutable content is never exposed as the selected partition.
 
 ## Limits and remaining work
 
-Graph bytes, element count, object bytes, durable receipt count, history count and
+Graph bytes, element count, object bytes, stored receipt count, history count and
 stored bytes use the existing StorageLimits admission checks. Automatic pruning
 remains disabled. There is no accepted partial staging state, expiry or abort API.
 Partial and PartialLast, alternate coherency modes, coalescing metadata writes and

@@ -140,8 +140,8 @@ var provider = new StorageProvider(new InMemoryDocumentRepository(content, limit
 builder.Services.AddCellBridge(provider, requireDurability: false);
 ```
 
-In-memory state and content disappear when the process stops. Durable and
-multi-instance registration rejects providers that cannot supply those guarantees.
+In-memory state and content disappear when the process stops. Registration with `requireDurability: true` rejects providers whose data cannot
+survive a restart. Multi-instance registration also requires shared storage.
 Filesystem storage supplies content only. Separate local directories on separate
 machines are not shared storage.
 
@@ -306,8 +306,7 @@ The provider validates their graph records before opening the write transaction,
 inserts the payloads, then locks the affected document row and publishes its
 records, limits, receipt and delivery together. Rejection, replay or cancellation
 before commit rolls back tentative content. An uncertain commit still resolves
-through the operation receipt. No physical content becomes durable without its
-document ownership charge.
+through the operation receipt. Physical content and its document ownership charge commit together.
 
 External content stores and saves that exceed the provisional buffer instead
 reserve capacity in the affected document before writing new physical content. Each unique handle and its ownership record
@@ -367,7 +366,7 @@ physical references. Capturing only current heads and application revisions woul
 lose intermediate protocol publications.
 
 Import validates complete normalized bundles and referenced content. It publishes
-all document state and the archive operation's durable receipt atomically into an
+all document state and the archive operation's stored receipt atomically into an
 empty namespace. A repeated accepted archive operation returns its receipt; a
 conflicting fingerprint fails. A lost commit response is resolved through that
 ledger. Recovery-only coordination does not participate in ordinary requests.
@@ -404,7 +403,7 @@ Do not run old writers against the migrated schema.
 
 Implement `IDocumentRepository` and `IContentStore`, then compose a
 `StorageProvider`. Repository durability and sharing flags describe actual backend
-guarantees. The complete configuration must satisfy durable/multi-host registration.
+guarantees. The complete configuration must satisfy restart-persistence and multi-host registration requirements.
 
 ### Repository contract
 
@@ -437,15 +436,15 @@ Keep package readers and control-only operations independent of retained history
 
 ### Content and package contracts
 
-`IContentStore.WriteAsync` returns a handle only after the complete immutable
-object is durable under the provider's declared guarantees. Never recycle keys or
+`IContentStore.WriteAsync` returns a handle only after the provider stores the complete immutable
+object according to its declared persistence guarantees. Never recycle keys or
 hide corruption. Check all aliases before caching or deduplicating a key.
 `IContentBatchReader` and `IContentBatchWriter` may batch object operations while
 preserving length/hash checks, cancellation and atomic batch failure.
 
 Stores used for ordinary document saves must return the lowercase SHA-256 digest
 as both `Key` and `Sha256` for new content. This lets the service reserve a known
-handle before any durable write. All bundled stores follow this rule. Trusted
+handle before any committed write. All bundled stores follow this rule. Trusted
 offline recovery can still remap provider-specific keys, and retained historical
 handles remain readable; that does not qualify an arbitrary-key writer for new
 document saves.

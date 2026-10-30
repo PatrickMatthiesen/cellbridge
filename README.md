@@ -70,7 +70,8 @@ aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj -
 aspire ps --non-interactive
 ```
 
-Aspire starts durable PostgreSQL, initializes the schema and then starts WebDemo.
+Aspire starts PostgreSQL with persistent storage, initializes the schema and
+then starts WebDemo.
 [Provision an account](docs/authentication.md#first-setup), then open
 the HTTPS endpoint shown for `webdemo`, followed by `/library`. Sign in, create
 a document and use its Office open link to edit and save it.

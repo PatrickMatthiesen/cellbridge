@@ -28,7 +28,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         DocumentPublicationRules.ValidateShape(publication);
         await ValidatePayloadsAsync(publication.Partitions, ct, provisional: overlay);
         // Reject unrelated provisional bytes. Publication must account for every
-        // physical object that this transaction could make durable.
+        // physical object that this transaction could publish.
         var references = publication.NewDocumentReferences.Concat(publication.Partitions.SelectMany(p => p.AddedElements).Select(e => e.Payload));
         if (publication.Receipt.Response is { } response) references = references.Append(response);
         var claimed = ContentStoreReader.UniqueHandles(references).ToDictionary(handle => handle.Key, StringComparer.Ordinal);

@@ -197,7 +197,7 @@ record bytes still count even where a table uses descriptor counts below.
 | Resource metadata/access | The repository resource lookup uses one indexed head statement and decodes `A` plus current metadata; independent of `H`. Service authorization can reread the head. A path lookup also reads its indexed claim. | Reads do not lock the namespace. Due editor expiry can require a document control update. |
 | Lease/editor control | Read current coordination, editor entries and partition headers, approximately `O(E + A)`. | One affected document row; no application revision or file graph load. |
 | Current package download | Read `L` bindings and their selected immutable graph/payload closure, reconstruct and verify `D` bytes. | No application-history scan. Reconstruction uses a temporary seekable file. |
-| File save | Validate admitted input, read current bindings, resolve changed/selected graph objects, reconstruct/hash `D` and examine up to `U` expanded ZIP bytes. Store new canonical payloads, changed mappings/bindings, revision and receipt. | Matching SQL state/content publish bounded provisional payloads and document ownership in one transaction, taking the document row lock once after inserting the payloads. External or larger saves reserve ownership before durable staging and take the document lock again for publication. Ownership lookups and inserts depend on the batch's keys, not total history. It stores no additional complete package; reconstruction and validation still cost document-sized work. |
+| File save | Validate admitted input, read current bindings, resolve changed/selected graph objects, reconstruct/hash `D` and examine up to `U` expanded ZIP bytes. Store new canonical payloads, changed mappings/bindings, revision and receipt. | Matching SQL state/content publish bounded provisional payloads and document ownership in one transaction, taking the document row lock once after inserting the payloads. External or larger saves reserve ownership before staging and take the document lock again for publication. Ownership lookups and inserts depend on the batch's keys, not total history. It stores no additional complete package; reconstruction and validation still cost document-sized work. |
 | Mapping/binding publication | Insert changed keys and their immutable version records; update current projections. | Checkpoints copy current bindings when the 128-change or 1 MiB replay bound is reached. This costs `O(L)` on that save, outside the document lock. |
 | QueryChanges | Read the selected live catalog and mappings, then process knowledge and select/serialize the response. Working memory includes `G + M + K` and selected response buffers. | The current service still enumerates the catalog and mappings even for warm knowledge. `G` and `M` can grow with protocol history. Indexed storage APIs alone do not make this operation output-sensitive. |
 | Point application revision / recent version page | Indexed revision selection; offset paging also scans the skipped entries. Returned records cost at least `O(h)`. | A full SOAP version list can still return all `H` records. |
@@ -240,8 +240,8 @@ complete-state reads on those paths.
 
 Working-memory priority M1 covers potentially full document/graph bodies, M2
 variable catalogs/knowledge/editor lists, and M3 bounded scalar/metadata results.
-Durable-space priority W1 covers novel document/graph content and revision growth,
-W2 metadata/receipt/coordination growth or rewrites, and W3 no intended durable
+Storage priority W1 covers novel document/graph content and revision growth,
+W2 metadata/receipt/coordination growth or rewrites, and W3 no intended stored
 write. These classify the legitimate operation; accidental full-state loading or
 rewriting is a defect to remove across all classes. M1 downloads with W3 differ
 from M1 saves with W1. Concurrency and `D/G/H/E` can change the relative urgency.
@@ -268,7 +268,7 @@ arbitrary membership arrangements retain more expensive validation paths. These
 are source-based growth statements, not fitted latency estimates or proof that
 every provider/policy takes the same path.
 
-| Operations | Time / working memory / durable space | Current cost driver | Desired per-operation work and space |
+| Operations | Time / working memory / persistent storage | Current cost driver | Desired per-operation work and space |
 | --- | --- | --- | --- |
 | A1 metadata/discovery | T2 / M3 / W3 | Selective metadata reads exist; full-state policy fallback remains. | Metadata lookup `O(log N)` plus output; bounded metadata buffers. Discovery should not inspect a graph. |
 | A2 current download | T2 / M1 / W3 | Content reads and transport buffering; authorization path can affect state reads. | Cached/direct-package path `O(log N + D)` with bounded streaming buffers. Lazy cold generation also resolves the selected graph and reads its payload closure before emitting `D` bytes; no universal bound in `D` alone. |
@@ -280,15 +280,15 @@ every provider/policy takes the same path.
 | B3 status/alone/availability | T1 / M3 / W3 | Complete-state load for current coordination response. | Current coordination lookup/count; bounded result independent of `D/G/H`. |
 | B4 SchemaLock; B5 ExclusiveLock | T1 / M3 / W2 | Full-state transitions and coordination restoration. | Current lease read/write with conflict fencing; no historical graph work. |
 | C1 presence lifecycle; C2 metadata mutation | T1 / M2 / W2 | Complete-state transition and editors-table serialization. | Actor/editor lookup plus changed metadata; amortized bounded expiry, no file history; retain `O(E+V)`. |
-| C3 editors query | T1 / M2 / W2 when expiry is due, otherwise W3 | Whole-state access plus generated editors graph/knowledge; `ExpireEditorsAsync` durably removes expired entries and advances affected partition knowledge/serials. | `O(K+E+R)` full query, or changed entries where knowledge permits; output `Omega(R)`. Publish due expiry in coordination/partition state without file-history rewrites. |
+| C3 editors query | T1 / M2 / W2 when expiry is due, otherwise W3 | Whole-state access plus generated editors graph/knowledge; `ExpireEditorsAsync` persists the removal of expired entries and advances affected partition knowledge/serials. | `O(K+E+R)` full query, or changed entries where knowledge permits; output `Omega(R)`. Publish due expiry in coordination/partition state without file-history rewrites. |
 | D1 unchanged file query | T1 / M2 / W3 | State decode, catalog enumeration, serial ambiguity and mapping checks, knowledge rebuild. | Indexed knowledge comparison plus necessary knowledge output; `O(K+G)` may remain when all graph knowledge must be emitted. No unrelated revision decode. |
 | D2 incremental query | T1 / M2 / W3 | Catalog work plus verified selected payload reads. | `O(K+q log q+q log G+d+R)` only where an index can prove the selection; full-knowledge output can force `O(G)`. |
 | D3 initial/full query | T2 / M1 / W3 | Catalog work plus full selected payload/knowledge assembly. | `O(g+B+K)` plus lookup, bounded streaming where framing permits; no unrelated history. |
 | D4 scoped/metadata query | T2 / M2 / W3 | Some multi-cell paths restore full graph to determine closure. | Work proportional to selected closure plus knowledge; no unrelated cells/history. Large opaque scopes inherit M1. |
 | E1 delta save | T1 / M1 / W1 | Fresh full state, retained catalog checks, selective payload reads, materialized `D`, new content and state publication. | Normal current-base append metadata can approach `O(d log G+log H)` plus validation/output. An old-base branch switch can change many more current bindings than the upload's `d`; checkpoints add construction/write work. Current full-file validation remains `Omega(D)` until separately changed and justified. |
-| E2 full replacement | T2 / M1 / W1 | Full graph/package validation and durable content insertion plus state/history work. | `O(D+g+log H)` or input graph bytes, bounded buffering; unavoidable full input and novel durable bytes. Promote T1 if replacements are common. |
+| E2 full replacement | T2 / M1 / W1 | Full graph/package validation and stored content insertion plus state/history work. | `O(D+g+log H)` or input graph bytes, bounded buffering; unavoidable full input and novel stored bytes. Promote T1 if replacements are common. |
 | E3 metadata publication | T2 / M2 / W1 | Full graph/closure validation and complete-state commit. | Changed closure plus index/history publication; opaque full graphs still cost `Omega(B)`. Promote M1 for large graphs. |
-| E4 replay/conflict | T2 / M3 / W3 | Submitted body parsing, current authorization/coherency and receipt lookup in state. | Indexed receipt/version checks after input validation; no new durable content on exact replay. Input cost is still unavoidable. |
+| E4 replay/conflict | T2 / M3 / W3 | Submitted body parsing, current authorization/coherency and receipt lookup in state. | Indexed receipt/version checks after input validation; no new stored content on exact replay. Input cost is still unavoidable. |
 | F1 metadata/enumeration; F2 property get | T2 / M3 / W3 | Outer operations use full-state transition; property builder constructs the property set. | `O(P+R)` enumeration; selected property reads `O(p+R)` with indexed lookup; no graph/history. |
 | F3 version list | T2 / M2 / W3 | SOAP enumerates retained revisions; author matching can add `O(H squared)` work. Separate selective paged API exists. | `O(log H+h+R)` recent headers, indexed author mapping; no revision graph materialization. |
 | F4 historical download | T3 / M1 / W3 | History selection and verified content read; selective summary API can avoid full state. | Cached/direct-package path `O(log H+Dhistorical)`. Lazy cold reads add checkpoint decoding, effective-delta replay, graph resolution and payload closure reads. Bound replay records/bytes explicitly; full output still costs `Omega(Dhistorical)`. |
@@ -296,7 +296,7 @@ every provider/policy takes the same path.
 | G1 rename/move | T2 / M3 / W2 | Atomic namespace/authority checks and full-state representation; path admission can scan namespace. | Unique indexed path reservation `O(log N)` plus bounded lifecycle/coordination update, no content rewrite. |
 | G2 namespace list | T3 / M2 / W3 | SQL projects namespace fields, but full enumeration is `O(N)` and server JSON processing is not free. | Page `O(log N+page size)` where contract allows; streaming a full inventory still costs `Omega(N)`. |
 | G3 create/import/recreate | T3 / M1 / W1 | Namespace admission, full package/graph construction, content insertion and state publication. | Indexed namespace admission plus `Omega(D)` validation/persistence; promote T1 during bulk import/recovery. |
-| G4 delete/purge/collection | T3 / M2 / W2 | Lifecycle tombstones/reservations and retained content references; collection may enumerate inventories. | Indexed lifecycle update, then collection proportional to affected references or explicit inventory scope. Reclaimed durable bytes can dominate the space benefit without a large wire response. |
+| G4 delete/purge/collection | T3 / M2 / W2 | Lifecycle tombstones/reservations and retained content references; collection may enumerate inventories. | Indexed lifecycle update, then collection proportional to affected references or explicit inventory scope. Reclaimed stored bytes can dominate the space benefit without a large wire response. |
 | X1/X2 unsupported operations | T3 / M3 / W3 | Parser/authorization can still consume admitted input/state. | Bounded early rejection after required validation; do not optimize hypothetical successful execution. |
 
 These current-path findings come from [SOAP execution](../src/CellBridge/Execution/CellBridgeRequestProcessor.cs),
@@ -337,7 +337,7 @@ bytes across 12,048 commits including warm-up and drain. Net growth was about
 303.89 KiB/commit, roughly 17.5 times the 17,733-byte mean binary save request.
 This is logical retained content/state growth, not physical I/O: it excludes SQL
 projections, indexes, WAL and page effects. It is also not the gross number of
-bytes rewritten per transaction. Measure durable bytes, WAL, state serialization,
+bytes rewritten per transaction. Measure stored bytes, WAL, state serialization,
 content inserts and network independently before attributing amplification.
 
 Retained space depends on representation as well as wire deltas. Keeping a
@@ -346,7 +346,7 @@ history even when each upload is small. Sharing immutable graph descriptors alon
 does not deduplicate those full-file bytes. A representation that shares content
 can approach initial content plus unique changed bytes and revision metadata, but
 its reconstruction, integrity checks and collection costs need separate evidence.
-Per-save durable work must therefore distinguish newly retained bytes from
+Per-save storage work must therefore distinguish newly retained bytes from
 rewritten state, SQL index/projection changes, WAL and eventual collection.
 
 ## Skeptical review and next measurements
@@ -371,7 +371,7 @@ in its single young-history run. These are different bottlenecks and workloads.
 If an optimized component is fraction `f` of end-to-end time, a tenfold speedup
 there gives `1 / ((1-f) + f/10)` overall under a simple serial model. At an assumed
 `f=0.05`, that is only about 1.047 times. This is an illustration, not a measured
-fraction. Concurrency, queues, admission and durable waits further complicate the
+fraction. Concurrency, queues, admission and storage waits further complicate the
 comparison. Removing history growth remains necessary even when young-history
 HTTP throughput changes little.
 

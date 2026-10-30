@@ -2,7 +2,7 @@ using System.Collections.Immutable;
 
 namespace CellBridge.Storage.Abstractions;
 
-/// <summary>New immutable metadata over an indexed durable source; no aggregate or payload catalog.</summary>
+/// <summary>New immutable metadata over an indexed source; no aggregate or payload catalog.</summary>
 public sealed class IndexedGraphOverlaySource : IIndexedGraphSource
 {
     private readonly IIndexedGraphSource? fallback;

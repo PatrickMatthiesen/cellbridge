@@ -272,7 +272,7 @@ their permission source through this boundary, retry a failed/stale CAS using
 fresh state, and acknowledge revocation only after the committed binding is
 observed. Permission updates that cannot resolve the next snapshot fail without
 publishing. A throwing recorded-subject evaluation aborts the update transaction.
-If the commit outcome is unknown, read the durable binding before retrying.
+If the commit outcome is unknown, read the stored binding before retrying.
 
 All instances use shared document state and the same policy domain. Distribute
 the exact new snapshot before or after committing it; a peer missing that

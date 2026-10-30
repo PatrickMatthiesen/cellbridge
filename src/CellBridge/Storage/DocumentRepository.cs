@@ -140,7 +140,7 @@ public sealed record DocumentPublicationFence(long LifecycleGeneration, long Aut
     public CoordinationState? PreparedCoordination { get; init; }
 }
 
-/// <summary>A publication references only complete durable physical objects.</summary>
+/// <summary>A publication references only complete physical objects stored according to the provider's persistence guarantees.</summary>
 public sealed record PreparedDocumentPublication(Guid ResourceId, DocumentActorAdmission Admission,
     DocumentPublicationFence Fence, DocumentOperationReceipt Receipt,
     ImmutableArray<PreparedPartitionPublication> Partitions)

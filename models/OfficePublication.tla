@@ -88,7 +88,7 @@ Publish(w) ==
     /\ UNCHANGED <<durable, Control, prepared>>
 
 \* The same actor/lifecycle/key with another digest cannot become a new save.
-\* Lookup after unknown commit or crash returns the durable accepted result.
+\* Lookup after unknown commit or crash returns the stored accepted result.
 Resolve(w) ==
     /\ phase[w] \in {"new", "ready", "locked", "unknown"}
     /\ receipts[ReceiptId(w)] # None

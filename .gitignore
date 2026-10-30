@@ -427,5 +427,5 @@ FodyWeavers.xsd
 appsettings.Local.json
 apphost.settings.json
 
-# Local durable content.
+# Local document content.
 .cellbridge/

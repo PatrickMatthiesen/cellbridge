@@ -305,7 +305,7 @@ public sealed partial class DocumentPartition
                         throw new InvalidDataException("Conflicting immutable data-element payload.");
                     stream.Position = 0;
                     // The visitor owns the stream. Retain only a bounded batch of
-                    // new payloads, then publish their durable handles together.
+                    // new payloads, then publish their content handles together.
                     if (pendingBytes + stream.Length > 8L * 1024 * 1024) await FlushAsync();
                     if (stream.Length > 8L * 1024 * 1024)
                         handle = await content.WriteAsync(stream, cancellationToken);

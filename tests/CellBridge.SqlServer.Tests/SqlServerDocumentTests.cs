@@ -145,7 +145,7 @@ public sealed class SqlServerDocumentTests(SqlServerFixture fixture)
         var uncertainBytes = MinimalDocx.Create("commit reply lost");
         var uncertain = await SqlServerDocuments.ProposalAsync(normal, current, uncertainBytes);
         var lost = new CommitObservation { AfterCommit = () => throw new IOException("Injected lost commit reply") };
-        // The provider resolves an uncertain commit using its durable operation receipt.
+        // The provider resolves an uncertain commit using its operation receipt.
         var resolved = await new CellBridgeDocumentService(database.Provider(lost)).ExecuteAsync(current.ResourceId,
             DocumentPartitionKind.FileContents, uncertain, new Dictionary<string,string>(), SqlServerDocuments.Actor);
         Assert.Single(resolved.AcceptedSaves);

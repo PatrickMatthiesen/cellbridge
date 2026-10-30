@@ -26,7 +26,7 @@ internal static class OuterDocumentOperations
                 if (minor != 0) { response.ErrorCode = "VersionNotFound"; return; }
                 var current = await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(resourceId), cancellationToken)
                     ?? throw new KeyNotFoundException();
-                // SOAP tokens correlate messages; they are not durable retry identities.
+                // SOAP tokens correlate messages; they do not identify retries across requests.
                 await service.RestoreRevisionAsync(resourceId, number, current.LatestRevisionNumber,
                     Guid.NewGuid().ToString("N"), actor, attributes, cancellationToken);
                 return;

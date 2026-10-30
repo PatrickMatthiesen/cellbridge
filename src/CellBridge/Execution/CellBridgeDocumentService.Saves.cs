@@ -21,7 +21,7 @@ public sealed partial class CellBridgeDocumentService
             (put.Flags & ~0x79) != 0 || (put.AdditionalFlagsBits & 0x38) != 0 ||
             kind == DocumentPartitionKind.Metadata && CellSubRequestDataValidation.TryGetBoolean(attributes, "Coalesce", out var coalesce) && coalesce)
             return Wrap(Failure(operation.RequestId, CellErrorCode.RequestNotSupported, "Only file and application metadata uploads are supported."), initial);
-        // The caller retains its request buffers. Own them before computing the durable retry identity.
+        // The caller retains its request buffers. Own them before computing the retry identity.
         var owned = new DataElementPackage();
         foreach (var element in package.DataElements)
             owned.DataElements.Add(new(element.DataElementType,

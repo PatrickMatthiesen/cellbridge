@@ -13,10 +13,11 @@ an expected empty target mapping, an operation key, and a distinct digest.
 Lifecycle replacement advances to 1 and invalidates these old requests. It does
 not model new requests for the replacement document or lifecycle reuse.
 
-`Prepare` abstracts successful body/package validation and durable immutable
-payload staging. Validation correctness, graph ancestry, checkpoint construction,
+`Prepare` abstracts successful body/package validation and immutable
+payload staging that survives a crash. Validation correctness, graph ancestry,
+checkpoint construction,
 external storage failures and exact package-byte reconstruction require separate
-checks. A payload token stands for its entire validated durable dependency closure.
+checks. A payload token stands for the validated payload and all its stored dependencies.
 No collector runs. Staged objects may remain unreachable until quiescent cleanup.
 
 Each document has its own `guard[d]`. Permission revocation, lifecycle replacement
@@ -48,7 +49,7 @@ so deadlock checking is disabled deliberately.
 | Invariant | Required implementation behavior |
 | --- | --- |
 | `TypeOK`, `GuardOwnership` | The guard belongs only to a worker publishing that document. |
-| `DurableHeads`, `ReceiptPayloadDurable` | Published references and accepted receipts refer only to durably staged, immutable content. |
+| `DurableHeads`, `ReceiptPayloadDurable` | Published references and accepted receipts refer only to immutable content staged in storage that survives a crash. |
 | `AtMostOnce`, `ReceiptAtomicity` | Head mutation and the actor/lifecycle/operation-key receipt commit together. Receipt identity excludes the digest; the stored digest distinguishes a replay from conflicting reuse. |
 | `SuccessfulReceipt` | Successful receipt resolution matches the original digest. |
 | `CurrentAuthority` | Check current permission, lifecycle, lease ownership and provider time at guarded admission. |
@@ -62,7 +63,7 @@ flags or additional checks.
 
 | Transition | Implementation acceptance test |
 | --- | --- |
-| `Prepare`, `Acquire` | Pause after durable staging; another document can stage and publish without waiting on this document. |
+| `Prepare`, `Acquire` | Pause after staging content in storage that survives a crash; another document can stage and publish without waiting on this document. |
 | `Reprepare` | Stage two candidates changing different keys. Publish the first, then rebuild the second from the current root and publish both changes without a wire coherency error. Expensive rebuilding happens after releasing the guard. |
 | `Publish`, `Reject` | With the same target precondition, two changes to that target cannot both publish. Unrelated root changes alone do not reject. |
 | `Revoke`, `ReplaceLifecycle`, `RevokeLease`, `Tick` | Change each condition after preparation. Also expire the lease after guard acquisition. The later admission must fail. |
@@ -73,9 +74,10 @@ The bounded results support removing a provider-wide publication gate, nested
 process publication locks, full-history validation during guarded admission, and
 wire rejection based only on an unrelated head change, provided implementation
 satisfies these assumptions. The model does not establish that arbitrary existing
-checks are redundant. Retain the affected-document transaction/guard, durable
+checks are redundant. Retain the affected-document transaction/guard, crash-safe
 staging, current authority and lifecycle checks, target-key coherency, stale-root
-repreparation, and atomic durable receipt. Checking a complete candidate against
+repreparation, and a receipt committed atomically with the head update. Checking
+a complete candidate against
 its expected root is necessary here because it replaces a whole mapping root.
 A different implementation that updates only affected bindings needs its own
 argument that its selected file/package still includes concurrent commits.

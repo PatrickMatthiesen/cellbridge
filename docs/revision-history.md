@@ -18,7 +18,7 @@ known current state before its next publication; earlier edits cannot be recover
 Reusable hosts can call `CellBridgeDocumentService.ListRevisionsAsync`,
 `GetRevisionAsync` and `RestoreRevisionAsync`. A restore requires the selected
 revision number, expected current history revision and a caller-supplied operation
-key. Reuse the same key and arguments after an uncertain commit result. The durable
+key. Reuse the same key and arguments after an uncertain commit result. The
 receipt returns the original committed revision even if a later save has occurred.
 Changing the arguments for an accepted key fails. Receipts belong to an
 authenticated subject and lifecycle generation; a revoked caller cannot replay them.
@@ -48,7 +48,7 @@ Unavailable revisions return 404 and denied access returns 403. Downloads carry
 private/no-store caching, an immutable revision ETag and the recorded timestamp.
 Versioning is enabled only for documents whose revision repository has been initialized.
 The legacy `BuildGetVersions(StoredDocument, ...)` API still describes current-only
-storage with versioning disabled; the durable request processor uses `DocumentState`.
+storage with versioning disabled; the request processor uses `DocumentState`.
 
 Restore stages and verifies both historical content and graphs before an atomic
 publication. It creates fresh cell manifests, revision wrappers, storage index
@@ -57,7 +57,7 @@ selected historical objects and repeat their roots. The new index selects histor
 cells; cells added in later revisions are not selected. Retained current and inherited
 records remain available. Restore preserves live security, editors and coordination,
 advances the file content version, appends a new history record and queues external
-delivery when the current document has a durable destination binding.
+delivery when the current document has a stored destination binding.
 An empty historical metadata index publishes a fresh empty index without inventing
 a storage manifest. [Storage index mappings are optional][index]. A present
 [storage manifest must declare at least one root][storage-manifest].
@@ -71,8 +71,8 @@ creates a new publication.
 SOAP `Versioning/RestoreVersion` accepts numeric major/minor version strings and
 returns `VersionNotFound` for a well-formed unavailable version. Published versions
 currently use `revisionNumber.0`. SOAP request/subrequest tokens correlate messages;
-the specification does not establish them as durable globally unique retry keys.
-Each SOAP restore request is a new restore. The keyed reusable API provides durable
+the specification does not establish them as globally unique retry keys.
+Each SOAP restore request is a new restore. The keyed reusable API provides
 retry guarantees. No automatic retry of an uncertain SOAP restore should be inferred.
 
 ## Outer document operations
