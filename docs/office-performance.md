@@ -13,6 +13,11 @@ The archived implementation reached 8,151 inside a measured minute with HTTP
 failures. The rewrite has not demonstrated a throughput gain over that result.
 These synthetic workloads do not validate desktop Office capacity.
 
+The retained runs below predate shared download admission. Their document GETs
+did not consume the SOAP concurrency budget or use its deadline. Current GETs
+share that budget through reconstruction and transfer. Qualification of this
+combined request policy requires a new exact-commit run.
+
 ## Atomic SQL publication experiment
 
 Commit `0b9a2d0` buffers up to 8 MiB and 64 provisional objects when SQL state
@@ -226,6 +231,36 @@ on Snowfall under `artifacts/office-snowfall-controlled/`. The A1 console log wa
 truncated during redaction; its raw results and previously captured verifier
 evidence survived. All owned fixtures stopped and the user's checkout was
 restored without changing its existing deletion.
+
+## Snowfall with process attribution
+
+Commit `2025796` was measured with separate generator, server and DCP process
+samples. These runs precede shared download admission.
+
+| Save interval | In-window ACK/minute | Late ACK | Measured save failures | All HTTP failures | Historical verification |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 8,000 ms | 10,231 | 54 | 958 | 2,153 | Unconfirmed for 15,076 ACKs; controller interruption lost terminal evidence |
+| 8,800 ms | 9,447 | 73 | 703 | 1,714 | All 13,945 ACKs passed byte hashes and one-to-one coverage |
+
+Both runs exited on overload. The higher-load count exceeds 10,000, but its
+failures and incomplete verification prevent capacity qualification. The lower
+point completed verification and still overloaded. Successful save p95/p99 was
+968/1,713 ms and 909/1,548 ms respectively.
+
+WebDemo used 4.41/4.28 mean logical CPU equivalents, the generator 0.65/0.63, and
+DCP 2.58/2.75. Peak sampled working sets were 668/650 MiB, 2,628/2,590 MiB and
+352/353 MiB respectively. PostgreSQL's first container sample averaged 4.53 CPU
+equivalents; the second container sampler failed because of command quoting.
+Host CPU averaged 98.1%/97.6%. Process and container accounting boundaries differ;
+container CPU is already included in host CPU and is not an extra host total.
+DCP's observed cost warrants checking the benchmark's proxy paths before assigning
+the whole host limit to the library.
+
+Available RAM remained above 9.4 GiB. Windows page-output and sampled Linux swap
+counters stayed zero; paging was not demonstrated. SQL samples recorded no blocked
+backends or deadlocks. WAL was 733,373,576/676,126,427 bytes across warm-up,
+measurement and drain. Raw evidence and the interruption/sampler limitations are
+retained on Snowfall under `artifacts/office-snowfall-2025796/`.
 
 ## Retained document staging admission measurements
 

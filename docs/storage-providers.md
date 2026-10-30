@@ -183,9 +183,9 @@ Environment variables use double underscores, such as
 | `Storage:SharedContent` | Operator declaration that the filesystem root is actually shared and has verified flush/rename behavior. Default false. |
 | `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM body, default 128 MiB. |
 | SOAP XML limit | Fixed 16 Mi characters, independent of the HTTP body limit. Inline base64 reaches this ceiling before a 128 MiB transport body. |
-| `Protocol:MaxConcurrentRequests` | Active cellstorage requests per host, including delivery, default 8. Excess requests return HTTP 503. |
-| `Protocol:MaxConcurrentRequestsPerSubject` | Active requests per authenticated subject, default 2. Excess requests return HTTP 429. |
-| `Protocol:RequestTimeout` | Deadline through request reading and response delivery, default `00:02:00`. |
+| `Protocol:MaxConcurrentRequests` | Cellstorage POSTs and current/history document GETs share eight active requests per process, including reconstruction and delivery. Excess requests return HTTP 503. |
+| `Protocol:MaxConcurrentRequestsPerSubject` | Shared active-request limit per authenticated subject, default 2. Excess requests return HTTP 429. |
+| `Protocol:RequestTimeout` | Absolute deadline through request reading, download reconstruction and response delivery, default `00:02:00`. |
 | `Protocol:PublicOrigin` | Optional fixed external HTTPS origin. Without a fixed Office/Protocol origin, configure specific remote `AllowedHosts`. |
 | `Protocol:MaxMtomParts` | Maximum MIME parts per request, default 128. |
 | `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
@@ -215,6 +215,13 @@ Body staging does not eliminate parsing allocations. Eight requests at the
 objects. Request concurrency is not a process memory limit, and direct service
 calls do not use HTTP admission limits. Set sizes and concurrency for the host's
 available memory.
+
+Document GETs retain their admission permit until the reconstructed package
+stream closes. A slow transfer therefore occupies its slot until completion,
+disconnect or the request deadline. Choose document size and concurrency limits
+for temporary disk capacity as well as memory. At the default limits, eight
+128 MiB downloads can retain 1 GiB of reconstructed package files. Direct
+package/service calls need their own caller-managed concurrency and cancellation.
 
 Before accepting a file publication, CellBridge reconstructs a seekable package,
 checks `[Content_Types].xml` and the extension's main document entry, reads ZIP

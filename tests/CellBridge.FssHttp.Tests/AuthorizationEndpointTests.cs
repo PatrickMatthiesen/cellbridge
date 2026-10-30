@@ -68,7 +68,12 @@ public sealed class AuthorizationEndpointTests
     [Fact]
     public async Task ConcurrentClientsKeepTheirOwnIdentity()
     {
-        await using var fixture = await Fixture.Start();
+        await using var fixture = await Fixture.Start(configure: options =>
+        {
+            // Admit the test's ten concurrent requests per authenticated subject.
+            options.MaxConcurrentRequests = 20;
+            options.MaxConcurrentRequestsPerSubject = 10;
+        });
         using var reader = fixture.CreateClient("reader");
         using var other = fixture.CreateClient("other");
 
@@ -272,14 +277,14 @@ public sealed class AuthorizationEndpointTests
         public DocumentHead State => state;
         public HttpClient Client => client;
         public HttpClient CreateClient(string user) => TestActor.CreateClient(app.GetTestServer(), user);
-        public static async Task<Fixture> Start(bool otherCanWrite = false, bool externalPolicy = false)
+        public static async Task<Fixture> Start(bool otherCanWrite = false, bool externalPolicy = false, Action<CellBridgeOptions>? configure = null)
         {
             var provider = TestStorage.Memory();
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
             TestActor.Register(builder.Services);
             if (externalPolicy) builder.Services.AddSingleton<ICellBridgeAuthorizationPolicy>(new ExternalPolicy(otherCanWrite));
-            builder.Services.AddCellBridge(provider, requireDurability: false);
+            builder.Services.AddCellBridge(provider, requireDurability: false, configure: configure);
             var app = builder.Build();
             app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
             var service = app.Services.GetRequiredService<CellBridgeDocumentService>();

@@ -92,42 +92,49 @@ public static class CellBridgeEndpoints
                     System.Globalization.CultureInfo.InvariantCulture, out var number)) return Results.NotFound();
                 var actor = CellBridgeActor.FromPrincipal(context.User);
                 if (actor is null) return Results.Unauthorized();
-                DocumentPackage package;
-                DateTime modifiedUtc;
-                Stream? content = null;
-                try
+                return HttpMethods.IsHead(context.Request.Method)
+                    ? await DownloadAsync()
+                    : await HandleAdmittedRequest(context, actor, DownloadAsync);
+
+                async Task<IResult> DownloadAsync()
                 {
-                    if (HttpMethods.IsHead(context.Request.Method))
+                    DocumentPackage package;
+                    DateTime modifiedUtc;
+                    Stream? content = null;
+                    try
                     {
-                        var revision = await service.GetRevisionSummaryAsync(resourceId, number, actor, context.RequestAborted);
-                        package = revision.Package;
-                        modifiedUtc = revision.CreatedUtc;
+                        if (HttpMethods.IsHead(context.Request.Method))
+                        {
+                            var revision = await service.GetRevisionSummaryAsync(resourceId, number, actor, context.RequestAborted);
+                            package = revision.Package;
+                            modifiedUtc = revision.CreatedUtc;
+                        }
+                        else
+                        {
+                            var download = await service.OpenDocumentAsync(new DocumentIdentity.Resource(resourceId), number, actor, context.RequestAborted);
+                            package = download.Package;
+                            modifiedUtc = download.ModifiedUtc;
+                            content = download.Content;
+                        }
                     }
-                    else
+                    catch (UnauthorizedAccessException) { return Results.NotFound(); }
+                    catch (KeyNotFoundException) { return Results.NotFound(); }
+                    try
                     {
-                        var download = await service.OpenDocumentAsync(new DocumentIdentity.Resource(resourceId), number, actor, context.RequestAborted);
-                        package = download.Package;
-                        modifiedUtc = download.ModifiedUtc;
-                        content = download.Content;
+                        if (package.LifecycleGeneration != generation) return Results.NotFound();
+                        context.Response.Headers.CacheControl = "private, no-store";
+                        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+                        context.Response.ContentType = "application/octet-stream";
+                        context.Response.Headers.ContentDisposition = "attachment";
+                        context.Response.Headers.ContentSecurityPolicy = "sandbox; default-src 'none'";
+                        context.Response.ContentLength = package.Length;
+                        context.Response.Headers.ETag = $"\"{resourceId:D}:{package.LifecycleGeneration}:{number}\"";
+                        context.Response.Headers.LastModified = modifiedUtc.ToString("R");
+                        if (content is not null) await content.CopyToAsync(context.Response.Body, context.RequestAborted);
                     }
+                    finally { if (content is not null) await content.DisposeAsync(); }
+                    return Results.Empty;
                 }
-                catch (UnauthorizedAccessException) { return Results.NotFound(); }
-                catch (KeyNotFoundException) { return Results.NotFound(); }
-                try
-                {
-                    if (package.LifecycleGeneration != generation) return Results.NotFound();
-                    context.Response.Headers.CacheControl = "private, no-store";
-                    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
-                    context.Response.ContentType = "application/octet-stream";
-                    context.Response.Headers.ContentDisposition = "attachment";
-                    context.Response.Headers.ContentSecurityPolicy = "sandbox; default-src 'none'";
-                    context.Response.ContentLength = package.Length;
-                    context.Response.Headers.ETag = $"\"{resourceId:D}:{package.LifecycleGeneration}:{number}\"";
-                    context.Response.Headers.LastModified = modifiedUtc.ToString("R");
-                    if (content is not null) await content.CopyToAsync(context.Response.Body, context.RequestAborted);
-                }
-                finally { if (content is not null) await content.DisposeAsync(); }
-                return Results.Empty;
             });
         routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], (HttpContext context) =>
             HttpDocumentPath.TryRequestPath(context, out _) ? Results.Ok() : Results.BadRequest());
@@ -156,6 +163,14 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
     if (HttpMethods.IsPost(context.Request.Method)) return Results.NotFound();
     var actor = CellBridgeActor.FromPrincipal(context.User);
     if (actor is null) return Results.Unauthorized();
+    return HttpMethods.IsHead(context.Request.Method)
+        ? await HandleSharedDownload(context, service, path, actor)
+        : await HandleAdmittedRequest(context, actor, () => HandleSharedDownload(context, service, path, actor));
+}
+
+private static async Task<IResult> HandleSharedDownload(HttpContext context, CellBridgeDocumentService service,
+    string path, CellBridgeActor actor)
+{
     DocumentHead state;
     DocumentPackage package;
     Stream? content = null;
@@ -221,6 +236,11 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
     if (!HttpDocumentPath.TryRequestPath(ctx, out _)) return Results.BadRequest();
     var actor = CellBridgeActor.FromPrincipal(ctx.User);
     if (actor is null) return Results.Unauthorized();
+    return await HandleAdmittedRequest(ctx, actor, () => HandleAdmittedCellStoragePost(ctx, service));
+}
+
+static async Task<IResult> HandleAdmittedRequest(HttpContext ctx, CellBridgeActor actor, Func<Task<IResult>> handle)
+{
     var admission = ctx.RequestServices.GetRequiredService<ProtocolRequestAdmission>();
     var lease = admission.TryAcquire(actor.Identity.Subject, out var rejection);
     if (lease is null) return Results.StatusCode(rejection);
@@ -231,11 +251,11 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
     try
     {
         IResult result;
-        try { result = await HandleAdmittedCellStoragePost(ctx, service); }
+        try { result = await handle(); }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested && !originalToken.IsCancellationRequested)
         {
             if (ctx.Response.HasStarted) { ctx.Abort(); result = Results.Empty; }
-            else result = Results.StatusCode(408);
+            else { ctx.Response.Clear(); result = Results.StatusCode(408); }
         }
         return new AdmittedResult(result, lease, deadline, originalToken);
     }
