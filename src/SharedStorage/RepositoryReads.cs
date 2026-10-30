@@ -149,7 +149,7 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
     public ValueTask<DocumentControlRead?> ReadControlAsync(Guid id, CancellationToken cancellationToken = default) =>
         ReadAsync(async db => await HeadAsync(db, id, cancellationToken) is { IsDeleted: false } head
             ? await ControlAsync(db, head, cancellationToken) : null, cancellationToken);
-    public ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, CancellationToken cancellationToken = default)
+    public ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision = null, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
@@ -158,11 +158,19 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
         {
             var head = await HeadAsync(db, id, cancellationToken);
             if (head is null || head.IsDeleted) return null;
-            var rows = await db.Set<RepositoryRevisionRow>().AsNoTracking()
-                .Where(row => row.ResourceId == id && row.Lifecycle == head.LifecycleGeneration)
-                .OrderByDescending(row => row.RevisionNumber).Skip(offset).Take(limit).Select(row => new { row.Json, row.RevisionNumber }).ToArrayAsync(cancellationToken);
-            return new DocumentRevisionPage(head, rows.Select(row => ReadRevisionRecord(head, row.RevisionNumber, row.Json)).ToImmutableArray(),
-                offset + rows.Length < head.Counters.Revisions ? offset + rows.Length : null);
+            var query = db.Set<RepositoryRevisionRow>().AsNoTracking()
+                .Where(row => row.ResourceId == id && row.Lifecycle == head.LifecycleGeneration);
+            if (beforeRevision is { } bound)
+            {
+                var value = (decimal)bound;
+                query = query.Where(row => row.RevisionNumber < value);
+            }
+            var rows = await query.OrderByDescending(row => row.RevisionNumber).Skip(offset).Take(beforeRevision.HasValue ? limit + 1 : limit)
+                .Select(row => new { row.Json, row.RevisionNumber }).ToArrayAsync(cancellationToken);
+            var count = Math.Min(limit, rows.Length);
+            var hasMore = beforeRevision.HasValue ? rows.Length > limit : offset + count < head.Counters.Revisions;
+            return new DocumentRevisionPage(head, rows.Take(count).Select(row => ReadRevisionRecord(head, row.RevisionNumber, row.Json)).ToImmutableArray(),
+                hasMore ? offset + count : null);
         }, cancellationToken);
     }
     private static async Task<DocumentRevisionRecord?> RevisionAsync(TContext db, DocumentHead head, ulong number, CancellationToken ct)

@@ -120,7 +120,7 @@ public sealed partial class InMemoryDocumentRepository : IDocumentRepository, II
     }
 
     public async ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit,
-        CancellationToken cancellationToken = default)
+        ulong? beforeRevision = null, CancellationToken cancellationToken = default)
     {
         DocumentReadModels.ValidatePage(offset, limit);
         if (!TryDocument(id, cancellationToken, out var entry)) return null;
@@ -128,10 +128,23 @@ public sealed partial class InMemoryDocumentRepository : IDocumentRepository, II
         try
         {
             if (entry.Head.IsDeleted) return null;
-            var count = Math.Min(limit, Math.Max(0, entry.Revisions.Count - offset));
+            var end = entry.Revisions.Count;
+            if (beforeRevision is { } bound)
+            {
+                // Lower bound in the retained, ascending keys. Revision numbers may have gaps.
+                var low = 0;
+                while (low < end)
+                {
+                    var middle = low + (end - low) / 2;
+                    if (entry.Revisions.Keys[middle] < bound) low = middle + 1;
+                    else end = middle;
+                }
+                end = low;
+            }
+            var count = Math.Min(limit, Math.Max(0, end - offset));
             var values = ImmutableArray.CreateBuilder<DocumentRevisionRecord>(count);
-            for (var i = 0; i < count; i++) values.Add(entry.Revisions.Values[entry.Revisions.Count - 1 - offset - i]);
-            return new(entry.Head, values.MoveToImmutable(), offset + count < entry.Revisions.Count ? offset + count : null);
+            for (var i = 0; i < count; i++) values.Add(entry.Revisions.Values[end - 1 - offset - i]);
+            return new(entry.Head, values.MoveToImmutable(), offset + count < end ? offset + count : null);
         }
         finally { entry.Guard.Release(); }
     }

@@ -14,6 +14,11 @@ namespace CellBridge.Storage.Tests;
 public sealed class PostgreSqlSelectiveReadTests
 {
     [PostgreSqlFact]
+    public Task StableHistoryExcludesConcurrentAppends() =>
+        BudgetAndQueryTests.WithDatabase(new(), source => CellBridge.Tests.StableHistoryScenario.RunAsync(
+            new(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source))));
+
+    [PostgreSqlFact]
     public Task UnsignedRevisionReadsUseNormalizedRowsAndIgnoreUnrelatedLegacySnapshots() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {

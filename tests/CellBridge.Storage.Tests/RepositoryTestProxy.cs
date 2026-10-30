@@ -12,7 +12,7 @@ internal abstract class RepositoryTestProxy(IDocumentRepository inner) : IDocume
     public virtual ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken ct = default) => Inner.FindAsync(identity, ct);
     public virtual ValueTask<IReadOnlyList<DocumentHead>> ListAsync(int offset, int limit, CancellationToken ct = default) => Inner.ListAsync(offset, limit, ct);
     public virtual ValueTask<DocumentControlRead?> ReadControlAsync(Guid id, CancellationToken ct = default) => Inner.ReadControlAsync(id, ct);
-    public virtual ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, CancellationToken ct = default) => Inner.ReadRevisionsAsync(id, offset, limit, ct);
+    public virtual ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision = null, CancellationToken ct = default) => Inner.ReadRevisionsAsync(id, offset, limit, beforeRevision, ct);
     public virtual ValueTask<DocumentRevisionSelection?> ReadRevisionAsync(Guid id, ulong number, CancellationToken ct = default) => Inner.ReadRevisionAsync(id, number, ct);
     public virtual ValueTask<SaveReceiptRead?> ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken ct = default) => Inner.ReadReceiptAsync(id, operation, ct);
     public virtual ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken ct = default) => Inner.ReadPartitionAsync(id, request, ct);

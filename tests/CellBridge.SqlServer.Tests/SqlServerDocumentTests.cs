@@ -18,6 +18,13 @@ namespace CellBridge.SqlServer.Tests;
 public sealed class SqlServerDocumentTests(SqlServerFixture fixture)
 {
     [Fact]
+    public async Task StableHistoryExcludesConcurrentAppends()
+    {
+        var database = await SqlServerDocuments.CreateAsync(fixture);
+        await CellBridge.Tests.StableHistoryScenario.RunAsync(database.Provider());
+    }
+
+    [Fact]
     public async Task ProviderConformanceAtomicTransitionsAndRestrictedRuntime()
     {
         var database = await SqlServerDocuments.CreateAsync(fixture);

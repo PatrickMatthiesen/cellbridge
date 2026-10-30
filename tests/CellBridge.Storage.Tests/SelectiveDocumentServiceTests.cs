@@ -385,8 +385,8 @@ internal sealed class SelectiveOnlyStateStore(IDocumentRepository inner) : Repos
     public int HistoryReadCount => Volatile.Read(ref _historyReadCount);
     public override ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken ct = default)
     { Interlocked.Increment(ref _metadataReadCount); return Inner.FindAsync(identity, ct); }
-    public override ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, CancellationToken ct = default)
-    { Interlocked.Increment(ref _historyReadCount); return Inner.ReadRevisionsAsync(id, offset, limit, ct); }
+    public override ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision = null, CancellationToken ct = default)
+    { Interlocked.Increment(ref _historyReadCount); return Inner.ReadRevisionsAsync(id, offset, limit, beforeRevision, ct); }
     public override ValueTask<DocumentRevisionSelection?> ReadRevisionAsync(Guid id, ulong number, CancellationToken ct = default)
     { Interlocked.Increment(ref _historyReadCount); return Inner.ReadRevisionAsync(id, number, ct); }
     public override ValueTask<NormalizedDocumentSnapshot?> ExportDocumentAsync(Guid id, CancellationToken ct = default)

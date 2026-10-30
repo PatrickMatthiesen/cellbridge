@@ -23,6 +23,7 @@
     <Compile Include="../CellBridge.Storage.Tests/ImmutableIndexedReadScenario.cs" Link="ImmutableIndexedReadScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/PublicationContentReadScenario.cs" Link="PublicationContentReadScenario.cs" />
     <Compile Include="../CellBridge.Storage.Tests/CurrentMetadataReadScenario.cs" Link="CurrentMetadataReadScenario.cs" />
+    <Compile Include="../CellBridge.Storage.Tests/StableHistoryScenario.cs" Link="StableHistoryScenario.cs" />
     <Using Include="Xunit" />
   </ItemGroup>
   <ItemGroup><Compile Include="../CellBridge.Storage.Tests/ControlReadBatchScenario.cs" Link="ControlReadBatchScenario.cs" /></ItemGroup>

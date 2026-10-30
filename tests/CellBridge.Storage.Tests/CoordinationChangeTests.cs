@@ -74,7 +74,7 @@ public sealed class CoordinationChangeTests
 
     private sealed class ControlOnlyRepository(IDocumentRepository inner) : RepositoryTestProxy(inner)
     {
-        public override ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, CancellationToken ct = default) => throw new InvalidOperationException("Metadata reads must not load history.");
+        public override ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision = null, CancellationToken ct = default) => throw new InvalidOperationException("Metadata reads must not load history.");
         public override ValueTask<DocumentRevisionSelection?> ReadRevisionAsync(Guid id, ulong number, CancellationToken ct = default) => throw new InvalidOperationException("Metadata reads must not load history.");
         public override ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken ct = default) => throw new InvalidOperationException("Metadata reads must not load graph records.");
     }

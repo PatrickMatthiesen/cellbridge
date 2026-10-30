@@ -17,13 +17,17 @@ public sealed partial class CellBridgeDocumentService
     {
         actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Read, cancellationToken);
         var revisions = new List<DocumentRevisionRecord>();
-        int offset = 0;
+        ulong? beforeRevision = null;
+        long? lifecycle = null;
         while (true)
         {
-            var page = await ListRevisionSummariesAsync(resourceId, offset, 256, actor, cancellationToken);
+            var page = await ReadRevisionPageAsync(resourceId, 0, 256, actor, beforeRevision, cancellationToken);
+            lifecycle ??= page.Current.LifecycleGeneration;
+            if (page.Current.LifecycleGeneration != lifecycle)
+                throw new UnauthorizedAccessException("The document lifecycle changed.");
             revisions.AddRange(page.Revisions);
-            if (page.NextOffset is not { } next) return revisions;
-            offset = next;
+            if (page.Revisions.IsEmpty || page.NextOffset is null) return revisions;
+            beforeRevision = page.Revisions[^1].RevisionNumber;
         }
     }
 

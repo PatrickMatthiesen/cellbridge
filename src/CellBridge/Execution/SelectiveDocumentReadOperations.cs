@@ -58,12 +58,19 @@ public sealed partial class CellBridgeDocumentService
     public async ValueTask<RevisionSummaryPage> ListRevisionSummariesAsync(Guid resourceId, int offset, int limit,
         CellBridgeActor actor, CancellationToken cancellationToken = default)
     {
+        var page = await ReadRevisionPageAsync(resourceId, offset, limit, actor, null, cancellationToken);
+        return new(page.Revisions, page.NextOffset);
+    }
+
+    private async ValueTask<DocumentRevisionPage> ReadRevisionPageAsync(Guid resourceId, int offset, int limit,
+        CellBridgeActor actor, ulong? beforeRevision, CancellationToken cancellationToken)
+    {
         DocumentReadModels.ValidatePage(offset, limit);
         actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Read, cancellationToken, fresh: actor.Authorization is null);
-        var page = await provider.Documents.ReadRevisionsAsync(resourceId, offset, limit, cancellationToken) ?? throw MissingDocument();
+        var page = await provider.Documents.ReadRevisionsAsync(resourceId, offset, limit, beforeRevision, cancellationToken) ?? throw MissingDocument();
         Demand(actor, page.Current, DocumentAccess.Read);
         foreach (var revision in page.Revisions) ValidateRevision(page.Current, revision);
-        return new(page.Revisions, page.NextOffset);
+        return page;
     }
 
     public async ValueTask<DocumentRevisionRecord> GetRevisionSummaryAsync(Guid resourceId, ulong revisionNumber,

@@ -109,7 +109,7 @@ public sealed class SeparateFreshPresenceTests
         }
         public override ValueTask<ControlResult> ExecuteControlAsync(DocumentControlCommand command, CancellationToken ct = default)
         { Assert.IsType<DocumentControlCommand.ExpireEditors>(command); Expirations++; return Inner.ExecuteControlAsync(command, ct); }
-        public override ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, CancellationToken ct = default) => throw DeepRead();
+        public override ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision = null, CancellationToken ct = default) => throw DeepRead();
         public override ValueTask<DocumentRevisionSelection?> ReadRevisionAsync(Guid id, ulong number, CancellationToken ct = default) => throw DeepRead();
         public override ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken ct = default) => throw DeepRead();
         public override ValueTask<SavePreparationRead?> PrepareSaveAsync(Guid id, SavePreparationRequest request, CancellationToken ct = default) => throw DeepRead();

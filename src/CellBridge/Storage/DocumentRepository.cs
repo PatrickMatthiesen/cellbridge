@@ -239,7 +239,8 @@ public interface IDocumentRepository : IIndexedSaveSource, IIndexedRepositoryRec
     ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken cancellationToken = default);
     ValueTask<IReadOnlyList<DocumentHead>> ListAsync(int offset, int limit, CancellationToken cancellationToken = default);
     ValueTask<DocumentControlRead?> ReadControlAsync(Guid id, CancellationToken cancellationToken = default);
-    ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, CancellationToken cancellationToken = default);
+    /// <summary>Reads newest-first revisions. An exclusive upper bound filters revision numbers before offset and limit.</summary>
+    ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision = null, CancellationToken cancellationToken = default);
     ValueTask<DocumentRevisionSelection?> ReadRevisionAsync(Guid id, ulong number, CancellationToken cancellationToken = default);
     ValueTask<SaveReceiptRead?> ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken cancellationToken = default);
     ValueTask<PartitionRead?> ReadPartitionAsync(Guid id, PartitionReadRequest request, CancellationToken cancellationToken = default);

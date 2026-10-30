@@ -18,8 +18,8 @@ public sealed partial class PostgreSqlStateStore : IDocumentRepository, IIndexed
         repository.ListAsync(offset, limit, ct);
     ValueTask<DocumentControlRead?> IDocumentRepository.ReadControlAsync(Guid id, CancellationToken ct) =>
         repository.ReadControlAsync(id, ct);
-    ValueTask<DocumentRevisionPage?> IDocumentRepository.ReadRevisionsAsync(Guid id, int offset, int limit, CancellationToken ct) =>
-        repository.ReadRevisionsAsync(id, offset, limit, ct);
+    ValueTask<DocumentRevisionPage?> IDocumentRepository.ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision, CancellationToken ct) =>
+        repository.ReadRevisionsAsync(id, offset, limit, beforeRevision, ct);
     ValueTask<DocumentRevisionSelection?> IDocumentRepository.ReadRevisionAsync(Guid id, ulong number, CancellationToken ct) =>
         repository.ReadRevisionAsync(id, number, ct);
     ValueTask<SaveReceiptRead?> IDocumentRepository.ReadReceiptAsync(Guid id, SaveOperationIdentity operation, CancellationToken ct) =>
