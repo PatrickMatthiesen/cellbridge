@@ -203,7 +203,7 @@ public sealed class AuthenticationKeyProtectionTests
 
     [PostgreSqlFact]
     public Task PlaintextKeysAreMigratedWithoutInvalidatingProtectedPayloads() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        RepositoryTestDatabase.WithDatabase(new(), async source =>
         {
             // DataSource.ConnectionString omits the password after connection.
             // Preserve test credentials while selecting the isolated database.

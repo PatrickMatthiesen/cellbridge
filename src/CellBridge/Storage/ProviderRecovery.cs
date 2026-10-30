@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -6,8 +7,12 @@ namespace CellBridge.Storage.Abstractions;
 
 public sealed record RecoveryHead(Guid ResourceId, long StateVersion);
 public sealed record RecoveryReceipt(Guid OperationId, string Fingerprint, int Documents, int Snapshots);
-public sealed record ProviderSnapshot(ImmutableArray<RecoveryHead> Heads,
-    ImmutableArray<DocumentState> Snapshots, ImmutableArray<RecoveryReceipt> Receipts);
+public sealed record ProviderSnapshot(ImmutableArray<NormalizedDocumentSnapshot> Snapshots, ImmutableArray<RecoveryReceipt> Receipts)
+{
+    [JsonIgnore]
+    public ImmutableArray<RecoveryHead> Heads => Snapshots.Select(snapshot =>
+        new RecoveryHead(snapshot.Current.Head.ResourceId, snapshot.Current.Head.StateVersion)).ToImmutableArray();
+}
 
 /// <summary>Optional whole-provider recovery. Import publishes all heads and its receipt atomically into an empty namespace.</summary>
 public interface IProviderRecoveryStore
@@ -24,6 +29,7 @@ public sealed class RecoveryConflictException(string message) : IOException(mess
 /// <summary>Recovery rejects unknown fields rather than silently dropping newer persisted semantics.</summary>
 public static class RecoveryJson
 {
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     public static JsonSerializerOptions Options { get; } = CreateOptions();
     private static JsonSerializerOptions CreateOptions()
     {
@@ -37,30 +43,45 @@ public static class RecoveryJson
         return options;
     }
 
+    /// <summary>Reads stored JSON text through a validated document.</summary>
+    public static T Read<T>(string text)
+    {
+        try
+        {
+            _ = StrictUtf8.GetByteCount(text);
+            using var json = ParseRawJson(text);
+            return json.RootElement.Deserialize<T>(Options) ?? throw new JsonException("Null recovery record.");
+        }
+        catch (Exception ex) when (ex is JsonException or EncoderFallbackException)
+        { throw new StorageCorruptionException("Unsupported or invalid recovery JSON.", ex); }
+    }
+
+    private static JsonDocument ParseRawJson(string text)
+    {
+        try { return JsonDocument.Parse(text, new() { MaxDepth = 64, AllowDuplicateProperties = false }); }
+        catch (InvalidOperationException ex) { throw new JsonException("Invalid recovery JSON text.", ex); }
+    }
+
     public static T Read<T>(ReadOnlySpan<byte> bytes)
     {
         try
         {
-            using var json = JsonDocument.Parse(bytes.ToArray(), new() { MaxDepth = 64 });
-            CheckDuplicates(json.RootElement);
+            // Validate raw input before converters can skip ignored properties or subtrees.
+            _ = StrictUtf8.GetCharCount(bytes);
+            ValidateRawJson(bytes);
             return JsonSerializer.Deserialize<T>(bytes, Options) ?? throw new JsonException("Null recovery record.");
         }
-        catch (JsonException ex) { throw new StorageCorruptionException("Unsupported or invalid recovery JSON.", ex); }
+        catch (Exception ex) when (ex is JsonException or DecoderFallbackException)
+        { throw new StorageCorruptionException("Unsupported or invalid recovery JSON.", ex); }
     }
 
-    private static void CheckDuplicates(JsonElement node)
+    private static void ValidateRawJson(ReadOnlySpan<byte> bytes)
     {
-        if (node.ValueKind == JsonValueKind.Object)
+        try
         {
-            var names = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var property in node.EnumerateObject())
-            {
-                if (!names.Add(property.Name)) throw new JsonException("Duplicate recovery property.");
-                CheckDuplicates(property.Value);
-            }
+            using var json = JsonDocument.Parse(bytes.ToArray(), new() { MaxDepth = 64, AllowDuplicateProperties = false });
         }
-        else if (node.ValueKind == JsonValueKind.Array)
-            foreach (var item in node.EnumerateArray()) CheckDuplicates(item);
+        catch (InvalidOperationException ex) { throw new JsonException("Invalid recovery JSON text.", ex); }
     }
 }
 
@@ -73,47 +94,24 @@ public static class ProviderRecovery
 
     public static void CheckAdmission(ProviderSnapshot snapshot, StorageLimits limits, DateTime now, bool requireExpired = true)
     {
-        if (snapshot.Heads.IsDefault || snapshot.Snapshots.IsDefault || snapshot.Receipts.IsDefault)
+        if (snapshot.Snapshots.IsDefault || snapshot.Receipts.IsDefault)
             throw new StorageCorruptionException("Missing recovery collections.");
-        StorageLimits.Check("recovery documents", snapshot.Heads.Length, limits.MaxDocuments);
-        if (snapshot.Heads.Select(h => h.ResourceId).Distinct().Count() != snapshot.Heads.Length ||
-            snapshot.Snapshots.Select(s => (s.ResourceId, s.StateVersion)).Distinct().Count() != snapshot.Snapshots.Length)
-            throw new StorageCorruptionException("Duplicate recovery identity.");
-        long decodedGraphMembershipBytes = 0;
-        foreach (var state in snapshot.Snapshots)
+        if (snapshot.Snapshots.Select(document => document.Current.Head.ResourceId).Distinct().Count() != snapshot.Snapshots.Length)
+            throw new StorageCorruptionException("Duplicate recovery document identity.");
+        foreach (var document in snapshot.Snapshots)
         {
-            decodedGraphMembershipBytes = checked(decodedGraphMembershipBytes + StorageLimits.GetDecodedGraphMembershipBytes(state));
-            StorageLimits.Check("recovery decoded graph membership bytes", decodedGraphMembershipBytes, 128L * 1024 * 1024);
-        }
-        var heads = snapshot.Heads.ToDictionary(h => h.ResourceId);
-        var groups = snapshot.Snapshots.GroupBy(s => s.ResourceId).ToDictionary(g => g.Key, g => g.ToArray());
-        if (heads.Count != groups.Count) throw new StorageCorruptionException("Recovery heads and snapshots disagree.");
-        foreach (var head in heads.Values)
-        {
-            if (!groups.TryGetValue(head.ResourceId, out var states) || head.StateVersion != states.Max(s => s.StateVersion))
-                throw new StorageCorruptionException("Missing or stale recovery head.");
-            StorageLimits.Check("retained state snapshots", states.Length, limits.MaxRetainedStateSnapshots);
-            foreach (var state in states)
-            {
-                // Recovery v1 cannot back up the host's external permission store.
-                // Reject states that depend on it, including when AuthorizationPolicy is a known codec field.
-                var security = JsonSerializer.SerializeToElement(state.Security);
-                if (security.TryGetProperty("AuthorizationPolicy", out var binding) && binding.ValueKind != JsonValueKind.Null)
-                    throw new NotSupportedException("Portable recovery of externally bound authorization state is unsupported.");
-                limits.CheckDocument(state);
-                foreach (var revision in state.Revisions)
-                    limits.CheckDocument(state with { Content = revision.Content, Partitions = revision.Partitions,
-                        Revisions = [], Receipts = [], RestoreReceipts = [], WholeFileSaveReceipts = [], Publication = null });
-            }
-            var current = states.Single(s => s.StateVersion == head.StateVersion);
-            if (requireExpired && (current.Editors.Any(e => e.ExpiresUtc > now) || current.Coordination.SchemaOwners.Any(l => l.ExpiresUtc > now) ||
-                current.Coordination.Exclusive is { } exclusive && exclusive.ExpiresUtc > now ||
-                current.Coordination.HostLock is { } host && host.ExpiresUtc > now))
+            NormalizedDocumentRecovery.Validate(document, limits);
+            if (document.Current.Head.Security.AuthorizationPolicy is not null)
+                throw new NotSupportedException("Portable recovery cannot back up the host's external permission store.");
+            if (requireExpired && (document.Current.Editors.Any(editor => editor.ExpiresUtc > now) ||
+                document.Current.Coordination.SchemaOwners.Any(lease => lease.ExpiresUtc > now) ||
+                document.Current.Coordination.Exclusive is { } exclusive && exclusive.ExpiresUtc > now ||
+                document.Current.Coordination.HostLock is { } host && host.ExpiresUtc > now))
                 throw new RecoveryConflictException("Recovery requires expired editor sessions and leases. Preserve the archive and retry after expiry.");
         }
-        if (snapshot.Receipts.Length > 1000 || snapshot.Receipts.Select(r => r.OperationId).Distinct().Count() != snapshot.Receipts.Length ||
-            snapshot.Receipts.Any(r => r.OperationId == Guid.Empty || r.Fingerprint.Length != 64 ||
-                r.Fingerprint.Any(c => !char.IsAsciiHexDigit(c)) || r.Documents < 0 || r.Snapshots < 0))
+        if (snapshot.Receipts.Length > 1000 || snapshot.Receipts.Select(receipt => receipt.OperationId).Distinct().Count() != snapshot.Receipts.Length ||
+            snapshot.Receipts.Any(receipt => receipt.OperationId == Guid.Empty || receipt.Fingerprint.Length != 64 ||
+                receipt.Fingerprint.Any(value => !char.IsAsciiHexDigit(value)) || receipt.Documents < 0 || receipt.Snapshots < 0))
             throw new StorageCorruptionException("Invalid recovery receipt ledger.");
     }
 }

@@ -15,71 +15,42 @@ namespace CellBridge.Storage.Tests;
 public sealed class PostgreSqlAllocationFollowupTests
 {
     [PostgreSqlFact]
-    public Task StateWriteRepairsMissingStaleAndUnexpectedSummariesWithoutTrackingUnchangedRows() =>
+    public Task ControlMutationsDoNotTrackOrRewriteImmutableApplicationHistory() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
             var changes = new SummaryChangesInterceptor();
-            var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
-                .UseNpgsql(source).AddInterceptors(changes).Options;
-            var store = new PostgreSqlStateStore(options);
+            var options = new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(source).AddInterceptors(changes).Options;
+            IDocumentRepository store = new PostgreSqlStateStore(options);
             var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
-            var state = (await service.CreateAsync("/summary-repair.docx", MinimalDocx.Create(), TestActor.Value))!;
-            state = await RevisionHistoryTests.Save(service, state, "second");
-            state = await RevisionHistoryTests.Save(service, state, "third");
-            var expected = JsonSerializer.Serialize((await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 10))!.Revisions);
-            await using (var corrupt = source.CreateCommand("""
-                UPDATE cellbridge_revision_summaries SET summary_json='{}' WHERE revision_number=1;
-                DELETE FROM cellbridge_revision_summaries WHERE revision_number=2;
-                INSERT INTO cellbridge_revision_summaries(resource_id,lifecycle_generation,revision_number,summary_json)
-                SELECT resource_id,lifecycle_generation,900,summary_json FROM cellbridge_revision_summaries WHERE revision_number=3;
-                INSERT INTO cellbridge_revision_summaries(resource_id,lifecycle_generation,revision_number,summary_json)
-                SELECT resource_id,lifecycle_generation+1,901,summary_json FROM cellbridge_revision_summaries WHERE revision_number=3;
-                """))
-                await corrupt.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageCorruptionException>(() =>
-                store.FindReadMetadataByResourceIdAsync(state.ResourceId).AsTask());
-
+            var head = (await service.CreateAsync("/history-control.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var expected = JsonSerializer.Serialize((await store.ReadRevisionsAsync(head.ResourceId, 0, 10))!.Revisions);
             changes.Rows.Clear();
-            await store.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current, true));
-
-            Assert.Equal(expected, JsonSerializer.Serialize((await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 10))!.Revisions));
-            Assert.Equal(4, changes.Rows.Count);
-            Assert.Contains((1m, EntityState.Modified), changes.Rows);
-            Assert.Contains((2m, EntityState.Added), changes.Rows);
-            Assert.Contains((900m, EntityState.Deleted), changes.Rows);
-            Assert.Contains((901m, EntityState.Deleted), changes.Rows);
-            Assert.DoesNotContain(changes.Rows, row => row.Revision == 3m);
+            Assert.True((await new SharedDocumentLocks(service).ApplyAsync(head.ResourceId, HostLockOperation.Acquire, "host", TestActor.Value)).Success);
+            Assert.Empty(changes.Rows);
+            Assert.Equal(expected, JsonSerializer.Serialize((await store.ReadRevisionsAsync(head.ResourceId, 0, 10))!.Revisions));
         });
 
     [PostgreSqlFact]
-    public Task CachedStateSizeKeepsExactAccountingAcrossUnicodeStatesAndSnapshotRetention() =>
-        BudgetAndQueryTests.WithDatabase(new() { MaxRetainedStateSnapshots = 2 }, async source =>
+    public Task UnicodeControlUpdatesKeepOneSmallHeadAndNoLegacyAggregateSnapshots() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var limits = new StorageLimits { MaxRetainedStateSnapshots = 2 };
-            var store = new PostgreSqlStateStore(source, limits);
-            var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source), limits));
-            var state = (await service.CreateAsync("/資料-é-😀.docx", MinimalDocx.Create("résumé"), TestActor.Value))!;
-            for (var index = 0; index < 4; index++)
-                await store.TransitionAsync(state.ResourceId, (current, now) =>
-                    new StateTransition<bool>(current with { ModifiedUtc = now }, true));
-
-            await using var accounting = source.CreateCommand("""
-                SELECT (SELECT count(*) FROM cellbridge_states) = 2,
-                    stored_bytes = (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects)
-                        + (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states)
-                FROM cellbridge_usage
-                """);
-            await using var reader = await accounting.ExecuteReaderAsync();
-            Assert.True(await reader.ReadAsync());
-            Assert.True(reader.GetBoolean(0));
-            Assert.True(reader.GetBoolean(1));
+            IDocumentRepository store = new PostgreSqlStateStore(source);
+            var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
+            var head = (await service.CreateAsync("/資料-é-😀.docx", MinimalDocx.Create("résumé"), TestActor.Value))!;
+            var locks = new SharedDocumentLocks(service);
+            foreach (var operation in new[] { HostLockOperation.Acquire, HostLockOperation.Refresh, HostLockOperation.Refresh, HostLockOperation.Release })
+                Assert.True((await locks.ApplyAsync(head.ResourceId, operation, "host", TestActor.Value)).Success);
+            Assert.Equal(head.Path, (await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId)))!.Path);
+            Assert.Single((await store.ReadRevisionsAsync(head.ResourceId, 0, 10))!.Revisions);
+            await using var rows = source.CreateCommand("SELECT (SELECT count(*) FROM cellbridge_states)=0 AND (SELECT count(*) FROM cellbridge_repository_heads)=1");
+            Assert.Equal(true, await rows.ExecuteScalarAsync());
         });
 
     [PostgreSqlFact]
     public Task CompiledReadsHonorEachStoresModelTimeoutAndCommandInterceptors() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var originalStore = new PostgreSqlStateStore(source);
+            IDocumentRepository originalStore = new PostgreSqlStateStore(source);
             var originalContent = new PostgreSqlContentStore(source);
             var state = (await new CellBridgeDocumentService(new(originalStore, originalContent))
                 .CreateAsync("/compiled-model.docx", MinimalDocx.Create(), TestActor.Value))!;
@@ -87,10 +58,10 @@ public sealed class PostgreSqlAllocationFollowupTests
             var handle = await originalContent.WriteAsync(new MemoryStream(bytes, writable: false));
             // Bind the ordinary model first. A process-wide delegate would reject
             // or incorrectly reuse it for the customized store below.
-            await originalStore.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(null, true));
+            Assert.NotNull(await originalStore.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
             Assert.Equal(bytes, await originalContent.ReadVerifiedAsync(handle));
             await using (var aliases = source.CreateCommand("""
-                CREATE VIEW followup_cellbridge_states AS SELECT * FROM cellbridge_states;
+                CREATE VIEW followup_cellbridge_repository_heads AS SELECT * FROM cellbridge_repository_heads;
                 CREATE VIEW followup_cellbridge_objects AS SELECT * FROM cellbridge_objects;
                 CREATE VIEW followup_cellbridge_chunks AS SELECT * FROM cellbridge_chunks;
                 """))
@@ -101,16 +72,15 @@ public sealed class PostgreSqlAllocationFollowupTests
                 .UseNpgsql(source, postgres => postgres.CommandTimeout(45))
                 .ReplaceService<IModelCustomizer, AlternateReadModelCustomizer>()
                 .AddInterceptors(commands).Options;
-            var store = new PostgreSqlStateStore(options);
+            IDocumentRepository store = new PostgreSqlStateStore(options);
             var content = new PostgreSqlContentStore(options);
             for (var index = 0; index < 2; index++)
             {
-                Assert.Equal(state.StateVersion, await store.TransitionAsync(state.ResourceId,
-                    (current, _) => new StateTransition<long>(null, current.StateVersion)));
+                Assert.Equal(state.StateVersion, (await store.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.StateVersion);
                 Assert.Equal(bytes, await content.ReadVerifiedAsync(handle));
                 Assert.Equal(handle, await content.WriteAsync(new MemoryStream(bytes, writable: false)));
             }
-            foreach (var table in new[] { "states", "objects", "chunks" })
+            foreach (var table in new[] { "repository_heads", "objects", "chunks" })
                 Assert.Contains(commands.Reads, read => read.Sql.Contains("followup_cellbridge_" + table, StringComparison.Ordinal));
             Assert.All(commands.Reads, read => Assert.Equal(45, read.Timeout));
             Assert.Equal(bytes, await originalContent.ReadVerifiedAsync(handle));
@@ -120,7 +90,7 @@ public sealed class PostgreSqlAllocationFollowupTests
     public Task DifferentModelsWithinOneStoreUseFallbackAndKeepExplicitConnectionOwnership() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var originalStore = new PostgreSqlStateStore(source);
+            IDocumentRepository originalStore = new PostgreSqlStateStore(source);
             var originalContent = new PostgreSqlContentStore(source);
             var bytes = MinimalDocx.Create("fallback");
             var state = (await new CellBridgeDocumentService(new(originalStore, originalContent))
@@ -131,15 +101,16 @@ public sealed class PostgreSqlAllocationFollowupTests
                 .UseNpgsql(connection)
                 .ReplaceService<IModelCacheKeyFactory, ContextIdentityModelCacheKeyFactory>()
                 .AddInterceptors(commands).Options;
-            var store = new PostgreSqlStateStore(options);
+            IDocumentRepository store = new PostgreSqlStateStore(options);
             var content = new PostgreSqlContentStore(options);
+            var physical = (await originalStore.ReadPartitionAsync(state.ResourceId, new(0) { IncludeCatalog = true }))!.Elements[0].Payload;
+            var physicalBytes = await originalContent.ReadVerifiedAsync(physical);
             for (var index = 0; index < 2; index++)
             {
-                Assert.Equal(state.StateVersion, await store.TransitionAsync(state.ResourceId,
-                    (current, _) => new StateTransition<long>(null, current.StateVersion)));
-                Assert.Equal(bytes, await content.ReadVerifiedAsync(state.Content));
+                Assert.Equal(state.StateVersion, (await store.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.StateVersion);
+                Assert.Equal(physicalBytes, await content.ReadVerifiedAsync(physical));
             }
-            var stateModels = commands.Reads.Where(read => read.Sql.Contains("cellbridge_states", StringComparison.Ordinal))
+            var stateModels = commands.Reads.Where(read => read.Sql.Contains("cellbridge_repository_heads", StringComparison.Ordinal))
                 .Select(read => read.Model).Distinct().ToArray();
             var objectModels = commands.Reads.Where(read => read.Sql.Contains("cellbridge_objects", StringComparison.Ordinal))
                 .Select(read => read.Model).Distinct().ToArray();
@@ -155,35 +126,34 @@ public sealed class PostgreSqlAllocationFollowupTests
             var commands = new ReadCommandsInterceptor();
             var options = new DbContextOptionsBuilder<CellBridgeDbContext>()
                 .UseNpgsql(source).AddInterceptors(commands).Options;
-            var store = new PostgreSqlStateStore(options);
+            IDocumentRepository store = new PostgreSqlStateStore(options);
             var content = new PostgreSqlContentStore(options);
             var bytes = MinimalDocx.Create("cancellation");
             var state = (await new CellBridgeDocumentService(new(store, content))
                 .CreateAsync("/compiled-cancel.docx", bytes, TestActor.Value))!;
-            foreach (var table in new[] { "cellbridge_states", "cellbridge_objects", "cellbridge_chunks" })
+            var physical = (await store.ReadPartitionAsync(state.ResourceId, new(0) { IncludeCatalog = true }))!.Elements[0].Payload;
+            var physicalBytes = await content.ReadVerifiedAsync(physical);
+            foreach (var table in new[] { "cellbridge_repository_heads", "cellbridge_objects", "cellbridge_chunks" })
             {
                 using var cancellation = new CancellationTokenSource();
                 commands.CancelTable = table;
                 commands.CancelSource = cancellation;
-                if (table == "cellbridge_states")
+                if (table == "cellbridge_repository_heads")
                 {
-                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.TransitionAsync<bool>(state.ResourceId,
-                        (current, _) => throw new InvalidOperationException("Cancelled lookup reached transition."),
-                        cancellation.Token).AsTask());
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.FindAsync(new DocumentIdentity.Resource(state.ResourceId), cancellation.Token).AsTask());
                 }
                 else
                 {
                     await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
                     {
-                        await using var stream = await content.OpenReadAsync(state.Content, cancellation.Token);
+                        await using var stream = await content.OpenReadAsync(physical, cancellation.Token);
                         await stream.CopyToAsync(Stream.Null, cancellation.Token);
                     });
                 }
                 Assert.Null(commands.CancelTable);
                 Assert.True(cancellation.IsCancellationRequested);
-                Assert.Equal(state.StateVersion, await store.TransitionAsync(state.ResourceId,
-                    (current, _) => new StateTransition<long>(null, current.StateVersion)));
-                Assert.Equal(bytes, await content.ReadVerifiedAsync(state.Content));
+                Assert.Equal(state.StateVersion, (await store.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.StateVersion);
+                Assert.Equal(physicalBytes, await content.ReadVerifiedAsync(physical));
             }
         });
 
@@ -195,7 +165,7 @@ public sealed class PostgreSqlAllocationFollowupTests
             InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
             foreach (var entry in eventData.Context!.ChangeTracker.Entries()
-                .Where(entry => entry.Metadata.GetTableName() == "cellbridge_revision_summaries"))
+                .Where(entry => entry.Metadata.GetTableName() == "cellbridge_repository_revisions"))
                 Rows.Add(((decimal)entry.Property("RevisionNumber").CurrentValue!, entry.State));
             return ValueTask.FromResult(result);
         }
@@ -229,7 +199,7 @@ public sealed class PostgreSqlAllocationFollowupTests
         {
             base.Customize(modelBuilder, context);
             foreach (var entity in modelBuilder.Model.GetEntityTypes())
-                if (entity.GetTableName() is "cellbridge_states" or "cellbridge_objects" or "cellbridge_chunks")
+                if (entity.GetTableName() is "cellbridge_repository_heads" or "cellbridge_objects" or "cellbridge_chunks")
                     entity.SetTableName("followup_" + entity.GetTableName());
         }
     }

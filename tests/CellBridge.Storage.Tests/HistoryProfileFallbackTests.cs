@@ -22,7 +22,7 @@ public sealed class HistoryProfileFallbackTests
         Assert.True(query.IgnoredQueryChangesVersioning);
         Assert.False(query.HasUnsupportedQueryControls);
         Assert.Null(query.Waterline);
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/profile.docx", MinimalDocx.Create(), TestActor.Value))!;
         async Task<byte[]> Execute(QueryChangesSubRequestData data)

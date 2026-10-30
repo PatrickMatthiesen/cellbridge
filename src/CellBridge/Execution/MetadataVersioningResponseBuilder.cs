@@ -17,23 +17,37 @@ namespace CellBridge.AspNetCore;
 public static class MetadataVersioningResponseBuilder
 {
     /// <summary>Lists exactly the resource revisions available through the authorized history route.</summary>
-    public static FssHttpSubResponse BuildGetVersions(DocumentState state, string publicOrigin)
+    public static FssHttpSubResponse BuildGetVersions(IReadOnlyList<DocumentRevisionRecord> revisions, string publicOrigin)
     {
-        var revisions = RevisionHistory.Initialize(state).Revisions.Reverse().ToArray();
-        var results = new XElement("results", new XElement("versioning", new XAttribute("enabled", state.Revisions.IsEmpty ? "0" : "1")));
-        for (int i = 0; i < revisions.Length; i++)
+        var results = new XElement("results", new XElement("versioning", new XAttribute("enabled", revisions.Count == 0 ? "0" : "1")));
+        for (int i = 0; i < revisions.Count; i++)
         {
             var revision = revisions[i];
             results.Add(new XElement("result",
                 new XAttribute("version", (i == 0 ? "@" : "") + OuterDocumentOperations.Version(revision.RevisionNumber)),
-                new XAttribute("url", OuterDocumentOperations.HistoricalUrl(state.ResourceId, revision.LifecycleGeneration, revision.RevisionNumber, publicOrigin)),
+                new XAttribute("url", OuterDocumentOperations.HistoricalUrl(revision.ResourceId, revision.LifecycleGeneration, revision.RevisionNumber, publicOrigin)),
                 new XAttribute("created", revision.CreatedUtc.ToString("M/d/yyyy h:mm tt", CultureInfo.InvariantCulture)),
                 new XAttribute("createdRaw", FormatProtocolDate(revision.CreatedUtc)),
                 new XAttribute("createdBy", revision.Author.Login), new XAttribute("createdByName", revision.Author.DisplayName),
-                new XAttribute("size", revision.Content.Length), new XAttribute("comments", "")));
+                new XAttribute("size", revision.Package.Length), new XAttribute("comments", "")));
         }
         return new() { Type = SubRequestType.GetVersions, ErrorCode = "Success", HResult = "0",
             SubResponseXml = new XElement("GetVersionsResponse", new XElement("GetVersionsResult", results)).ToString(SaveOptions.DisableFormatting) };
+    }
+
+    public static FssHttpSubResponse BuildGetDocMetaInfo(DocumentHead document)
+    {
+        var properties = new XElement("DocProps",
+            Property("vti_filesize", document.Package.Length.ToString(CultureInfo.InvariantCulture)),
+            Property("vti_contentversion", document.ContentVersion.ToString(CultureInfo.InvariantCulture)),
+            Property("vti_docstoreversion", document.ContentVersion.ToString(CultureInfo.InvariantCulture)),
+            Property("vti_modifiedby", document.Security.ModifiedBy?.Login ?? "unknown"),
+            Property("vti_author", document.Security.CreatedBy?.Login ?? "unknown"),
+            Property("vti_timecreated", FormatProtocolDate(document.CreatedUtc)),
+            Property("vti_contentversionisdirty", "false"), Property("vti_level", CapturedItemLevel),
+            Property("vti_streamschema", CapturedStreamSchema));
+        return new() { Type = SubRequestType.GetDocMetaInfo, ErrorCode = "Success", HResult = "0",
+            SubResponseDataXml = properties.ToString(SaveOptions.DisableFormatting) };
     }
 
     // These are the values observed repeatedly in the SharePoint capture for

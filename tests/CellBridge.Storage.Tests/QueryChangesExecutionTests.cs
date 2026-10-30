@@ -23,6 +23,8 @@ public sealed class QueryChangesExecutionTests
         var response = (await service.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents, request,
             new Dictionary<string, string>(), TestActor.Value)).Response;
 
+        // MS-FSSHTTPB 2.2.1.12 defines an array of immutable data elements,
+        // without a type-order rule. Check its complete contents and repeatability.
         Assert.Equal(
             new[]
             {
@@ -31,11 +33,13 @@ public sealed class QueryChangesExecutionTests
                 DataElementType.RevisionManifestDataElementData,
                 DataElementType.ObjectGroupDataElementData,
                 DataElementType.StorageIndexDataElementData,
-            },
-            response.DataElementPackage!.DataElements.Select(element => element.DataElementType));
-        var persisted = (await provider.State.FindByResourceIdAsync(document.ResourceId))!;
-        Assert.Equal(new byte[] { 1, 2, 3 }, await provider.Content.ReadVerifiedAsync(
-            persisted.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents).Content));
+            }.OrderBy(type => (uint)type),
+            response.DataElementPackage!.DataElements.Select(element => element.DataElementType).OrderBy(type => (uint)type));
+        var repeated = await service.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents, request,
+            new Dictionary<string, string>(), TestActor.Value);
+        Assert.Equal(response.ToByteArray(), repeated.Response.ToByteArray());
+        var persisted = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(document.ResourceId)))!;
+        Assert.Equal(new byte[] { 1, 2, 3 }, await StorageTestDocuments.PackageAsync(provider,persisted.Package));
         Assert.False(Assert.IsType<QueryChangesSubResponseData>(
             Assert.Single(response.SubResponses).Data).PartialResult);
 

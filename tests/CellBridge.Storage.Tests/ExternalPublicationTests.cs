@@ -39,34 +39,35 @@ public sealed class ExternalPublicationTests
         var (state, first, second) = await PrepareTwo(provider, destination);
         var lost = new AfterWriteFailure(destination);
         var publisher = new ExternalRevisionPublisher(provider, lost);
-        var head = (await provider.State.FindByResourceIdAsync(state.ResourceId))!.Publication!.Pending[0];
+        var head = (await provider.Documents.ReadNextDeliveryAsync(state.ResourceId))!.Revision;
         Assert.Equal(PublicationAttempt.TransientFailure, await publisher.PublishNextAsync(state.ResourceId));
-        Assert.Equal(head, (await peer.State.FindByResourceIdAsync(state.ResourceId))!.Publication!.Pending[0]);
-        Assert.Equal(first.State.Content.Sha256, (await destination.ReadAsync()).Hash);
+        Assert.Equal(head, (await peer.Documents.ReadNextDeliveryAsync(state.ResourceId))!.Revision);
+        Assert.Equal(first.State.Package.Sha256, (await destination.ReadAsync()).Hash);
         // Recreate publisher and destination objects over the shared durable stores.
         var replay = new ExternalRevisionPublisher(peer, restartedDestination);
         var attempts = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => replay.PublishNextAsync(state.ResourceId).AsTask()));
         Assert.Contains(PublicationAttempt.Delivered, attempts);
-        while ((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Publication!.Pending.Length != 0)
+        while ((await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Counters.PendingDeliveries != 0)
             Assert.Equal(PublicationAttempt.Delivered, await replay.PublishNextAsync(state.ResourceId));
-        Assert.Equal(second.State.Content.Sha256, (await destination.ReadAsync()).Hash);
+        Assert.Equal(second.State.Package.Sha256, (await destination.ReadAsync()).Hash);
         // A delayed earlier delivery must return its durable receipt without changing the newer bytes.
-        await using var oldBytes = await provider.Content.OpenReadAsync(head.Content);
-        var old = await destination.CompareExchangeAsync(new(state.Publication!.BindingId, state.Publication.Destination, "r0", head), oldBytes);
+        await using var oldBytes = await provider.Packages.OpenReadAsync(head.Package);
+        var old = await destination.CompareExchangeAsync(new(state.Delivery!.BindingId, state.Delivery.Destination, "r0", head), oldBytes);
         Assert.Equal(ExternalDeliveryStatus.Applied, old.Status);
-        Assert.Equal(second.State.Content.Sha256, (await destination.ReadAsync()).Hash);
+        Assert.Equal(second.State.Package.Sha256, (await destination.ReadAsync()).Hash);
         // New local commit followed by a non-CellBridge write must conflict and pin the undelivered local revision.
-        var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        await provider.State.TransitionAsync(state.ResourceId, (c, _) =>
-            new StateTransition<bool>(ExternalPublication.Append(c, c with { ContentVersion = c.ContentVersion + 1 }, Guid.NewGuid(), provider.Limits), true));
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        await RepositoryTestPublications.SaveAsync(new(provider), current, MinimalDocx.Create("third local revision"));
         await destination.RemoteWriteAsync("remote-author");
         Assert.Equal(PublicationAttempt.Conflict, await replay.PublishNextAsync(state.ResourceId));
-        var blocked = (await peer.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Single(blocked.Publication!.Pending);
-        Assert.Contains(blocked.Publication.Pending[0].Content, StorageReferences.Handles(blocked));
+        var blocked = (await peer.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        var pinned = Assert.Single((await provider.Documents.ExportDocumentAsync(state.ResourceId))!.Deliveries);
+        Assert.Equal(blocked.Package, pinned.Package);
+        Assert.Equal(1, blocked.Counters.PendingDeliveries);
+        Assert.Equal(pinned.Package.Length, (await StorageTestDocuments.PackageAsync(provider, pinned.Package)).LongLength);
         Assert.Equal("remote-author", (await destination.ReadAsync()).Hash);
-        Assert.False(await ((IDocumentLifecycleStore)provider.State).TryDeleteAsync(state.ResourceId, 1, blocked.StateVersion));
-        Assert.True(await replay.RetryAsync(state.ResourceId, blocked.Publication.BindingId, blocked.Publication.Pending[0].OperationId));
+        Assert.False((await provider.Documents.ChangeLifecycleAsync(new DocumentLifecycleCommand.Delete(state.ResourceId, 1, blocked.StateVersion))).Applied);
+        Assert.True(await replay.RetryAsync(state.ResourceId, blocked.Delivery!.BindingId, pinned.OperationId));
         Assert.Equal(PublicationAttempt.Conflict, await replay.PublishNextAsync(state.ResourceId));
         Assert.Equal(current.ContentVersion + 1, blocked.ContentVersion);
     }
@@ -83,9 +84,9 @@ public sealed class ExternalPublicationTests
         Assert.Equal(PublicationAttempt.Delivered, await new ExternalRevisionPublisher(provider, destination).PublishNextAsync(state.ResourceId));
         delayed.Continue.SetResult();
         Assert.Equal(PublicationAttempt.Conflict, await failing);
-        var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Single(current.Publication!.Pending);
-        Assert.Null(current.Publication.BlockedReason);
+        var current = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(1, current.Counters.PendingDeliveries);
+        Assert.Null(current.Delivery!.BlockedReason);
         Assert.Equal(PublicationAttempt.Delivered, await new ExternalRevisionPublisher(provider, destination).PublishNextAsync(state.ResourceId));
     }
 
@@ -101,11 +102,11 @@ public sealed class ExternalPublicationTests
         var peer = new ExternalRevisionPublisher(provider, destination);
         Assert.Equal(PublicationAttempt.Delivered, await peer.PublishNextAsync(state.ResourceId));
         Assert.Equal(PublicationAttempt.Delivered, await peer.PublishNextAsync(state.ResourceId));
-        var delivered = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.True(await ((IDocumentLifecycleStore)provider.State).TryDeleteAsync(state.ResourceId, 1, delivered.StateVersion));
+        var delivered = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.True((await provider.Documents.ChangeLifecycleAsync(new DocumentLifecycleCommand.Delete(state.ResourceId, 1, delivered.StateVersion))).Applied);
         delayed.Continue.SetResult();
         Assert.Equal(PublicationAttempt.Superseded, await pending);
-        Assert.Null(await provider.State.FindByResourceIdAsync(state.ResourceId));
+        Assert.Null(await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Fact]
@@ -114,12 +115,13 @@ public sealed class ExternalPublicationTests
         var provider = Memory();
         var destination = MemoryDestination();
         var (state, _, _) = await PrepareTwo(provider, destination);
-        var broken = new StorageProvider(provider.State, new MissingContent());
+        var broken = new StorageProvider(provider.Documents, new MissingContent());
         Assert.Equal(PublicationAttempt.ContentUnavailable, await new ExternalRevisionPublisher(broken, destination).PublishNextAsync(state.ResourceId));
         Assert.Equal("initial", (await destination.ReadAsync()).Hash);
-        var blocked = (await provider.State.FindByResourceIdAsync(state.ResourceId))!.Publication!;
-        Assert.Equal(2, blocked.Pending.Length);
-        Assert.True(await new ExternalRevisionPublisher(provider, destination).RetryAsync(state.ResourceId, blocked.BindingId, blocked.Pending[0].OperationId));
+        var blocked = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        var pinned = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!.Deliveries[0];
+        Assert.Equal(2, blocked.Counters.PendingDeliveries);
+        Assert.True(await new ExternalRevisionPublisher(provider, destination).RetryAsync(state.ResourceId, blocked.Delivery!.BindingId, pinned.OperationId));
         Assert.Equal(PublicationAttempt.Delivered, await new ExternalRevisionPublisher(provider, destination).PublishNextAsync(state.ResourceId));
     }
 
@@ -127,7 +129,7 @@ public sealed class ExternalPublicationTests
     public async Task FullQueueRejectsSaveAndReceiptReplayDoesNotEnqueue()
     {
         var limits = new StorageLimits { MaxPendingExternalRevisions = 1 };
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore(), limits);
+        var provider = StorageTestDocuments.Memory(limits: limits);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/capacity.docx", MinimalDocx.Create(), TestActor.Value))!;
         var publisher = new ExternalRevisionPublisher(provider, MemoryDestination());
@@ -136,55 +138,52 @@ public sealed class ExternalPublicationTests
         var first = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         var replay = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(replay.AcceptedSaves).IsReplay);
-        Assert.Single(replay.State.Publication!.Pending);
+        Assert.Equal(1, replay.State.Counters.PendingDeliveries);
         var refused = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
-            StorageTests.Fixture("save-second"), new Dictionary<string, string>(), TestActor.Value);
+            await StorageTestDocuments.SaveRequestAsync(service, first.State, MinimalDocx.Create("second")), new Dictionary<string, string>(), TestActor.Value);
         Assert.True(Assert.Single(refused.Response.SubResponses).Status);
-        Assert.Equal(first.State.ContentVersion, (await provider.State.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
+        Assert.Equal(first.State.ContentVersion, (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.ContentVersion);
     }
 
     [PostgreSqlFact]
     public Task LeaseSnapshotsCannotPruneUndeliveredContentPins() =>
-        BudgetAndQueryTests.WithDatabase(new() { MaxRetainedStateSnapshots = 2 }, async source =>
+        RepositoryTestDatabase.WithDatabase(new() { MaxRetainedStateSnapshots = 2 }, async source =>
         {
             var limits = new StorageLimits { MaxRetainedStateSnapshots = 2 };
             var provider = new StorageProvider(new PostgreSqlStateStore(source, limits), new PostgreSqlContentStore(source), limits);
             var destination = new TestDestination(Guid.NewGuid(), source);
             await destination.InitializeAsync();
             var (state, first, _) = await PrepareTwo(provider, destination);
+            var locks = new SharedDocumentLocks(new(provider));
+            Assert.True((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "maintenance-lease", TestActor.Value)).Success);
             for (var i = 0; i < 5; i++)
-                await provider.State.TransitionAsync(state.ResourceId, (c, _) => new StateTransition<bool>(c with
-                { Coordination = c.Coordination with { Generation = c.Coordination.Generation + 1 } }, true));
-            var current = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-            Assert.Contains(first.State.Content, StorageReferences.Handles(current));
+                Assert.True((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Refresh, "maintenance-lease", TestActor.Value)).Success);
+            var current = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
+            Assert.Contains(current.Deliveries, delivery => delivery.Package == first.State.Package);
             await new StorageMaintenance(source).CollectOrphansAsync(apply: true, quiescent: true);
-            Assert.Equal(first.State.Content.Sha256, Convert.ToHexStringLower(SHA256.HashData(await provider.Content.ReadVerifiedAsync(first.State.Content))));
-            var restored = await (await StoredDocument.RestoreAsync(current, provider.Content)).CaptureAsync(provider.Content);
-            Assert.Equal(current.Publication, restored.Publication);
-            Assert.Equal(current.LifecycleGeneration, restored.LifecycleGeneration);
+            var bytes = await StorageTestDocuments.PackageAsync(provider, first.State.Package);
+            Assert.Equal(first.State.Package.Sha256, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+            var restored = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
+            Assert.Equal(JsonSerializer.Serialize(current.Deliveries), JsonSerializer.Serialize(restored.Deliveries));
+            Assert.Equal(current.Current.Head.LifecycleGeneration, restored.Current.Head.LifecycleGeneration);
         });
 
-    private static StorageProvider Memory() => new(new InMemoryStateStore(), new InMemoryContentStore());
+    private static StorageProvider Memory() => StorageTestDocuments.Memory();
     private static TestDestination MemoryDestination() => new(Guid.NewGuid());
-    private static async Task<FsshttpbCellRequest> FirstRequest(StorageProvider provider, DocumentState state)
-    {
-        var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
-        return request;
-    }
-    private static async Task<(DocumentState, CellExecution, CellExecution)> PrepareTwo(StorageProvider provider, TestDestination destination)
+    private static Task<FsshttpbCellRequest> FirstRequest(StorageProvider provider, DocumentHead state) =>
+        StorageTestDocuments.SaveRequestAsync(new(provider), state, MinimalDocx.Create("first"));
+    private static async Task<(DocumentHead, CellExecution, CellExecution)> PrepareTwo(StorageProvider provider, TestDestination destination)
     {
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/publication-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var publisher = new ExternalRevisionPublisher(provider, destination);
         Assert.True(await publisher.BindAsync(state.ResourceId, 1, 0, Guid.NewGuid(), destination.Id.ToString(), "r0"));
-        state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        state = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         var first = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, await FirstRequest(provider, state), new Dictionary<string, string>(), TestActor.Value);
-        var second = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, StorageTests.Fixture("save-second"), new Dictionary<string, string>(), TestActor.Value);
+        var second = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, await StorageTestDocuments.SaveRequestAsync(service, first.State, MinimalDocx.Create("second")), new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(first.Response.SubResponses).Status);
         Assert.False(Assert.Single(second.Response.SubResponses).Status);
-        Assert.Equal(2, second.State.Publication!.Pending.Length);
+        Assert.Equal(2, second.State.Counters.PendingDeliveries);
         return (state, first, second);
     }
     private sealed class MissingContent : IContentStore
@@ -250,8 +249,8 @@ public sealed class ExternalPublicationTests
         {
             using var content = new MemoryStream();
             await bytes.CopyToAsync(content, cancellationToken);
-            Assert.Equal(request.Revision.Content.Length, content.Length);
-            Assert.Equal(request.Revision.Content.Sha256, Convert.ToHexStringLower(SHA256.HashData(content.ToArray())));
+            Assert.Equal(request.Revision.Package.Length, content.Length);
+            Assert.Equal(request.Revision.Package.Sha256, Convert.ToHexStringLower(SHA256.HashData(content.ToArray())));
             var fingerprint = JsonSerializer.Serialize(request);
             return await Mutate(state =>
             {
@@ -262,7 +261,7 @@ public sealed class ExternalPublicationTests
                 }
                 if (request.ExpectedRevision != "r" + state.Counter) return (state, new ExternalDeliveryResult(ExternalDeliveryStatus.Conflict));
                 var revision = "r" + (state.Counter + 1);
-                return (state with { Counter = state.Counter + 1, Hash = request.Revision.Content.Sha256,
+                return (state with { Counter = state.Counter + 1, Hash = request.Revision.Package.Sha256,
                     Receipts = state.Receipts.Add(request.Revision.OperationId, new(fingerprint, revision)) },
                     new ExternalDeliveryResult(ExternalDeliveryStatus.Applied, revision));
             });

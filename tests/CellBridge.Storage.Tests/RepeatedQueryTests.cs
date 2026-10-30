@@ -14,7 +14,7 @@ public class RepeatedQueryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task UnsupportedLegacyScopePreservesEarlierQueryAndSaveAcknowledgement(bool postgreSql)
+    public async Task SelfContainedLegacyScopePreservesEarlierQueryAndSaveAcknowledgement(bool postgreSql)
     {
         await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
         var provider = testProvider.Provider;
@@ -24,15 +24,47 @@ public class RepeatedQueryTests
         f.MakeSelfContainedWithUnmappedAncestor();
         var request = Query(1);
         request.DataElementPackage = new(); request.DataElementPackage.DataElements.AddRange(f.Elements);
-        request.SubRequests.Add(Save(state, f));
+        request.SubRequests.Add(Save(f));
+        StorageTests.Rebase(request,await StorageTestDocuments.GraphAsync(service,state));
         request.SubRequests.Add(Query(3, cell: f.Cell).SubRequests[0]);
         var result = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.False(result.SubResponses[0].Status);
         Assert.False(result.SubResponses[1].Status);
-        Assert.True(result.SubResponses[2].Status);
-        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, result.SubResponses[2].Error!.ErrorCode);
+        Assert.False(result.SubResponses[2].Status);
+        var selected = Assert.IsType<QueryChangesSubResponseData>(result.SubResponses[2].Data).StorageIndexExtendedGuid;
+        Assert.Equal(f.Bytes,PartitionGraphSnapshot.Create(result.DataElementPackage!.DataElements,selected).Materialize());
         Assert.NotEmpty(result.DataElementPackage!.DataElements);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task QueryChangesUsesMappingsFromItsPartitionRead(bool postgreSql)
+    {
+        await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
+        var provider = testProvider.Provider;
+        var state = await PublishGraph(provider);
+        var partition = (await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0)))!.Partition;
+        var scope = new IndexedGraphScope(state.ResourceId, state.LifecycleGeneration, 0);
+        var expected = await provider.Documents.ReadMappingsAsync(scope, partition.PublicationSequence);
+        Assert.NotEmpty(expected);
+        var old = (await provider.Documents.ReadPartitionAsync(state.ResourceId,
+            new(0) { RevisionNumber = 1, IncludeMappings = true }))!;
+        Assert.Equal((await provider.Documents.ReadMappingsAsync(scope, old.Partition.PublicationSequence)).ToHashSet(), old.Mappings.ToHashSet());
+        var oldIndex = (await provider.Documents.ReadPartitionAsync(state.ResourceId,
+            new(0) { StorageIndex = old.Partition.StorageIndex, IncludeMappings = true }))!;
+        Assert.Equal((await provider.Documents.ReadMappingsAsync(scope, oldIndex.Partition.PublicationSequence)).ToHashSet(), oldIndex.Mappings.ToHashSet());
+
+        var repository = new CoherentMappingReadRepository(provider.Documents);
+        var queryProvider = new StorageProvider(repository, provider.Content, provider.Limits);
+        var result = await new CellBridgeDocumentService(queryProvider).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents, Query(1), new Dictionary<string, string>(), TestActor.Value);
+
+        Assert.False(Assert.Single(result.Response.SubResponses).Status);
+        Assert.True(repository.SawMappingsRequest);
+        Assert.Equal(expected.ToHashSet(), repository.Mappings.ToHashSet());
+        Assert.All(repository.Mappings, mapping => Assert.Equal(scope, mapping.Scope));
     }
 
     [Theory]
@@ -112,7 +144,7 @@ public class RepeatedQueryTests
         Assert.Equal(f.Cell.LongId.Guid, data.CellKnowledgeCellGuid);
         Assert.DoesNotContain(response.DataElementPackage!.DataElements, e => e.DataElementExtendedGuid.Equals(f.OtherGroup));
         Assert.Contains(response.DataElementPackage.DataElements, e => e.DataElementExtendedGuid.Equals(f.Blob));
-        var other = state.Partitions[0].Elements.Single(e => e.Id == StorageIds.Capture(f.OtherGroup));
+        var other = (await provider.Documents.ReadElementsAsync(new(state.ResourceId,state.LifecycleGeneration,0),[StorageIds.Capture(f.OtherGroup)])).Single();
         var knowledge = ClientKnowledge.Deserialize(new BinaryReaderEx(data.KnowledgeBytes!));
         Assert.False(knowledge.Contains(new SerialNumber(other.Serial.Guid, other.Serial.Value)));
         var repeated = Query(1, cell: f.Cell);
@@ -124,10 +156,16 @@ public class RepeatedQueryTests
         Assert.False(ClientKnowledge.Deserialize(new BinaryReaderEx(
             Assert.IsType<QueryChangesSubResponseData>(union.SubResponses[0].Data).KnowledgeBytes!))
             .Contains(new SerialNumber(other.Serial.Guid, other.Serial.Value)));
-        var stale = new CellId(StorageIds.Restore(state.Partitions[0].Identity.CellLong), StorageIds.Restore(state.Partitions[0].Identity.CellShort));
+        var identity = (await provider.Documents.ReadPartitionAsync(state.ResourceId,new(0)))!.Partition.Identity;
+        var stale = new CellId(StorageIds.Restore(identity.CellLong),StorageIds.Restore(identity.CellShort));
         var unsupported = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId,
             DocumentPartitionKind.FileContents, Query(3, cell: stale), new Dictionary<string, string>(), TestActor.Value);
-        Assert.True(Assert.Single(unsupported.Response.SubResponses).Status);
+        // Key updates retain cells omitted from the new mapping envelope.
+        Assert.False(Assert.Single(unsupported.Response.SubResponses).Status);
+        var missing = new CellId(new ExGuid(1,Guid.NewGuid()),new ExGuid(1,Guid.NewGuid()));
+        var unknown = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId,
+            DocumentPartitionKind.FileContents,Query(4,cell:missing),new Dictionary<string,string>(),TestActor.Value);
+        Assert.True(Assert.Single(unknown.Response.SubResponses).Status);
     }
 
     [Theory]
@@ -139,27 +177,11 @@ public class RepeatedQueryTests
         var provider = testProvider.Provider;
         var state = await PublishGraph(provider);
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
-        var other = state.Partitions[0].Elements.Single(e => e.Id == StorageIds.Capture(f.OtherGroup));
+        var other = (await provider.Documents.ReadElementsAsync(new(state.ResourceId,state.LifecycleGeneration,0),[StorageIds.Capture(f.OtherGroup)])).Single();
         var shared = other.Serial;
         var aliasedId = StorageIds.Capture(f.BaseGroup);
-        static PartitionState ApplyAlias(PartitionState value, ExtendedId id, SerialId serial) => value.Kind != 0 ? value : value with
-        {
-            Elements = value.Elements.Select(element => element.Id == id
-                ? element with { Serial = serial } : element).ToImmutableArray(),
-        };
-        await provider.State.TransitionAsync(state.ResourceId, (current, _) =>
-        {
-            // Keep retained copies consistent while preserving ambiguity between the two distinct group IDs.
-            var next = current with
-            {
-                Partitions = current.Partitions.Select(partition => ApplyAlias(partition, aliasedId, shared)).ToImmutableArray(),
-                Revisions = current.Revisions.Select(revision => revision with
-                {
-                    Partitions = revision.Partitions.Select(partition => ApplyAlias(partition, aliasedId, shared)).ToImmutableArray(),
-                }).ToImmutableArray(),
-            };
-            return new StateTransition<bool>(next, true);
-        });
+        var aliased = new AliasReadRepository(provider.Documents,aliasedId,shared);
+        provider = new StorageProvider(aliased,provider.Content,provider.Limits);
         var known = ClientKnowledge.FromElements([new DataElement(DataElementType.ObjectGroupDataElementData,
             f.OtherGroup, new SerialNumber(shared.Guid, shared.Value))]);
         var query = await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
@@ -180,35 +202,65 @@ public class RepeatedQueryTests
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         var request = Query(1);
         request.DataElementPackage = new(); request.DataElementPackage.DataElements.AddRange(f.Elements);
-        request.SubRequests.Add(Save(before, f));
+        request.SubRequests.Add(Save(f));
+        var beforeIndex = (await provider.Documents.ReadPartitionAsync(before.ResourceId,new(0)))!.Partition.StorageIndex!;
+        StorageTests.Rebase(request,await StorageTestDocuments.GraphAsync(service,before));
         request.SubRequests.Add(Query(3).SubRequests[0]);
         var result = await service.ExecuteAsync(before.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value);
         Assert.All(result.Response.SubResponses, s => Assert.False(s.Status));
-        Assert.Equal(StorageIds.Restore(before.Partitions[0].StorageIndex!),
+        Assert.Equal(StorageIds.Restore(beforeIndex),
             Assert.IsType<QueryChangesSubResponseData>(result.Response.SubResponses[0].Data).StorageIndexExtendedGuid);
-        Assert.Equal(f.Index, Assert.IsType<QueryChangesSubResponseData>(result.Response.SubResponses[2].Data).StorageIndexExtendedGuid);
+        var applied = Assert.IsType<PutChangesSubResponseData>(result.Response.SubResponses[1].Data).PutChangesResponse!.AppliedStorageIndexID;
+        Assert.Equal(applied,Assert.IsType<QueryChangesSubResponseData>(result.Response.SubResponses[2].Data).StorageIndexExtendedGuid);
         Assert.Equal(before.ContentVersion + 1, result.State.ContentVersion);
         Assert.Contains(result.Response.DataElementPackage!.DataElements,
-            e => e.DataElementExtendedGuid.Equals(StorageIds.Restore(before.Partitions[0].StorageIndex!)));
-        Assert.Contains(result.Response.DataElementPackage.DataElements, e => e.DataElementExtendedGuid.Equals(f.Index));
+            e => e.DataElementExtendedGuid.Equals(StorageIds.Restore(beforeIndex)));
+        Assert.Contains(result.Response.DataElementPackage.DataElements, e => e.DataElementExtendedGuid.Equals(applied));
     }
 
-    private static async Task<DocumentState> PublishGraph(StorageProvider provider)
+    private static async Task<DocumentHead> PublishGraph(StorageProvider provider)
     {
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/scopes-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var f = new GraphFixture(MinimalDocx.Create("after"), blob: true);
         var request = new FsshttpbCellRequest { DataElementPackage = new() };
-        request.DataElementPackage.DataElements.AddRange(f.Elements); request.SubRequests.Add(Save(state, f));
+        request.DataElementPackage.DataElements.AddRange(f.Elements); request.SubRequests.Add(Save(f));
+        StorageTests.Rebase(request,await StorageTestDocuments.GraphAsync(service,state));
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request,
             new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(result.Response.SubResponses).Status);
         return result.State;
     }
-    private static FsshttpbCellSubRequest Save(DocumentState state, GraphFixture f) => new(RequestTypes.PutChanges)
+    private static FsshttpbCellSubRequest Save(GraphFixture f) => new(RequestTypes.PutChanges)
     { RequestId = 2, Data = new PutChangesSubRequestData { StorageIndex = f.Index,
-        ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!), Flags = 1 } };
+        Flags = 1, HasAdditionalFlags = true, AdditionalFlagsBits = 1 } };
+    private sealed class AliasReadRepository(IDocumentRepository inner,ExtendedId id,SerialId serial) : RepositoryTestProxy(inner)
+    {
+        public override async ValueTask<PartitionRead?> ReadPartitionAsync(Guid resourceId,PartitionReadRequest request,CancellationToken cancellationToken=default)
+        {
+            var read = await base.ReadPartitionAsync(resourceId,request,cancellationToken);
+            return read is null ? null : read with { Elements = read.Elements.Select(element => element.Id == id ? element with { Serial = serial } : element).ToImmutableArray() };
+        }
+    }
+    private sealed class CoherentMappingReadRepository(IDocumentRepository inner) : RepositoryTestProxy(inner)
+    {
+        public bool SawMappingsRequest { get; private set; }
+        public ImmutableArray<IndexedStorageMapping> Mappings { get; private set; } = [];
+
+        public override async ValueTask<PartitionRead?> ReadPartitionAsync(Guid resourceId, PartitionReadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            SawMappingsRequest |= request.IncludeMappings;
+            var read = await base.ReadPartitionAsync(resourceId, request, cancellationToken);
+            if (request.IncludeMappings && read is not null) Mappings = read.Mappings;
+            return read;
+        }
+
+        public override ValueTask<ImmutableArray<IndexedStorageMapping>> ReadMappingsAsync(IndexedGraphScope scope,
+            long sequence, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("QueryChanges must use mappings from its coherent partition read.");
+    }
     private static FsshttpbCellRequest Query(ulong id, ClientKnowledge? knowledge = null, ulong? maximum = null, CellId? cell = null) => new()
     { SubRequests = { new(RequestTypes.QueryChanges) { RequestId = id, Data = new QueryChangesSubRequestData
         { IncludeStorageManifest = true, IncludeCellChanges = true, Knowledge = knowledge, MaxDataElements = maximum, CellId = cell } } } };

@@ -59,7 +59,7 @@ public sealed class NegotiatedHashExecutionTests
             HashOptions = new(1, instead, include),
             SubRequests = { Query(1), Query(2), new(RequestTypes.QueryAccess) { RequestId = 3 } },
         };
-        var graph = await DocumentPartition.RestoreFileGraphAsync(document, provider.Content, provider.Limits);
+        var graph = await StorageTestDocuments.GraphAsync(service,document);
         var snapshot = JsonSerializer.Serialize(graph.Elements);
 
         var response = (await service.ExecuteAsync(document.ResourceId, DocumentPartitionKind.FileContents,
@@ -68,8 +68,8 @@ public sealed class NegotiatedHashExecutionTests
         Assert.All(response.SubResponses, s => Assert.False(s.Status));
         var group = Assert.Single(response.DataElementPackage!.DataElements, e => e.DataElementType == DataElementType.ObjectGroupDataElementData);
         Assert.Equal(instead || include, IsHash(group));
-        var persisted = (await provider.State.FindByResourceIdAsync(document.ResourceId))!;
-        var storedGraph = await DocumentPartition.RestoreFileGraphAsync(persisted, provider.Content, provider.Limits);
+        var persisted = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(document.ResourceId)))!;
+        var storedGraph = await StorageTestDocuments.GraphAsync(service,persisted);
         Assert.Equal(snapshot, JsonSerializer.Serialize(storedGraph.Elements));
         Assert.Equal(JsonSerializer.Serialize(document), JsonSerializer.Serialize(persisted));
 
@@ -112,8 +112,8 @@ public sealed class NegotiatedHashExecutionTests
         Assert.Equal(ErrorType.Cell, response.Error!.Type);
         Assert.Equal((ulong)(version is not (12 or 13 or 14) || minimum != 11
             ? CellErrorCode.IncompatibleProtocolVersion : CellErrorCode.RequestStreamSchemaError), response.Error.ErrorCode);
-        var persisted = (await provider.State.FindByResourceIdAsync(document.ResourceId))!;
-        Assert.Equal(new byte[] { 1 }, await provider.Content.ReadVerifiedAsync(persisted.Content));
+        var persisted = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(document.ResourceId)))!;
+        Assert.Equal(new byte[] { 1 }, await StorageTestDocuments.PackageAsync(provider,persisted.Package));
         Assert.Equal(JsonSerializer.Serialize(document), JsonSerializer.Serialize(persisted));
         Assert.Empty(execution.AcceptedSaves);
     }

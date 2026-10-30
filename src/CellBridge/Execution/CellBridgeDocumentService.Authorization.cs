@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 
@@ -16,15 +17,15 @@ public sealed partial class CellBridgeDocumentService
             !string.IsNullOrWhiteSpace(binding.PolicyDomain) &&
             string.Equals(binding.PolicyDomain, _policy.PolicyDomain, StringComparison.Ordinal);
 
-    private ICellBridgeAuthorizationSnapshot? ResolvePolicy(DocumentState state)
+    private ICellBridgeAuthorizationSnapshot? ResolvePolicy(DocumentHead state)
     {
         if (!ValidBinding(state.Security.AuthorizationPolicy)) return null;
-        var snapshot = _policy.Resolve(state);
+        var snapshot = _policy.Resolve(state.Authorization);
         return snapshot?.ResourceId == state.ResourceId && snapshot.Binding == state.Security.AuthorizationPolicy
             ? snapshot : null;
     }
 
-    private DocumentAccess SubjectAccess(CellBridgeActor actor, DocumentState state)
+    private DocumentAccess SubjectAccess(CellBridgeActor actor, DocumentHead state)
     {
         if (state.IsDeleted || string.IsNullOrWhiteSpace(actor.Identity.Subject)) return DocumentAccess.None;
         try
@@ -33,7 +34,7 @@ public sealed partial class CellBridgeDocumentService
             if (snapshot is null) return DocumentAccess.None;
             // Preserve the beta evaluator only for unbound documents under the default policy.
             if (_policy is StoredGrantAuthorizationPolicy && _access is not null)
-                return NormalizeAccess(_access.Evaluate(actor, state));
+                return NormalizeAccess(_access.Evaluate(actor, state.Authorization));
             return EvaluateBoundAccess(snapshot, actor.Identity.Subject, state);
         }
         catch (Exception)
@@ -43,14 +44,14 @@ public sealed partial class CellBridgeDocumentService
         }
     }
 
-    private DocumentAccess EvaluateBoundAccess(ICellBridgeAuthorizationSnapshot snapshot, string subject, DocumentState state)
+    private DocumentAccess EvaluateBoundAccess(ICellBridgeAuthorizationSnapshot snapshot, string subject, DocumentHead state)
     {
         var access = NormalizeAccess(snapshot.Evaluate(subject));
         // External ceilings receive only the stable subject, including when reconciling lease owners.
-        return _access is null ? access : access & NormalizeAccess(_access.Evaluate(new(new(subject, subject, subject)), state));
+        return _access is null ? access : access & NormalizeAccess(_access.Evaluate(new(new(subject, subject, subject)), state.Authorization));
     }
 
-    private DocumentState BindNewDocument(DocumentState state)
+    private DocumentHead BindNewDocument(DocumentHead state)
     {
         if (_externalAuthorization is not null)
             throw new InvalidOperationException("Use CreateExternalAsync or ImportExternalAsync with an explicit trusted scope.");
@@ -83,20 +84,22 @@ public sealed partial class CellBridgeDocumentService
         // Resolve outside coordination too, so an unavailable snapshot cannot be mistaken for a successful update.
         var before = await CurrentAsync(resourceId, cancellationToken);
         _ = RequireNextSnapshot(before);
-        return await provider.State.TransitionAsync(resourceId, (current, now) =>
-        {
-            if (current.IsDeleted || current.Security.AuthorizationPolicy != expected) return new StateTransition<bool>(null, false);
-            var snapshot = RequireNextSnapshot(current);
-            var security = current.Security with { AuthorizationPolicy = next };
-            var nextState = current with { Security = security };
-            // A throwing decision aborts the entire update. Missing subjects are explicit None decisions.
-            var updated = DocumentPermissionUpdates.ApplyPolicy(current, now, security,
-                subject => EvaluateBoundAccess(snapshot, subject, nextState));
-            provider.Limits.CheckDocument(updated);
-            return new StateTransition<bool>(updated, true);
-        }, cancellationToken);
+        var current = await provider.Documents.ReadControlAsync(resourceId, cancellationToken)
+            ?? throw MissingDocument();
+        if (current.Head.Security.AuthorizationPolicy != expected) return false;
+        var snapshot = RequireNextSnapshot(current.Head);
+        var nextHead = current.Head with { Security = current.Head.Security with { AuthorizationPolicy = next } };
+        var subjects = current.Editors.Select(editor => editor.Owner?.Subject)
+            .Concat(current.Coordination.SchemaOwners.Select(lease => lease.OwnerSubject))
+            .Append(current.Coordination.Exclusive?.OwnerSubject).Append(current.Coordination.HostLock?.OwnerSubject)
+            .Where(subject => subject is not null).Distinct(StringComparer.Ordinal);
+        var decisions = subjects.ToImmutableDictionary(subject => subject!,
+            subject => EvaluateBoundAccess(snapshot, subject!, nextHead), StringComparer.Ordinal);
+        var result = await provider.Documents.ExecuteControlAsync(
+            new DocumentControlCommand.BindAuthorization(resourceId, expected, next, decisions) { ExpectedStateVersion = current.Head.StateVersion }, cancellationToken);
+        return result.Changed;
 
-        ICellBridgeAuthorizationSnapshot RequireNextSnapshot(DocumentState current)
+        ICellBridgeAuthorizationSnapshot RequireNextSnapshot(DocumentHead current)
         {
             try
             {

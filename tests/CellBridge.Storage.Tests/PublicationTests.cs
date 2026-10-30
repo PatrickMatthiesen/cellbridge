@@ -61,7 +61,7 @@ public class PublicationTests
     [Fact]
     public async Task ConcurrentIdenticalRequestsPublishOnce()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         await ConcurrentRetries(provider);
     }
 
@@ -69,43 +69,39 @@ public class PublicationTests
     {
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        var expected = (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
-        var requests = Enumerable.Range(0, 8).Select(_ => StorageTests.Fixture("save-first")).ToArray();
-        foreach (var request in requests)
-            ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex = expected;
+        var original = await StorageTestDocuments.SaveRequestAsync(service, state, MinimalDocx.Create("same operation"));
+        var requests = Enumerable.Range(0, 8).Select(_ => FsshttpbCellRequest.Deserialize(new BinaryReaderEx(original.ToByteArray()))).ToArray();
         var results = await Task.WhenAll(requests.Select(request => new CellBridgeDocumentService(provider)
             .ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value).AsTask()));
         Assert.All(results, result => Assert.False(Assert.Single(result.Response.SubResponses).Status));
-        var final = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var final = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
         Assert.Equal(state.ContentVersion + 1, final.ContentVersion);
-        Assert.Single(final.Receipts);
+        Assert.Equal(1, final.Counters.SaveReceipts);
         Assert.All(results, result => Assert.Equal(final.StateVersion, result.State.StateVersion));
         var committed = Assert.Single(results, result => !Assert.Single(result.AcceptedSaves).IsReplay);
         Assert.All(results, result =>
         {
             Assert.Equal(committed.Response.ToByteArray(), result.Response.ToByteArray());
             var receipt = Assert.Single(result.AcceptedSaves);
-            Assert.Equal(final.Content, receipt.Content);
+            Assert.Equal(final.Package, receipt.Package);
             Assert.Equal(final.ContentVersion, receipt.ContentVersion);
-            Assert.Equal(final.Receipts[0].OperationKey, receipt.OperationKey);
+            Assert.Equal(IndexedPartitionSavePreparer.Identify(state.LifecycleGeneration, 0, original.SubRequests[0], original.DataElementPackage!).Operation.OperationKey, receipt.OperationKey);
         });
     }
 
     [Fact]
     public async Task PutThenQueryAndInterruptedBatchKeepAcceptedRevision()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/batch.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests[0].Data!).ExpectedStorageIndex =
-            (await StoredDocument.RestoreAsync(state, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        var request = await StorageTestDocuments.SaveRequestAsync(service, state, MinimalDocx.Create("saved"));
         request.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 991, Data = new QueryChangesSubRequestData() });
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.Equal(2, result.Response.SubResponses.Count);
         Assert.All(result.Response.SubResponses, r => Assert.False(r.Status));
         Assert.NotNull(result.Response.DataElementPackage);
-        var latest = (await StoredDocument.RestoreAsync(result.State, provider.Content)).FilePartition.FileGraph.StorageIndex;
+        var latest = StorageIds.Restore((await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0)))!.Partition.StorageIndex!);
         Assert.Equal(latest, ((QueryChangesSubResponseData)result.Response.SubResponses[1].Data!).StorageIndexExtendedGuid);
         // A failed later operation does not roll back the first publication.
         request.SubRequests[1] = new(RequestTypes.PutChanges) { RequestId = 992,
@@ -114,27 +110,28 @@ public class PublicationTests
         Assert.False(repeated.Response.SubResponses[0].Status);
         Assert.True(repeated.Response.SubResponses[1].Status);
         Assert.Equal(result.State.ContentVersion, repeated.State.ContentVersion);
-        Assert.Single(repeated.State.Receipts);
+        Assert.Equal(1, repeated.State.Counters.SaveReceipts);
     }
 
     [Fact]
     public async Task EditorsQueryPersistsExpiryAndKnowledgeTogether()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var clock = new ManualClock(); var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/editors.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var document = await StoredDocument.RestoreAsync(state, provider.Content);
-        document.JoinSession(Guid.NewGuid(), "test-editor");
-        var withEditor = document.CaptureCoordination(state, state.Coordination);
-        withEditor = withEditor with { Editors = withEditor.Editors.Select(e => e with { ExpiresUtc = DateTime.UtcNow.AddMinutes(-10) }).ToImmutableArray() };
-        await provider.State.TransitionAsync(state.ResourceId, (_, _) => new StateTransition<bool>(withEditor, true));
-        var before = withEditor.Partitions.Single(p => p.Kind == 2).Knowledge;
+        var join = new FssHttpSubRequest { Type = SubRequestType.Coauth,
+            SubRequestDataAttributes = { ["CoauthRequestType"] = "JoinCoauthoring", ["ClientID"] = Guid.NewGuid().ToString(),
+                ["SchemaLockID"] = Guid.NewGuid().ToString(), ["Timeout"] = "3600" } };
+        Assert.True((await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(state.ResourceId, TestStorage.Admit(state), join))).Changed);
+        var before = (await provider.Documents.ReadControlAsync(state.ResourceId))!.Partitions.Single(p => p.Kind == 2).Knowledge;
+        clock.Advance(TimeSpan.FromHours(2));
         var request = new FsshttpbCellRequest();
         request.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 1, Data = new QueryChangesSubRequestData() });
         var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.EditorsTable, request, new Dictionary<string, string>(), TestActor.Value);
-        var after = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(2, after.StateVersion);
-        Assert.Equal(after.StateVersion, result.State.StateVersion);
+        var after = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
+        Assert.Equal(2, after.Head.StateVersion);
+        Assert.Equal(after.Head.StateVersion, result.State.StateVersion);
         Assert.Empty(after.Editors);
         Assert.True(after.Partitions.Single(p => p.Kind == 2).Knowledge > before);
     }
@@ -154,30 +151,28 @@ public class PublicationTests
         await using var source = NpgsqlDataSource.Create(connectionString);
         var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        var now = DateTime.UtcNow;
-        var expired = state with { Coordination = new(null, [], new("lease", "client", now.AddMilliseconds(250), 0, null), 1) };
-        await provider.State.TransitionAsync(state.ResourceId, (_, _) => new StateTransition<bool>(expired, true));
+        var control = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
+        var expires = control.UtcNow.AddSeconds(1);
+        Assert.True((await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetHostLease(state.ResourceId,
+            TestStorage.Admit(state), new("lease", TestActor.Value.Identity.Subject, expires), null))).Changed);
+        control = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         await using var connection = await source.OpenConnectionAsync();
         await using var transaction = await connection.BeginTransactionAsync();
-        await using (var command = new NpgsqlCommand("SELECT state_version FROM cellbridge_documents WHERE resource_id=$1 FOR UPDATE", connection, transaction))
+        await using (var command = new NpgsqlCommand("SELECT \"ResourceId\" FROM cellbridge_repository_heads WHERE \"ResourceId\"=$1 FOR UPDATE", connection, transaction))
         {
             command.Parameters.Add(new NpgsqlParameter { Value = state.ResourceId });
             await command.ExecuteScalarAsync();
         }
-        var waiting = provider.State.TransitionAsync(state.ResourceId, (current, clock) =>
-        {
-            var document = StoredDocument.RestoreMetadata(current, clock);
-            var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, clock, TestActor.Value.Identity);
-            Assert.True(coordinator.ExecuteCellWrite(new Dictionary<string, string>(), () => true, out _, out _, clock));
-            Assert.True(clock > now.AddMilliseconds(250));
-            return new StateTransition<DateTime>(current with { Coordination = coordinator.Capture() }, clock);
-        }).AsTask();
+        var waiting = provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetHostLease(state.ResourceId,
+            TestStorage.Admit(control.Head), new("after-expiry", TestActor.Value.Identity.Subject, expires.AddMinutes(1)), null)).AsTask();
         await WaitForDatabaseLockWait(source);
-        await WaitUntilAsync(() => DateTime.UtcNow > now.AddMilliseconds(250));
+        await WaitUntilAsync(() => DateTime.UtcNow > expires);
         Assert.False(waiting.IsCompleted);
         await transaction.CommitAsync();
-        await waiting.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Null((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Coordination.Exclusive);
+        var acquired = await waiting.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(acquired.Changed);
+        Assert.True(acquired.Current.UtcNow > expires);
+        Assert.Equal("after-expiry", acquired.Current.Coordination.HostLock!.Token);
     }
 
     private static async Task WaitForDatabaseLockWait(NpgsqlDataSource source)
@@ -194,6 +189,13 @@ public class PublicationTests
             if ((bool)(await command.ExecuteScalarAsync(timeout.Token))!) return;
             await Task.Delay(10, timeout.Token);
         }
+    }
+
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset _now = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => _now;
+        public void Advance(TimeSpan elapsed) => _now += elapsed;
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

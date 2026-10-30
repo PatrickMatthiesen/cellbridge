@@ -60,18 +60,18 @@ public sealed class RetainedReplyFramingTests(ITestOutputHelper output)
     [Fact]
     public async Task InMemoryHistoryRetainsIndependentlyDecodableSaveReplies()
     {
-        var provider = PortabilityTests.Memory();
+        var provider = StorageTestDocuments.Memory();
         var service = new CellBridgeDocumentService(provider);
         var original = (await service.CreateAsync("/history.docx", MinimalDocx.Create("initial"), TestActor.Value))!;
         var metadata = await service.ExecuteAsync(original.ResourceId, DocumentPartitionKind.Metadata,
             MetadataPublicationTests.Initial(new GraphFixture([8, 7, 6], blob: true)), new Dictionary<string, string>(), TestActor.Value);
         var file = MetadataPublicationTests.Initial(new GraphFixture(MinimalDocx.Create("inherited blob"), blob: true));
-        ((PutChangesSubRequestData)file.SubRequests[0].Data!).ExpectedStorageIndex = StorageIds.Restore(original.Partitions.Single(p => p.Kind == 0).StorageIndex!);
+        StorageTests.Rebase(file, await StorageTestDocuments.GraphAsync(service,original));
         var saved = await service.ExecuteAsync(original.ResourceId, DocumentPartitionKind.FileContents, file, new Dictionary<string, string>(), TestActor.Value);
-        var receipts = metadata.State.Receipts.Concat(saved.State.Receipts).Where(r => r.Response is not null)
+        var receipts = (await provider.Documents.ExportDocumentAsync(original.ResourceId))!.Receipts.Where(r => r.Response is not null)
             .DistinctBy(r => r.Response!.Key).ToArray();
         Assert.Equal(2, receipts.Length);
-        await service.RestoreRevisionAsync(original.ResourceId, 2, RevisionHistory.Latest(saved.State), "before-recovery", TestActor.Value);
+        await service.RestoreRevisionAsync(original.ResourceId, 2, saved.State.LatestRevisionNumber, "before-recovery", TestActor.Value);
         foreach (var receipt in receipts)
         {
             await using var stream = await provider.Content.OpenReadAsync(receipt.Response!);

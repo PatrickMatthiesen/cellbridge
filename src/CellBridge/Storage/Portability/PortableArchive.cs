@@ -19,7 +19,7 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
         var recovery = RecoveryStore(source);
         await recovery.CheckRecoveryAsync(cancellationToken);
         var snapshot = await recovery.CaptureRecoveryAsync(cancellationToken);
-        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(StorageReferences.Handles))
+        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences.Where(reference => !reference.IsPending).Select(reference => reference.Handle)))
             .OrderBy(h => h.Key, StringComparer.Ordinal).ToImmutableArray();
         var manifest = new PortableManifest(PortableManifest.CurrentVersion, Guid.NewGuid(), context, snapshot, handles);
         CheckManifest(manifest);
@@ -113,7 +113,16 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
             remapping.Add(handle.Key, imported);
         }
         var snapshot = Remap(staged.Manifest.State, remapping);
-        return await recovery.ImportRecoveryAsync(snapshot, expected, cancellationToken);
+        try { return await recovery.ImportRecoveryAsync(snapshot, expected, cancellationToken); }
+        catch (Exception error) when (error is StorageUnavailableException ||
+            error is OperationCanceledException && cancellationToken.IsCancellationRequested)
+        {
+            // The provider may have committed before the reply or cancellation reached this process.
+            var recoveredReceipt = await recovery.FindRecoveryReceiptAsync(expected.OperationId, CancellationToken.None);
+            if (recoveredReceipt is null) throw;
+            ProviderRecovery.CheckReceipt(recoveredReceipt, expected);
+            return recoveredReceipt;
+        }
     }
 
     /// <summary>Copies through a validated archive. Final cutover requires stopping source writers and a fresh export.</summary>
@@ -125,7 +134,7 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
     }
 
     private void CheckLimits() { _storage.Validate(); _archive.Validate(); }
-    private static IProviderRecoveryStore RecoveryStore(StorageProvider provider) => provider.State as IProviderRecoveryStore
+    private static IProviderRecoveryStore RecoveryStore(StorageProvider provider) => provider.Documents as IProviderRecoveryStore
         ?? throw new NotSupportedException("The selected state provider has no atomic recovery capability.");
     private static string ObjectName(int ordinal) => $"objects/{ordinal:D8}";
 
@@ -150,7 +159,7 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
         ProviderRecovery.CheckAdmission(manifest.State, _storage, DateTime.MinValue, requireExpired: false);
         if (manifest.State.Receipts.Any(r => r.OperationId == manifest.ArchiveId))
             throw new StorageCorruptionException("Archive identity collides with retained receipt.");
-        var required = ContentStoreReader.UniqueHandles(manifest.State.Snapshots.SelectMany(StorageReferences.Handles))
+        var required = ContentStoreReader.UniqueHandles(manifest.State.Snapshots.SelectMany(snapshot => snapshot.ContentReferences.Where(reference => !reference.IsPending).Select(reference => reference.Handle)))
             .ToDictionary(h => h.Key, StringComparer.Ordinal);
         if (manifest.Objects.Select(h => h.Key).Distinct(StringComparer.Ordinal).Count() != manifest.Objects.Length ||
             required.Count != manifest.Objects.Length || manifest.Objects.Any(h => !required.TryGetValue(h.Key, out var expected) || expected != h ||
@@ -159,7 +168,7 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
             throw new StorageCorruptionException("Archive inventory does not exactly match retained content references.");
         foreach (var handle in manifest.Objects) StorageLimits.Check("recovery object bytes", handle.Length, _storage.MaxObjectBytes);
         foreach (var state in manifest.State.Snapshots)
-            if (state.Publication is { } publication && !manifest.Context.ExternalDestinations.Any(e =>
+            if (state.Current.Head.Delivery is { } publication && !manifest.Context.ExternalDestinations.Any(e =>
                     e.BindingId == publication.BindingId && e.Destination == publication.Destination))
                 throw new RecoveryConflictException("An external delivery binding lacks a compatible receipt-domain context.");
     }
@@ -238,16 +247,30 @@ public sealed partial class PortableArchive(StorageLimits? storageLimits = null,
     private static ProviderSnapshot Remap(ProviderSnapshot snapshot, IReadOnlyDictionary<string, ContentHandle> handles)
     {
         ContentHandle Map(ContentHandle h) => handles[h.Key];
-        ImmutableArray<PartitionState> Partitions(ImmutableArray<PartitionState> partitions) => partitions.Select(p => p with
-        { Content = Map(p.Content), Elements = p.Elements.Select(e => e with { Payload = Map(e.Payload) }).ToImmutableArray() }).ToImmutableArray();
-        return snapshot with { Snapshots = snapshot.Snapshots.Select(s => s with
+        var documents = snapshot.Snapshots.Select(document =>
         {
-            Content = Map(s.Content), Partitions = Partitions(s.Partitions),
-            Receipts = s.Receipts.Select(r => r with { Response = r.Response is null ? null : Map(r.Response) }).ToImmutableArray(),
-            Revisions = s.Revisions.Select(r => r with { Content = Map(r.Content), Partitions = Partitions(r.Partitions) }).ToImmutableArray(),
-            Publication = s.Publication is null ? null : s.Publication with
-            { Pending = s.Publication.Pending.Select(r => r with { Content = Map(r.Content) }).ToImmutableArray() },
-        }).ToImmutableArray() };
+            var mapped = document with
+            {
+                Elements = document.Elements.Select(element => element with { Element = element.Element with { Payload = Map(element.Element.Payload) } }).ToImmutableArray(),
+                Receipts = document.Receipts.Select(receipt => receipt with { Response = receipt.Response is null ? null : Map(receipt.Response) }).ToImmutableArray(),
+                ContentReferences = document.ContentReferences.Select(reference =>
+                {
+                    var handle = reference.IsPending ? reference.Handle : Map(reference.Handle);
+                    return reference with { Handle = handle, AdmissionBytes = reference.AdmissionBytes == 0 ? 0 : NormalizedContentReference.StagingMetadataBytes(handle) };
+                })
+                    .GroupBy(reference => reference.Handle.Key, StringComparer.Ordinal).Select(group =>
+                    {
+                        var first = group.First();
+                        if (group.Any(reference => reference.Handle != first.Handle || reference.IsPending != first.IsPending || reference.AdmissionBytes != first.AdmissionBytes))
+                            throw new StorageCorruptionException("Destination content keys conflict after remapping.");
+                        return first with { ReferenceCount = group.Aggregate(0L, (count, reference) => checked(count + reference.ReferenceCount)) };
+                    }).ToImmutableArray(),
+            };
+            // Content keys can change length across providers. Recompute the logical UTF-8 metadata charge.
+            return mapped with { Current = mapped.Current with { Head = mapped.Current.Head with
+                { Counters = mapped.Current.Head.Counters with { StoredBytes = NormalizedDocumentRecovery.StoredBytes(mapped) } } } };
+        }).ToImmutableArray();
+        return snapshot with { Snapshots = documents };
     }
 
     private sealed class StagedArchive : IDisposable

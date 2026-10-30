@@ -22,13 +22,13 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
         var namespaces = new HashSet<Guid>();
         for (int sample = 0; sample < 8; sample++)
         {
-            var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+            var provider = Memory();
             var service = new CellBridgeDocumentService(provider);
             byte[] content = new byte[random.Next(1, 1025)]; random.NextBytes(content);
             var initial = await service.CreateAsync($"/bounded-{sample}.bin", content, Actor);
             Assert.NotNull(initial);
             string unchanged = JsonSerializer.Serialize(initial);
-            var file = initial.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents);
+            var file = await GraphAsync(service,initial);
             ulong count = (ulong)random.Next(1, 1001), firstId = (ulong)(sample * 10 + 1);
             var firstQuery = Query(firstId + 1);
             var lastQuery = Query(firstId + 4);
@@ -65,7 +65,7 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
             Assert.Equal(0, access.WriteAccessResponse.WriteResponseError.GetErrorData<Reference.HRESULTError>().ErrorCode);
             Assert.Equal(Guid.Parse(Reference.ResponseError.CellErrorGuid), response.CellSubResponses[3].ResponseError.ErrorTypeGUID);
             Assert.Equal(Reference.CellErrorCode.Requestnotsupported, response.CellSubResponses[3].ResponseError.GetErrorData<Reference.CellError>().ErrorCode);
-            foreach (int i in new[] { 1, 4 }) Equal(file.StorageIndex!, response.CellSubResponses[i]
+            foreach (int i in new[] { 1, 4 }) Equal(StorageIds.Capture(file.StorageIndex), response.CellSubResponses[i]
                 .GetSubResponseData<Reference.QueryChangesSubResponseData>().StorageIndexExtendedGUID);
             foreach (int i in new[] { 2, 5 })
             {
@@ -76,11 +76,11 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
             }
             var elements = response.DataElementPackage.DataElements;
             var expected = file.Elements.Where(e =>
-                (firstQuery.IncludeStorageManifest != 0 || e.Type != (uint)DataElementType.StorageManifestDataElementData) &&
-                (firstQuery.IncludeCellChanges != 0 || e.Type != (uint)DataElementType.CellManifestDataElementData)).ToArray();
+                (firstQuery.IncludeStorageManifest != 0 || e.DataElementType != DataElementType.StorageManifestDataElementData) &&
+                (firstQuery.IncludeCellChanges != 0 || e.DataElementType != DataElementType.CellManifestDataElementData)).ToArray();
             Assert.Equal(expected.Length, elements.Count);
             foreach (var element in expected)
-                Assert.Single(elements, e => Same(element.Id, e.DataElementExtendedGUID));
+                Assert.Single(elements, e => Same(StorageIds.Capture(element.DataElementExtendedGuid), e.DataElementExtendedGUID));
             var group = Assert.Single(elements, e => e.DataElementType == Reference.DataElementType.ObjectGroupDataElementData)
                 .GetData<Reference.ObjectGroupDataElementData>();
             Assert.Contains(group.ObjectGroupData.ObjectGroupObjectDataList, item => item.Data.Content.SequenceEqual(content));
@@ -97,15 +97,15 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
     [InlineData("hierarchy-fail")]
     public async Task MicrosoftWrittenUnsupportedControlsLeaveStateUnchangedAndFollowingQuerySucceeds(string control)
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
         byte[] content = DocumentBytes();
         var initial = await service.CreateAsync("/controls.docx", content, Actor);
         Assert.NotNull(initial);
-        var file = initial.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents);
+        var file = await GraphAsync(service,initial);
         Reference.FsshttpbCellSubRequest operation;
         if (control.StartsWith("partial", StringComparison.Ordinal))
-            operation = new Reference.PutChangesCellSubRequest(2, new Reference.ExGuid(file.StorageIndex!.Value, file.StorageIndex.Guid))
+            operation = new Reference.PutChangesCellSubRequest(2, new Reference.ExGuid(file.StorageIndex.Value, file.StorageIndex.Guid))
             { ExpectedStorageIndexExtendedGUID = new(file.StorageIndex.Value, file.StorageIndex.Guid),
                 Partial = control == "partial" ? 1 : 0, PartialLast = control == "partial-last" ? 1 : 0 };
         else
@@ -118,7 +118,7 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
         }
         var reference = Request([Query(1), operation, Query(3)]);
         if (operation is Reference.PutChangesCellSubRequest)
-            reference.DataElementPackage = await StoredPackage(provider, file);
+            reference.DataElementPackage = StoredPackage(file);
         byte[] wire = reference.SerializeToByteList().ToArray();
         Assert.InRange(wire.Length, 1, 4096);
         var decoded = Decode(wire);
@@ -145,9 +145,9 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
             Assert.Equal(Guid.Parse(Reference.ResponseError.CellErrorGuid), middle.ResponseError.ErrorTypeGUID);
             Assert.Equal(Reference.CellErrorCode.Requestnotsupported, middle.ResponseError.GetErrorData<Reference.CellError>().ErrorCode);
         }
-        var expectedIndex = initial.Partitions.Single(p => p.Kind == (int)DocumentPartitionKind.FileContents).StorageIndex!;
+        var expectedIndex = file.StorageIndex;
         foreach (var sub in response.CellSubResponses.Where(s => !s.Status))
-            Equal(expectedIndex, sub.GetSubResponseData<Reference.QueryChangesSubResponseData>().StorageIndexExtendedGUID);
+            Equal(StorageIds.Capture(expectedIndex), sub.GetSubResponseData<Reference.QueryChangesSubResponseData>().StorageIndexExtendedGUID);
         await Unchanged(provider, initial.ResourceId, unchanged, content);
         if (control == "hierarchy-ignored")
         {
@@ -158,9 +158,9 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
             var full = Reference.FsshttpbResponse.DeserializeResponseFromByteArray(
                 result.Response.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11), 0);
             Assert.False(Assert.Single(full.CellSubResponses).Status);
-            Assert.Equal(file.Elements.Length, full.DataElementPackage.DataElements.Count);
+            Assert.Equal(file.Elements.Count(), full.DataElementPackage.DataElements.Count);
             foreach (var expected in file.Elements)
-                Assert.Single(full.DataElementPackage.DataElements, e => Same(expected.Id, e.DataElementExtendedGUID));
+                Assert.Single(full.DataElementPackage.DataElements, e => Same(StorageIds.Capture(expected.DataElementExtendedGuid), e.DataElementExtendedGUID));
             var group = Assert.Single(full.DataElementPackage.DataElements, e => e.DataElementType == Reference.DataElementType.ObjectGroupDataElementData)
                 .GetData<Reference.ObjectGroupDataElementData>();
             Assert.Contains(group.ObjectGroupData.ObjectGroupObjectDataList, item => item.Data.Content.SequenceEqual(content));
@@ -178,18 +178,19 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
             var acknowledgement = Reference.FsshttpbResponse.DeserializeResponseFromByteArray(
                 accepted.Response.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11), 0);
             Assert.False(Assert.Single(acknowledgement.CellSubResponses).Status, accepted.Response.SubResponses[0].Error?.ErrorMessage);
-            Assert.Single(accepted.State.Receipts);
+            Assert.Equal(initial,accepted.State);
+            Assert.Equal(0,accepted.State.Counters.SaveReceipts);
         }
         output.WriteLine($"seed={Seed} bytes={wire.Length} mutation={control} rejected={middle.Status}");
     }
 
-    private static async Task<Reference.DataElementPackage> StoredPackage(StorageProvider provider, PartitionState file)
+    private static Reference.DataElementPackage StoredPackage(PartitionGraphSnapshot file)
     {
         var package = new Reference.DataElementPackage();
         foreach (var element in file.Elements)
         {
-            byte[] bytes = await provider.Content.ReadVerifiedAsync(element.Payload, 16 * 1024);
-            Reference.DataElementData data = (DataElementType)element.Type switch
+            byte[] bytes = element.Data!;
+            Reference.DataElementData data = element.DataElementType switch
             {
                 DataElementType.StorageIndexDataElementData => new Reference.StorageIndexDataElementData(),
                 DataElementType.StorageManifestDataElementData => new Reference.StorageManifestDataElementData(),
@@ -204,9 +205,9 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
                 // Existing element identities require their original payload bytes.
                 // Microsoft parsing above validates them; its envelope writer below
                 // carries them unchanged rather than choosing new inner header widths.
-                DataElementType = (Reference.DataElementType)element.Type, Data = new StoredPayload(bytes),
-                DataElementExtendedGUID = new(element.Id.Value, element.Id.Guid),
-                SerialNumber = new(element.Serial.Guid, element.Serial.Value),
+                DataElementType = (Reference.DataElementType)element.DataElementType, Data = new StoredPayload(bytes),
+                DataElementExtendedGUID = new(element.DataElementExtendedGuid.Value, element.DataElementExtendedGuid.Guid),
+                SerialNumber = new(element.SerialNumber.Guid, element.SerialNumber.Value),
             });
         }
         return package;
@@ -249,9 +250,27 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
     private static void Equal(ExtendedId expected, Reference.ExGuid actual) => Assert.True(Same(expected, actual));
     private static async Task Unchanged(StorageProvider provider, Guid resourceId, string expectedState, byte[] expectedContent)
     {
-        var persisted = await provider.State.FindByResourceIdAsync(resourceId); Assert.NotNull(persisted);
+        var persisted = await provider.Documents.FindAsync(new DocumentIdentity.Resource(resourceId)); Assert.NotNull(persisted);
         Assert.Equal(expectedState, JsonSerializer.Serialize(persisted));
-        Assert.Equal(expectedContent, (await StoredDocument.RestoreAsync(persisted, provider.Content)).FilePartition.FileGraph.Materialize());
+        await using var stream = await provider.Packages.OpenReadAsync(persisted.Package);
+        using var copy = new MemoryStream();
+        await stream.CopyToAsync(copy);
+        Assert.Equal(expectedContent,copy.ToArray());
+    }
+
+    private static StorageProvider Memory()
+    {
+        var content = new InMemoryContentStore();
+        return new(new InMemoryDocumentRepository(content),content);
+    }
+    private static async Task<PartitionGraphSnapshot> GraphAsync(CellBridgeDocumentService service,DocumentHead head)
+    {
+        var response = await service.ExecuteAsync(head.ResourceId,DocumentPartitionKind.FileContents,
+            new() { SubRequests = { new(RequestTypes.QueryChanges) { RequestId = 1,Data = new QueryChangesSubRequestData
+                { IncludeStorageManifest = true,IncludeCellChanges = true } } } },new Dictionary<string,string>(),Actor);
+        Assert.False(Assert.Single(response.Response.SubResponses).Status);
+        return PartitionGraphSnapshot.Create(response.Response.DataElementPackage!.DataElements,
+            Assert.IsType<QueryChangesSubResponseData>(response.Response.SubResponses[0].Data).StorageIndexExtendedGuid);
     }
 
     private sealed class FailingHierarchyQuery(ulong id) : Reference.QueryChangesCellSubRequest(id)

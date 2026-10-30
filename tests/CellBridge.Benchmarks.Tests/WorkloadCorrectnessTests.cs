@@ -24,7 +24,12 @@ public sealed class SyntheticWorkloadTests
         var payload = StorageBenchmarkInputs.Package(1, 42);
 
         Assert.Equal(1_050_773, payload.Length);
-        Assert.Equal("83eaba2676ad6a42bfe7e60be47b3b66be8d2a17bb6a85f97a992d7a3dd85e19",
+        // ZipArchive records the creator OS and Unix file permissions in its
+        // central directory. XML and entry sizes remain the same on both hosts.
+        var expectedHash = OperatingSystem.IsWindows()
+            ? "a0047c783bbdf8aabc961cf1b59d43bcfe740b013df617d8136f778a05ed5b54"
+            : "83eaba2676ad6a42bfe7e60be47b3b66be8d2a17bb6a85f97a992d7a3dd85e19";
+        Assert.Equal(expectedHash,
             Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(payload)));
     }
 
@@ -36,7 +41,7 @@ public sealed class SyntheticWorkloadTests
     public async Task RepeatedSavesRetainContentAndRetryIdentity(string workload)
     {
         var content = new InMemoryContentStore();
-        var provider = new StorageProvider(new InMemoryStateStore(), content);
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content), content);
         await CheckRepeatedSavesAsync(provider, workload);
     }
 
@@ -51,26 +56,26 @@ public sealed class SyntheticWorkloadTests
         for (var i = 0; i < 16; i++)
         {
             var previous = state;
-            var current = await StoredDocument.RestoreAsync(state, provider.Content);
+            var current = await BenchmarkTestDocuments.GraphAsync(service, state, actor);
             var bytes = workload == "changed-full" ? MinimalDocx.Create("Revision " + i) : payload;
             var request = SyntheticWorkload.Save(current, bytes, workload, i, random);
             var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), actor);
             Assert.All(result.Response.SubResponses, r => Assert.False(r.Status));
             state = result.State;
             Assert.True(state.StateVersion > previous.StateVersion);
-            var restored = await StoredDocument.RestoreAsync(state, provider.Content);
-            Assert.Equal(bytes, restored.FilePartition.FileGraph.Materialize());
-            Assert.Equal(state.Content.Length, bytes.Length);
-            var retention = restored.FilePartition.FileGraph.AnalyzeRetention();
+            var restored = await BenchmarkTestDocuments.GraphAsync(service, state, actor);
+            Assert.Equal(bytes, restored.Materialize());
+            Assert.Equal(state.Package.Length, bytes.Length);
+            var retention = restored.AnalyzeRetention();
             Assert.True(retention.Complete);
             if (i == 0) firstRetainedBytes = retention.RetainedBytes;
             if (workload == "delta-chain" && i > 0) Assert.True(retention.RetainedBytes > firstRetainedBytes);
             var retry = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), actor);
             Assert.All(retry.Response.SubResponses, r => Assert.False(r.Status));
             Assert.Equal(state.StateVersion, retry.State.StateVersion);
-            Assert.Equal(state.Content, retry.State.Content);
+            Assert.Equal(state.Package, retry.State.Package);
         }
-        Assert.Equal(16, state.Receipts.Length);
+        Assert.Equal(16, state.Counters.SaveReceipts);
     }
 }
 
@@ -80,7 +85,7 @@ public sealed class BenchmarkDatabaseCollection : ICollectionFixture<BenchmarkEn
 public sealed class BenchmarkEnvironment : IAsyncLifetime
 {
     public LoadTestEnvironment Environment { get; private set; } = null!;
-    public async Task InitializeAsync() => Environment = await LoadTestEnvironment.StartAsync();
+    public async Task InitializeAsync() => Environment = await LoadTestEnvironment.StartAsync(userCount: 3, useDefaultAdmissionLimits: true);
     public async Task DisposeAsync() { if (Environment is not null) await Environment.DisposeAsync(); }
 }
 

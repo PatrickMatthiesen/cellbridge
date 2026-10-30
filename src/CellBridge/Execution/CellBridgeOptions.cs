@@ -5,8 +5,11 @@ public sealed class CellBridgeOptions
     /// <summary>Wire-hash configuration, independent of stored-content integrity.</summary>
     public CellBridge.FssHttpB.ProtocolHashingOptions Hashing { get; set; } = CellBridge.FssHttpB.ProtocolHashingOptions.Default;
     public long MaxRequestBytes { get; set; } = 128L * 1024 * 1024;
+    /// <summary>Maximum active cellstorage POSTs and document GETs per process, through response delivery.</summary>
     public int MaxConcurrentRequests { get; set; } = 8;
+    /// <summary>Maximum admitted requests for one authenticated subject within this process.</summary>
     public int MaxConcurrentRequestsPerSubject { get; set; } = 2;
+    /// <summary>Absolute deadline covering request reading, download reconstruction and response delivery.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromMinutes(2);
     /// <summary>Fixed external HTTPS origin. Required for remote hosts unless AllowedHosts validates their authority.</summary>
     public string? PublicOrigin { get; set; }

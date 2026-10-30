@@ -16,33 +16,25 @@ namespace CellBridge.Storage.Tests;
 public sealed class DocumentStateJsonTests
 {
     [Fact]
-    public Task ChangedSaveHistoryHasLinearEncodedGrowthAndRestoresFromCompactRoundTrip() =>
-        CheckWholeFileHistoryCodecAsync(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore(),
-            new StorageLimits { MaxRetainedStateSnapshots = 64 }));
+    public Task ChangedSaveHistoryHasLinearNormalizedGrowthAndRestoresFromRoundTrip() =>
+        CheckWholeFileHistoryAsync(StorageTestDocuments.Memory());
 
     [PostgreSqlFact]
-    public Task DurableChangedSaveHistoryHasLinearGrowthAndRestoresEveryPersistedRevision() =>
-        BudgetAndQueryTests.WithDatabase(new() { MaxRetainedStateSnapshots = 64 }, async source =>
+    public Task DurableChangedSaveHistoryHasLinearGrowthAndRestoresEveryRevision() =>
+        EfPostgreSqlMigrationTests.WithInitializedDatabaseAsync(new(), async source =>
         {
-            var limits = new StorageLimits { MaxRetainedStateSnapshots = 64 };
-            var provider = new StorageProvider(new PostgreSqlStateStore(source, limits),
-                new PostgreSqlContentStore(source), limits);
-            await CheckWholeFileHistoryCodecAsync(provider, async resourceId =>
-            {
-                await using var command = source.CreateCommand("SELECT count(*) FROM cellbridge_states WHERE resource_id=$1");
-                command.Parameters.AddWithValue(resourceId);
-                Assert.Equal((long)limits.MaxRetainedStateSnapshots, (long)(await command.ExecuteScalarAsync())!);
-            });
+            var provider = new StorageProvider(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
+            await CheckWholeFileHistoryAsync(provider);
+            await using var command = source.CreateCommand("SELECT count(*) FROM cellbridge_states");
+            Assert.Equal(0L, await command.ExecuteScalarAsync());
         });
 
-    private static async Task CheckWholeFileHistoryCodecAsync(StorageProvider provider,
-        Func<Guid, Task>? verifyRetainedSnapshots = null)
+    private static async Task CheckWholeFileHistoryAsync(StorageProvider provider)
     {
         var service = new CellBridgeDocumentService(provider);
         var submitted = new List<byte[]> { MinimalDocx.Create("revision 0") };
-        var state = (await service.CreateAsync("/compact-history.docx", submitted[0], TestActor.Value))!;
-        var originalGraph = await DocumentPartition.RestoreFileGraphAsync(state, provider.Content, provider.Limits);
-        var originalFileCell = originalGraph.FileCell;
+        var state = (await service.CreateAsync("/normalized-history.docx", submitted[0], TestActor.Value))!;
+        var originalFileCell = state.Package.Root.Cell;
         var locks = new SharedDocumentLocks(service);
         Assert.True((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "lock", TestActor.Value)).Success);
         var sizes = new Dictionary<int, long>();
@@ -51,78 +43,62 @@ public sealed class DocumentStateJsonTests
             var bytes = MinimalDocx.Create("revision " + saveNumber);
             submitted.Add(bytes);
             using var package = new MemoryStream(bytes);
-            var result = await service.SaveWholeFileAsync(state.ResourceId, package, "save-" + saveNumber,
-                TestActor.Value, "lock");
+            var result = await service.SaveWholeFileAsync(state.ResourceId, package, "save-" + saveNumber, TestActor.Value, "lock");
             Assert.False(result.IsReplay);
-            state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+            state = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
             if (saveNumber is 10 or 20 or 40 or 100)
-                sizes[saveNumber] = DocumentStateJson.GetSerializedSize(state);
+                sizes[saveNumber] = JsonSerializer.SerializeToUtf8Bytes(await provider.Documents.ExportDocumentAsync(state.ResourceId), RecoveryJson.Options).LongLength;
         }
-
-        Assert.True((double)sizes[40] / sizes[20] < 2.8,
-            $"Encoded state grew {sizes[40] / (double)sizes[20]:F2}x from 20 to 40 whole-file saves.");
-        Assert.True((double)sizes[100] / sizes[40] < 2.8,
-            $"Encoded state grew {sizes[100] / (double)sizes[40]:F2}x from 40 to 100 whole-file saves.");
-
+        Assert.True((double)sizes[40] / sizes[20] < 2.8, $"Snapshot grew {sizes[40] / (double)sizes[20]:F2}x from 20 to 40 saves.");
+        Assert.True((double)sizes[100] / sizes[40] < 2.8, $"Snapshot grew {sizes[100] / (double)sizes[40]:F2}x from 40 to 100 saves.");
         Assert.True((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Release, "lock", TestActor.Value)).Success);
-        state = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(101, state.Revisions.Length);
-        Assert.Equal(100, state.WholeFileSaveReceipts.Length);
-        if (verifyRetainedSnapshots is not null) await verifyRetainedSnapshots(state.ResourceId);
-        var json = DocumentStateJson.Serialize(state);
-        Assert.Equal(Encoding.UTF8.GetByteCount(json), DocumentStateJson.GetSerializedSize(state));
-        var decoded = DocumentStateJson.Deserialize(json, strict: true);
-        Assert.Equal(JsonSerializer.Serialize(state), JsonSerializer.Serialize(decoded));
-
-        var latestFile = decoded.Partitions.Single(partition => partition.Kind == 0);
-        var latestRevisionFile = decoded.Revisions[^1].Partitions.Single(partition => partition.Kind == 0);
-        Assert.Equal(latestFile.Elements.Length, latestRevisionFile.Elements.Length);
-        for (var index = 0; index < latestFile.Elements.Length; index++)
-            Assert.Same(latestFile.Elements[index], latestRevisionFile.Elements[index]);
-        Assert.Equal(originalFileCell, (await DocumentPartition.RestoreFileGraphAsync(decoded, provider.Content,
-            provider.Limits)).FileCell);
-
-        for (var index = 0; index < decoded.Revisions.Length; index++)
+        state = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(101, state.Counters.Revisions);
+        Assert.Equal(100, state.Counters.WholeFileSaveReceipts);
+        var snapshot = (await provider.Documents.ExportDocumentAsync(state.ResourceId))!;
+        var json = JsonSerializer.Serialize(snapshot, RecoveryJson.Options);
+        var decoded = JsonSerializer.Deserialize<NormalizedDocumentSnapshot>(json, RecoveryJson.Options)!;
+        NormalizedDocumentRecovery.Validate(decoded, provider.Limits);
+        Assert.Equal(json, JsonSerializer.Serialize(decoded, RecoveryJson.Options));
+        Assert.Equal(NormalizedDocumentRecovery.StoredBytes(decoded), state.Counters.StoredBytes);
+        var reader = new NormalizedSnapshotGraphSource(decoded, provider.Content, provider.Limits).PackageReader();
+        for (var index = 0; index < decoded.ApplicationRevisions.Length; index++)
         {
-            var revision = decoded.Revisions[index];
-            var partition = revision.Partitions.Single(partition => partition.Kind == 0);
-            var graph = await DocumentPartition.RestoreGraphAsync(partition, provider.Content, provider.Limits);
-            Assert.Equal(submitted[index], await provider.Content.ReadVerifiedAsync(revision.Content));
-            Assert.Equal(submitted[index], PartitionGraphSnapshot.Create(graph.Elements, graph.StorageIndex).Materialize());
-            Assert.Equal(originalFileCell, PartitionGraphSnapshot.Create(graph.Elements, graph.StorageIndex).FileCell);
+            var revision = decoded.ApplicationRevisions[index];
+            Assert.Equal(originalFileCell, revision.Package.Root.Cell);
+            await using var package = await reader.OpenReadAsync(revision.Package);
+            using var copy = new MemoryStream();
+            await package.CopyToAsync(copy);
+            Assert.Equal(submitted[index], copy.ToArray());
         }
-
-        var selected = decoded.Revisions[9];
-        var restoreProvider = provider.State.Durable ? provider :
-            new StorageProvider(new InMemoryStateStore(((InMemoryContentStore)provider.Content).Budget), provider.Content);
-        if (!provider.State.Durable) Assert.True(await restoreProvider.State.TryCreateAsync(decoded));
-        var restoreService = provider.State.Durable ? service : new CellBridgeDocumentService(restoreProvider);
+        var selected = decoded.ApplicationRevisions[9];
+        var restoreProvider = provider.Documents.Durable ? provider : StorageTestDocuments.Memory(provider.Content);
+        if (!provider.Documents.Durable)
+            await restoreProvider.Documents.ImportRecoveryAsync(new([decoded], []), new(Guid.NewGuid(), new string('a', 64), 1, 1));
+        var restoreService = new CellBridgeDocumentService(restoreProvider);
         var restored = await restoreService.RestoreRevisionAsync(state.ResourceId, selected.RevisionNumber,
-            RevisionHistory.Latest(state), "codec-round-trip-restore", TestActor.Value);
+            state.LatestRevisionNumber, "round-trip-restore", TestActor.Value);
         Assert.False(restored.IsReplay);
-        var restoredState = (await restoreProvider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(submitted[9], await restoreProvider.Content.ReadVerifiedAsync(restoredState.Content));
-        Assert.Equal(originalFileCell, (await DocumentPartition.RestoreFileGraphAsync(restoredState,
-            restoreProvider.Content, restoreProvider.Limits)).FileCell);
+        var restoredState = (await restoreProvider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(submitted[9], await StorageTestDocuments.PackageAsync(restoreProvider, restoredState.Package));
+        Assert.Equal(originalFileCell, restoredState.Package.Root.Cell);
         var replay = await restoreService.RestoreRevisionAsync(state.ResourceId, selected.RevisionNumber,
-            RevisionHistory.Latest(state), "codec-round-trip-restore", TestActor.Value);
+            state.LatestRevisionNumber, "round-trip-restore", TestActor.Value);
         Assert.True(replay.IsReplay);
         Assert.Equal(restored.Revision.RevisionNumber, replay.Revision.RevisionNumber);
-        Assert.Equal(100, ((await restoreProvider.State.FindByResourceIdAsync(state.ResourceId))!).WholeFileSaveReceipts.Length);
+        Assert.Equal(100, restoredState.Counters.WholeFileSaveReceipts);
         using var replayBytes = new MemoryStream(submitted[1]);
-        var wholeFileReplay = await restoreService.SaveWholeFileAsync(state.ResourceId, replayBytes, "save-1",
-            TestActor.Value, "lock");
+        var wholeFileReplay = await restoreService.SaveWholeFileAsync(state.ResourceId, replayBytes, "save-1", TestActor.Value, "lock");
         Assert.True(wholeFileReplay.IsReplay);
-        Assert.Equal(decoded.Revisions[1].RevisionNumber, wholeFileReplay.Revision.RevisionNumber);
+        Assert.Equal(decoded.ApplicationRevisions[1].RevisionNumber, wholeFileReplay.Revision.RevisionNumber);
     }
 
     [Fact]
     public async Task ExpandedLegacyJsonRemainsReadableAndGraphRangesPreserveOrderAndDescriptorIdentity()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
-        var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/expanded-history.docx", MinimalDocx.Create("legacy"), TestActor.Value))!;
-        state = await RevisionHistoryTests.Save(service, state, "changed");
+        var content = new InMemoryContentStore();
+        var state = await LegacyStorageFixture.CreateAsync(content, "/expanded-history.docx", MinimalDocx.Create("legacy"));
+        state = (await LegacyStorageFixture.SaveAsync(state, content, MinimalDocx.Create("changed"))).State;
 
         var partition = state.Partitions.Single(value => value.Kind == 0);
         var elements = partition.Elements;
@@ -200,9 +176,7 @@ public sealed class DocumentStateJsonTests
     [Fact]
     public async Task DecoderRejectsConflictingDescriptorsForTheSameIdentity()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
-        var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/descriptor-conflicts.docx", MinimalDocx.Create("conflicts"), TestActor.Value))!;
+        var state = await LegacyStorageFixture.CreateAsync(new InMemoryContentStore(), "/descriptor-conflicts.docx", MinimalDocx.Create("conflicts"));
         var original = state.Partitions.Single(partition => partition.Kind == 0).Elements.First(element => element.Serial.Guid != Guid.Empty);
         var validCompact = DocumentStateJson.Serialize(state);
         var historyFilePartitionIndex = Array.FindIndex(state.Revisions[0].Partitions.ToArray(), partition => partition.Kind == 0);
@@ -237,10 +211,9 @@ public sealed class DocumentStateJsonTests
     [Fact]
     public async Task DecoderRejectsMalformedRangesVersionsAndDuplicateProperties()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
-        var service = new CellBridgeDocumentService(provider);
-        var state = (await service.CreateAsync("/bad-ranges.docx", MinimalDocx.Create("ranges"), TestActor.Value))!;
-        state = await RevisionHistoryTests.Save(service, state, "second range version");
+        var content = new InMemoryContentStore();
+        var state = await LegacyStorageFixture.CreateAsync(content, "/bad-ranges.docx", MinimalDocx.Create("ranges"));
+        state = (await LegacyStorageFixture.SaveAsync(state, content, MinimalDocx.Create("second range version"))).State;
         var json = DocumentStateJson.Serialize(state);
         var filePartitionIndex = Array.FindIndex(state.Partitions.ToArray(), partition => partition.Kind == 0);
 

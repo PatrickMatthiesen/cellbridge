@@ -18,7 +18,7 @@ public sealed class BoundedTransactionPropertyTests(ITestOutputHelper output)
 
     [Fact]
     public Task BoundedCompleteSaveFailuresAndReceiptsPreservePersistedState() =>
-        Check(new(new InMemoryStateStore(), new InMemoryContentStore()));
+        Check(StorageTestDocuments.Memory());
 
     [PostgreSqlFact]
     public async Task PostgreSqlBoundedSaveFailuresAndReceiptsSurviveProviderRecreation()
@@ -38,7 +38,8 @@ public sealed class BoundedTransactionPropertyTests(ITestOutputHelper output)
                 "/bounded-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
             var request = StorageTests.Fixture("save-first");
             var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
-            put.ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!);
+            var originalGraph = await StorageTestDocuments.GraphAsync(new CellBridgeDocumentService(provider),state);
+            StorageTests.Rebase(request,originalGraph);
             put.Flags |= sample % 2 == 0 ? (byte)0x20 : (byte)0;
             put.AdditionalFlagsBits = sample % 3 == 0 ? (ushort)0x8004 : (ushort)0x04;
             request.SubRequests[0].RequestId = (ulong)random.Next(1, 1000);
@@ -47,9 +48,9 @@ public sealed class BoundedTransactionPropertyTests(ITestOutputHelper output)
                 request, new Dictionary<string, string>(), TestActor.Value);
             Assert.False(Assert.Single(saved.Response.SubResponses).Status);
             Assert.Equal(state.ContentVersion + 1, saved.State.ContentVersion);
-            Assert.Single(saved.State.Receipts);
+            Assert.Equal(1,saved.State.Counters.SaveReceipts);
             string committed = JsonSerializer.Serialize(saved.State);
-            byte[] expectedBytes = (await StoredDocument.RestoreAsync(saved.State, provider.Content)).FilePartition.FileGraph.Materialize();
+            byte[] expectedBytes = await StorageTestDocuments.PackageAsync(provider,saved.State.Package);
 
             provider = recreate?.Invoke() ?? provider;
             service = new(provider);
@@ -71,8 +72,7 @@ public sealed class BoundedTransactionPropertyTests(ITestOutputHelper output)
                 Assert.Equal(committed, JsonSerializer.Serialize(rejected.State));
             }
             var stale = StorageTests.Fixture("save-second");
-            Assert.IsType<PutChangesSubRequestData>(stale.SubRequests[0].Data).ExpectedStorageIndex =
-                StorageIds.Restore(state.Partitions[0].StorageIndex!);
+            StorageTests.Rebase(stale,originalGraph);
             var failure = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
                 stale, new Dictionary<string, string>(), TestActor.Value);
             var staleResponse = Assert.Single(failure.Response.SubResponses);
@@ -82,9 +82,9 @@ public sealed class BoundedTransactionPropertyTests(ITestOutputHelper output)
             Assert.Equal(committed, JsonSerializer.Serialize(failure.State));
 
             provider = recreate?.Invoke() ?? provider;
-            var persisted = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+            var persisted = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
             Assert.Equal(committed, JsonSerializer.Serialize(persisted));
-            Assert.Equal(expectedBytes, (await StoredDocument.RestoreAsync(persisted, provider.Content)).FilePartition.FileGraph.Materialize());
+            Assert.Equal(expectedBytes, await StorageTestDocuments.PackageAsync(provider,persisted.Package));
         }
     }
 }

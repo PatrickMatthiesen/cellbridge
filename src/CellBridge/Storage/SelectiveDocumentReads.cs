@@ -24,24 +24,7 @@ public sealed record DocumentRevisionReadPage(DocumentReadMetadata Current,
     ImmutableArray<DocumentRevisionSummary> Revisions, int? NextOffset);
 public sealed record DocumentRevisionRead(DocumentReadMetadata Current, DocumentRevisionSummary? Revision);
 
-/// <summary>
-/// Optional selective reads. Each call observes one current document pointer and
-/// returns metadata for that pointer; revision rows belong to that same current
-/// lifecycle/history. Missing or stale derived records are corruption, not a reason
-/// to return another document. Reads perform no package or graph payload I/O.
-/// Existing state-store and full graph-returning APIs remain available.
-/// </summary>
-public interface IDocumentReadStore
-{
-    ValueTask<DocumentReadMetadata?> FindReadMetadataByResourceIdAsync(Guid resourceId, CancellationToken cancellationToken = default);
-    ValueTask<DocumentReadMetadata?> FindReadMetadataByPathKeyAsync(string pathKey, CancellationToken cancellationToken = default);
-    ValueTask<DocumentRevisionReadPage?> ReadRevisionSummariesAsync(Guid resourceId, int offset, int limit,
-        CancellationToken cancellationToken = default);
-    ValueTask<DocumentRevisionRead?> ReadRevisionSummaryAsync(Guid resourceId, ulong revisionNumber,
-        CancellationToken cancellationToken = default);
-}
-
-/// <summary>Pure projections shared by providers and compatibility fallbacks.</summary>
+/// <summary>Legacy schema projections used during explicit database migrations.</summary>
 public static class DocumentReadModels
 {
     public const int MaxPageSize = 256;

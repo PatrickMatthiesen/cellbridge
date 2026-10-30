@@ -28,8 +28,8 @@ public sealed class PortabilityToolTests
             await Command("restore-version", destination.ConnectionString,
                 ["--resource-id", document.ResourceId.ToString(), "--revision", "1", "--expected-revision", "1",
                  "--operation-key", "operator-recovery", "--subject", TestActor.Value.Identity.Subject]);
-            var restored = (await new PostgreSqlStateStore(destination).FindByResourceIdAsync(document.ResourceId))!;
-            Assert.Equal(2UL, RevisionHistory.Latest(restored));
+            var restored = (await ((IDocumentRepository)new PostgreSqlStateStore(destination)).FindAsync(new DocumentIdentity.Resource(document.ResourceId)))!;
+            Assert.Equal(2UL, restored.LatestRevisionNumber);
             Assert.Equal(imported, await Command("import", destination.ConnectionString, context));
         }));
 

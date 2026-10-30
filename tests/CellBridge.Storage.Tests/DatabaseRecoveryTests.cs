@@ -1,4 +1,6 @@
+using System.Collections.Immutable;
 using System.Diagnostics;
+using Microsoft.EntityFrameworkCore;
 using System.Security.Cryptography;
 using System.Text.Json;
 using CellBridge.AspNetCore;
@@ -8,6 +10,7 @@ using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;
+using CellBridge.Tests;
 using Npgsql;
 
 namespace CellBridge.Storage.Tests;
@@ -33,50 +36,68 @@ public sealed class DatabaseRecoveryTests
                 initial.LifecycleGeneration, initial.StateVersion, Guid.NewGuid(), "outage-destination", "initial"));
             var before = await Capture(provider);
             var request = StorageTests.Fixture("save-first");
-            ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
-                StorageIds.Restore(initial.Partitions.Single(p => p.Kind == 0).StorageIndex!);
-            using var gate = new PublicationGate(provider.State);
-            var interrupted = new CellBridgeDocumentService(new(gate, provider.Content));
-            // Only this fault-injection callback blocks. Production callbacks stay bounded and pure.
+            await SupplyExpectedIndex(service, initial, request);
+            var gate = new NormalizedHeadPause(initial.ResourceId);
+            var options = new DbContextOptionsBuilder<CellBridgeDbContext>().UseNpgsql(db).AddInterceptors(gate).Options;
+            IContentStore interruptedContent = root is null ? new PostgreSqlContentStore(options) : new PostgreSqlFileSystemContentStore(options, root);
+            var interrupted = new CellBridgeDocumentService(new(new PostgreSqlStateStore(options, validationContent: interruptedContent), interruptedContent));
+            // The test interceptor pauses after actual normalized-head UPDATE SQL and before COMMIT.
             var save = Task.Run(async () => await interrupted.ExecuteAsync(initial.ResourceId,
                 DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value));
+            var reserved = before;
             try
             {
                 await gate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                reserved = await Capture(provider);
+                var unreserved = reserved.Snapshot.Snapshots.Select(snapshot => snapshot with
+                {
+                    ContentReferences = snapshot.ContentReferences.Where(reference => !reference.IsPending).ToImmutableArray(),
+                    Current = snapshot.Current with { Head = snapshot.Current.Head with { Counters = snapshot.Current.Head.Counters with
+                        { StoredBytes = snapshot.Current.Head.Counters.StoredBytes - snapshot.ContentReferences.Where(reference => reference.IsPending)
+                            .Sum(reference => reference.Handle.Length + reference.AdmissionBytes) } } },
+                });
+                if (filesystem)
+                    Assert.Contains(reserved.Snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences), reference => reference.IsPending);
+                else
+                {
+                    Assert.DoesNotContain(reserved.Snapshot.Snapshots.SelectMany(snapshot => snapshot.ContentReferences), reference => reference.IsPending);
+                    Assert.Equal(PortabilityTests.CanonicalSnapshots(before.Snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(reserved.Snapshot.Snapshots));
+                }
+                Assert.Equal(PortabilityTests.CanonicalSnapshots(before.Snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(unreserved));
                 await control.Kill();
-                gate.Release.Set();
+                gate.Continue.TrySetResult();
                 await Assert.ThrowsAsync<StorageUnavailableException>(() => save.WaitAsync(TimeSpan.FromSeconds(30)));
-                await Assert.ThrowsAsync<StorageUnavailableException>(() => provider.State.FindByResourceIdAsync(initial.ResourceId).AsTask());
+                await Assert.ThrowsAsync<StorageUnavailableException>(() => provider.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)).AsTask());
                 await Assert.ThrowsAsync<StorageUnavailableException>(() => service.CreateAsync("/outage-must-not-exist.docx",
                     MinimalDocx.Create(), TestActor.Value).AsTask());
             }
             finally
             {
-                gate.Release.Set();
+                gate.Continue.TrySetResult();
                 // Restart before WithDatabase's finally needs the admin connection for DROP DATABASE.
                 await control.Start();
             }
             // Check both the existing pool and a fresh pool BEFORE retry, without initialization or pool clearing.
-            await Verify(provider, before);
+            await Verify(provider, reserved);
             await using var fresh = Reopen(db);
-            await Verify(Provider(fresh, root), before);
-            Assert.Null(await provider.State.FindByPathKeyAsync("/OUTAGE-MUST-NOT-EXIST.DOCX"));
-            await VerifyAccounting(db);
+            await Verify(Provider(fresh, root), reserved);
+            Assert.Null(await provider.Documents.FindAsync(new DocumentIdentity.Path("/OUTAGE-MUST-NOT-EXIST.DOCX")));
+            await VerifyInventory(db);
             var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
                 request, new Dictionary<string, string>(), TestActor.Value);
             Assert.False(Assert.Single(saved.Response.SubResponses).Status);
             Assert.Equal(initial.ContentVersion + 1, saved.State.ContentVersion);
-            Assert.Single(saved.State.Receipts);
-            Assert.Single(saved.State.Publication!.Pending);
-            Assert.Equal(initial.Revisions.Length + 1, saved.State.Revisions.Length);
+            Assert.Equal(1, saved.State.Counters.SaveReceipts);
+            Assert.Equal(1, saved.State.Counters.PendingDeliveries);
+            Assert.Equal(initial.Counters.Revisions + 1, saved.State.Counters.Revisions);
             VerifyIndependentReply(saved.Response.ToByteArray());
             var published = await Capture(provider);
             var retry = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
                 request, new Dictionary<string, string>(), TestActor.Value);
             Assert.False(Assert.Single(retry.Response.SubResponses).Status);
             await Verify(provider, published);
-            await VerifyAccounting(db);
-            await control.Report("interruption", filesystem, new { boundary = "proposed state inside transaction, before publication SQL", snapshots = before.Snapshot.Snapshots.Length });
+            await VerifyInventory(db);
+            await control.Report("interruption", filesystem, new { boundary = "normalized-head UPDATE executed inside transaction, before COMMIT", snapshots = before.Snapshot.Snapshots.Length });
         });
 
     [DatabaseRecoveryTheory]
@@ -94,14 +115,14 @@ public sealed class DatabaseRecoveryTests
             try
             {
                 await control.Stop();
-                await Assert.ThrowsAsync<StorageUnavailableException>(() => provider.State.FindByResourceIdAsync(original.ResourceId).AsTask());
+                await Assert.ThrowsAsync<StorageUnavailableException>(() => provider.Documents.FindAsync(new DocumentIdentity.Resource(original.ResourceId)).AsTask());
             }
             finally { await control.Start(); }
             Assert.Equal(JsonSerializer.Serialize(rows), JsonSerializer.Serialize(await RawRows(db)));
             await Verify(provider, before);
             await using var fresh = Reopen(db);
             await Verify(Provider(fresh, root), before);
-            await VerifyAccounting(db);
+            await VerifyInventory(db);
             await control.Report("restart", filesystem, new { boundary = "acknowledged saves followed by clean database stop/start", snapshots = before.Snapshot.Snapshots.Length });
         });
 
@@ -115,14 +136,14 @@ public sealed class DatabaseRecoveryTests
             var root = filesystem ? control.Directory("backup-source-content") : null;
             var provider = Provider(db, root);
             var original = await PortabilityTests.History(provider, Guid.NewGuid());
-            Assert.NotEmpty(original.Receipts);
-            Assert.NotEmpty(original.RestoreReceipts);
-            Assert.NotEmpty(original.Publication!.Pending);
-            Assert.Contains(original.Partitions, p => p.Kind == (int)DocumentPartitionKind.Metadata && p.Elements.Length > 0);
+            Assert.True(original.Counters.SaveReceipts > 0);
+            Assert.True(original.Counters.RestoreReceipts > 0);
+            Assert.True(original.Counters.PendingDeliveries > 0);
+            Assert.Contains((await provider.Documents.ReadControlAsync(original.ResourceId))!.Partitions, p => p.Kind == (int)DocumentPartitionKind.Metadata && p.ElementCount > 0);
             var service = new CellBridgeDocumentService(provider);
             var retired = (await service.CreateAsync("/retired.docx", MinimalDocx.Create("retired"), TestActor.Value))!;
-            Assert.True(await ((IDocumentLifecycleStore)provider.State).TryDeleteAsync(retired.ResourceId,
-                retired.LifecycleGeneration, retired.StateVersion));
+            Assert.True((await provider.Documents.ChangeLifecycleAsync(new DocumentLifecycleCommand.Delete(retired.ResourceId,
+                retired.LifecycleGeneration, retired.StateVersion))).Applied);
             // No writers, external publishers or collectors run against these private databases/roots.
             var before = await Capture(provider);
             foreach (var reply in before.Decoders)
@@ -132,9 +153,9 @@ public sealed class DatabaseRecoveryTests
                 sourceFixture = "PortabilityTests.History: MetadataPublicationTests.Initial(GraphFixture), synthetic metadata and DOCX inline file graphs; not a desktop capture",
                 decoders = before.Decoders
             }, new JsonSerializerOptions { WriteIndented = true }));
-            var headHandles = before.Snapshot.Snapshots.Where(s => before.Snapshot.Heads.Any(h => h.ResourceId == s.ResourceId && h.StateVersion == s.StateVersion))
-                .SelectMany(StorageReferences.Handles).Select(h => h.Key).ToHashSet();
-            var historyOnly = before.Handles.First(h => !headHandles.Contains(h.Key));
+            var activeHandles = before.Snapshot.Snapshots.SelectMany(document => document.Visibility.Where(visibility => visibility.EndSequence is null)
+                .Select(visibility => document.Elements.Single(element => element.Scope == visibility.Scope && element.Element.Id == visibility.Element).Element.Payload.Key)).ToHashSet();
+            var historyOnly = before.Handles.First(handle => !activeHandles.Contains(handle.Key));
             var rows = await RawRows(db);
             var archive = control.File("database.dump");
             await control.Dump(db, archive);
@@ -148,12 +169,12 @@ public sealed class DatabaseRecoveryTests
                 await control.Restore(restoredName, archive);
                 var connection = Connection(db); connection.Database = restoredName;
                 await using var restoredDb = NpgsqlDataSource.Create(connection.ConnectionString);
-                // Do not InitializeAsync: it repairs accounting and could mask a broken backup.
+                // Open the restored schema directly, without running initialization.
                 Assert.Equal(JsonSerializer.Serialize(rows), JsonSerializer.Serialize(await RawRows(restoredDb)));
                 var restored = Provider(restoredDb, copiedRoot);
                 await Verify(restored, before);
-                await VerifyAccounting(restoredDb);
-                Assert.Null(await restored.State.FindByResourceIdAsync(retired.ResourceId));
+                await VerifyInventory(restoredDb);
+                Assert.Null(await restored.Documents.FindAsync(new DocumentIdentity.Resource(retired.ResourceId)));
                 await Assert.ThrowsAsync<UnauthorizedAccessException>(() => new CellBridgeDocumentService(restored)
                     .GetRevisionAsync(original.ResourceId, 1, new(new("foreign", "foreign", "foreign"))).AsTask());
                 if (filesystem)
@@ -176,16 +197,16 @@ public sealed class DatabaseRecoveryTests
                 }
                 var restoredService = new CellBridgeDocumentService(restored);
                 var revision = await restoredService.RestoreRevisionAsync(original.ResourceId, 3,
-                    RevisionHistory.Latest(original), "after-logical-backup", TestActor.Value);
-                Assert.Equal(original.Revisions[2].Content, revision.Revision.Content);
+                    original.LatestRevisionNumber, "after-logical-backup", TestActor.Value);
+                Assert.Equal(before.Snapshot.Snapshots.Single(document => document.Current.Head.ResourceId == original.ResourceId).ApplicationRevisions.Single(record => record.RevisionNumber == 3).Package.Sha256, revision.Revision.Package.Sha256);
                 var published = await Capture(restored);
                 var retry = await restoredService.RestoreRevisionAsync(original.ResourceId, 3,
-                    RevisionHistory.Latest(original), "after-logical-backup", TestActor.Value);
+                    original.LatestRevisionNumber, "after-logical-backup", TestActor.Value);
                 Assert.Equal(JsonSerializer.Serialize(revision.Revision), JsonSerializer.Serialize(retry.Revision));
                 await Verify(restored, published);
                 // A new reference PutChanges on another document must also survive receipt retry.
                 await CheckReferenceSave(restored);
-                await VerifyAccounting(restoredDb);
+                await VerifyInventory(restoredDb);
                 await using var archiveStream = System.IO.File.OpenRead(archive);
                 await control.Report("backup", filesystem, new { snapshots = before.Snapshot.Snapshots.Length,
                     contentObjects = before.Handles.Length, historyOnly = historyOnly.Key,
@@ -232,8 +253,11 @@ public sealed class DatabaseRecoveryTests
         }
     }
 
-    private static StorageProvider Provider(NpgsqlDataSource db, string? root) => new(new PostgreSqlStateStore(db),
-        root is null ? new PostgreSqlContentStore(db) : new PostgreSqlFileSystemContentStore(db, root));
+    private static StorageProvider Provider(NpgsqlDataSource db, string? root)
+    {
+        IContentStore content = root is null ? new PostgreSqlContentStore(db) : new PostgreSqlFileSystemContentStore(db, root);
+        return new(new PostgreSqlStateStore(db, validationContent: content), content);
+    }
 
     private static NpgsqlConnectionStringBuilder Connection(NpgsqlDataSource db) => new(Environment.GetEnvironmentVariable("ConnectionStrings__cellbridge")!)
         { Database = new NpgsqlConnectionStringBuilder(db.ConnectionString).Database, Timeout = 5, CommandTimeout = 10 };
@@ -251,8 +275,8 @@ public sealed class DatabaseRecoveryTests
         Dictionary<string, DecoderEvidence> Decoders);
     private static async Task<Expected> Capture(StorageProvider provider)
     {
-        var snapshot = await ((IProviderRecoveryStore)provider.State).CaptureRecoveryAsync();
-        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(StorageReferences.Handles)).ToArray();
+        var snapshot = await ((IProviderRecoveryStore)provider.Documents).CaptureRecoveryAsync();
+        var handles = ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(document => document.ContentReferences.Where(reference => !reference.IsPending).Select(reference => reference.Handle))).ToArray();
         var bytes = new Dictionary<string, byte[]>();
         foreach (var handle in handles) bytes.Add(handle.Key, await provider.Content.ReadVerifiedAsync(handle));
         var decoders = snapshot.Snapshots.SelectMany(s => s.Receipts).Where(r => r.Response is not null)
@@ -262,8 +286,9 @@ public sealed class DatabaseRecoveryTests
 
     private static async Task Verify(StorageProvider provider, Expected expected)
     {
-        Assert.Equal(JsonSerializer.Serialize(expected.Snapshot),
-            JsonSerializer.Serialize(await ((IProviderRecoveryStore)provider.State).CaptureRecoveryAsync()));
+        var actual = await provider.Documents.CaptureRecoveryAsync();
+        Assert.Equal(PortabilityTests.CanonicalSnapshots(expected.Snapshot.Snapshots), PortabilityTests.CanonicalSnapshots(actual.Snapshots));
+        Assert.Equal(JsonSerializer.Serialize(expected.Snapshot.Receipts), JsonSerializer.Serialize(actual.Receipts));
         foreach (var handle in expected.Handles)
         {
             await using var stream = await provider.Content.OpenReadAsync(handle);
@@ -280,21 +305,18 @@ public sealed class DatabaseRecoveryTests
                 Assert.Equal(0, restoredDecoder.Status);
             }
         }
-        foreach (var state in expected.Snapshot.Snapshots)
+        foreach (var snapshot in expected.Snapshot.Snapshots)
         {
-            await VerifyGraph(state, provider.Content);
-            foreach (var revision in state.Revisions)
-                await VerifyGraph(state with { Content = revision.Content,
-                    Partitions = revision.Partitions.Add(state.Partitions.Single(p => p.Kind == 2)) }, provider.Content);
-            // Retained replies must preserve their source decoding result AND
-            // decode fully. Byte equality never excuses a source wire defect.
+            await VerifyGraph(snapshot.Current.Head.Package, provider);
+            foreach (var revision in snapshot.ApplicationRevisions) await VerifyGraph(revision.Package, provider);
         }
     }
 
-    private static async Task VerifyGraph(DocumentState state, IContentStore content)
+    private static async Task VerifyGraph(DocumentPackage package, StorageProvider provider)
     {
-        var document = await StoredDocument.RestoreAsync(state, content);
-        Assert.Equal(await content.ReadVerifiedAsync(state.Content), document.FilePartition.FileGraph.Materialize());
+        var bytes = await StorageTestDocuments.PackageAsync(provider, package);
+        Assert.Equal(package.Length, bytes.LongLength);
+        Assert.Equal(package.Sha256, Convert.ToHexStringLower(SHA256.HashData(bytes)));
     }
 
     private static void VerifyIndependentReply(byte[] bytes)
@@ -309,8 +331,7 @@ public sealed class DatabaseRecoveryTests
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/reference-save.docx", MinimalDocx.Create(), TestActor.Value))!;
         var request = StorageTests.Fixture("save-first");
-        ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex =
-            StorageIds.Restore(initial.Partitions.Single(p => p.Kind == 0).StorageIndex!);
+        await SupplyExpectedIndex(service, initial, request);
         var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, request,
             new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
@@ -321,11 +342,13 @@ public sealed class DatabaseRecoveryTests
         Assert.False(Assert.Single(retry.Response.SubResponses).Status);
         Assert.Equal(saved.Response.ToByteArray(), retry.Response.ToByteArray());
         await Verify(provider, expected);
+        var second = StorageTests.Fixture("save-second");
+        await SupplyExpectedIndex(service, saved.State, second);
         var continued = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
-            StorageTests.Fixture("save-second"), new Dictionary<string, string>(), TestActor.Value);
+            second, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(continued.Response.SubResponses).Status);
         VerifyIndependentReply(continued.Response.ToByteArray());
-        await VerifyGraph(continued.State, provider.Content);
+        await VerifyGraph(continued.State.Package, provider);
     }
 
     private static async Task<SortedDictionary<string, string[]>> RawRows(NpgsqlDataSource db)
@@ -349,18 +372,9 @@ public sealed class DatabaseRecoveryTests
         return result;
     }
 
-    private static async Task VerifyAccounting(NpgsqlDataSource db)
+    private static async Task VerifyInventory(NpgsqlDataSource db)
     {
-        await using var command = db.CreateCommand("""
-            SELECT stored_bytes =
-                (SELECT COALESCE(SUM(length),0) FROM cellbridge_objects) +
-                (SELECT COALESCE(SUM(octet_length(state_json)),0) FROM cellbridge_states) +
-                (SELECT COALESCE(SUM(octet_length(receipt_json)),0) FROM cellbridge_recovery_receipts),
-                document_count = (SELECT COUNT(*) FROM cellbridge_documents)
-            FROM cellbridge_usage
-            """);
-        await using var reader = await command.ExecuteReaderAsync();
-        Assert.True(await reader.ReadAsync()); Assert.True(reader.GetBoolean(0)); Assert.True(reader.GetBoolean(1));
+        await new StorageMaintenance(db).CollectOrphansAsync();
     }
 
     private static void CopyObjects(string source, string target)
@@ -369,29 +383,12 @@ public sealed class DatabaseRecoveryTests
             System.IO.File.Copy(path, Path.Combine(target, Path.GetFileName(path)), overwrite: false);
     }
 
-    private sealed class PublicationGate(IDocumentStateStore inner) : IDocumentStateStore, IDisposable
+    private static async Task SupplyExpectedIndex(CellBridgeDocumentService service, DocumentHead head, FsshttpbCellRequest request)
     {
-        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public ManualResetEventSlim Release { get; } = new(false);
-        public bool Durable => inner.Durable;
-        public bool Shared => inner.Shared;
-        public ValueTask<DocumentState?> FindByResourceIdAsync(Guid id, CancellationToken ct = default) => inner.FindByResourceIdAsync(id, ct);
-        public ValueTask<DocumentState?> FindByPathKeyAsync(string key, CancellationToken ct = default) => inner.FindByPathKeyAsync(key, ct);
-        public ValueTask<IReadOnlyList<DocumentSummary>> ListAsync(int offset, int limit, CancellationToken ct = default) => inner.ListAsync(offset, limit, ct);
-        public ValueTask<bool> TryCreateAsync(DocumentState state, CancellationToken ct = default) => inner.TryCreateAsync(state, ct);
-        public ValueTask CheckHealthAsync(CancellationToken ct = default) => inner.CheckHealthAsync(ct);
-        public ValueTask<T> TransitionAsync<T>(Guid id, Func<DocumentState, DateTime, StateTransition<T>> transition, CancellationToken ct = default) =>
-            inner.TransitionAsync(id, (current, now) =>
-            {
-                var next = transition(current, now);
-                if (next.Next is not null)
-                {
-                    Entered.TrySetResult();
-                    if (!Release.Wait(TimeSpan.FromSeconds(60))) throw new TimeoutException("Recovery gate was not released.");
-                }
-                return next;
-            }, ct);
-        public void Dispose() => Release.Dispose();
+        var expected = (await StorageTestDocuments.GraphAsync(service, head)).StorageIndexes.Single();
+        ((PutChangesSubRequestData)request.SubRequests.Single().Data!).ExpectedStorageIndex = expected.DataElementExtendedGuid;
+        request.DataElementPackage!.DataElements.RemoveAll(element => element.DataElementExtendedGuid.Equals(expected.DataElementExtendedGuid));
+        request.DataElementPackage.DataElements.Add(expected);
     }
 
     private sealed class UnusedDestination : IExternalRevisionDestination

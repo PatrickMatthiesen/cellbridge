@@ -153,7 +153,7 @@ public sealed class OfficeFormsAuthenticationTests
                     if (configuration == "events-type") o.EventsType = typeof(HostCookieEvents);
                 });
             builder.Services.AddAuthorization();
-            builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+            builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false);
             builder.Services.AddCellBridgeOfficeFormsAuthentication(configuration is "missing" or "bearer" ? configuration : "office",
                 o =>
                 {

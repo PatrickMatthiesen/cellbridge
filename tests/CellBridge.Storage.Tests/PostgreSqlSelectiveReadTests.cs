@@ -3,6 +3,7 @@ using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;
 using Npgsql;
@@ -13,269 +14,122 @@ namespace CellBridge.Storage.Tests;
 public sealed class PostgreSqlSelectiveReadTests
 {
     [PostgreSqlFact]
-    public Task SelectiveReadsPreserveUnsignedRevisionNumbersAndNeverDecodeFullSnapshots() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
-        {
-            var store = new PostgreSqlStateStore(source);
-            var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
-            var state = (await service.CreateAsync("/selective.docx", MinimalDocx.Create("current"), TestActor.Value))!;
-            var original = Assert.Single(state.Revisions);
-            var firstNumber = (ulong)long.MaxValue + 7;
-            await store.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-            {
-                Revisions = [original with { RevisionNumber = firstNumber }, original with { RevisionNumber = ulong.MaxValue }],
-            }, true));
-            var current = (await store.FindByResourceIdAsync(state.ResourceId))!;
-
-            // If any selective call touches authoritative JSON, it now fails. This
-            // is an isolated test database; no repair or fallback is involved.
-            await using (var corrupt = source.CreateCommand("UPDATE cellbridge_states SET state_json='not JSON' WHERE resource_id=$1"))
-            {
-                corrupt.Parameters.AddWithValue(state.ResourceId);
-                await corrupt.ExecuteNonQueryAsync();
-            }
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.FindByResourceIdAsync(state.ResourceId).AsTask());
-
-            var metadata = (await store.FindReadMetadataByResourceIdAsync(state.ResourceId))!;
-            AssertMetadata(current, metadata);
-            Assert.Equal(JsonSerializer.Serialize(metadata), JsonSerializer.Serialize(await store.FindReadMetadataByPathKeyAsync(current.PathKey)));
-            var page = (await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 1))!;
-            Assert.Equal(ulong.MaxValue, Assert.Single(page.Revisions).RevisionNumber);
-            Assert.Equal(1, page.NextOffset);
-            var next = (await store.ReadRevisionSummariesAsync(state.ResourceId, page.NextOffset!.Value, 1))!;
-            Assert.Equal(firstNumber, Assert.Single(next.Revisions).RevisionNumber);
-            Assert.Null(next.NextOffset);
-            Assert.Empty((await store.ReadRevisionSummariesAsync(state.ResourceId, 100, 5))!.Revisions);
-            Assert.Equal(ulong.MaxValue, (await store.ReadRevisionSummaryAsync(state.ResourceId, ulong.MaxValue))!.Revision!.RevisionNumber);
-            Assert.Null((await store.ReadRevisionSummaryAsync(state.ResourceId, 1))!.Revision);
-            var summary = Assert.Single(await store.ListAsync(0, 10));
-            Assert.Equal(current.ResourceId, summary.ResourceId);
-            Assert.Equal(current.Path, summary.Path);
-        });
+    public Task StableHistoryExcludesConcurrentAppends() =>
+        BudgetAndQueryTests.WithDatabase(new(), source => CellBridge.Tests.StableHistoryScenario.RunAsync(
+            new(new PostgreSqlStateStore(source), new PostgreSqlContentStore(source))));
 
     [PostgreSqlFact]
-    public Task MissingStaleMalformedAndIncompleteReadProjectionsFailExplicitly() =>
+    public Task UnsignedRevisionReadsUseNormalizedRowsAndIgnoreUnrelatedLegacySnapshots() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var store = new PostgreSqlStateStore(source);
-            var state = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
-                .CreateAsync("/projection-corruption.docx", MinimalDocx.Create(), TestActor.Value))!;
-            await using (var stale = source.CreateCommand("UPDATE cellbridge_read_heads SET state_version=state_version+1"))
-                await stale.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.FindReadMetadataByResourceIdAsync(state.ResourceId).AsTask());
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadRevisionSummariesAsync(state.ResourceId, 0, 1).AsTask());
+            var content = new PostgreSqlContentStore(source); var memory = new InMemoryDocumentRepository(content);
+            var provider = new StorageProvider(memory, content); var service = new CellBridgeDocumentService(provider);
+            var head = (await service.CreateAsync("/unsigned.docx", MinimalDocx.Create("first"), TestActor.Value))!;
+            Assert.True((await new SharedDocumentLocks(service).ApplyAsync(head.ResourceId, HostLockOperation.Acquire, "host", TestActor.Value)).Success);
+            using (var input = new MemoryStream(MinimalDocx.Create("second"))) await service.SaveWholeFileAsync(head.ResourceId, input, "second", TestActor.Value, "host");
+            await new SharedDocumentLocks(service).ApplyAsync(head.ResourceId, HostLockOperation.Release, "host", TestActor.Value);
+            var snapshot = (await memory.ExportDocumentAsync(head.ResourceId))!;
+            var first = (ulong)long.MaxValue + 7;
+            var revisions = snapshot.ApplicationRevisions.Select((revision, index) => revision with
+                { RevisionNumber = index == 0 ? first : ulong.MaxValue, Package = revision.Package with { RevisionNumber = index == 0 ? first : ulong.MaxValue } }).ToImmutableArray();
+            snapshot = snapshot with { ApplicationRevisions = revisions,
+                Current = snapshot.Current with { Head = snapshot.Current.Head with { LatestRevisionNumber = ulong.MaxValue, Package = revisions[^1].Package } },
+                Receipts = snapshot.Receipts.Select(receipt => receipt with { RevisionNumber = ulong.MaxValue }).ToImmutableArray() };
+            snapshot = snapshot with { Current = snapshot.Current with { Head = snapshot.Current.Head with { Counters = snapshot.Current.Head.Counters with
+                { StoredBytes = NormalizedDocumentRecovery.StoredBytes(snapshot) } } } };
+            IDocumentRepository store = new PostgreSqlStateStore(source);
+            await store.ImportRecoveryAsync(new([snapshot], []), new(Guid.NewGuid(), new string('a', 64), 1, 1));
+            await using (var corrupt = source.CreateCommand("INSERT INTO cellbridge_states VALUES ($1,0,'not JSON')"))
+            { corrupt.Parameters.AddWithValue(Guid.NewGuid()); await corrupt.ExecuteNonQueryAsync(); }
+            Assert.NotNull(await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId)));
+            var page = (await store.ReadRevisionsAsync(head.ResourceId, 0, 1))!;
+            Assert.Equal(ulong.MaxValue, Assert.Single(page.Revisions).RevisionNumber); Assert.Equal(1, page.NextOffset);
+            var next = (await store.ReadRevisionsAsync(head.ResourceId, 1, 1))!;
+            Assert.Equal(first, Assert.Single(next.Revisions).RevisionNumber); Assert.Null(next.NextOffset);
+            Assert.Equal(ulong.MaxValue, (await store.ReadRevisionAsync(head.ResourceId, ulong.MaxValue))!.Revision!.RevisionNumber);
+            Assert.Null((await store.ReadRevisionAsync(head.ResourceId, 1))!.Revision);
+        });
+    [PostgreSqlFact]
+    public Task MalformedOrMismatchedNormalizedMetadataFailsAtItsTargetedRead() =>
+        BudgetAndQueryTests.WithDatabase(new(), async source =>
+        {
+            IDocumentRepository store = new PostgreSqlStateStore(source);
+            var head = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source))).CreateAsync("/corrupt-normalized.docx", MinimalDocx.Create(), TestActor.Value))!;
+            await using (var corrupt = source.CreateCommand("UPDATE cellbridge_repository_heads SET \"StateVersion\"=\"StateVersion\"+1")) await corrupt.ExecuteNonQueryAsync();
+            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.FindAsync(new DocumentIdentity.Resource(head.ResourceId)).AsTask());
             await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ListAsync(0, 10).AsTask());
-            await using (var repair = source.CreateCommand("UPDATE cellbridge_read_heads SET state_version=state_version-1"))
-                await repair.ExecuteNonQueryAsync();
-
-            await using (var malformed = source.CreateCommand("UPDATE cellbridge_revision_summaries SET summary_json='{}'"))
-                await malformed.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadRevisionSummaryAsync(state.ResourceId, 1).AsTask());
-            await using (var missing = source.CreateCommand("DELETE FROM cellbridge_revision_summaries"))
-                await missing.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.FindReadMetadataByPathKeyAsync(state.PathKey).AsTask());
-            await using (var missing = source.CreateCommand("DELETE FROM cellbridge_read_heads"))
-                await missing.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadRevisionSummaryAsync(state.ResourceId, 1).AsTask());
-            Assert.Null(await store.FindReadMetadataByResourceIdAsync(Guid.NewGuid()));
+            await using (var repair = source.CreateCommand("UPDATE cellbridge_repository_heads SET \"StateVersion\"=\"StateVersion\"-1")) await repair.ExecuteNonQueryAsync();
+            await using (var corrupt = source.CreateCommand("UPDATE cellbridge_repository_revisions SET \"Json\"='{}'")) await corrupt.ExecuteNonQueryAsync();
+            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadRevisionAsync(head.ResourceId, 1).AsTask());
+            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.ReadRevisionsAsync(head.ResourceId, 0, 1).AsTask());
+            Assert.NotNull(await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId)));
+            Assert.Null(await store.FindAsync(new DocumentIdentity.Resource(Guid.NewGuid())));
         });
-
     [PostgreSqlFact]
-    public Task Schema5MigrationBuildsReadIndexesWithoutRewritingSnapshotsOrChargingTheirBytes() =>
+    public Task RenameDeleteAndRecreateFenceTheRetiredIdentityAndKeepImmutableHistory() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var store = new PostgreSqlStateStore(source);
-            var service = new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)));
-            var state = (await service.CreateAsync("/projection-migration.docx", MinimalDocx.Create(), TestActor.Value))!;
-            for (var index = 0; index < 4; index++) state = await RevisionHistoryTests.Save(service, state, "revision " + index);
-            var before = await SnapshotJson(source);
-            long usage;
-            await using (var ledger = source.CreateCommand("SELECT stored_bytes FROM cellbridge_usage"))
-                usage = (long)(await ledger.ExecuteScalarAsync())!;
-            await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
-                await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
-                await version.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageUnavailableException>(() => store.CheckHealthAsync().AsTask());
-            await store.InitializeAsync();
-            Assert.Equal(before, await SnapshotJson(source));
-            AssertMetadata(state, await store.FindReadMetadataByResourceIdAsync(state.ResourceId));
-            var page = (await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!;
-            Assert.Equal(state.Revisions.Select(revision => revision.RevisionNumber).Reverse(),
-                page.Revisions.Select(revision => revision.RevisionNumber));
-            await using (var ledger = source.CreateCommand("SELECT stored_bytes FROM cellbridge_usage"))
-                Assert.Equal(usage, await ledger.ExecuteScalarAsync());
-            await using (var physical = source.CreateCommand("SELECT pg_total_relation_size('cellbridge_read_heads')+pg_total_relation_size('cellbridge_revision_summaries')"))
-                Assert.True((long)(await physical.ExecuteScalarAsync())! > 0);
+            var content = new PostgreSqlContentStore(source); IDocumentRepository store = new PostgreSqlStateStore(source);
+            var head = (await new CellBridgeDocumentService(new(store, content)).CreateAsync("/before.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var renamed = (await store.ChangePathAsync(new(head.ResourceId, StorageTestDocuments.Admission(head), "/after.docx", "/AFTER.DOCX", ImmutableDictionary<string, string>.Empty))).Current;
+            Assert.Null(await store.FindAsync(new DocumentIdentity.Path(head.PathKey)));
+            Assert.Equal(head.Package, (await store.ReadRevisionAsync(head.ResourceId, 1))!.Revision!.Package);
+            Assert.True((await store.ChangeLifecycleAsync(new DocumentLifecycleCommand.Delete(renamed.ResourceId, 1, renamed.StateVersion))).Applied);
+            Assert.Null(await store.ReadRevisionsAsync(head.ResourceId, 0, 10)); Assert.NotNull((await store.ReadRevisionAsync(head.ResourceId, 1))!.Revision); Assert.Empty(await store.ListAsync(0, 10));
+            var retired = (await store.FindAsync(new DocumentIdentity.Resource(head.ResourceId, true)))!;
+            var replacement = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), renamed.Path, MinimalDocx.Create("replacement"), head.Security, content, new(), lifecycleGeneration: 2);
+            Assert.True((await store.ChangeLifecycleAsync(new DocumentLifecycleCommand.Recreate(retired.ResourceId, 1, retired.StateVersion, replacement))).Applied);
+            Assert.Equal(replacement.Head.ResourceId, (await store.FindAsync(new DocumentIdentity.Path(renamed.PathKey)))!.ResourceId);
+            Assert.Single((await store.ReadRevisionsAsync(replacement.Head.ResourceId, 0, 10))!.Revisions);
+            Assert.Single((await store.ExportDocumentAsync(retired.ResourceId))!.ApplicationRevisions);
         });
-
     [PostgreSqlFact]
-    public Task RenameDeleteAndRecreateKeepProjectionIdentityAndLegacyHistoryFenced() =>
+    public Task IntermediateProtocolRootsSurviveRecoveryInEitherRecordOrderWithoutInventingApplicationRevisions() =>
         BudgetAndQueryTests.WithDatabase(new(), async source =>
         {
-            var store = new PostgreSqlStateStore(source);
-            var content = new PostgreSqlContentStore(source);
-            var state = (await new CellBridgeDocumentService(new(store, content))
-                .CreateAsync("/projection-before.docx", MinimalDocx.Create("before"), TestActor.Value))!;
-            await store.RenameAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-            {
-                Path = "/projection-after.docx", PathKey = StorageIds.PathKey("/projection-after.docx"),
-            }, true));
-            var renamed = (await store.FindByResourceIdAsync(state.ResourceId))!;
-            Assert.Null(await store.FindReadMetadataByPathKeyAsync(state.PathKey));
-            var renamedRead = (await store.ReadRevisionSummaryAsync(state.ResourceId, 1))!;
-            Assert.Equal(renamed.Path, renamedRead.Current.Path);
-            Assert.Equal(state.Content, renamedRead.Revision!.Content);
-            Assert.Equal(renamed.ResourceId, (await store.FindReadMetadataByPathKeyAsync(renamed.PathKey))!.ResourceId);
-            Assert.True(await store.TryDeleteAsync(renamed.ResourceId, renamed.LifecycleGeneration, renamed.StateVersion));
-            Assert.Null(await store.FindReadMetadataByResourceIdAsync(state.ResourceId));
-            Assert.Null(await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 10));
-            Assert.Null(await store.ReadRevisionSummaryAsync(state.ResourceId, 1));
-            Assert.Empty(await store.ListAsync(0, 10));
-
-            var retired = (await store.FindLifecycleAsync(state.ResourceId))!;
-            var replacement = await new DocumentStore().Put(renamed.Path, MinimalDocx.Create("replacement")).CaptureAsync(content);
-            replacement = replacement with { LifecycleGeneration = retired.LifecycleGeneration + 1, Security = state.Security };
-            Assert.Empty(replacement.Revisions); // Exercise the supported legacy initialization projection.
-            Assert.True(await store.TryRecreateAsync(retired.ResourceId, retired.LifecycleGeneration, retired.StateVersion, replacement));
-            var replacementRead = (await store.FindReadMetadataByPathKeyAsync(replacement.PathKey))!;
-            Assert.Equal(replacement.ResourceId, replacementRead.ResourceId);
-            Assert.Equal(2, replacementRead.LifecycleGeneration);
-            Assert.Equal(1, replacementRead.RevisionCount);
-            var history = (await store.ReadRevisionSummariesAsync(replacement.ResourceId, 0, 10))!;
-            var revision = Assert.Single(history.Revisions);
-            Assert.Equal(replacement.ResourceId, revision.ResourceId);
-            Assert.Equal(replacement.Content, revision.Content);
-            Assert.Null(await store.ReadRevisionSummaryAsync(retired.ResourceId, revision.RevisionNumber));
-        });
-
-    [PostgreSqlFact]
-    public Task RemovedCurrentRevisionDoesNotReturnFromRetainedSnapshotsMigrationOrEitherImportOrder() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
-        {
-            var store = new PostgreSqlStateStore(source);
-            var content = new PostgreSqlContentStore(source);
-            var service = new CellBridgeDocumentService(new(store, content));
-            var state = (await service.CreateAsync("/projection-current-membership.docx", MinimalDocx.Create("original"), TestActor.Value))!;
-            state = await RevisionHistoryTests.Save(service, state, "older retained revision");
-            var removed = state.Revisions[^1];
-            var removedBytes = await content.ReadVerifiedAsync(removed.Content);
-            state = await RevisionHistoryTests.Save(service, state, "current revision");
-
-            // This synthetic store-level change exercises exact current membership.
-            // It is not a production history-retention or pruning policy. All old
-            // snapshots, graph identities and content remain available to recovery.
-            await store.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-            {
-                Revisions = current.Revisions.Where(revision => revision.RevisionNumber != removed.RevisionNumber).ToImmutableArray(),
-            }, true));
-            await AssertCurrentMembership(store);
-            var before = await SnapshotJson(source);
-            await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
-                await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
-                await version.ExecuteNonQueryAsync();
-            await store.InitializeAsync();
-            Assert.Equal(before, await SnapshotJson(source));
-            await AssertCurrentMembership(store);
-
-            var snapshot = await store.CaptureRecoveryAsync();
-            Assert.Contains(snapshot.Snapshots, old => old.StateVersion < snapshot.Heads.Single().StateVersion &&
-                old.Revisions.Any(revision => revision.RevisionNumber == removed.RevisionNumber));
-            Assert.Equal(removedBytes, await content.ReadVerifiedAsync(removed.Content));
+            var content = new PostgreSqlContentStore(source); IDocumentRepository store = new PostgreSqlStateStore(source); var provider = new StorageProvider(store, content);
+            var head = (await new CellBridgeDocumentService(provider).CreateAsync("/intermediate.docx", MinimalDocx.Create(), TestActor.Value))!;
+            var plan = await PublicationTestPlans.NoopAsync(provider, head.ResourceId, "intermediate"); Assert.Equal(PublicationStatus.Accepted, (await store.PublishAsync(plan)).Status);
+            var snapshot = (await store.ExportDocumentAsync(head.ResourceId))!;
+            Assert.Single(snapshot.ApplicationRevisions); Assert.Equal(2, snapshot.MappingRoots.Length);
+            Assert.NotEqual(snapshot.Partitions.Single(partition => partition.Head.Kind == 0).Head.StorageIndex,
+                (await store.ReadPartitionAsync(head.ResourceId, new(0) { RevisionNumber = 1 }))!.Partition.StorageIndex);
             foreach (var reverse in new[] { false, true })
-            {
-                await BudgetAndQueryTests.WithDatabase(new(), async destination =>
+                await BudgetAndQueryTests.WithDatabase(new(), async target =>
                 {
-                    var target = new PostgreSqlStateStore(destination);
-                    var targetContent = new PostgreSqlContentStore(destination);
-                    foreach (var handle in ContentStoreReader.UniqueHandles(snapshot.Snapshots.SelectMany(StorageReferences.Handles)))
-                    {
-                        await using var bytes = await content.OpenReadAsync(handle);
-                        Assert.Equal(handle, await targetContent.WriteAsync(bytes));
-                    }
-                    var ordered = snapshot with { Snapshots = reverse
-                        ? snapshot.Snapshots.OrderByDescending(old => old.StateVersion).ToImmutableArray()
-                        : snapshot.Snapshots.OrderBy(old => old.StateVersion).ToImmutableArray() };
-                    await target.ImportRecoveryAsync(ordered, new(Guid.NewGuid(), new string('b', 64), snapshot.Heads.Length, snapshot.Snapshots.Length));
-                    await AssertCurrentMembership(target);
-                    Assert.Equal(JsonSerializer.Serialize(await store.FindReadMetadataByResourceIdAsync(state.ResourceId)),
-                        JsonSerializer.Serialize(await target.FindReadMetadataByResourceIdAsync(state.ResourceId)));
-                    Assert.Equal(JsonSerializer.Serialize((await store.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions),
-                        JsonSerializer.Serialize((await target.ReadRevisionSummariesAsync(state.ResourceId, 0, 100))!.Revisions));
-                    var restored = await target.CaptureRecoveryAsync();
-                    Assert.Contains(restored.Snapshots, old => old.StateVersion < restored.Heads.Single().StateVersion &&
-                        old.Revisions.Any(revision => revision.RevisionNumber == removed.RevisionNumber));
-                    Assert.Equal(removedBytes, await targetContent.ReadVerifiedAsync(removed.Content));
+                    var targetContent = new PostgreSqlContentStore(target); await CellBridge.Tests.NormalizedProviderScenarios.CopyReferencesAsync(snapshot, content, targetContent);
+                    IDocumentRepository repository = new PostgreSqlStateStore(target); var ordered = reverse ? snapshot with { MappingRoots = snapshot.MappingRoots.Reverse().ToImmutableArray() } : snapshot;
+                    await repository.ImportRecoveryAsync(new([ordered], []), new(Guid.NewGuid(), new string('b', 64), 1, 1));
+                    Assert.Equal(PortabilityTests.CanonicalSnapshots([snapshot]), PortabilityTests.CanonicalSnapshots([(await repository.ExportDocumentAsync(head.ResourceId))!]));
                 });
-            }
-
-            async Task AssertCurrentMembership(PostgreSqlStateStore currentStore)
-            {
-                var selected = (await currentStore.ReadRevisionSummaryAsync(state.ResourceId, removed.RevisionNumber))!;
-                Assert.Null(selected.Revision);
-                Assert.Equal(2, selected.Current.RevisionCount);
-                var page = (await currentStore.ReadRevisionSummariesAsync(state.ResourceId, 0, 10))!;
-                Assert.Equal(new[] { state.Revisions[^1].RevisionNumber, state.Revisions[0].RevisionNumber },
-                    page.Revisions.Select(revision => revision.RevisionNumber));
-                Assert.DoesNotContain(page.Revisions, revision => revision.RevisionNumber == removed.RevisionNumber);
-                Assert.Null(page.NextOffset);
-            }
         });
-
     [PostgreSqlFact]
-    public Task FailedSchema5ProjectionMigrationRollsBackTablesVersionAndJson() =>
-        BudgetAndQueryTests.WithDatabase(new(), async source =>
+    public Task Schema5MigrationPreservesLegacySnapshotsAndBuildsNormalizedReads() =>
+        EfPostgreSqlMigrationTests.WithEmptyDatabase(async source =>
         {
-            var store = new PostgreSqlStateStore(source);
-            var state = (await new CellBridgeDocumentService(new(store, new PostgreSqlContentStore(source)))
-                .CreateAsync("/projection-rollback.docx", MinimalDocx.Create(), TestActor.Value))!;
-            await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries"))
-                await remove.ExecuteNonQueryAsync();
-            await using (var version = source.CreateCommand("DROP TABLE \"__CellBridgeDocumentMigrationsHistory\"; UPDATE cellbridge_schema SET version=5"))
-                await version.ExecuteNonQueryAsync();
-            await using (var corrupt = source.CreateCommand("UPDATE cellbridge_states SET state_json='not JSON'"))
-                await corrupt.ExecuteNonQueryAsync();
-            await Assert.ThrowsAsync<StorageCorruptionException>(() => store.InitializeAsync());
-            await using (var check = source.CreateCommand("SELECT version,to_regclass('cellbridge_read_heads') IS NULL,to_regclass('cellbridge_revision_summaries') IS NULL FROM cellbridge_schema"))
-            await using (var reader = await check.ExecuteReaderAsync())
-            {
-                Assert.True(await reader.ReadAsync());
-                Assert.Equal(5, reader.GetInt32(0));
-                Assert.True(reader.GetBoolean(1));
-                Assert.True(reader.GetBoolean(2));
-            }
-            await using (var check = source.CreateCommand("SELECT state_json FROM cellbridge_states"))
-                Assert.Equal("not JSON", await check.ExecuteScalarAsync());
+            var content = new InMemoryContentStore(); var state = await LegacyStorageFixture.CreateAsync(content, "/schema5.docx", MinimalDocx.Create());
+            state = (await LegacyStorageFixture.SaveAsync(state, content, MinimalDocx.Create("second"))).State;
+            await LegacyPostgreSqlFixture.SeedAsync(source, content, [state], 5, expandedJson: false);
+            await using (var remove = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries")) await remove.ExecuteNonQueryAsync();
+            var before = await SnapshotJson(source); var store = new PostgreSqlStateStore(source); await store.InitializeAsync();
+            Assert.Equal(before, await SnapshotJson(source));
+            var repository = (IDocumentRepository)store; Assert.Equal(2, (await repository.ReadRevisionsAsync(state.ResourceId, 0, 10))!.Revisions.Length);
+            Assert.Equal(state.Content.Sha256, (await repository.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Package.Sha256);
         });
-
-    private static void AssertMetadata(DocumentState expected, DocumentReadMetadata? actual)
-    {
-        Assert.NotNull(actual);
-        Assert.Equal(expected.ResourceId, actual.ResourceId);
-        Assert.Equal(expected.Path, actual.Path);
-        Assert.Equal(expected.PathKey, actual.PathKey);
-        Assert.Equal(expected.CreatedUtc, actual.CreatedUtc);
-        Assert.Equal(expected.ModifiedUtc, actual.ModifiedUtc);
-        Assert.Equal(expected.ContentVersion, actual.ContentVersion);
-        Assert.Equal(expected.StateVersion, actual.StateVersion);
-        Assert.Equal(expected.LifecycleGeneration, actual.LifecycleGeneration);
-        Assert.Equal(expected.IsDeleted, actual.IsDeleted);
-        Assert.Equal(expected.Content, actual.Content);
-        Assert.Equal(JsonSerializer.Serialize(expected.Security), JsonSerializer.Serialize(actual.Security));
-        Assert.Equal(expected.Revisions[^1].RevisionNumber, actual.LatestRevisionNumber);
-        Assert.Equal(expected.Revisions.Length, actual.RevisionCount);
-        Assert.Equal(expected.Editors.Select(editor => editor.ExpiresUtc), actual.EditorExpiries);
-        Assert.Equal(expected.Publication?.Pending.Length ?? 0, actual.PendingDeliveryCount);
-        Assert.Equal(expected.Publication?.BlockedReason, actual.DeliveryBlock);
-    }
-
+    [PostgreSqlFact]
+    public Task FailedSchema5MigrationRollsBackVersionTablesAndOriginalJson() =>
+        EfPostgreSqlMigrationTests.WithEmptyDatabase(async source =>
+        {
+            var content = new InMemoryContentStore(); var state = await LegacyStorageFixture.CreateAsync(content, "/schema5-invalid.docx", MinimalDocx.Create());
+            await LegacyPostgreSqlFixture.SeedAsync(source, content, [state], 5, expandedJson: false);
+            await using (var corrupt = source.CreateCommand("DROP TABLE cellbridge_read_heads,cellbridge_revision_summaries; UPDATE cellbridge_states SET state_json='not JSON'")) await corrupt.ExecuteNonQueryAsync();
+            await Assert.ThrowsAsync<StorageCorruptionException>(() => new PostgreSqlStateStore(source).InitializeAsync());
+            await using var check = source.CreateCommand("SELECT version=5 AND to_regclass('cellbridge_repository_heads') IS NULL AND to_regclass('cellbridge_read_heads') IS NULL FROM cellbridge_schema");
+            Assert.Equal(true, await check.ExecuteScalarAsync()); Assert.Equal("not JSON", Assert.Single(await SnapshotJson(source)));
+        });
     private static async Task<string[]> SnapshotJson(NpgsqlDataSource source)
     {
-        var result = new List<string>();
-        await using var command = source.CreateCommand("SELECT state_json FROM cellbridge_states ORDER BY resource_id,state_version");
-        await using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync()) result.Add(reader.GetString(0));
-        return result.ToArray();
+        var rows = new List<string>(); await using var command = source.CreateCommand("SELECT state_json FROM cellbridge_states ORDER BY resource_id,state_version");
+        await using var reader = await command.ExecuteReaderAsync(); while (await reader.ReadAsync()) rows.Add(reader.GetString(0)); return rows.ToArray();
     }
 }

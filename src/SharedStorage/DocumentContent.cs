@@ -6,14 +6,15 @@ using Microsoft.EntityFrameworkCore.Metadata;
 namespace CellBridge.Storage.Shared;
 
 /// <summary>Stores immutable content in bounded database chunks and reuses matching objects.</summary>
-internal sealed class DocumentContent<TContext> : IContentStore, IStorageBudgetParticipant where TContext : DbContext
+internal sealed partial class DocumentContent<TContext> : IContentStore where TContext : DbContext
 {
     private const int ChunkSize = 65536;
     private const int ChunksPerBatch = 16;
     private readonly IDocumentDatabase<TContext> database;
-    private readonly object _budgetScope;
     private readonly long _maxObjectBytes;
-    private readonly SemaphoreSlim _writers = new(4);
+    // Bound chunk staging while allowing independent document transactions to
+    // overlap database round trips and durable commits.
+    private readonly SemaphoreSlim _writers = new(16);
     // Delegates belong to this store's options, not a process-wide default model.
     private IModel? _queryModel;
     private readonly Func<TContext, string, CancellationToken, Task<ContentMetadata?>> _contentMetadata =
@@ -25,15 +26,13 @@ internal sealed class DocumentContent<TContext> : IContentStore, IStorageBudgetP
             context.Set<ChunkRow>().AsNoTracking().Where(row => row.ObjectKey == key)
                 .OrderBy(row => row.Ordinal).Select(row => new ChunkProjection { Ordinal = row.Ordinal, Bytes = row.Bytes }));
 
-    public DocumentContent(IDocumentDatabase<TContext> database, long maxObjectBytes, object budgetScope)
+    public DocumentContent(IDocumentDatabase<TContext> database, long maxObjectBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxObjectBytes);
         this.database = database;
         _maxObjectBytes = maxObjectBytes;
-        _budgetScope = budgetScope;
     }
 
-    public object BudgetScope => _budgetScope;
     public bool Durable => true;
     public bool Shared => true;
     private TContext CreateContext() =>
@@ -44,6 +43,7 @@ internal sealed class DocumentContent<TContext> : IContentStore, IStorageBudgetP
         ArgumentNullException.ThrowIfNull(source);
         await _writers.WaitAsync(cancellationToken);
         try { return await WriteCoreAsync(source, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex) when (database.IsDatabaseException(ex))
         { throw new StorageUnavailableException("Content write failed or its commit outcome is unknown.", ex); }
         finally { _writers.Release(); }
@@ -71,13 +71,15 @@ internal sealed class DocumentContent<TContext> : IContentStore, IStorageBudgetP
         await using var databaseTransaction = await context.Database.BeginTransactionAsync(cancellationToken);
         await database.ConfigureAsync(context, cancellationToken);
         await database.CheckConfigurationAsync(context, cancellationToken);
-        await database.Locks.PublicationAsync(context, false, cancellationToken);
-        await database.Locks.ContentAsync(context, digest, cancellationToken);
-        var inserted = await database.InsertObjectAsync(context, handle, cancellationToken);
+        var inserted = false;
+        if (!await TryVerifyExistingContentAsync(context, handle, cancellationToken))
+        {
+            await database.Locks.ContentAsync(context, digest, cancellationToken);
+            inserted = await database.InsertObjectAsync(context, handle, cancellationToken);
+            if (!inserted) await VerifyExistingContentAsync(context, handle, cancellationToken);
+        }
         if (inserted)
         {
-            await DocumentBudget.AdjustAsync(database, context, length, 0, cancellationToken);
-            await context.SaveChangesAsync(cancellationToken);
             spool.Position = 0;
             var ordinal = 0;
             var pending = new List<ChunkRow>(ChunksPerBatch);
@@ -93,35 +95,57 @@ internal sealed class DocumentContent<TContext> : IContentStore, IStorageBudgetP
                     await SaveChunkBatchAsync(context, pending, cancellationToken);
             }
             if (pending.Count != 0) await SaveChunkBatchAsync(context, pending, cancellationToken);
-        }
-        else
-        {
-            var metadata = await ReadContentMetadataAsync(context, digest, cancellationToken);
-            if (metadata is null || metadata.Length != length || metadata.Sha256 != digest)
-                throw new StorageCorruptionException("Existing content has invalid metadata.");
-            using var verification = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            long storedLength = 0;
-            await foreach (var chunk in ReadContentChunks(context, digest, cancellationToken))
-            {
-                storedLength = checked(storedLength + chunk.Length);
-                if (storedLength > length)
-                    throw new StorageCorruptionException("Existing content exceeds its declared length.");
-                verification.AppendData(chunk);
-            }
-            if (storedLength != length || Convert.ToHexStringLower(verification.GetHashAndReset()) != digest)
-                throw new StorageCorruptionException("Existing content chunks failed integrity verification.");
+            await context.SaveChangesAsync(cancellationToken);
         }
         cancellationToken.ThrowIfCancellationRequested();
         await databaseTransaction.CommitAsync(CancellationToken.None);
         return handle;
     }
 
-    private static async Task SaveChunkBatchAsync(TContext context, List<ChunkRow> pending,
+    private async Task VerifyExistingContentAsync(TContext context, ContentHandle handle, CancellationToken cancellationToken)
+    {
+        if (!await TryVerifyExistingContentAsync(context, handle, cancellationToken))
+            throw new StorageCorruptionException("Existing content is missing.");
+    }
+
+    private async Task<bool> TryVerifyExistingContentAsync(TContext context, ContentHandle handle,
         CancellationToken cancellationToken)
     {
-        context.Set<ChunkRow>().AddRange(pending);
-        await context.SaveChangesAsync(cancellationToken);
-        foreach (var chunk in pending) context.Entry(chunk).State = EntityState.Detached;
+        var metadata = await ReadContentMetadataAsync(context, handle.Key, cancellationToken);
+        if (metadata is null) return false;
+        await VerifyExistingContentAsync(context, handle, metadata, cancellationToken);
+        return true;
+    }
+
+    private async Task VerifyExistingContentAsync(TContext context, ContentHandle handle,
+        ContentMetadata metadata, CancellationToken cancellationToken)
+    {
+        // Existing objects are immutable. Reclamation requires stopped readers
+        // and writers, so ordinary reuse needs no publication gate.
+        if (metadata.Length != handle.Length || metadata.Sha256 != handle.Sha256)
+            throw new StorageCorruptionException("Existing content has invalid metadata.");
+        using var verification = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        long storedLength = 0;
+        await foreach (var chunk in ReadContentChunks(context, handle.Key, cancellationToken))
+        {
+            storedLength = checked(storedLength + chunk.Length);
+            if (storedLength > handle.Length)
+                throw new StorageCorruptionException("Existing content exceeds its declared length.");
+            verification.AppendData(chunk);
+        }
+        if (storedLength != handle.Length || Convert.ToHexStringLower(verification.GetHashAndReset()) != handle.Sha256)
+            throw new StorageCorruptionException("Existing content chunks failed integrity verification.");
+    }
+
+    private async Task SaveChunkBatchAsync(TContext context, List<ChunkRow> pending,
+        CancellationToken cancellationToken)
+    {
+        if (!await database.TryInsertChunksAsync(context, pending, cancellationToken))
+        {
+            context.Set<ChunkRow>().AddRange(pending);
+            await context.SaveChangesAsync(cancellationToken);
+            foreach (var chunk in pending) context.Entry(chunk).State = EntityState.Detached;
+        }
         pending.Clear();
     }
 

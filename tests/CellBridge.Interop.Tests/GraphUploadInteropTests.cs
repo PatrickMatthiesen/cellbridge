@@ -33,7 +33,12 @@ public sealed class GraphUploadInteropTests
         var replay = await Send(http, peer, path, request, target);
         Assert.Equal(saved.Bytes, replay.Bytes);
         var read = await Send(http, peer, path, Query(2, target), target);
-        var expected = read.Server.DataElementPackage!.DataElements.Single(e => e.DataElementExtendedGuid.Equals(f.Index));
+        var applied = Assert.IsType<PutChangesSubResponseData>(saved.Server.SubResponses[0].Data).PutChangesResponse!.AppliedStorageIndexID;
+        Assert.False(applied.IsNull);
+        Assert.NotEqual(f.Index, applied);
+        var current = Assert.IsType<QueryChangesSubResponseData>(read.Server.SubResponses[0].Data).StorageIndexExtendedGuid;
+        Assert.Equal(applied, current);
+        var expected = read.Server.DataElementPackage!.DataElements.Single(e => e.DataElementExtendedGuid.Equals(current));
         var left = f.CreatePatch(expected, false);
         var right = f.CreatePatch(expected, true);
         var patches = await Task.WhenAll(Send(http, endpoint, path, left, target), Send(http, peer, path, right, target));
@@ -72,8 +77,13 @@ public sealed class GraphUploadInteropTests
         var request = FsshttpbCellRequest.Deserialize(new(Assert.Single(parts, p => p.ContentType.Contains("application/octet-stream")).Content));
         var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
         put.ExpectedStorageIndex = Assert.IsType<QueryChangesSubResponseData>(initial.Server.SubResponses[0].Data).StorageIndexExtendedGuid;
+        // MS-FSSHTTPB 2.2.2.1.4 requires the expected index in this request's package.
+        request.DataElementPackage!.DataElements.Add(initial.Server.DataElementPackage!.DataElements.Single(element =>
+            element.DataElementExtendedGuid.Equals(put.ExpectedStorageIndex)));
+        put.HasAdditionalFlags = true;
         put.AdditionalFlagsBits |= 1;
         var saved = await Send(http, endpoint, path, request, Guid.Empty);
+        Assert.False(Assert.Single(saved.Server.SubResponses).Status, saved.Server.SubResponses[0].Error?.ErrorMessage);
         var reference = Assert.IsType<Reference.PutChangesSubResponseData>(Assert.Single(saved.Reference.CellSubResponses).SubResponseData);
         var id = reference.PutChangesResponse.AppliedStorageIndexID;
         Assert.NotEqual(0u, id.Type);

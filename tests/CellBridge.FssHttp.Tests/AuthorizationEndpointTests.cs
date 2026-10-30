@@ -68,7 +68,12 @@ public sealed class AuthorizationEndpointTests
     [Fact]
     public async Task ConcurrentClientsKeepTheirOwnIdentity()
     {
-        await using var fixture = await Fixture.Start();
+        await using var fixture = await Fixture.Start(configure: options =>
+        {
+            // Admit the test's ten concurrent requests per authenticated subject.
+            options.MaxConcurrentRequests = 20;
+            options.MaxConcurrentRequestsPerSubject = 10;
+        });
         using var reader = fixture.CreateClient("reader");
         using var other = fixture.CreateClient("other");
 
@@ -156,7 +161,7 @@ public sealed class AuthorizationEndpointTests
             DataElementPackage = new DataElementPackage(),
         };
         byte[] binary = cell.ToByteArray();
-        var before = await fixture.Provider.State.FindByResourceIdAsync(fixture.State.ResourceId);
+        var before = await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(fixture.State.ResourceId));
 
         var xml = await fixture.Send("writer", new FssHttpSubRequest
         {
@@ -173,7 +178,7 @@ public sealed class AuthorizationEndpointTests
         var payload = Convert.FromBase64String(xml.Descendants(Protocol + "SubResponseData").Single().Value);
         var response = FsshttpbResponse.Deserialize(new BinaryReaderEx(payload));
         Assert.Equal((ulong)CellErrorCode.RequestNotSupported, Assert.Single(response.SubResponses).Error?.ErrorCode);
-        Assert.Equal(before, await fixture.Provider.State.FindByResourceIdAsync(fixture.State.ResourceId));
+        Assert.Equal(before, await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(fixture.State.ResourceId)));
     }
 
     [Fact]
@@ -222,11 +227,13 @@ public sealed class AuthorizationEndpointTests
                 ["Timeout"] = "60", ["AsEditor"] = "true" },
         };
         Assert.Equal("Success", Error(await fixture.Send("writer", Request("JoinEditingSession"))));
-        var before = await fixture.Provider.State.FindByResourceIdAsync(fixture.State.ResourceId);
+        var before = await fixture.Provider.Documents.ReadControlAsync(fixture.State.ResourceId);
         foreach (var operation in new[] { "JoinEditingSession", "RefreshEditingSession", "LeaveEditingSession" })
             Assert.Equal("FileUnauthorizedAccess", Error(await fixture.Send("other", Request(operation))));
-        var after = await fixture.Provider.State.FindByResourceIdAsync(fixture.State.ResourceId);
-        Assert.Equal(before, after);
+        var after = await fixture.Provider.Documents.ReadControlAsync(fixture.State.ResourceId);
+        Assert.Equal(before!.Head, after!.Head);
+        Assert.Equal(before.Coordination, after.Coordination);
+        Assert.Equal(before.Editors, after.Editors);
         Assert.Equal(TestActor.Value.Identity, Assert.Single(after!.Editors).Owner);
     }
 
@@ -264,27 +271,27 @@ public sealed class AuthorizationEndpointTests
 
     private static string? Error(XDocument xml) => (string?)xml.Descendants(Protocol + "SubResponse").Single().Attribute("ErrorCode");
 
-    private sealed class Fixture(WebApplication app, StorageProvider provider, DocumentState state, HttpClient client) : IAsyncDisposable
+    private sealed class Fixture(WebApplication app, StorageProvider provider, DocumentHead state, HttpClient client) : IAsyncDisposable
     {
         public StorageProvider Provider => provider;
-        public DocumentState State => state;
+        public DocumentHead State => state;
         public HttpClient Client => client;
         public HttpClient CreateClient(string user) => TestActor.CreateClient(app.GetTestServer(), user);
-        public static async Task<Fixture> Start(bool otherCanWrite = false, bool externalPolicy = false)
+        public static async Task<Fixture> Start(bool otherCanWrite = false, bool externalPolicy = false, Action<CellBridgeOptions>? configure = null)
         {
-            var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+            var provider = TestStorage.Memory();
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
             TestActor.Register(builder.Services);
             if (externalPolicy) builder.Services.AddSingleton<ICellBridgeAuthorizationPolicy>(new ExternalPolicy(otherCanWrite));
-            builder.Services.AddCellBridge(provider, requireDurability: false);
+            builder.Services.AddCellBridge(provider, requireDurability: false, configure: configure);
             var app = builder.Build();
             app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
             var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
             var state = (await service.CreateAsync("/shared/secret.bin", [1, 2, 3], TestActor.Value))!;
-            if (!externalPolicy) await provider.State.TransitionAsync(state.ResourceId, (current, _) => new StateTransition<bool>(current with
-            { Security = current.Security with { Grants = current.Security.Grants.Add("tests:reader", DocumentAccess.Read)
-                .Add("tests:other", otherCanWrite ? DocumentAccess.Read | DocumentAccess.Write : DocumentAccess.None) } }, true));
+            if (!externalPolicy) await TestStorage.SetPermissionsAsync(provider, state.ResourceId,
+                state.Security with { Grants = state.Security.Grants.Add("tests:reader", DocumentAccess.Read)
+                    .Add("tests:other", otherCanWrite ? DocumentAccess.Read | DocumentAccess.Write : DocumentAccess.None) });
             await app.StartAsync();
             return new(app, provider, state, app.GetTestClient());
         }
@@ -330,7 +337,7 @@ public sealed class AuthorizationEndpointTests
     {
         public string PolicyDomain => "tests:endpoint-host";
         public DocumentAuthorizationBinding BindNewDocument(Guid resourceId) => new(PolicyDomain, 1, 1);
-        public ICellBridgeAuthorizationSnapshot Resolve(DocumentState state) => new Snapshot(state.ResourceId, state.Security.AuthorizationPolicy!, otherCanWrite);
+        public ICellBridgeAuthorizationSnapshot Resolve(DocumentAuthorizationView state) => new Snapshot(state.ResourceId, state.Security.AuthorizationPolicy!, otherCanWrite);
         private sealed record Snapshot(Guid ResourceId, DocumentAuthorizationBinding Binding, bool OtherCanWrite) : ICellBridgeAuthorizationSnapshot
         {
             public DocumentAccess Evaluate(string subject) => subject switch

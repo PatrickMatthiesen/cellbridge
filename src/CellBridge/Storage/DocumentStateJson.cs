@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
@@ -9,7 +10,7 @@ namespace CellBridge.Storage.Abstractions;
 /// <summary>
 /// Storage encoding 1 shares immutable graph descriptors within a state. Partition
 /// membership is an ordered sequence of table ranges; no graph identity is removed.
-/// The detached public records and legacy expanded JSON remain unchanged.
+/// The public membership view and legacy expanded JSON preserve every descriptor.
 /// </summary>
 public static partial class DocumentStateJson
 {
@@ -88,9 +89,16 @@ public static partial class DocumentStateJson
             var state = document.RootElement.Deserialize<DocumentState>(options) ?? throw new JsonException("Empty state.");
             if (state.FormatVersion != DocumentState.CurrentFormat || state.Security is null || state.Security.Grants is null)
                 throw new JsonException("Unsupported document format or missing security state.");
-            ValidatePartitionIdentities(state);
-            if (ranges is not null && ranges.Used.Any(used => !used))
-                throw new JsonException("Unreferenced shared graph descriptor.");
+            if (ranges is not null)
+            {
+                ranges.Validate(state);
+                ranges.CheckAllUsed();
+            }
+            else
+            {
+                context = AcquireContext();
+                context.PrepareEncoding(state);
+            }
             return state;
         }
         catch (JsonException ex) { throw new StorageCorruptionException("Invalid persisted document state.", ex); }
@@ -153,15 +161,14 @@ public static partial class DocumentStateJson
         {
             var indices = new Dictionary<GraphElementState, int>(ElementComparer.Instance);
             var elements = new List<GraphElementState>();
-            foreach (var partition in state.Partitions.Concat(state.Revisions.SelectMany(r => r.Partitions)))
-                foreach (var element in partition.Elements)
+            foreach (var element in GraphElementCollection.UniqueElements(AllPartitions(state).Select(p => p.Elements)))
                 {
                     if (element is null) throw new StorageCorruptionException("Null immutable graph descriptor.");
                     if (indices.TryAdd(element, elements.Count)) elements.Add(element);
                 }
-            ValidatePartitionIdentities(state);
             _metadata = new(1, elements.ToArray());
             Ranges.Initialize(_metadata.Elements, indices);
+            Ranges.Validate(state);
         }
 
         public void Clear()
@@ -172,88 +179,178 @@ public static partial class DocumentStateJson
         }
     }
 
-    private sealed class ElementRanges : JsonConverter<ImmutableArray<GraphElementState>>
+    private static IEnumerable<PartitionState> AllPartitions(DocumentState state) =>
+        state.Partitions.Concat(state.Revisions.SelectMany(r => r.Partitions));
+
+    private readonly record struct TableRange(int Start, int Count);
+
+    private sealed class ElementRanges : JsonConverter<GraphElementCollection>
     {
-        private GraphElementState[] table = [];
+        private ImmutableArray<GraphElementState> table = [];
         private Dictionary<GraphElementState, int>? indices;
+        private readonly Dictionary<GraphElementCollection.Node, TableRange[]> nodeRanges = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<ImmutableArray<GraphElementState>, TableRange[]> tableRuns = new();
+        private int[] uniqueWindowStart = [];
+        private int[] usage = [];
         private int maxElements;
-        public bool[] Used { get; private set; } = [];
+
         public void Initialize(GraphElementState[] elements, Dictionary<GraphElementState, int>? elementIndices = null,
             int maxElements = int.MaxValue)
         {
-            table = elements;
+            table = ImmutableCollectionsMarshal.AsImmutableArray(elements);
             indices = elementIndices;
             this.maxElements = maxElements;
-            Used = elementIndices is null ? new bool[elements.Length] : [];
+            usage = new int[elements.Length + 1];
+            uniqueWindowStart = new int[elements.Length];
+            var last = new Dictionary<ExtendedId, int>();
+            var window = 0;
+            for (var i = 0; i < elements.Length; i++)
+            {
+                var element = elements[i];
+                if (element is null || element.Id is null || element.Serial is null || element.Payload is null ||
+                    element.MappingSerials.IsDefault)
+                    throw new StorageCorruptionException("Incomplete immutable graph descriptor.");
+                if (last.TryGetValue(element.Id, out var previous)) window = Math.Max(window, previous + 1);
+                uniqueWindowStart[i] = window;
+                last[element.Id] = i;
+            }
         }
+
         public void Clear()
         {
             table = [];
             indices = null;
-            Used = [];
+            usage = [];
+            uniqueWindowStart = [];
+            nodeRanges.Clear();
+            tableRuns.Clear();
         }
-        public override ImmutableArray<GraphElementState> Read(ref Utf8JsonReader reader, Type typeToConvert,
+
+        public override GraphElementCollection Read(ref Utf8JsonReader reader, Type typeToConvert,
             JsonSerializerOptions options)
         {
             if (reader.TokenType != JsonTokenType.StartArray) throw new JsonException("Missing graph ranges.");
-            var elements = ImmutableArray.CreateBuilder<GraphElementState>();
-            var identities = new HashSet<ExtendedId>();
+            var elements = GraphElementCollection.Empty;
             while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
             {
                 if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt32(out var start) ||
                     !reader.Read() || reader.TokenType != JsonTokenType.Number || !reader.TryGetInt32(out var count) ||
                     start < 0 || count <= 0 || start > table.Length - count)
                     throw new JsonException("Invalid graph table range.");
-                // A graph cannot contain an identity twice. Bound expansion before allocating.
-                if (count > table.Length - elements.Count) throw new JsonException("Graph membership exceeds the table.");
-                StorageLimits.Check("graph elements", checked((long)elements.Count + count), maxElements);
-                for (var i = start; i < start + count; i++)
-                {
-                    if (!identities.Add(table[i].Id)) throw new JsonException("Duplicate graph member identity.");
-                    Used[i] = true;
-                    elements.Add(table[i]);
-                }
+                if (count > table.Length - elements.Length) throw new JsonException("Graph membership exceeds the table.");
+                StorageLimits.Check("graph elements", checked((long)elements.Length + count), maxElements);
+                if (uniqueWindowStart[start + count - 1] > start) throw new JsonException("Duplicate graph member identity.");
+                usage[start] = checked(usage[start] + 1);
+                usage[start + count] = checked(usage[start + count] - 1);
+                elements = elements.Concat(GraphElementCollection.FromRange(table, start, count));
             }
             if (reader.TokenType != JsonTokenType.EndArray) throw new JsonException("Incomplete graph ranges.");
-            return elements.ToImmutable();
+            return elements;
         }
 
-        public override void Write(Utf8JsonWriter writer, ImmutableArray<GraphElementState> value,
-            JsonSerializerOptions options)
+        public void CheckAllUsed()
         {
-            writer.WriteStartArray();
-            for (var i = 0; i < value.Length;)
+            var used = 0;
+            for (var i = 0; i < table.Length; i++)
             {
-                var start = indices![value[i++]];
-                var count = 1;
-                while (i < value.Length && indices[value[i]] == start + count) { count++; i++; }
-                writer.WriteNumberValue(start);
-                writer.WriteNumberValue(count);
+                used = checked(used + usage[i]);
+                if (used == 0) throw new JsonException("Unreferenced shared graph descriptor.");
             }
-            writer.WriteEndArray();
         }
-    }
 
-    private static void ValidatePartitionIdentities(DocumentState state)
-    {
-        foreach (var partitions in state.Partitions.Concat(state.Revisions.SelectMany(r => r.Partitions)).GroupBy(p => p.Kind))
+        private TableRange[] GetRanges(GraphElementCollection elements)
         {
-            var identities = new Dictionary<ExtendedId, (GraphElementState Element, int Partition)>();
-            var partitionNumber = 0;
-            foreach (var partition in partitions)
+            if (elements.Root is null) return [];
+            var stack = new Stack<(GraphElementCollection.Node Node, bool Visited)>();
+            stack.Push((elements.Root, false));
+            while (stack.TryPop(out var item))
             {
-                foreach (var element in partition.Elements)
+                var node = item.Node;
+                if (nodeRanges.ContainsKey(node)) continue;
+                if (node.Left is not null)
+                {
+                    if (!item.Visited)
+                    {
+                        stack.Push((node, true));
+                        stack.Push((node.Right!, false));
+                        stack.Push((node.Left, false));
+                        continue;
+                    }
+                    var left = nodeRanges[node.Left];
+                    var right = nodeRanges[node.Right!];
+                    var merged = new List<TableRange>(left.Length + right.Length);
+                    foreach (var range in left) AddRange(merged, range);
+                    foreach (var range in right) AddRange(merged, range);
+                    nodeRanges.Add(node, merged.ToArray());
+                }
+                else if (node.Table == table)
+                    nodeRanges.Add(node, [new(node.Start, node.Length)]);
+                else
+                {
+                    if (!tableRuns.TryGetValue(node.Table, out var runs))
+                    {
+                        var mapped = new List<TableRange>();
+                        for (var i = 0; i < node.Table.Length; i++)
+                        {
+                            var index = node.Table[i] is { } descriptor && indices!.TryGetValue(descriptor, out var value) ? value : -1;
+                            // An unused backing slot can occur in a sliced collection.
+                            // Keep it separate so that a referenced slice cannot cross it.
+                            if (index < 0) mapped.Add(new(int.MinValue, 1));
+                            else AddRange(mapped, new(index, 1));
+                        }
+                        tableRuns.Add(node.Table, runs = mapped.ToArray());
+                    }
+                    var ranges = new List<TableRange>();
+                    var offset = 0;
+                    foreach (var run in runs)
+                    {
+                        var start = Math.Max(node.Start, offset);
+                        var end = Math.Min(node.Start + node.Length, offset + run.Count);
+                        if (start < end) AddRange(ranges, new(run.Start + start - offset, end - start));
+                        offset += run.Count;
+                        if (offset >= node.Start + node.Length) break;
+                    }
+                    nodeRanges.Add(node, ranges.ToArray());
+                }
+            }
+            return nodeRanges[elements.Root];
+        }
+
+        private static void AddRange(List<TableRange> ranges, TableRange range)
+        {
+            if (ranges.Count > 0 && ranges[^1].Start + ranges[^1].Count == range.Start)
+                ranges[^1] = ranges[^1] with { Count = checked(ranges[^1].Count + range.Count) };
+            else ranges.Add(range);
+        }
+
+        public void Validate(DocumentState state)
+        {
+            // A single contiguous membership is checked in constant time after
+            // preprocessing the table. Arbitrary reordered memberships use a set.
+            foreach (var partition in AllPartitions(state))
+            {
+                if (partition.Elements.IsDefault) throw new StorageCorruptionException("Missing graph membership.");
+                var ranges = GetRanges(partition.Elements);
+                foreach (var range in ranges)
+                    if (uniqueWindowStart[range.Start + range.Count - 1] > range.Start)
+                        throw new StorageCorruptionException("Duplicate graph member identity.");
+                if (ranges.Length > 1)
+                {
+                    var ids = new HashSet<ExtendedId>();
+                    foreach (var element in partition.Elements)
+                        if (!ids.Add(element.Id)) throw new StorageCorruptionException("Duplicate graph member identity.");
+                }
+            }
+            foreach (var partitions in AllPartitions(state).GroupBy(p => p.Kind))
+            {
+                var identities = new Dictionary<ExtendedId, GraphElementState>();
+                foreach (var element in GraphElementCollection.UniqueElements(partitions.Select(p => p.Elements)))
                 {
                     if (element is null || element.Id is null || element.Serial is null || element.Payload is null || element.MappingSerials.IsDefault)
                         throw new StorageCorruptionException("Incomplete immutable graph descriptor.");
                     var canonical = element;
-                    if (identities.TryGetValue(element.Id, out var previous))
+                    if (identities.TryGetValue(element.Id, out var prior))
                     {
-                        if (previous.Partition == partitionNumber)
-                            throw new StorageCorruptionException("Duplicate graph member identity.");
-                        var prior = previous.Element;
-                        // Protocol null serials may acquire a watermark. Preserve
-                        // the populated watermark while checking later partitions.
                         if (prior.Type != element.Type || prior.Payload.Length != element.Payload.Length ||
                             prior.Payload.Sha256 != element.Payload.Sha256 ||
                             prior.Serial.Guid != Guid.Empty && element.Serial.Guid != Guid.Empty && prior.Serial != element.Serial ||
@@ -261,10 +358,20 @@ public static partial class DocumentStateJson
                             throw new StorageCorruptionException("Conflicting immutable graph descriptor identity.");
                         if (prior.Serial.Guid != Guid.Empty) canonical = prior;
                     }
-                    identities[element.Id] = (canonical, partitionNumber);
+                    identities[element.Id] = canonical;
                 }
-                partitionNumber = checked(partitionNumber + 1);
             }
+        }
+
+        public override void Write(Utf8JsonWriter writer, GraphElementCollection value, JsonSerializerOptions options)
+        {
+            writer.WriteStartArray();
+            foreach (var range in GetRanges(value))
+            {
+                writer.WriteNumberValue(range.Start);
+                writer.WriteNumberValue(range.Count);
+            }
+            writer.WriteEndArray();
         }
     }
 

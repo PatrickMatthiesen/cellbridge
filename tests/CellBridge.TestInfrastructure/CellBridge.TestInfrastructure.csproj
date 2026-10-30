@@ -6,5 +6,6 @@
     <PackageReference Include="Aspire.Hosting.SqlServer" Version="17.0.0-preview.1.26520.1" />
     <ProjectReference Include="../../src/CellBridge.AppHost/CellBridge.AppHost.csproj" />
     <ProjectReference Include="../../src/CellBridge/CellBridge.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Authentication/CellBridge.Authentication.csproj" />
   </ItemGroup>
 </Project>

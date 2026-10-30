@@ -8,18 +8,12 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.AspNetCore;
 
-public sealed record WholeFileSaveResult(DocumentRevision Revision, bool IsReplay);
-
-/// <summary>A prepared whole-file write no longer matches the authoritative document or retry key.</summary>
+public sealed record WholeFileSaveResult(DocumentRevisionRecord Revision, bool IsReplay);
 public sealed class WholeFileSaveConflictException(string message) : InvalidOperationException(message);
 
 public sealed partial class CellBridgeDocumentService
 {
-    /// <summary>
-    /// Prepares and commits a complete Office package while preserving protocol graphs, shared locks,
-    /// history and conditional external publication. Repeating the same key returns its accepted revision.
-    /// A missing host lock is accepted only for an empty document without active protocol locks.
-    /// </summary>
+    /// <summary>Stages a complete package as a canonical graph and atomically publishes its typed receipt and outbox.</summary>
     public async ValueTask<WholeFileSaveResult> SaveWholeFileAsync(Guid resourceId, Stream content,
         string operationKey, CellBridgeActor actor, string? hostLockToken = null,
         CancellationToken cancellationToken = default)
@@ -31,18 +25,15 @@ public sealed partial class CellBridgeDocumentService
         if (hostLockToken is not null && (string.IsNullOrWhiteSpace(hostLockToken) || hostLockToken.Length > 1024))
             throw new ArgumentException("A host lock token must contain 1 to 1024 characters.", nameof(hostLockToken));
 
-        actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Write, cancellationToken);
-
-        // Capture authority before consuming host bytes. Preparing a file never refreshes its lease.
-        var before = await provider.State.TransitionAsync(resourceId, (current, now) =>
-        {
-            Demand(actor, current, DocumentAccess.Write);
-            if (Receipt(current) is null) DemandWholeFileLock(current, actor, hostLockToken, now);
-            return new StateTransition<DocumentState>(null, current);
-        }, cancellationToken);
+        var before = await provider.Documents.ReadControlAsync(resourceId, cancellationToken) ?? throw MissingDocument();
+        actor = await AuthorizeActorAsync(actor, before.Head, DocumentAccess.Write, cancellationToken, fresh: true);
+        Demand(actor, before.Head, DocumentAccess.Write);
+        var identity = new SaveOperationIdentity(before.Head.LifecycleGeneration, SaveOperationFamily.WholeFile, 0, operationKey);
+        var prior = await provider.Documents.ReadReceiptAsync(resourceId, identity, cancellationToken) ?? throw MissingDocument();
+        if (prior.Receipt is null && DocumentControlReducer.ValidateWholeFile(before, Admission(actor, before.Head), hostLockToken) is { } lockError)
+            throw new DocumentOperationLockException(lockError);
 
         await using var staged = OpenSaveStagingStream();
-        long bound = Math.Min(provider.Limits.MaxDocumentBytes, int.MaxValue);
         var buffer = new byte[65536];
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long length = 0;
@@ -50,145 +41,123 @@ public sealed partial class CellBridgeDocumentService
         while ((read = await content.ReadAsync(buffer, cancellationToken)) != 0)
         {
             length = checked(length + read);
-            StorageLimits.Check("document bytes", length, bound);
+            StorageLimits.Check("document bytes", length, Math.Min(provider.Limits.MaxDocumentBytes, Array.MaxLength));
             hash.AppendData(buffer, 0, read);
             await staged.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
         }
-        string sha256 = Convert.ToHexStringLower(hash.GetHashAndReset());
-        string lockDigest = hostLockToken is null ? "none" : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(hostLockToken)));
-        string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+        var sha256 = Convert.ToHexStringLower(hash.GetHashAndReset());
+        var lockDigest = hostLockToken is null ? "none" : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(hostLockToken)));
+        var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             string.Create(CultureInfo.InvariantCulture, $"{length}:{sha256}:{lockDigest}"))));
+        if (await ReplayAsync(cancellationToken) is { } replay) return replay;
 
-        if (Receipt(before) is not null)
-            return await provider.State.TransitionAsync(resourceId, (current, _) =>
-            {
-                Demand(actor, current, DocumentAccess.Write);
-                DemandLifecycle(current);
-                return new StateTransition<WholeFileSaveResult>(null, Replay(current) ??
-                    throw new WholeFileSaveConflictException("The accepted whole-file save is no longer available."));
-            }, cancellationToken);
-
-        StorageLimits.Check("whole-file save receipts", before.WholeFileSaveReceipts.Length + 1L, provider.Limits.MaxWholeFileSaveReceipts);
+        StorageLimits.Check("whole-file save receipts", before.Head.Counters.WholeFileSaveReceipts + 1L, provider.Limits.MaxWholeFileSaveReceipts);
         staged.Position = 0;
-        await FilePartitionSaveHandler.ValidateDocumentAsync(staged, before.Path, provider.Limits.MaxDocumentBytes, cancellationToken);
-        bool changed = before.Content.Length != length || before.Content.Sha256 != sha256;
-        PartitionState? preparedFile = null;
-        ContentHandle preparedContent = before.Content;
-        if (changed)
+        await OfficePackageValidation.ValidateDocumentAsync(staged, before.Head.Path, provider.Limits.MaxDocumentBytes, cancellationToken);
+        using var stagingContent = new DocumentStagingContent(provider.Documents, provider.Content, Admission(actor, before.Head), provider.Limits);
+        PreparedDocumentPublication publication;
+        if (before.Head.Package.Length == length && before.Head.Package.Sha256 == sha256)
+        {
+            publication = new(resourceId, Admission(actor, before.Head),
+                new(before.Head.LifecycleGeneration, before.Head.AuthorityGeneration, before.Coordination.Generation,
+                    before.Head.StateVersion, before.Head.ContentVersion, []),
+                new(identity, digest, actor.Identity.Subject, before.Head.ContentVersion, before.Head.LatestRevisionNumber, null, null), [])
+            { HostLockToken = hostLockToken };
+        }
+        else
         {
             staged.Position = 0;
             var bytes = new byte[checked((int)length)];
             await staged.ReadExactlyAsync(bytes, cancellationToken);
-            var currentFile = before.Partitions.Single(p => p.Kind == 0);
-            var currentGraph = await DocumentPartition.RestoreGraphAsync(currentFile, provider.Content, provider.Limits, cancellationToken);
-            // A replacement publishes new objects in the existing file cell. Changing the
-            // cell would invalidate scoped queries from clients retaining its identity.
-            var cell = PartitionGraphSnapshot.Create(currentGraph.Elements, currentGraph.StorageIndex).FileCell;
+            var file = before.Partitions.Single(p => p.Kind == 0);
+            var cell = IndexedDocumentGraph.Restore(before.Head.Package.Root.Cell);
             ExGuid Fresh() => new(1, Guid.NewGuid());
-            var identity = new StorageManifestBuilder.StableIdentity(Fresh(), Fresh(), Fresh(), Fresh(),
+            var graphIdentity = new StorageManifestBuilder.StableIdentity(Fresh(), Fresh(), Fresh(), Fresh(),
                 Fresh(), Fresh(), Fresh(), cell, Guid.NewGuid());
-            var imported = FileContentPartitionBuilder.BuildQueryChangesResponse(1, bytes, identity, currentFile.Knowledge);
+            var imported = FileContentPartitionBuilder.BuildQueryChangesResponse(1, bytes, graphIdentity, file.Knowledge);
             var index = ((QueryChangesSubResponseData)imported.SubResponses[0].Data!).StorageIndexExtendedGuid;
-            var importedGraph = GenericPartitionGraphSnapshot.Create(imported.DataElementPackage!.DataElements, index,
-                new(MaxElements: provider.Limits.MaxGraphElements, MaxPayloadBytes: provider.Limits.MaxGraphBytes));
-            var publication = HistoricalGraphRestorer.Rebase(currentGraph, importedGraph, currentFile.Identity.SerialGuid,
-                currentFile.Knowledge, new(MaxElements: provider.Limits.MaxGraphElements, MaxPayloadBytes: provider.Limits.MaxGraphBytes));
-            staged.Position = 0;
-            preparedContent = await provider.Content.WriteAsync(staged, cancellationToken);
-            preparedFile = await DocumentPartition.CaptureGraphAsync(currentFile, publication.Graph, publication.Knowledge,
-                provider.Content, provider.Limits, cancellationToken);
-            preparedFile = preparedFile with { Content = preparedContent, InlineContent = [] };
+            var package = imported.DataElementPackage!;
+            var scope = new IndexedGraphScope(resourceId, before.Head.LifecycleGeneration, 0);
+            var keys = IndexedDocumentGraph.ReadMetadata(scope,
+                package.DataElements.Single(element => element.DataElementExtendedGuid.Equals(index))).Mappings.Select(m => m.Key).ToImmutableArray();
+            var preparation = await provider.Documents.PrepareSaveAsync(resourceId,
+                new(0, identity, keys) { IncludeBindings = true }, cancellationToken) ?? throw MissingDocument();
+            if (preparation.Control.Head.StateVersion != before.Head.StateVersion)
+            {
+                if (await ReplayAsync(cancellationToken) is { } acceptedRetry) return acceptedRetry;
+                Demand(actor, preparation.Control.Head, DocumentAccess.Write);
+                throw new WholeFileSaveConflictException("The document changed while preparing the whole-file save.");
+            }
+            var operation = new FsshttpbCellSubRequest(RequestTypes.PutChanges)
+            { RequestId = 1, Data = new PutChangesSubRequestData { StorageIndex = index } };
+            var admission = Admission(actor, before.Head);
+            IndexedPreparedSave prepared;
+            try
+            {
+                prepared = await IndexedPartitionSavePreparer.PrepareAsync(preparation, operation, package,
+                    admission, ImmutableDictionary<string, string>.Empty, provider.Documents,
+                    stagingContent, provider.Limits,
+                    cancellationToken, new DocumentWriteContext(identity, digest, hostLockToken));
+            }
+            catch (StagingAdmissionChangedException)
+            {
+                if (await ReplayAsync(cancellationToken) is { } acceptedRetry) return acceptedRetry;
+                throw new WholeFileSaveConflictException("The document changed while admitting whole-file content.");
+            }
+            if (prepared.ErrorCode is { } error)
+            {
+                if (error == "FileUnauthorizedAccess") throw new UnauthorizedAccessException("Write access denied.");
+                throw new DocumentOperationLockException(error);
+            }
+            publication = prepared.Publication ?? throw new WholeFileSaveConflictException("The whole-file graph could not be prepared.");
+            if (publication.Package is not { } descriptor || descriptor.Length != length || descriptor.Sha256 != sha256)
+                throw new StorageCorruptionException("The prepared graph does not reproduce the supplied package.");
         }
 
-        Guid publicationOperationId = Guid.NewGuid();
-        try
+        PublicationResult result;
+        try { result = await stagingContent.PublishAsync(publication, cancellationToken); }
+        catch (Exception error) when (error is StorageUnavailableException || error is OperationCanceledException && cancellationToken.IsCancellationRequested)
         {
-            return await provider.State.TransitionAsync(resourceId, (current, now) =>
-            {
-                Demand(actor, current, DocumentAccess.Write);
-                DemandLifecycle(current);
-                if (Replay(current) is { } accepted) return new StateTransition<WholeFileSaveResult>(null, accepted);
-                if (current.StateVersion != before.StateVersion)
-                    throw new WholeFileSaveConflictException("The document changed while preparing the whole-file save.");
-                if (current.Coordination.Generation != before.Coordination.Generation)
-                    throw new DocumentOperationLockException("InvalidCoauthSession");
-                DemandWholeFileLock(current, actor, hostLockToken, now);
-                var next = current;
-                if (changed)
-                {
-                    uint version = checked(current.ContentVersion + 1);
-                    next = current with
-                    {
-                        Content = preparedContent,
-                        ContentVersion = version,
-                        ModifiedUtc = now,
-                        Security = current.Security with { ModifiedBy = actor.Identity },
-                        Partitions = current.Partitions.Select(p => p.Kind == 0 ? preparedFile! :
-                            p.Kind == 1 && p.StorageIndex is null && p.Elements.IsEmpty ? p with
-                            {
-                                Knowledge = checked(p.Knowledge + 1),
-                                InlineContent = Encoding.UTF8.GetBytes(
-                                    $"<Metadata ContentVersion=\"{version}\" Modified=\"{now.Ticks}\" />").ToImmutableArray(),
-                            } : p).ToImmutableArray(),
-                        Receipts = current.Receipts.Select(r => r.PartitionKind == 0 ? r with { Response = null } : r).ToImmutableArray(),
-                    };
-                    next = RevisionHistory.Append(current, next, actor.Identity, now);
-                    next = ExternalPublication.Append(current, next, publicationOperationId, provider.Limits);
-                }
-                else next = RevisionHistory.Initialize(next);
-                var revision = next.Revisions[^1];
-                next = next with { WholeFileSaveReceipts = current.WholeFileSaveReceipts.Add(new(
-                    current.LifecycleGeneration, actor.Identity.Subject, operationKey, digest, revision.RevisionNumber)) };
-                provider.Limits.CheckDocument(next);
-                return new StateTransition<WholeFileSaveResult>(next, new(revision, false));
-            }, cancellationToken);
-        }
-        catch (StorageUnavailableException)
-        {
-            // The transaction may have committed. Resolve its durable receipt without repeating publication.
-            var accepted = await provider.State.TransitionAsync(resourceId, (current, _) =>
-            {
-                Demand(actor, current, DocumentAccess.Write);
-                DemandLifecycle(current);
-                return new StateTransition<WholeFileSaveResult?>(null, Replay(current));
-            }, CancellationToken.None);
-            if (accepted is not null) return accepted;
+            if (await ReplayAsync(CancellationToken.None) is { } accepted) return accepted;
             throw;
         }
-
-        WholeFileSaveReceipt? Receipt(DocumentState state) => state.WholeFileSaveReceipts.FirstOrDefault(r =>
-            r.LifecycleGeneration == state.LifecycleGeneration && r.OwnerSubject == actor.Identity.Subject && r.OperationKey == operationKey);
-
-        WholeFileSaveResult? Replay(DocumentState state)
+        if (result.Status == PublicationStatus.Replay)
+            return await ReplayAsync(cancellationToken) ?? throw new StorageCorruptionException("An accepted whole-file receipt is missing.");
+        if (result.Status == PublicationStatus.Reprepare)
         {
-            var receipt = Receipt(state);
-            if (receipt is null) return null;
-            if (!string.Equals(receipt.Digest, digest, StringComparison.Ordinal))
-                throw new WholeFileSaveConflictException("The whole-file save key was reused with different content or lock authority.");
-            return new(FindRevision(state, receipt.RevisionNumber), true);
+            if (await ReplayAsync(cancellationToken) is { } acceptedRetry) return acceptedRetry;
+            throw new WholeFileSaveConflictException("The document changed while preparing the whole-file save.");
         }
-
-        void DemandLifecycle(DocumentState state)
+        if (result.Status == PublicationStatus.ProtocolError)
         {
-            if (state.LifecycleGeneration != before.LifecycleGeneration)
+            if (result.ErrorCode == "FileUnauthorizedAccess") throw new UnauthorizedAccessException("Write access denied.");
+            if (result.ErrorCode is "CoherencyFailure" or "InvalidRequest") throw new WholeFileSaveConflictException(result.ErrorMessage ?? "The whole-file save conflicts with current state.");
+            throw new DocumentOperationLockException(result.ErrorCode ?? "CellRequestFail");
+        }
+        var selected = await provider.Documents.ReadRevisionAsync(resourceId, result.Receipt!.RevisionNumber, cancellationToken) ?? throw MissingDocument();
+        var revision = selected.Revision ?? throw new StorageCorruptionException("The accepted whole-file revision is missing.");
+        actor = await AuthorizeActorAsync(actor, selected.Current, DocumentAccess.Write, cancellationToken);
+        Demand(actor, selected.Current, DocumentAccess.Write);
+        return new(revision, false);
+
+        async ValueTask<WholeFileSaveResult?> ReplayAsync(CancellationToken ct)
+        {
+            var readReceipt = await provider.Documents.ReadReceiptAsync(resourceId, identity, ct) ?? throw MissingDocument();
+            actor = await AuthorizeActorAsync(actor, readReceipt.Current, DocumentAccess.Write, ct);
+            Demand(actor, readReceipt.Current, DocumentAccess.Write);
+            if (readReceipt.Current.LifecycleGeneration != before.Head.LifecycleGeneration)
                 throw new WholeFileSaveConflictException("The document lifecycle changed while preparing the whole-file save.");
+            if (readReceipt.Receipt is not { } receipt) return null;
+            if (receipt.OwnerSubject != actor.Identity.Subject || receipt.Digest != digest)
+                throw new WholeFileSaveConflictException("The whole-file save key was reused by another actor or with different content or lock authority.");
+            var selection = await provider.Documents.ReadRevisionAsync(resourceId, receipt.RevisionNumber, ct) ?? throw MissingDocument();
+            var accepted = selection.Revision ?? throw new StorageCorruptionException("The accepted whole-file revision is missing.");
+            var current = await provider.Documents.ReadReceiptAsync(resourceId, identity, ct) ?? throw MissingDocument();
+            actor = await AuthorizeActorAsync(actor, current.Current, DocumentAccess.Write, ct);
+            Demand(actor, current.Current, DocumentAccess.Write);
+            if (current.Current.LifecycleGeneration != before.Head.LifecycleGeneration || current.Receipt != receipt)
+                throw new WholeFileSaveConflictException("The accepted whole-file save changed during response preparation.");
+            return new(accepted, true);
         }
-    }
-
-    private static void DemandWholeFileLock(DocumentState state, CellBridgeActor actor, string? token, DateTime now)
-    {
-        var coordination = state.Coordination;
-        if (coordination.Exclusive is { } exclusive && exclusive.ExpiresUtc > now ||
-            coordination.SchemaOwners.Any(l => l.ExpiresUtc > now))
-            throw new DocumentOperationLockException("FileAlreadyLockedOnServer");
-        if (token is not null)
-        {
-            if (coordination.HostLock is not { } lease || lease.ExpiresUtc <= now ||
-                !string.Equals(lease.Token, token, StringComparison.Ordinal) ||
-                !string.Equals(lease.OwnerSubject, actor.Identity.Subject, StringComparison.Ordinal))
-                throw new DocumentOperationLockException("InvalidCoauthSession");
-        }
-        else if (state.Content.Length != 0 || coordination.HostLock is { } host && host.ExpiresUtc > now)
-            throw new DocumentOperationLockException("FileAlreadyLockedOnServer");
     }
 }

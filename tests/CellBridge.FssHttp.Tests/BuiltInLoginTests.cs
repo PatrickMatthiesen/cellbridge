@@ -294,7 +294,7 @@ public sealed class BuiltInLoginTests
                 return Task.CompletedTask;
             };
         });
-        builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+        builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false);
         builder.Services.AddAntiforgery(options => options.FormFieldName = tokenField);
         builder.Services.AddSingleton<LoginStats>();
         if (!missingAuthenticator) builder.Services.AddScoped<ICellBridgeLoginAuthenticator, LoginAuthenticator>();

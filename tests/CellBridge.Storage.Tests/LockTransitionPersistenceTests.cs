@@ -16,7 +16,7 @@ public sealed class LockTransitionPersistenceTests
 {
     [Fact]
     public Task IndependentCoordinatorsPersistMembershipAndAcknowledgement() =>
-        Lifecycle(new(new InMemoryStateStore(), new InMemoryContentStore()));
+        Lifecycle(StorageTestDocuments.Memory());
 
     [PostgreSqlFact]
     public async Task PostgreSqlIndependentCoordinatorsPersistMembershipAndAcknowledgement()
@@ -28,20 +28,20 @@ public sealed class LockTransitionPersistenceTests
     [Fact]
     public async Task OldJsonStatePromotesOwnerOnlyOnExplicitCoauthorRefresh()
     {
-        var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+        var provider = StorageTestDocuments.Memory();
         var state = (await new CellBridgeDocumentService(provider).CreateAsync("/legacy.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var now = DateTime.UtcNow;
         var client = Guid.NewGuid().ToString(); var schema = Guid.NewGuid().ToString();
-        var document = StoredDocument.RestoreMetadata(state, now);
-        var coordinator = FssHttpLockCoordinator.Restore(document, state.Coordination, now, TestActor.Value.Identity);
-        coordinator.ApplySchemaLock(Request("SchemaLockRequestType", "GetLock", client, schema), new());
-        var json = JsonNode.Parse(JsonSerializer.Serialize(document.CaptureCoordination(state, coordinator.Capture())))!;
+        var initial = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
+        var granted = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(state.ResourceId,
+            TestStorage.Admit(initial.Head), Request("SchemaLockRequestType", "GetLock", client, schema)));
+        Assert.Null(granted.ErrorCode);
+        var json = JsonNode.Parse(JsonSerializer.Serialize(granted.Current))!;
         json["Coordination"]!.AsObject().Remove("CoauthorClients");
         json["Coordination"]!.AsObject().Remove("CoauthorTransitionPending");
-        var restored = json.Deserialize<DocumentState>()!;
+        var restored = json.Deserialize<DocumentControlRead>()!;
         Assert.Empty(restored.Coordination.CoauthorClients);
-        var second = StoredDocument.RestoreMetadata(restored, now);
-        var next = FssHttpLockCoordinator.Restore(second, restored.Coordination, now, TestActor.Value.Identity);
+        var second = StoredDocument.RestoreControl(restored);
+        var next = FssHttpLockCoordinator.Restore(second, restored.Coordination, restored.UtcNow, TestActor.Value.Identity);
         var rejected = new FssHttpSubResponse();
         next.ApplyCoauthTransition(Request("CoauthRequestType", "MarkTransitionComplete", client, schema), rejected);
         Assert.Equal("InvalidCoauthSession", rejected.ErrorCode);
@@ -58,39 +58,38 @@ public sealed class LockTransitionPersistenceTests
         string first = Guid.NewGuid().ToString(), second = Guid.NewGuid().ToString(), schema = Guid.NewGuid().ToString();
         await Transition("JoinCoauthoring", first);
         await Transition("JoinCoauthoring", second);
-        var joined = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var joined = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         Assert.True(joined.Coordination.CoauthorTransitionPending);
         Assert.Equal(2, joined.Coordination.CoauthorClients.Length);
-        Assert.Equal(state.Content, joined.Content);
-        Assert.Equal(state.ContentVersion, joined.ContentVersion);
+        Assert.Equal(state.Package, joined.Head.Package);
+        Assert.Equal(state.ContentVersion, joined.Head.ContentVersion);
         // Fresh metadata/coordinator instances on every transaction model host restart/handoff.
         await Transition("ExitCoauthoring", second);
-        var remaining = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var remaining = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         Assert.True(remaining.Coordination.CoauthorTransitionPending);
         await Transition("MarkTransitionComplete", first);
-        Assert.False((await provider.State.FindByResourceIdAsync(state.ResourceId))!.Coordination.CoauthorTransitionPending);
+        Assert.False((await provider.Documents.ReadControlAsync(state.ResourceId))!.Coordination.CoauthorTransitionPending);
         await Transition("ConvertToExclusive", first);
-        var exclusive = (await provider.State.FindByResourceIdAsync(state.ResourceId))!;
+        var exclusive = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
         Assert.NotNull(exclusive.Coordination.Exclusive);
         Assert.Empty(exclusive.Coordination.CoauthorClients); Assert.Empty(exclusive.Editors);
-        Assert.Equal(state.Content, exclusive.Content);
-        Assert.Equal(state.ContentVersion, exclusive.ContentVersion);
+        Assert.Equal(state.Package, exclusive.Head.Package);
+        Assert.Equal(state.ContentVersion, exclusive.Head.ContentVersion);
 
-        async Task Transition(string operation, string client) => await provider.State.TransitionAsync(state.ResourceId, (current, now) =>
+        async Task Transition(string operation, string client)
         {
-            var document = StoredDocument.RestoreMetadata(current, now);
-            var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, now, TestActor.Value.Identity);
-            var response = new FssHttpSubResponse();
-            coordinator.ApplyCoauthSession(document, Request("CoauthRequestType", operation, client, schema), response);
-            Assert.Null(response.ErrorCode);
-            return new StateTransition<bool>(document.CaptureCoordination(current, coordinator.Capture()), true);
-        });
+            var current = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
+            var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(state.ResourceId,
+                TestStorage.Admit(current.Head), Request("CoauthRequestType", operation, client, schema)));
+            Assert.Null(result.ErrorCode);
+        }
     }
 
     private static FssHttpSubRequest Request(string key, string operation, string client, string schema)
     {
         var request = new FssHttpSubRequest
         {
+            Type = key == "SchemaLockRequestType" ? SubRequestType.SchemaLock : SubRequestType.Coauth,
             SubRequestDataAttributes =
             {
                 [key] = operation, ["ClientID"] = client, ["SchemaLockID"] = schema, ["Timeout"] = "3600",

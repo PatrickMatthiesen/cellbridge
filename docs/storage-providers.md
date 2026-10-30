@@ -1,249 +1,54 @@
 # Storage providers and reusable hosting
 
-See [tested environments and recovery limits](supported-environments.md) and the
-[upgrade procedure](#updating-a-host) before updating a host with stored documents.
+CellBridge stores canonical protocol graphs and typed document metadata. A
+`DocumentPackage` describes a derived Office file by its immutable graph root,
+reconstruction version, length and SHA-256. A changed file save does not store a
+second complete downloadable package. Downloads reconstruct and verify the
+selected version.
 
-CellBridge stores document state separately from file content. PostgreSQL or
-SQL Server holds document identities, revisions, synchronization graphs, save
-receipts, sessions and leases. Content uses database chunks or immutable filesystem
-objects. In-memory stores are available for disposable development.
+The `CellBridge` package contains the protocol and storage contracts.
+`CellBridge.AspNetCore` supplies HTTP endpoints and hosting registration.
+PostgreSQL and SQL Server providers use the same normalized repository operations
+with their own EF mappings and migrations. Document and Lists packages have
+independent dependencies and schemas. All shipping CellBridge packages use the
+same beta version and target .NET 11.
 
-The `CellBridge` core package contains document and storage contracts. Provider
-packages depend on core; `CellBridge.AspNetCore` adds HTTP and hosting adapters.
-Document storage and Lists use separate contexts, migrations and package
-dependencies. PostgreSQL and SQL Server each own their EF model. Legacy schema
-upgrades retain their data transforms.
-
-PostgreSQL and SQL Server use the same document operations. Each provider owns
-its database mappings and migration history. Required database locks stay enabled.
-
-`CellBridge.Storage.SqlServer` and `CellBridge.Lists.SqlServer` are independent
-.NET 11 packages. Use the same version for every CellBridge package. Each
-package has its own schema and explicit migrator. Neither depends on PostgreSQL
-or on the other SQL Server package. The demo does not use these providers. Live
-Office editing against SQL Server has not been validated. See [Lists setup](lists.md#sql-server-setup-and-runtime)
-and [SQL Server engine checks](automated-testing.md#sql-server-engine-checks).
-
-SQL Server consumers run initialization separately with setup credentials and
-all hosts stopped:
-
-```csharp
-using CellBridge.Storage.Abstractions;
-using CellBridge.Storage.SqlServer;
-using Microsoft.EntityFrameworkCore;
-
-var limits = new StorageLimits();
-var setupOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
-    .UseSqlServer(setupConnectionString).Options;
-await new SqlServerStorageMigrator(setupOptions, limits).MigrateAsync();
-```
-
-The host then uses restricted runtime credentials:
-
-```csharp
-var runtimeOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
-    .UseSqlServer(runtimeConnectionString).Options;
-var provider = new StorageProvider(
-    new SqlServerStateStore(runtimeOptions, limits),
-    new SqlServerContentStore(runtimeOptions, limits.MaxObjectBytes), limits);
-builder.Services.AddCellBridge(provider, multipleInstances: true);
-await provider.CheckHealthAsync();
-```
-
-Import `CellBridge.AspNetCore` for `AddCellBridge`. Pass the same runtime options
-instance to both stores so they share one byte budget. Registration, health
-checks and requests never migrate schemas. Do not enable EF automatic execution
-strategy retries. Retry protocol operations with the same operation identity to
-replay an accepted save.
-
-SQL Server requires `DELAYED_DURABILITY = DISABLED`. Runtime credentials need
-data access to the document tables, read access to `schema_version` and `usage`,
-and update access to `usage.StoredBytes` and `usage.DocumentCount`. They do not
-need schema, migration-history or quota-limit write permissions. Host
-authorization still controls document operations. The provider uses database
-locks to coordinate hosts; these locks cannot be disabled.
-
-SQL Server provides explicit quiescent collection through
-`CellBridge.Storage.SqlServer.StorageMaintenance`. Stop every host, reader, writer
-and publisher before applying it. Use maintenance credentials with delete access
-to the owned content objects and chunks, read access to the document inventory and
-usage ledger, and update access to `usage.StoredBytes`. The normal runtime login
-used by the engine tests cannot delete content.
-
-```csharp
-var maintenance = new CellBridge.Storage.SqlServer.StorageMaintenance(options, limits);
-var preview = await maintenance.CollectOrphansAsync();
-var applied = await maintenance.CollectOrphansAsync(apply: true, quiescent: true);
-```
-
-The dry run removes nothing. Apply deletes only unreferenced objects and chunks
-and updates the byte ledger in one transaction. Stop all readers and writers
-before applying collection. The provider checks retained snapshots, history,
-receipts and recovery data before deleting anything. An invalid inventory aborts
-the operation. Database locks protect the collection transaction, but they do not
-replace the requirement to stop all hosts and workers first.
-
-## Run the PostgreSQL sample
-
-With Aspire stopped, build and start from the repository root:
-
-```sh
-dotnet build CellBridge.slnx
-aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-```
-
-Aspire uses a PostgreSQL volume that retains data between runs. The `storage-init`
-resource initializes fresh/current storage, and the host checks both stores
-before serving requests. [Provision an account](authentication.md#first-setup)
-to use the library. Removing the volume removes its persisted data.
-
-Outside Aspire, build and run `tools/CellBridge.Storage.Setup` with
-`ConnectionStrings__cellbridge` before starting the host. Setup accepts fresh
-or schema-6 databases and upgrades schemas 3, 4 and 5 while preserving documents
-and retained snapshots. Stop all hosts and workers using the database first.
-Unsupported schemas, corruption or exceeded limits abort the upgrade without
-changing persisted data. Follow the [upgrade procedure](#updating-a-host)
-for backups and rollback.
-
-Consumers can invoke the same migration implementation from their own initializer
-or deployment application. The implementation is in the reusable
-`CellBridge.Storage.PostgreSql` package:
-
-```csharp
-await using var source = NpgsqlDataSource.Create(connectionString);
-await new PostgreSqlStorageMigrator(source, limits).MigrateAsync();
-```
-
-Run this step with setup credentials and every writer stopped. Service
-registration, health checks and ordinary document operations do not create or
-migrate tables. Existing SQL-created schemas keep their documents, content,
-graphs, replies and retained snapshots when setup records the EF migration
-history. The application keeps ownership of its own business tables.
-
-Current metadata and paged revision summaries avoid loading complete document
-history with the built-in stores. See [reading document metadata and history](async-document-authorization.md#read-document-metadata-and-history).
-Graph operations, saves and restores still load complete states. Derived read
-indexes take physical disk space in addition to the authoritative state and
-content counted by storage quotas.
-
-### Configuration
-
-| Setting | Meaning |
-| --- | --- |
-| `Storage:Provider` | `PostgreSql` or explicitly volatile `InMemory`. Aspire selects PostgreSQL; the sample executable's standalone default is InMemory. |
-| `ConnectionStrings:cellbridge` | Required PostgreSQL connection string, supplied by Aspire in local development. |
-| `Storage:ContentProvider` | `PostgreSql`, the default for PostgreSQL state, or `FileSystem`. |
-| `Storage:ContentRoot` | Absolute filesystem content directory, required for FileSystem. |
-| `Storage:MaxDecodedGraphMembershipBytes` | Maximum graph-reference bytes per document state, default 128 MiB. Applies to reads, writes and upgrades. This is separate from disk quotas and does not limit total process memory. |
-| `Storage:MaxObjectBytes` | Maximum bytes per binary object, default 512 MiB. This is a quota, not a tested document-size promise. |
-| `Storage:MultipleInstances` | Require shared state and content; reject incompatible provider combinations. |
-| `Storage:SharedContent` | Operator declaration that the filesystem root is shared with verified flush/rename semantics. Default false. |
-| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM request size, default 128 MiB. Large bodies spool to private temporary files before one parsing allocation. Requests and retained graph payloads still occupy memory. |
-| SOAP XML limit | Fixed 16 Mi characters before parsing, independent of the HTTP body limit. Inline base64 reaches this ceiling before a 128 MiB transport body; use MTOM for larger binary payloads. |
-| `Protocol:MaxConcurrentRequests` | Maximum cellstorage requests per host, including response delivery, default 8; excess requests return HTTP 503. |
-| `Protocol:MaxConcurrentRequestsPerSubject` | Maximum active protocol requests per authenticated subject, default 2; excess requests return HTTP 429. |
-| `Protocol:RequestTimeout` | Absolute deadline through body reading and response delivery, default `00:02:00`. |
-| `Protocol:PublicOrigin` | Optional fixed external HTTPS origin. Without a fixed Office/Protocol origin, remote hosts must configure a specific `AllowedHosts` list; loopback remains available for local tests. |
-| `Protocol:MaxCaptureBytes` | Per-process capture byte budget including existing evidence, default 1 GiB. Use a separate directory per process. |
-| `Protocol:MaxMtomParts` | Maximum MIME parts per request, default 128. |
-| `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
-| `Protocol:CaptureDirectory` | Opt-in directory for correlated raw requests/responses. Default disabled. Restrict access and manage retention. |
-
-
-The graph-reference limit covers current and historical graph arrays. Exceeding
-it rejects the operation without removing history. Raise it only with enough
-memory for concurrent operations; graph objects and file buffers consume memory
-in addition to this limit. Recovery also has a fixed 128 MiB aggregate limit on
-graph-reference bytes across retained snapshots.
-
-Environment variables use double underscores, such as
-`Storage__ContentProvider=FileSystem`. Multi-host integration tests customize the
-main AppHost before starting it, with a fresh database and a second WebDemo process.
-
-### Deployment constraints
-
-Filesystem content must be visible to every host and recovery environment.
-Separate local directories on separate machines cannot provide shared content.
-`SharedContent` declares an actual shared root with suitable flush/rename
-semantics; it does not make local content shared.
-
-New content directories, content files, spool files and portable recovery files
-use owner-only Unix permissions at creation, `0700` for directories and `0600`
-for files. Existing directory permissions are preserved. Review existing storage
-roots and old objects before deployment; this change does not repair their ACLs.
-Shared filesystem deployments should run under the same operating-system
-identity. If distinct identities need access, the operator must configure
-restricted ACLs for those trusted identities, including access to newly published
-files. `SharedContent` does not broaden permissions. On Windows, files inherit
-the parent directory ACL, so restrict the content, recovery output and service
-temporary directories to the service identity and trusted administrators.
-
-Request bodies larger than 256 KiB, save staging, PostgreSQL content writes and
-external file delivery use the system temporary directory. Aspire sets `TMPDIR`,
-`TMP` and `TEMP` for its .NET resources to the checkout's `artifacts/tmp` directory.
-Set `Parameters__TemporaryDirectory` to override this location. Relative paths
-resolve against the checkout root. The HTTP test peer uses the same setting.
-
-Other hosts can set `TMPDIR` on Linux, or `TMP` and `TEMP` on Windows, before
-starting the process to select a private, disk-backed directory. A temporary
-directory on `tmpfs` uses RAM and counts against the host's memory limit. Writing
-to a temporary file does not reduce RAM use on that filesystem. These request,
-save and content files close and delete when their operation finishes.
-
-Both a disk-backed `/tmp` and a repo directory store files on disk. The location
-also determines who removes files left by interrupted tools. Operating-system
-cleanup may remove old files in `/tmp`; `artifacts/tmp` needs explicit cleanup.
-Keep reports and saved documents outside both temporary locations.
-
-Before publishing an Office save, CellBridge checks the proposed ZIP package for
-`[Content_Types].xml` and the main document entry for its file extension. It reads
-each entry and limits the total expanded size. These checks reject some broken
-uploads and oversized compressed packages before they replace the current file.
-They do not validate the Office XML or prove that Office can open the document.
-The current implementation rewinds the stream to check and then store the same
-bytes. A temporary file provides that seekable stream without keeping another
-full document in RAM. The file itself adds no crash recovery guarantee.
-
-Request parsing still allocates an array for the full body after staging it.
-The default eight active requests and 128 MiB body limit therefore allow up to
-1 GiB of body arrays alone. Parsing and document graphs need more memory.
-`MaxConcurrentRequests` limits request count, not total bytes, and direct document
-service calls do not use that HTTP limit. Set request sizes and concurrency for
-the host's available memory. Storage quotas do not set a process memory limit.
-
-Use one content configuration for each database. Changing providers requires
-an explicit data migration; changing settings alone does not move objects.
-Use the [provider portability workflow](provider-portability.md) for validated exports
-and atomic recovery into an empty destination. [Revision restoration](revision-history.md)
-publishes an older retained version through the regular document service.
+See [tested environments](supported-environments.md), the
+[design decision](office-storage-design.md) and the [host update procedure](#updating-a-host).
+Database and filesystem durability still require qualification on the deployment's
+actual storage. Live Office editing against SQL Server remains unverified.
 
 ## Consume the packages
 
-The eleven shipping packages target .NET 11 and share one version. Install
-`CellBridge` for protocol execution and storage contracts, `CellBridge.AspNetCore`
-for HTTP endpoints, login integration and dependency registration, and the
-provider packages you use. `CellBridge.FssHttpB` remains standalone. Choose state and content
-stores from `.PostgreSql`, `.SqlServer`, `.FileSystem` and `.InMemory`; filesystem storage
-supplies content only.
+Initialize the database with setup credentials and all hosts stopped. Constructors,
+registration, health checks and requests do not create or migrate schemas.
 
-For an initialized PostgreSQL database:
+For PostgreSQL:
 
 ```csharp
-using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
 using Npgsql;
 
+var limits = new StorageLimits();
+await using var setupSource = NpgsqlDataSource.Create(setupConnectionString);
+await new PostgreSqlStorageMigrator(setupSource, limits).MigrateAsync();
+```
+
+The runtime host uses its own credentials:
+
+```csharp
+using CellBridge.AspNetCore;
+
 var builder = WebApplication.CreateBuilder(args);
-var source = NpgsqlDataSource.Create(
-    builder.Configuration.GetConnectionString("cellbridge")!);
+var source = NpgsqlDataSource.Create(runtimeConnectionString);
 builder.Services.AddSingleton(source);
-var provider = new StorageProvider(
-    new PostgreSqlStateStore(source), new PostgreSqlContentStore(source));
+var content = new PostgreSqlContentStore(source, limits.MaxObjectBytes);
+var documents = new PostgreSqlStateStore(source, limits, content);
+var provider = new StorageProvider(documents, content, limits);
 builder.Services.AddCellBridge(provider, multipleInstances: true);
-// Register a real authentication scheme and map validated claims to
-// cellbridge:subject. See the authentication guide and NuGet example.
+
+// Register authentication and map validated claims to cellbridge:subject.
 var app = builder.Build();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -253,320 +58,445 @@ app.MapHealthChecks("/health");
 await app.RunAsync();
 ```
 
+See [authentication integration](authentication.md#reusable-hosts) for the subject
+claim and Office sign-in exchange. Stored document grants deny access by default.
+The host must authorize document creation and provide the authenticated actor.
+GUID-first creation/import overloads preserve a host's stable resource identity.
+Unknown resource IDs never fall back to a path or create a document.
 
-To use local filesystem content, replace the content store with
-`new PostgreSqlFileSystemContentStore(source, root)` and set
-`multipleInstances: false`. Volatile stores require
-`AddCellBridge(..., requireDurability: false)`.
+For SQL Server, initialize separately:
 
-For EF configuration, supply `DbContextOptions<CellBridgeDbContext>` built with
-`UseNpgsql` to the state store, PostgreSQL content store and migrator. The context
-is library-owned and sealed. Runtime stores lease one context per operation from
-their private EF context pools. They can share the consumer's configured
-`NpgsqlDataSource` and connection pool. Helpers within a transaction share that
-operation's context. HTTP request scopes do not determine its lifetime, and
-concurrent operations never share one context. Dispose content read streams to
-return their context leases. Options containing an explicit `DbConnection` use
-unpooled contexts and preserve the configured connection ownership.
-Pass the same options instance to both stores for shared storage accounting.
-Connection settings, command timeouts, logging and interceptors remain active.
-Each store's fixed compiled queries use its configured EF model. A context that
-selects a different model uses an ordinary EF query.
-Interceptors and custom EF services must support context reuse and concurrent
-operations. The context constructor accepts the supplied EF options unchanged;
-the stores and migrator configure migration and tracking settings on a copy of
-those options. Use
-`PostgreSqlStorageMigrator` for initialization and existing-data upgrades.
-Configure a non-retrying EF execution strategy. The provider rejects
-`EnableRetryOnFailure` because its explicit transactions and receipt checks own
-retries after uncertain outcomes.
-PostgreSQL row and advisory locks still coordinate document transitions,
-namespace changes and shared storage accounting. EF does not replace those
-database guarantees.
+```csharp
+using CellBridge.Storage.SqlServer;
+using Microsoft.EntityFrameworkCore;
 
-The host supplies authentication and maps validated principals to CellBridge
-subjects. Document grants deny access by default. See
-[authentication integration](authentication.md#reusable-hosts) for the claim
-contract and the Office sign-in exchange.
+var setupOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
+    .UseSqlServer(setupConnectionString).Options;
+await new SqlServerStorageMigrator(setupOptions, limits).MigrateAsync();
 
-`CellBridgeDocumentService.CreateAsync` takes an authenticated actor with
-creation permission, sets ownership/authorship and returns null on a conflicting
-path or identity. `ImportAsync` takes an explicit owner and importer.
-The GUID-first overloads preserve a host's stable resource identity. See
-[embedding in another host](package-integration.md) for the parsed-SOAP processor,
-request permission limits and accepted-save receipts.
-`ResolveAsync` gives supplied ResourceIDs precedence; `ExecuteAsync` handles
-supported binary operations. The sample's catalog, Office file generation and
-Aspire setup live outside these packages.
-
-Build the core and optional Lists packages, the [consumer example](../examples/NuGetConsumer/README.md)
-and its [tests](../tests/CellBridge.Packages.Tests/README.md) with Aspire stopped:
-
-```sh
-python3 tools/verify_packages.py
+var runtimeOptions = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
+    .UseSqlServer(runtimeConnectionString).Options;
+var content = new SqlServerContentStore(runtimeOptions, limits.MaxObjectBytes);
+var documents = new SqlServerStateStore(runtimeOptions, limits, content);
+var provider = new StorageProvider(documents, content, limits);
 ```
 
-The default command builds both package-only document and Lists consumers, runs
-non-database checks and reports database skips. Add `--sqlserver` to run them
-against separate empty databases in the disposable Aspire SQL Server environment.
-Outputs and the isolated feed/cache stay in ignored `artifacts/packages`. See
-[package checks](automated-testing.md#package-checks) for evidence and prerequisites.
+SQL Server requires `DELAYED_DURABILITY = DISABLED` and
+`ALLOW_SNAPSHOT_ISOLATION = ON`. Explicit initialization enables snapshot isolation.
+Runtime credentials need access to the normalized document tables, immutable
+objects/chunks and recovery receipts, and read access to the schema version.
+Initialization and maintenance use separate credentials. The setup tool grants
+runtime access without permission to migrate schemas or delete content objects.
+
+Use a non-retrying EF execution strategy. `EnableRetryOnFailure` is rejected
+because CellBridge owns transactions and resolves uncertain outcomes through
+receipts. Supplied options retain connection settings, timeouts, logging and
+interceptors; providers normalize migration and tracking settings on a copy.
+Each operation owns its context. Do not share one context across concurrent
+operations, and dispose content read streams. Database chunks and their repository
+must use the same database and schema configuration.
 
 ### Provider composition constraints
 
-Pass consistent `StorageLimits` to the state store, content store's object-size
-argument, `StorageProvider` and schema setup. PostgreSQL state/content stores
-must share one `NpgsqlDataSource` instance, or the same EF options instance.
-SQL Server state/content stores must share the same EF options instance.
-Empty in-memory stores composed
-through `StorageProvider` share their counters.
+`StorageProvider.Documents` is the required `IDocumentRepository`.
+`StorageProvider.Content` stores immutable physical objects, and
+`StorageProvider.Packages` reads verified derived packages. Every repository must
+provide the typed read, publication, control, lifecycle, delivery and complete
+recovery operations. There is no optional aggregate callback path.
 
-`StorageCapabilities.AtomicBudgets` reports coordinated accounting.
-Explicit limits reject uncoordinated pairs; default settings permit providers
-without that capability. Standalone `FileSystemContentStore` enforces object
-size only; its PostgreSQL wrapper adds shared accounting.
+Pass consistent `StorageLimits` to the repository, content object's size limit,
+provider and initializer. Pass the actual content reader to the repository when
+physical objects use another backend. This lets publication verify physical
+payloads and their indexed metadata before acquiring a document guard.
+
+For PostgreSQL-inventoried filesystem content:
+
+```csharp
+var content = new PostgreSqlFileSystemContentStore(source, root,
+    limits.MaxObjectBytes, shared: false);
+var documents = new PostgreSqlStateStore(source, limits, content);
+var provider = new StorageProvider(documents, content, limits);
+builder.Services.AddCellBridge(provider, multipleInstances: false);
+```
+
+The same reader is required for upgrades of existing filesystem-backed data:
+
+```csharp
+await new PostgreSqlStorageMigrator(source, limits, content).MigrateAsync();
+```
+
+A missing filesystem reader fails initialization and rolls back its database
+changes. Changing configuration does not move existing objects. Use an explicit
+[provider portability workflow](provider-portability.md).
+
+For disposable development:
+
+```csharp
+using CellBridge.Storage.InMemory;
+
+var content = new InMemoryContentStore(limits.MaxObjectBytes);
+var provider = new StorageProvider(new InMemoryDocumentRepository(content, limits),
+    content, limits);
+builder.Services.AddCellBridge(provider, requireDurability: false);
+```
+
+In-memory state and content disappear when the process stops. Durable and
+multi-instance registration rejects providers that cannot supply those guarantees.
+Filesystem storage supplies content only. Separate local directories on separate
+machines are not shared storage.
+
+## Run the PostgreSQL sample
+
+Stop Aspire before building outputs used by its processes:
+
+```sh
+dotnet build CellBridge.slnx
+aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
+```
+
+The AppHost retains PostgreSQL data in its development volume and runs explicit
+storage initialization before WebDemo. Imports create only missing documents;
+saves do not write back to the import directory. Removing the database volume
+removes its persisted data. See [account setup](authentication.md#first-setup).
+
+Outside Aspire, run `tools/CellBridge.Storage.Setup` with the setup connection
+string before starting the host. PostgreSQL initialization accepts supported
+schemas 3 through 9. SQL Server's current document schema is 4. Initializers
+preserve document data, old recovery snapshots, physical objects and consumer
+business tables. Unknown schemas or migration histories fail without resetting
+the database.
+
+### Configuration
+
+Environment variables use double underscores, such as
+`Storage__ContentProvider=FileSystem`.
+
+| Setting | Meaning |
+| --- | --- |
+| `Storage:Provider` | `PostgreSql`, `SqlServer` or explicitly volatile `InMemory`. Aspire defaults to PostgreSQL. |
+| `ConnectionStrings:cellbridge` | PostgreSQL connection string, supplied by Aspire in local development. |
+| `ConnectionStrings:documents` | SQL Server document connection string. |
+| `Storage:ContentProvider` | `PostgreSql` or `FileSystem` for PostgreSQL repository storage. |
+| `Storage:ContentRoot` | Absolute filesystem content directory, required for filesystem objects and their migration. |
+| `Storage:MultipleInstances` | Require shared repository and content guarantees. |
+| `Storage:SharedContent` | Operator declaration that the filesystem root is actually shared and has verified flush/rename behavior. Default false. |
+| `Protocol:MaxRequestBytes` | Maximum SOAP/MTOM body, default 128 MiB. |
+| SOAP XML limit | Fixed 16 Mi characters, independent of the HTTP body limit. Inline base64 reaches this ceiling before a 128 MiB transport body. |
+| `Protocol:MaxConcurrentRequests` | Cellstorage POSTs and current/history document GETs share eight active requests per process, including reconstruction and delivery. Excess requests return HTTP 503. |
+| `Protocol:MaxConcurrentRequestsPerSubject` | Shared active-request limit per authenticated subject, default 2. Excess requests return HTTP 429. |
+| `Protocol:RequestTimeout` | Absolute deadline through request reading, download reconstruction and response delivery, default `00:02:00`. |
+| `Protocol:PublicOrigin` | Optional fixed external HTTPS origin. Without a fixed Office/Protocol origin, configure specific remote `AllowedHosts`. |
+| `Protocol:MaxMtomParts` | Maximum MIME parts per request, default 128. |
+| `Protocol:MaxMtomHeaderBytes` | Maximum header bytes per MIME part, default 16 KiB. |
+| `Protocol:CaptureDirectory` | Optional correlated raw traffic capture directory. Disabled by default. |
+| `Protocol:MaxCaptureBytes` | Per-process capture limit, including existing evidence, default 1 GiB. Use a separate directory per process. |
+
+### Deployment constraints
+
+`SharedContent` does not turn a local directory into shared storage or change its
+permissions. Every host and recovery environment must see the same objects.
+New content directories use Unix mode `0700`; new content, spool and recovery
+files use `0600`. Existing permissions are preserved. Shared filesystem hosts
+should use the same operating-system identity, or explicitly configured restricted
+ACLs that also cover newly created files. On Windows, files inherit the parent
+ACL. Restrict content, recovery output and service temporary directories.
+
+Request bodies larger than 256 KiB, save preparation, content writes, derived
+packages and external delivery can use temporary files. Aspire points `TMPDIR`,
+`TMP` and `TEMP` at `artifacts/tmp` by default; `Parameters__TemporaryDirectory`
+overrides it. Other hosts can set the operating system's temporary directory
+before starting the process. Use a private disk-backed directory. A `tmpfs`
+temporary directory consumes RAM. Closing operation scratch files removes them;
+interrupted processes can leave files that require explicit cleanup.
+
+Body staging does not eliminate parsing allocations. Eight requests at the
+128 MiB body limit can allocate 1 GiB for bodies alone, before graph and parsing
+objects. Request concurrency is not a process memory limit, and direct service
+calls do not use HTTP admission limits. Set sizes and concurrency for the host's
+available memory.
+
+Document GETs retain their admission permit until the reconstructed package
+stream closes. A slow transfer therefore occupies its slot until completion,
+disconnect or the request deadline. Choose document size and concurrency limits
+for temporary disk capacity as well as memory. At the default limits, eight
+128 MiB downloads can retain 1 GiB of reconstructed package files. Direct
+package/service calls need their own caller-managed concurrency and cancellation.
+
+Before accepting a file publication, CellBridge reconstructs a seekable package,
+checks `[Content_Types].xml` and the extension's main document entry, reads ZIP
+members and limits expanded bytes. These checks reject some broken or oversized
+packages. They do not validate Office XML or prove desktop Office compatibility.
 
 ## Commit and retry behavior
 
-The document service verifies and combines the retained graph without loading
-the previous complete package. It reconstructs the file into an exclusively
-created temporary file, checks every ZIP member against the limit on expanded
-bytes and rewinds the stream for storage. Graph payloads still load eagerly.
-The staging file is deleted on success, failure or cancellation.
+Save preparation reads a coherent current control view, selected bindings and
+explicitly affected mapping keys. Immutable elements and metadata use scoped,
+targeted lookups. Ordinary controls, metadata reads and package downloads do not
+decode a retained `DocumentState` aggregate or enumerate application history.
 
-The service then locks the document row, reads the current state and database
-time, rechecks permission, coherency and leases, and saves a snapshot with a
-save receipt. File I/O happens outside the lock;
-different documents have independent locks.
+Immutable physical input is staged and verified before the affected document's
+publication guard. Publication obtains provider time and checks current authority,
+lifecycle, receipts, coordination and mapping fences. It atomically accepts the
+new roots, indexed records, document counters, receipt and any outbox entry.
+PostgreSQL uses affected-head row locks and repeatable-read snapshot reads.
+SQL Server uses affected-head update locks and snapshot reads. Ordinary operations
+do not take provider-wide publication or namespace gates.
 
-Receipts bind the proposed storage index to the operation digest, accepted
-response and writer. An identical retry of the current content version returns
-the accepted response without advancing the version. Conflicting reuse of an
-index fails. A delayed retry after another save returns a coherency error.
-A lost commit reply triggers receipt lookup before reapplying the operation.
-Every retry requires its original writer and current Write access.
+Storage-index wire elements are transmission envelopes. Key updates apply
+atomically without replacing unrelated mapping keys. Providers keep current
+mapping values and historical visibility intervals, with logical root identities
+for selected versions. Raw incoming index envelopes do not accumulate as canonical
+graph objects.
 
-Each supported `PutChanges` commits independently. A later failure does not undo
-an earlier accepted save. Unsupported partial uploads fail per operation, so
-independent queries and complete saves can still succeed. `MultiRequestPutHint`
-is a coalescing hint and is accepted for complete saves; it does not enable
-staged partial uploads. Explicit binary targets select the file, metadata or
-editors partition independently of the SOAP default. Unknown targets fail.
+Current bindings support latest-version reads. Immutable effective changes and
+synchronously prepared checkpoints support historical reads. The shipping policy
+bounds a replay tail at 128 publication changes and 1 MiB of encoded changes.
+Providers reject a publication that requires a checkpoint but omits it. These
+prototype bounds require measurement before tuning; they are not a throughput
+qualification.
 
-Session and lease updates use the same transaction. Database time is read after
-lock acquisition, so waiting cannot preserve an expired lease. Restart does not
-extend leases; editor expiry and editor-partition knowledge advance together.
+Receipts bind an operation to its digest, actor, lifecycle and accepted result.
+A current accepted retry reuses the receipt without publishing another version.
+Protocol replay rejects a superseded file content version or metadata index.
+Whole-file and restore receipts retain their accepted immutable revision.
+Unknown commit outcomes require receipt lookup before retrying. Current access is required for replay; an old
+accepted save does not restore revoked permissions. Genuine ownerless legacy
+receipts remain preserved and cannot authorize replay.
 
-PostgreSQL requires `fsync=on`, forces `synchronous_commit=on`, uses five-second
-lock and 30-second statement timeouts, and reads from the primary. Replication
-failover needs database settings that prevent loss of acknowledged saves. Storage failures do not
-switch the host to volatile storage.
+A stale preparation returns a reprepare result. Explicit client coherency
+preconditions still produce their protocol error. Metadata publications can add
+an application revision while retaining file bytes, file content version and file
+authorship/modification fields. Changed file publications advance the file version
+and enqueue delivery when a destination is bound. A whole-file unchanged retry
+can record its receipt without adding an application revision.
+
+Supported operations commit independently. A later failing operation does not
+undo an earlier accepted save. Unsupported partial upload modes remain explicit
+errors; hints do not enable partial-upload support. Session, permission and lease
+changes use typed controls under the document guard. Waiting does not extend a
+lease because the provider reads authoritative time after acquiring the guard.
+
+PostgreSQL requires `fsync=on`, sets `synchronous_commit=on`, and uses five-second
+lock and 30-second statement timeouts. Read from the primary. Replication failover
+must preserve acknowledged commits. SQL Server requires delayed durability to be
+disabled. A storage failure never switches the host to volatile storage.
 
 ## Filesystem writes and retention
 
-Content writes accept non-seekable streams, check quotas, hash bytes and flush a
-temporary file before renaming it to its SHA-256 key.
-Linux synchronizes directories and newly created parent entries. Windows uses
-write-through flushes and `MoveFileEx` with `MOVEFILE_WRITE_THROUGH`.
+Physical writes accept non-seekable streams, enforce the object limit and publish
+complete immutable objects under their SHA-256 keys. Filesystem writes flush a
+temporary file before rename. Linux synchronizes directories and newly created
+parent entries; Windows uses write-through flushes and `MOVEFILE_WRITE_THROUGH`.
+Reads verify length and SHA-256. Filesystem reads verify before returning a stream;
+PostgreSQL verifies chunks while streaming. Dispose every returned stream.
 
-Reads verify length and SHA-256. PostgreSQL verifies chunks while streaming;
-filesystem reads verify the file before returning a stream, adding a read pass.
-Downloads use content and headers from one state snapshot.
-
-Restoration, queries and receipt replay read at most the handle's declared length
-plus an EOF probe, verify SHA-256 and honor cancellation. Conflicting handles
-sharing a cache key are rejected before caching. Receipt replay requires a complete
-successful binary save response without trailing bytes.
-
-PostgreSQL retains the latest 64 state snapshots per document by default,
-including lease-only changes. The current state retains its synchronization
-graph and receipt identities. Superseded receipt response handles are dropped
-from new snapshots, while operation digests remain to reject stale/conflicting
-retries. Current-version retries keep their response.
+Application revisions, immutable protocol records, operation receipts and pending
+deliveries have separate purposes. Controls update small current records instead
+of appending complete provider snapshots. Historical packages select their
+immutable graph root and resolved bindings. Retained legacy aggregate rows exist
+for migration evidence and offline retention; ordinary exports use normalized
+records and never return those stale aggregates as current state.
 
 ### Collect orphan content
 
-Failed staging can leave charged orphan objects; interrupted filesystem writes
-can leave `.tmp` files. Remove temporary files only with all writers stopped.
-Age and the current materialized file are insufficient grounds for deleting
-`.blob` objects because later saves may reference older parts.
+When SQL state and content use the same configured database, Office, whole-file
+and restore saves buffer up to 8 MiB and 64 provisional objects in owned memory.
+The provider validates their graph records before opening the write transaction,
+inserts the payloads, then locks the affected document row and publishes its
+records, limits, receipt and delivery together. Rejection, replay or cancellation
+before commit rolls back tentative content. An uncertain commit still resolves
+through the operation receipt. No physical content becomes durable without its
+document ownership charge.
 
-Report objects unreferenced by every retained snapshot:
+External content stores and saves that exceed the provisional buffer instead
+reserve capacity in the affected document before writing new physical content. Each unique handle and its ownership record
+count toward `MaxDocumentStoredBytes`, including when the save later fails.
+Reservation takes that document's row lock and does not advance its version.
+Repeated attempts with the same handle reuse the charge. Publication completes
+the ownership records in its transaction without charging the payload again.
+No provider-wide counter or bucket participates.
+
+A pending reservation may have complete bytes, partial external staging, or no
+physical object after cancellation or a failed write. Recovery preserves its
+descriptor and charge without treating it as published content. Only offline,
+quiescent collection releases unused reservations. Raw `IContentStore` writes
+are trusted storage operations outside this document admission contract. Fresh
+document creation remains a separate host-authorized operation with no global
+document-count limit.
+
+Failed staging can leave unreferenced physical objects. Interrupted filesystem
+writes can leave `.tmp` files. File age and the latest package alone cannot
+establish that an object is unreferenced.
+
+Preview PostgreSQL-backed inventory:
 
 ```sh
 dotnet tools/CellBridge.Storage.Setup/bin/Release/net11.0/CellBridge.Storage.Setup.dll --collect-orphans
 ```
 
-Supply the database connection and filesystem root through configuration.
-Stop every host, reader and writer before adding `--apply --quiescent`.
-Database locks cannot protect detached readers or outstanding filesystem writers.
-Collection deletes orphan content and releases its charge; it does not prune
-the live graph. Filesystem deletion requires Linux directory synchronization.
+Supply the connection string and filesystem root through configuration. Stop every
+host, reader, writer and delivery worker before applying collection with
+`--apply --quiescent`. There is no ordinary global gate that makes an online sweep
+safe. Collection preserves normalized document-owned physical references and
+retained legacy snapshot roots, including tombstones and recreated ancestors.
+It checks complete normalized metadata and reference inventories before deleting
+orphan candidates. Missing reference records fail collection before any deletion.
+Deletion and recreation reject a document with pending delivery entries.
 
-This collector applies to PostgreSQL state with PostgreSQL content or
-PostgreSQL-inventoried filesystem content. It scans every retained state snapshot,
-including deletion tombstones and the old resource after explicit recreation.
-Current replacement content, historical revisions, retained graph payloads and
-receipt responses remain roots. Pending external publications also retain their
-content; deletion refuses a document with undelivered entries. See
-[conditional deletion and recreation](external-host-reliability.md#deletion-recreation-and-local-eviction).
+SQL Server exposes the same explicit operation:
 
-`LifecycleCollectionTests` runs collection after deletion and again after
-recreation for both PostgreSQL and filesystem content. Each sweep removes an unrelated
-orphan and verifies retained bytes using fresh provider connections. The tests
-also preserve a separate live publication queue. Its saved content has history
-references too, so these cases do not establish an exclusive publication pin.
-The in-memory provider retains lifecycle state only for the process lifetime and
-has no persistent orphan collector. Persistent garbage collection is inapplicable
-to it; its deletion/recreation and detached-reader behavior are covered by
-`HostLifecycleTests` and `HistoryLifecycleIntegrationTests`.
+```csharp
+var maintenance = new CellBridge.Storage.SqlServer.StorageMaintenance(setupOptions, limits);
+var preview = await maintenance.CollectOrphansAsync();
+var applied = await maintenance.CollectOrphansAsync(apply: true, quiescent: true);
+```
+
+Apply releases pending reservations and deletes only unreferenced objects/chunks.
+It does not prune graph history.
+Use maintenance credentials with content deletion rights. In-memory storage has
+no persistent collector.
 
 ### Backup and recovery
 
-The [portable archive and recovery tool](provider-portability.md) preserves current
-heads, every retained provider snapshot, history, permissions and referenced content
-across supported content providers. It rejects incompatible policy/destination
-bindings and imports into an empty namespace only. Native database backups remain
-a separate environment-specific option.
+`IDocumentRepository` requires complete provider recovery. A coherent capture
+contains every normalized identity, including retired documents; immutable graph
+records and intervals; mappings and logical roots; binding changes/checkpoints;
+application revisions; permissions; receipts; outbox records; path claims and
+physical references. Capturing only current heads and application revisions would
+lose intermediate protocol publications.
 
-A PostgreSQL-only backup contains state and content. With filesystem content,
-preserve every object referenced by the database recovery point. Append-only
-objects allow a content copy completed after the database backup while writes
-continue, provided the copy captures complete objects and retention is unchanged.
+Import validates complete normalized bundles and referenced content. It publishes
+all document state and the archive operation's durable receipt atomically into an
+empty namespace. A repeated accepted archive operation returns its receipt; a
+conflicting fingerprint fails. A lost commit response is resolved through that
+ledger. Recovery-only coordination does not participate in ordinary requests.
+Current portable recovery rejects host-owned authorization bindings and active
+editor sessions or leases. See [portable recovery](provider-portability.md).
 
-Keep backup content separate from orphan collection; backup recovery points are
-not collector roots. Test restoration with the chosen database/filesystem tools.
-Missing referenced content is corruption and is never replaced by reseeding.
-The filesystem and storage hardware must honor flush/rename operations;
-power-loss and shared-filesystem behavior need deployment-specific qualification.
+Native database backups are a separate operational choice. With filesystem
+content, preserve every immutable object referenced by the database recovery
+point. Backup recovery points are not collector roots. Test the chosen restore
+process, retain matching content and never replace missing objects by reseeding.
 
 ### Updating a host
 
-1. Record the installed package versions, database schema and content provider.
-   Keep the previous binaries and configuration.
-2. Stop every writer using the database, including external publication workers.
-   Back up PostgreSQL and any filesystem objects referenced by that recovery point.
-   Test restoration in a separate environment.
-3. Update all CellBridge package references together. Build the application and
-   the repository's `CellBridge.Storage.Setup` tool from matching source.
-4. Run setup against the stopped database. It migrates storage schema 3, 4 or 5 to 6,
-   preserves documents and all retained snapshots, builds the selective read indexes,
-   initializes recovery schema 1 and records the document EF migration history.
-   Older development schemas need a separate migration or recreation; setup rejects them.
-5. Start one upgraded host. Check provider health, document identities,
-   permissions, downloads and a save/reopen cycle before enabling other writers.
-   Verify publication workers' destination bindings and stored receipts
-   before restarting them.
+1. Record package versions, database schema, content configuration and credentials.
+   Keep the prior binaries and configuration.
+2. Stop all writers and delivery workers. Back up the database and referenced
+   filesystem objects. Test restoration separately.
+3. Update shipping CellBridge packages together and build matching setup tooling.
+4. Run explicit initialization. PostgreSQL schema 8 and SQL Server schema 3 remove
+   the old global quota tables. PostgreSQL schema 9 and SQL Server schema 4 create
+   normalized records and backfill current controls and retained application
+   revisions from validated legacy data. Filesystem upgrades require the matching
+   content reader/root. PostgreSQL schema 10 and SQL Server schema 5 add charged
+   staging reservations to document content ownership. Existing data and consumer
+   tables are preserved.
+5. Start one host and verify health, identities, permissions, downloads and a
+   save/reopen cycle before enabling other writers or delivery workers.
 
-There is no schema-6 downgrade. For rollback, stop upgraded writers and
-restore the previous database, matching content objects, binaries and
-configuration. This loses changes made after the backup unless you reconcile
-them separately. Do not run older writers against the migrated database.
+Initialization does not downgrade databases. Rollback requires stopped writers
+and restoration of the matching prior database, content, binaries and settings.
+Do not run old writers against the migrated schema.
 
 ## Implement a provider
 
-Implement `IDocumentStateStore` and `IContentStore`, then compose a
-`StorageProvider`. Set storage capability flags only for guarantees provided by
-the complete deployed backend.
+Implement `IDocumentRepository` and `IContentStore`, then compose a
+`StorageProvider`. Repository durability and sharing flags describe actual backend
+guarantees. The complete configuration must satisfy durable/multi-host registration.
 
-### State contract
+### Repository contract
 
-Use `DocumentStateJson` to read and write persisted state and calculate its
-encoded size. It supports compact storage encoding 1 and legacy expanded JSON.
-The public `DocumentState` records remain logical format 2. Preserve all revision
-graph identities and content handles when implementing a provider.
+Return detached typed records. Keep the current `DocumentHead` bounded; application
+history, receipts, graph records and outbox entries have indexed records of their
+own. Multi-record reads must be coherent. Identity lookup has one explicit target;
+unknown resource IDs cannot resolve through a URL fallback.
 
-Providers can implement `IDocumentReadStore` for current metadata and paged
-revision summaries. Return each selection with the current authorization and
-lifecycle metadata from one coherent view. Update any derived read records
-atomically with state changes, including recovery import. Without this optional
-capability, the service reads complete states.
+Dispatch typed controls through `DocumentControlReducer`. Publication must honor
+actor/authority generations, lifecycle, coordination, prepared file versions,
+operation receipts and affected mapping preconditions. Invoke no arbitrary
+whole-history callback. `ReserveContentAsync` checks current write authority and
+charges new handles under the affected document guard before physical staging.
+Publication takes that guard again and commits the document records together.
+Matching SQL providers can also implement `IAtomicDocumentPublisher` to insert
+owned provisional content and publish the document in one transaction. They must
+roll back those inserts on every rejected or replayed publication, validate the
+supplied bytes before taking the document guard, and preserve content-key lock
+ordering. This optional operation does not replace external staging admission.
+Preserve pending reservations after cancellation or an uncertain commit; their
+bytes may already exist. Do not retry an arbitrary mutation after an unknown
+commit outcome.
 
-`TransitionAsync` acquires exclusive coordination for the resource, loads one
-coherent snapshot and supplies authoritative time. Invoke the callback once.
-Atomically publish `Next` and advance `StateVersion`, or publish nothing for
-null/exception. Do not retry callbacks after an unknown commit outcome.
-Callbacks perform no I/O; prepare content beforehand.
+Mapping serial claims retain their scoped key/target meaning. Mapping updates
+change only requested keys. Persist the current catalog's visibility intervals,
+current resolved bindings and historical effective changes/checkpoints. Historical
+reads replay a bounded tail from a checkpoint. Full mapping enumeration is an
+explicit query/export operation; ordinary preparation reads only affected keys.
+Keep package readers and control-only operations independent of retained history.
 
-Return immutable detached records, enforce unique paths/resource IDs and forbid
-identity/path changes in transitions. Preserve unsigned protocol values, serials,
-GUIDs, timestamps and format versions. Path keys use normalized invariant
-uppercase with ordinal comparison; percent escapes are decoded once and Unicode
-normalization is not applied.
+### Content and package contracts
 
-### Generic graph persistence
+`IContentStore.WriteAsync` returns a handle only after the complete immutable
+object is durable under the provider's declared guarantees. Never recycle keys or
+hide corruption. Check all aliases before caching or deduplicating a key.
+`IContentBatchReader` and `IContentBatchWriter` may batch object operations while
+preserving length/hash checks, cancellation and atomic batch failure.
 
-`DocumentPartition.CaptureGraphAsync` and `RestoreGraphAsync` preserve opaque
-graphs separately from application file reconstruction. They reuse document
-state format 2 and the existing graph-element records, with no database schema
-change. Existing file states retain their legacy reconstruction path. Generic
-restore is stricter about mapped revision closure; it rejects incomplete graphs
-rather than treating them as opaque file bytes.
+Stores used for ordinary document saves must return the lowercase SHA-256 digest
+as both `Key` and `Sha256` for new content. This lets the service reserve a known
+handle before any durable write. All bundled stores follow this rule. Trusted
+offline recovery can still remap provider-specific keys, and retained historical
+handles remain readable; that does not qualify an arbitrary-key writer for new
+document saves.
 
-Every retained element, including separately referenced BLOBs, has an immutable
-verified content handle. Storage-index mapping serials are persisted and checked
-against payload bytes on restore. Capture rejects reused IDs with changed type,
-payload or conflicting non-null serials. Knowledge and unsigned identities
-round-trip unchanged. Existing provider reference enumeration includes these
-handles, so state snapshots protect them from orphan collection. Automatic
-graph pruning remains disabled.
+`IDocumentPackageReader` reproduces one exact immutable package version and verifies
+its recorded digest and length. Package descriptors are not physical content keys.
+The canonical graph retains opaque protocol identities and payloads; file
+reconstruction remains a separate validated adapter. Unsupported non-file uploads
+do not become supported merely because a package can be created or downloaded.
 
-Capture stages content and returns a detached partition. Its caller owns
-authorization, document consistency and atomic publication. It does not update
-materialized document content or enable non-file protocol uploads. File
-publication uses the separate validated file adapter. Generic restoration
-enforces graph/object budgets, integrity and cancellation; permitted object/cell
-cycles are bounded separately from invalid revision-base cycles.
+### Recovery contract
 
-### Content and budget contracts
-
-`WriteAsync` stores the content before returning an immutable handle.
-Handles are not recycled and remain readable after restart. Open a stream for
-each read and report corruption/storage failures explicitly. Content reclamation
-requires quiescent maintenance over all retained snapshots.
-
-For atomic budgets, both stores implement `IStorageBudgetParticipant` and expose
-one scope object. Charge state JSON, unique content/reservations and document
-identities under one atomic admission mechanism. Wrappers preserve this
-coordination; the marker alone does not implement accounting.
-
-Repository provider tests cover save, lease, crash and replay behavior. Hardware
-flushes and distributed locking still require qualification in the intended
-deployment environment.
+`IIndexedRepositoryRecovery` includes whole-provider capture, receipt lookup and
+atomic import. `NormalizedDocumentSnapshot` has an explicit format version and
+contains provider-independent domain records. Do not export EF rows or silently
+omit history. Validate duplicate/cross-scope identities, intervals, bindings,
+immutable metadata, package roots, physical references and counters before import.
+The receipt ledger commits with every imported head.
 
 ## Limits and qualification
 
-The sample binds positive `StorageLimits` from `Storage`:
+`StorageLimits` bounds individual operations and documents. Providers do not cap
+total stored bytes or document count, and independent documents update no shared
+usage counter or allowance bucket.
 
-| Setting | Default | Admission scope |
+| Setting | Default | Scope |
 | --- | --- | --- |
-| `MaxDocumentBytes` | 128 MiB | Materialized document and expanded ZIP data. |
-| `MaxGraphBytes` | 512 MiB | Retained element payloads across document partitions. |
-| `MaxGraphElements` | 100,000 | Retained graph elements across document partitions. |
-| `MaxDocumentStoredBytes` | 1 GiB | Current state JSON plus distinct referenced content handles. |
-| `MaxStoredBytes` | 10 GiB | Unique objects/reservations plus retained UTF-8 state JSON. |
-| `MaxDocuments` | 10,000 | Published document identities. |
-| `MaxObjectBytes` | 512 MiB | One content object while streaming. |
-| `MaxSaveReceipts` | 10,000 | Receipt identities per document; identities are not evicted. |
-| `MaxRetainedStateSnapshots` | 64 | PostgreSQL metadata history per document. |
-| `MaxHistoryRevisions` | 1,000 | Immutable file/application-metadata publications per document; no automatic expiration. |
-| `MaxRestoreReceipts` | 1,000 | Stored keyed restore receipts per document; identities are not evicted. |
-| `MaxRetiredPathKeys` | 128 | Permanently reserved names per resource after rename; keys are not evicted. |
+| `MaxDocumentBytes` | 128 MiB | Derived package and expanded ZIP bytes. |
+| `MaxGraphBytes` | 512 MiB | Retained canonical element payload bytes per document. |
+| `MaxGraphElements` | 100,000 | Retained canonical element records per document. |
+| `MaxDocumentStoredBytes` | 1 GiB | Canonically charged metadata and unique document-owned physical references. |
+| `MaxObjectBytes` | 512 MiB | One physical content object. |
+| `MaxSaveReceipts` | 10,000 | Protocol operation receipts per document. |
+| `MaxHistoryRevisions` | 1,000 | Application revisions per document. |
+| `MaxRestoreReceipts` | 1,000 | Keyed restore receipts per document. |
+| `MaxWholeFileSaveReceipts` | 10,000 | Keyed whole-file save receipts per document. |
+| `MaxRetiredPathKeys` | 128 | Permanently claimed aliases per resource. |
+| `MaxPendingExternalRevisions` | 128 | Pending delivery entries per document. |
+| `MaxPendingExternalBytes` | 1 GiB | Pending derived package lengths per document. |
 
+Metadata charges use UTF-8 domain JSON, owned path strings and unique physical
+reference lengths. The head's own `StoredBytes` field is serialized as zero when
+charging the head, so its decimal representation does not change its own charge.
+Current mapping values and their immutable intervals each occupy a charged record.
+Row/index overhead, WAL, scratch files and process allocation overhead are outside
+these logical limits. Legacy aggregate decoding retains separate graph-membership
+bounds; it does not define normal repository reads.
 
-Accounting includes reservations and charged orphans, but excludes database
-row/index overhead, WAL, spool files and allocator overhead. Each content store admits four spool writers. Duplicate content is charged once. A rejected
-save preserves the selected revision; content staged before rejection stays
-charged until collected.
-
-The creation API returns HTTP 507 for quota failures, file saves return Win32
-`ERROR_DISK_FULL` 112, and oversized HTTP bodies return 413. Server/proxy limits
-can reject a request earlier.
-
-Requests and graph payloads occupy memory, and graph merging retains defensive
-copies. Package reconstruction and ZIP validation use a seekable staging file;
-MTOM output streams without a base64 round trip or complete multipart buffer.
-Configured defaults are admission limits rather than qualified Office file sizes. Automatic graph
-pruning is disabled, so even a constant-size file can accumulate history until a
-quota blocks further saves. See [synchronization knowledge and graph retention](protocol-version-decision.md#synchronization-knowledge)
-for the graph rules, and [automated testing](automated-testing.md) for measurements.
+Creation maps quota failures to HTTP 507; file saves use Win32 `ERROR_DISK_FULL`
+112. Oversized HTTP bodies return 413, and a proxy can reject a request earlier.
+Defaults are admission bounds rather than qualified Office file-size claims.
+Automatic graph/history pruning remains disabled. See
+[protocol retention](protocol-version-decision.md#synchronization-knowledge) and
+[automated testing](automated-testing.md) for constraints and evidence.

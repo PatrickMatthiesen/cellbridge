@@ -33,8 +33,7 @@ public sealed class GuidAllocationTests
         var ranges = results.Select(result => AssertRange(result.Response)).ToArray();
         Assert.All(ranges, r => Assert.Equal(count, r.IntegerRangeMax - r.IntegerRangeMin));
         Assert.Equal(ranges.Length, ranges.Select(r => r.GuidComponent).Distinct().Count());
-        Assert.Equal(DocumentStateJson.Serialize(state),
-            DocumentStateJson.Serialize((await provider.State.FindByResourceIdAsync(state.ResourceId))!));
+        Assert.Equal(state,await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
         Assert.All(results, result => Assert.Equal(state.StateVersion, result.State.StateVersion));
     }
 
@@ -58,8 +57,7 @@ public sealed class GuidAllocationTests
         Assert.Equal(23UL, result.RequestId);
         Assert.Equal(RequestTypes.AllocateExtendedGuidRange, result.RequestType);
         Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, result.Error!.ErrorCode);
-        Assert.Equal(DocumentStateJson.Serialize(state),
-            DocumentStateJson.Serialize((await provider.State.FindByResourceIdAsync(state.ResourceId))!));
+        Assert.Equal(state,await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
     }
 
     [Theory]
@@ -76,8 +74,7 @@ public sealed class GuidAllocationTests
         var ranges = executions.Select(x => AssertRange(x.Response)).ToArray();
         Assert.Equal(32, ranges.Select(x => x.GuidComponent).Distinct().Count());
         Assert.All(ranges, x => Assert.Equal(100_000UL, x.IntegerRangeMax - x.IntegerRangeMin));
-        Assert.Equal(DocumentStateJson.Serialize(state),
-            DocumentStateJson.Serialize((await provider.State.FindByResourceIdAsync(state.ResourceId))!));
+        Assert.Equal(state,await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
         Assert.All(executions, x => Assert.Equal(state.StateVersion, x.State.StateVersion));
     }
 
@@ -93,15 +90,14 @@ public sealed class GuidAllocationTests
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/allocation-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var other = new CellBridgeActor(new("tests:allocation-reader", "reader", "Reader"));
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) =>
-            new StateTransition<bool>(DocumentPermissionUpdates.Apply(current, now,
-                current.Security with { Grants = current.Security.Grants.SetItem(other.Identity.Subject, access) }), true));
+        Assert.True((await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(state.ResourceId,
+            StorageTestDocuments.Admission(state),state.Security with { Grants = state.Security.Grants.SetItem(other.Identity.Subject,access) },state.AuthorityGeneration))).Changed);
         var denied = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
             Request(1), new Dictionary<string, string>(), other);
         Assert.Equal(CellBridgeAuthorization.AccessDeniedHResult, Assert.Single(denied.Response.SubResponses).Error!.ErrorCode);
         Assert.Equal(state.ContentVersion, denied.State.ContentVersion);
-        Assert.Equal(state.Partitions[0].StorageIndex, denied.State.Partitions[0].StorageIndex);
-        Assert.Empty(denied.State.Receipts);
+        Assert.Equal(state.Package,denied.State.Package);
+        Assert.Equal(0,denied.State.Counters.SaveReceipts);
     }
 
     private static FsshttpbCellRequest Request(ulong count)

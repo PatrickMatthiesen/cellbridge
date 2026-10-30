@@ -8,10 +8,12 @@ public sealed class SqlServerStorageMigrator
 {
     private readonly DbContextOptions<SqlServerDocumentDbContext> options;
     private readonly StorageLimits limits;
+    private readonly IContentStore? migrationContent;
 
-    public SqlServerStorageMigrator(DbContextOptions<SqlServerDocumentDbContext> options, StorageLimits? limits = null)
+    public SqlServerStorageMigrator(DbContextOptions<SqlServerDocumentDbContext> options, StorageLimits? limits = null, IContentStore? migrationContent = null)
     {
         this.options = SqlServerDocumentDatabase.Normalize(options);
+        this.migrationContent = migrationContent;
         this.limits = limits ?? new();
         this.limits.Validate();
     }
@@ -19,27 +21,19 @@ public sealed class SqlServerStorageMigrator
     public async Task MigrateAsync(CancellationToken cancellationToken = default)
     {
         await using var db = new SqlServerDocumentDbContext(options);
+        if (await db.Database.SqlQueryRaw<int>("SELECT CAST(snapshot_isolation_state AS int) AS Value FROM sys.databases WHERE database_id=DB_ID()").SingleAsync(cancellationToken) != 1)
+            await db.Database.ExecuteSqlRawAsync("ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON", cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         await SqlServerDocumentDatabase.ConfigureTransactionAsync(db, cancellationToken);
         await SqlServerDocumentDatabase.CheckDurabilityAsync(db, cancellationToken);
-        await SqlServerDocumentDatabase.LockAsync(db, SqlServerDocumentDatabase.PublicationGate, cancellationToken);
+        await SqlServerDocumentDatabase.LockAsync(db, SqlServerDocumentDatabase.MigrationGate, cancellationToken);
         await SqlServerDocumentDatabase.LockAsync(db, "CellBridge.Documents.Migrations", cancellationToken);
         var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
         if ((await db.Database.GetAppliedMigrationsAsync(cancellationToken)).Any(id => !known.Contains(id)))
             throw new StorageUnavailableException("Unsupported document migration history; persisted data was not changed.");
         await db.Database.MigrateAsync(cancellationToken);
-        var usage = await SqlServerDocumentDatabase.LockUsageAsync(db, cancellationToken);
-        var actual = await db.Objects.SumAsync(row => (long?)row.Length, cancellationToken) ?? 0;
-        actual = checked(actual + (await db.Snapshots.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.StateJson), cancellationToken) ?? 0));
-        actual = checked(actual + (await db.RecoveryReceipts.SumAsync(row => (long?)SqlServerDocumentDbContext.ByteLength(row.ReceiptJson), cancellationToken) ?? 0));
-        var documents = await db.Documents.LongCountAsync(cancellationToken);
-        if (actual != usage.StoredBytes) throw new StorageCorruptionException("Content usage ledger does not match stored objects.");
-        if (documents != usage.DocumentCount) throw new StorageCorruptionException("Document usage ledger does not match stored identities.");
-        StorageLimits.Check("total stored bytes", actual, limits.MaxStoredBytes);
-        usage.MaxStoredBytes = limits.MaxStoredBytes;
-        StorageLimits.Check("document count", documents, limits.MaxDocuments);
-        usage.MaxDocuments = limits.MaxDocuments;
-        await db.SaveChangesAsync(cancellationToken);
+        await new RelationalDocumentRepository<SqlServerDocumentDbContext>(new SqlServerRepositoryDatabase(options), limits)
+            .BackfillAsync(db, migrationContent, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
 }

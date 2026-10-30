@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
@@ -92,12 +93,13 @@ internal static class AllocationDiagnostics
             }
             else throw new ArgumentException("Workload must be synthetic, save-first or save-second.");
 
-            // Persist setup outside every measured interval. Restore retains the reviewed graph structure.
-            var document = new DocumentStore().Put("/shared/benchmark.docx", payload);
-            var state = await document.CaptureAsync(content);
-            var filePartition = await DocumentPartition.CaptureFileGraphAsync(state.Partitions.Single(p => p.Kind == 0),
-                graph, 1, state.Content, content);
-            state = state with { Partitions = state.Partitions.Select(p => p.Kind == 0 ? filePartition : p).ToImmutableArray() };
+            // Parse/materialize reviewed captures above; create the current canonical package from those bytes.
+            // The reconstruction stage measures the shipping package reader, not a legacy capture-state adapter.
+            var repository = new StorageProvider(new InMemoryDocumentRepository(content), content);
+            var prepared = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), "/shared/benchmark.docx", payload,
+                DocumentSecurity.Create(new("benchmark:writer", "writer", "Benchmark writer")), content, repository.Limits);
+            var state = (await repository.Documents.CreateAsync(prepared)).Current ?? throw new InvalidDataException("Benchmark create failed.");
+            var filePartition = prepared.Partitions.Single(partition => partition.After.Kind == 0).After;
             var rows = new List<object>();
             if (stage is "all" or "inbound") await Measure("inbound-mtom-soap-binary", () =>
             {
@@ -107,7 +109,12 @@ internal static class AllocationDiagnostics
                 return ValueTask.FromResult<object>(ParseBinary(parts.Single(p => p.ContentType.Contains("application/octet-stream")).ContentMemory));
             });
             if (stage is "all" or "binary") await Measure("binary-parse", () => ValueTask.FromResult<object>(ParseBinary(binary)));
-            if (stage is "all" or "restore") await Measure("eager-document-restore", async () => await StoredDocument.RestoreAsync(state, content));
+            if (stage is "all" or "restore") await Measure("canonical-package-stream", async () =>
+            {
+                await using var stream = await repository.Packages.OpenReadAsync(state.Package);
+                await stream.CopyToAsync(Stream.Null);
+                return stream.Length;
+            });
             if (stage is "all" or "nested") await Measure("nested-object-group-build", () => ValueTask.FromResult<object>(
                 StorageManifestBuilder.BuildObjectGroupDataElement(identity.ObjectGroupGuid, new(guid, 1), identity.ObjectGuid,
                     (ulong)payload.Length, payload)));
@@ -117,16 +124,16 @@ internal static class AllocationDiagnostics
             await File.WriteAllTextAsync(output, JsonSerializer.Serialize(new
             {
                 source = Option("--source", "unspecified"),
-                sourceMetadata = BenchmarkMetadata.Capture(typeof(FsshttpbCellRequest).Assembly, typeof(StoredDocument).Assembly, typeof(AllocationDiagnostics).Assembly),
-                measurement = new { setup = "Input preparation and content persistence excluded.", warmupOperations = 5,
+                sourceMetadata = BenchmarkMetadata.Capture(typeof(FsshttpbCellRequest).Assembly, typeof(DocumentHead).Assembly, typeof(AllocationDiagnostics).Assembly),
+                measurement = new { setup = "Input preparation and canonical graph creation from materialized input bytes excluded. Captured wire structure is measured by parse stages; package reconstruction uses the newly created canonical graph.", warmupOperations = 5,
                     interval = "Sequential awaited operations; output serialization, probes and forced collections excluded.",
                     memory = "Process peak includes setup and JIT; retained managed bytes is not transient peak memory." },
                 runtime = RuntimeInformation.FrameworkDescription,
                 os = RuntimeInformation.OSDescription, architecture = RuntimeInformation.ProcessArchitecture.ToString(),
                 processorCount = Environment.ProcessorCount, serverGc = System.Runtime.GCSettings.IsServerGC,
                 workload, provenance, backend, iterations, payloadBytes = payload.Length, requestBytes = inbound.Length,
-                binaryBytes = binary.Length, graphElements = filePartition.Elements.Length,
-                graphBytes = filePartition.Elements.Sum(e => e.Payload.Length),
+                binaryBytes = binary.Length, graphElements = filePartition.ElementCount,
+                graphBytes = filePartition.ElementBytes,
                 payloadSha256 = Convert.ToHexStringLower(SHA256.HashData(payload)),
                 nestedSha256 = Convert.ToHexStringLower(SHA256.HashData(StorageManifestBuilder.BuildObjectGroupDataElement(
                     identity.ObjectGroupGuid, new(guid, 1), identity.ObjectGuid, (ulong)payload.Length, payload).Data!)),

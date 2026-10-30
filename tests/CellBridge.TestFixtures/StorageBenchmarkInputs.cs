@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text;
 
 namespace CellBridge.TestFixtures;
 
@@ -32,8 +33,12 @@ public static class StorageBenchmarkInputs
                 }
                 else
                 {
-                    using var input = entry.Open();
-                    input.CopyTo(target);
+                    // MinimalDocx's XML literals inherit checkout line endings.
+                    // Normalize the measurement XML across Windows and Linux;
+                    // ZIP creator metadata remains platform-specific.
+                    using var reader = new StreamReader(entry.Open());
+                    using var writer = new StreamWriter(target, new UTF8Encoding(false));
+                    writer.Write(reader.ReadToEnd().ReplaceLineEndings("\n"));
                 }
             }
         }

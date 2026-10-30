@@ -24,7 +24,7 @@ public sealed class MtomEndpointTests
         string captureDirectory = Path.Combine(Path.GetTempPath(), "cellbridge-mtom-" + Guid.NewGuid().ToString("N"));
         try
         {
-            var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+            var provider = TestStorage.Memory();
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
             TestActor.Register(builder.Services);

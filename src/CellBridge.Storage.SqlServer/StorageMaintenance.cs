@@ -14,7 +14,7 @@ public sealed class StorageMaintenance
     {
         limits?.Validate();
         options = SqlServerDocumentDatabase.Normalize(options);
-        maintenance = new(new SqlServerDocumentDatabase(options), limits);
+        maintenance = new(new SqlServerDocumentDatabase(options), new SqlServerRepositoryDatabase(options), limits);
     }
     public async Task<StorageMaintenanceReport> CollectOrphansAsync(bool apply = false, bool quiescent = false,
         CancellationToken cancellationToken = default)

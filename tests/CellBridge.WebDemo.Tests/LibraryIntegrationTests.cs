@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using CellBridge.AspNetCore;
 using CellBridge.Authentication;
 using CellBridge.Storage.InMemory;
+using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Builder;
@@ -54,8 +55,8 @@ public sealed class LibraryIntegrationTests
         Assert.Contains("no-store", page.Headers.CacheControl!.ToString());
         var documents = await writer.GetFromJsonAsync<DocumentListing[]>("/api/documents");
         Assert.Equal("Quarter #1.xlsx", Assert.Single(documents!).Name);
-        var state = Assert.Single(await fixture.Service.Provider.State.ListAsync(0, 100));
-        var persisted = await fixture.Service.Provider.State.FindByResourceIdAsync(state.ResourceId);
+        var state = Assert.Single(await fixture.Service.Provider.Documents.ListAsync(0, 100));
+        var persisted = await fixture.Service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId));
         Assert.Equal("writer", persisted!.Security.CreatedBy!.Subject);
     }
 
@@ -70,7 +71,7 @@ public sealed class LibraryIntegrationTests
         using var page = await client.PostAsync("/library?handler=Create", new FormUrlEncodedContent(new Dictionary<string, string>
         { ["NewName"] = "unsafe", ["NewType"] = "docx" }));
         Assert.Equal(HttpStatusCode.BadRequest, page.StatusCode);
-        Assert.Empty(await fixture.Service.Provider.State.ListAsync(0, 100));
+        Assert.Empty(await fixture.Service.Provider.Documents.ListAsync(0, 100));
     }
 
     [Fact]
@@ -117,7 +118,7 @@ public sealed class LibraryIntegrationTests
             ["__RequestVerificationToken"] = token, ["NewName"] = "denied", ["NewType"] = "docx",
         }));
         Assert.Equal(HttpStatusCode.Forbidden, page.StatusCode);
-        Assert.Empty(await fixture.Service.Provider.State.ListAsync(0, 100));
+        Assert.Empty(await fixture.Service.Provider.Documents.ListAsync(0, 100));
     }
 
     private sealed class Fixture(WebApplication app) : IAsyncDisposable
@@ -146,7 +147,8 @@ public sealed class LibraryIntegrationTests
             { ApplicationName = typeof(WebDemoEndpoints).Assembly.FullName, EnvironmentName = "Development" });
             builder.WebHost.UseTestServer();
             builder.Logging.ClearProviders();
-            builder.Services.AddCellBridge(new(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+            var content = new InMemoryContentStore();
+            builder.Services.AddCellBridge(new(new InMemoryDocumentRepository(content), content), requireDurability: false);
             builder.Services.AddSingleton(new AuthenticationOrigin("https://office.example"));
             builder.Services.AddAuthentication("test-cookie").AddCookie("test-cookie", options =>
             {

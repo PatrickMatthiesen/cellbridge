@@ -19,7 +19,7 @@ public static class DocumentImports
         {
             if (Path.GetFileName(file).StartsWith("~$", StringComparison.Ordinal)) continue;
             var path = "/shared/" + Uri.EscapeDataString(Path.GetFileName(file));
-            if (await service.Provider.State.FindByPathKeyAsync(StorageIds.PathKey(DocumentStore.NormalizeUrl(path)), cancellationToken) is not null)
+            if (await service.Provider.Documents.FindAsync(new DocumentIdentity.Path(StorageIds.PathKey(DocumentStore.NormalizeUrl(path))), cancellationToken) is not null)
             {
                 skipped++;
                 continue;

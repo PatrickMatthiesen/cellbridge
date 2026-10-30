@@ -44,17 +44,31 @@ if (commandName == "seed-test-user")
     // Operator create-user continues to accept its password only through stdin.
     var password = builder.Configuration["Seed:Password"]
         ?? throw new InvalidOperationException("Test account seeding requires Seed:Password.");
-    var user = await users.FindByIdAsync("integration-writer");
-    if (user is null)
+    var userCount = builder.Configuration.GetValue("Seed:UserCount", 1);
+    ArgumentOutOfRangeException.ThrowIfNegativeOrZero(userCount);
+    var template = new CellBridgeUser { UserName = "integration-writer" };
+    foreach (var validator in users.PasswordValidators)
+        Check(await validator.ValidateAsync(users, template, password));
+    // Only this Testing command shares a hash for its common ephemeral password.
+    // UserManager still creates independent IDs, security stamps and claims.
+    var passwordHash = users.PasswordHasher.HashPassword(template, password);
+    for (var userIndex = 0; userIndex < userCount; userIndex++)
     {
-        user = new() { Id = "integration-writer", UserName = "integration-writer",
-            DisplayName = "Integration writer", CanCreate = true };
-        Check(await users.CreateAsync(user, password));
+        var suffix = userIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var login = userIndex == 0 ? "integration-writer" : "integration-writer-" + suffix;
+        var user = await users.FindByIdAsync(login);
+        if (user is null)
+        {
+            user = new() { Id = login, UserName = login, Enabled = true, CanCreate = true,
+                DisplayName = userIndex == 0 ? "Integration writer" : "Integration writer " + suffix,
+                PasswordHash = passwordHash };
+            Check(await users.CreateAsync(user));
+        }
+        else if (!user.Enabled || !user.CanCreate || user.UserName != login ||
+            !await users.CheckPasswordAsync(user, password))
+            throw new InvalidOperationException("The existing test account does not match this run. Use a disposable database.");
     }
-    else if (!user.Enabled || !user.CanCreate || user.UserName != "integration-writer" ||
-        !await users.CheckPasswordAsync(user, password))
-        throw new InvalidOperationException("The existing test account does not match this run. Use a disposable database.");
-    Console.WriteLine($"Test subject {user.Subject} is ready.");
+    Console.WriteLine($"{userCount} test accounts are ready.");
 }
 else if (commandName == "create-user")
 {
@@ -115,16 +129,20 @@ else if (commandName is "grant" or "set-owner")
         "write" => DocumentAccess.Read | DocumentAccess.Write, _ => throw new ArgumentException("Access must be none, read or write."),
     } : DocumentAccess.None;
     await using var source = NpgsqlDataSource.Create(connectionString);
-    var stateStore = new PostgreSqlStateStore(source);
+    IDocumentRepository stateStore = new PostgreSqlStateStore(source);
     await stateStore.CheckHealthAsync();
-    await stateStore.TransitionAsync(id, (current, now) =>
-    {
-        if (commandName == "grant" && current.Security.Owner == subject)
-            throw new InvalidOperationException("The owner has Read and Write. Transfer ownership before revoking that access.");
-        var security = commandName == "set-owner" ? current.Security with { Owner = subject }
-            : current.Security with { Grants = access == DocumentAccess.None ? current.Security.Grants.Remove(subject) : current.Security.Grants.SetItem(subject, access) };
-        return new StateTransition<bool>(DocumentPermissionUpdates.Apply(current, now, security), true);
-    });
+    var current = await stateStore.ReadControlAsync(id) ?? throw new KeyNotFoundException("The document does not exist.");
+    if (commandName == "grant" && current.Head.Security.Owner == subject)
+        throw new InvalidOperationException("The owner has Read and Write. Transfer ownership before revoking that access.");
+    var security = commandName == "set-owner" ? current.Head.Security with { Owner = subject }
+        : current.Head.Security with { Grants = access == DocumentAccess.None ? current.Head.Security.Grants.Remove(subject)
+            : current.Head.Security.Grants.SetItem(subject, access) };
+    // This command runs as the trusted database operator, outside the user-facing protocol endpoints.
+    var admission = new DocumentActorAdmission(new("system:operator", "operator", "Operator"), id,
+        current.Head.LifecycleGeneration, current.Head.Security.AuthorizationPolicy, DocumentAccess.Read | DocumentAccess.Write)
+    { AuthorityGeneration = current.Head.AuthorityGeneration, StateVersion = current.Head.StateVersion };
+    var result = await stateStore.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(id, admission, security, current.Head.AuthorityGeneration));
+    if (result.ErrorCode is { } error) throw new InvalidOperationException($"The permission update failed: {error}.");
     Console.WriteLine($"{commandName} resource={id:D} subject={subject} access={access} actor=operator utc={DateTime.UtcNow:O}");
 }
 else throw new ArgumentException("Unknown command.");

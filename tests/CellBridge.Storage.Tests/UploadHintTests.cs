@@ -1,4 +1,5 @@
 using CellBridge.AspNetCore;
+using CellBridge.FssHttp;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
@@ -18,7 +19,7 @@ public sealed class UploadHintTests
         var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/hint-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        var request = Save(state, 0x20);
+        var request = await Save(service, state, 0x20);
         request.SubRequests[0].TargetPartitionId = Guid.Empty;
         var saved = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(saved.Response.SubResponses).Status);
@@ -29,7 +30,7 @@ public sealed class UploadHintTests
         Assert.False(Assert.Single(retry.Response.SubResponses).Status);
         Assert.Equal(saved.State.StateVersion, retry.State.StateVersion);
         Assert.Equal(saved.Response.ToByteArray(), retry.Response.ToByteArray());
-        Assert.Single(retry.State.Receipts);
+        Assert.Equal(1, retry.State.Counters.SaveReceipts);
         Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data).Flags ^= 0x20;
         var withoutHint = await restarted.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.False(Assert.Single(withoutHint.Response.SubResponses).Status);
@@ -48,7 +49,7 @@ public sealed class UploadHintTests
         var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/partial-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        var request = Save(state, 0x20);
+        var request = await Save(service, state, 0x20);
         var complete = request.SubRequests[0]; complete.RequestId = 3; complete.TargetPartitionId = Guid.Empty;
         request.SubRequests.Clear();
         request.SubRequests.Add(Query(1));
@@ -79,16 +80,18 @@ public sealed class UploadHintTests
         var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
         var state = (await service.CreateAsync("/locked-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        await provider.State.TransitionAsync(state.ResourceId, (current, now) => new StateTransition<bool>(current with
-        { Coordination = new(null, [], new("11111111-1111-1111-1111-111111111111", "client", now.AddHours(1), 0, null, TestActor.Value.Identity.Subject), 1) }, true));
-        var request = Save(state, 0x20); request.SubRequests[0].TargetPartitionId = Guid.Empty;
+        var lockedHead = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(state.ResourceId,
+            StorageTestDocuments.Admission(state), new() { Type = SubRequestType.ExclusiveLock, SubRequestDataAttributes =
+            { ["ExclusiveLockRequestType"] = "GetLock", ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["ClientID"] = "client", ["Timeout"] = "3600" } }));
+        Assert.True(lockedHead.Changed);
+        var request = await Save(service, state, 0x20); request.SubRequests[0].TargetPartitionId = Guid.Empty;
         var locked = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request, new Dictionary<string, string>(), TestActor.Value);
         Assert.NotNull(locked.LockError);
         Assert.Equal(state.ContentVersion, locked.State.ContentVersion);
         var denied = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request,
             new Dictionary<string, string> { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }, new CellBridgeActor(new("other", "other", "Other")));
         Assert.Equal(CellBridgeAuthorization.AccessDeniedHResult, Assert.Single(denied.Response.SubResponses).Error!.ErrorCode);
-        Assert.Equal(state.ContentVersion, denied.State.ContentVersion); Assert.Empty(denied.State.Receipts);
+        Assert.Equal(state.ContentVersion, denied.State.ContentVersion); Assert.Equal(0, denied.State.Counters.SaveReceipts);
         var allowed = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata, request,
             new Dictionary<string, string> { ["ExclusiveLockID"] = "11111111-1111-1111-1111-111111111111", ["Timeout"] = "3600" }, TestActor.Value);
         Assert.Null(allowed.LockError); Assert.False(Assert.Single(allowed.Response.SubResponses).Status);
@@ -101,11 +104,15 @@ public sealed class UploadHintTests
     public async Task PermissionRevocationBetweenOperationsPreservesEarlierPayloadAndDeniesRemainingOperations(bool postgreSql)
     {
         await using var testProvider = ProtocolExecutionTestProvider.Create(postgreSql);
-        var inner = testProvider.Provider.State;
+        var inner = testProvider.Provider.Documents;
         var content = testProvider.Provider.Content;
         var state = (await new CellBridgeDocumentService(new(inner, content)).CreateAsync("/revoked-batch-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        var revoking = new BeforeReadStateStore(inner, 3, () => inner.TransitionAsync(state.ResourceId, (current, now) =>
-            new StateTransition<bool>(current with { Security = current.Security with { Owner = "new-owner" } }, true)).AsTask());
+        var revoking = new BeforeReadStateStore(inner, 5, async () =>
+        {
+            var current = (await inner.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+            Assert.True((await inner.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(state.ResourceId,
+                StorageTestDocuments.Admission(current), current.Security with { Owner = "new-owner" }, current.AuthorityGeneration))).Changed);
+        });
         var request = new FsshttpbCellRequest { SubRequests =
         {
             Query(1),
@@ -120,15 +127,15 @@ public sealed class UploadHintTests
         Assert.False(result.Response.SubResponses[0].Status);
         Assert.All(result.Response.SubResponses.Skip(1), s => Assert.Equal(CellBridgeAuthorization.AccessDeniedHResult, s.Error!.ErrorCode));
         Assert.NotEmpty(result.Response.DataElementPackage!.DataElements);
-        Assert.Equal(state.Content, result.State.Content); Assert.Equal(state.ContentVersion, result.State.ContentVersion);
-        Assert.Empty(result.State.Receipts);
+        Assert.Equal(state.Package, result.State.Package); Assert.Equal(state.ContentVersion, result.State.ContentVersion);
+        Assert.Equal(0, result.State.Counters.SaveReceipts);
     }
 
-    private static FsshttpbCellRequest Save(DocumentState state, byte extraFlags)
+    private static async Task<FsshttpbCellRequest> Save(CellBridgeDocumentService service, DocumentHead state, byte extraFlags)
     {
         var request = StorageTests.Fixture("save-first");
         var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
-        put.ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service, state));
         put.Flags |= extraFlags;
         return request;
     }

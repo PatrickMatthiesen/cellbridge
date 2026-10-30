@@ -26,6 +26,36 @@ internal static class TestActor
     })) { BaseAddress = server.BaseAddress };
 }
 
+internal static class TestStorage
+{
+    public static StorageProvider Memory(StorageLimits? limits = null)
+    {
+        limits ??= new();
+        var content = new CellBridge.Storage.InMemory.InMemoryContentStore(limits.MaxObjectBytes);
+        return new(new CellBridge.Storage.InMemory.InMemoryDocumentRepository(content, limits), content, limits);
+    }
+
+    public static DocumentActorAdmission Admit(DocumentHead head, CellBridgeActor? actor = null) => new((actor ?? TestActor.Value).Identity,
+        head.ResourceId, head.LifecycleGeneration, head.Security.AuthorizationPolicy, DocumentAccess.Read | DocumentAccess.Write)
+        { StateVersion = head.StateVersion, AuthorityGeneration = head.AuthorityGeneration };
+
+    public static async Task SetPermissionsAsync(StorageProvider provider, Guid id, DocumentSecurity security)
+    {
+        var control = await provider.Documents.ReadControlAsync(id) ?? throw new KeyNotFoundException("Test document does not exist.");
+        var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(id, Admit(control.Head),
+            security, control.Head.AuthorityGeneration));
+        if (!result.Changed) throw new InvalidOperationException("Test permission command failed: " + result.ErrorCode);
+    }
+
+    public static async Task<byte[]> ReadPackageAsync(StorageProvider provider, DocumentPackage package)
+    {
+        await using var stream = await provider.Packages.OpenReadAsync(package);
+        using var result = new MemoryStream();
+        await stream.CopyToAsync(result);
+        return result.ToArray();
+    }
+}
+
 internal sealed class TestAuthenticationHandler(IOptionsMonitor<AuthenticationSchemeOptions> options,
     ILoggerFactory logger, UrlEncoder encoder) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {

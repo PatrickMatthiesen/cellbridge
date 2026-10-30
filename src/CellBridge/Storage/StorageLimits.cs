@@ -1,3 +1,5 @@
+using CellBridge.FssHttpB;
+
 namespace CellBridge.Storage.Abstractions;
 
 /// <summary>Admission limits, not a claim about supported Office file sizes.</summary>
@@ -6,11 +8,9 @@ public sealed record StorageLimits
     public long MaxDocumentBytes { get; init; } = 128L * 1024 * 1024;
     public long MaxGraphBytes { get; init; } = 512L * 1024 * 1024;
     public int MaxGraphElements { get; init; } = 100_000;
-    /// <summary>Reference slots across current and historical graph arrays, not a total heap or storage quota.</summary>
+    /// <summary>Logical reference slots across current and historical graphs, independent of membership sharing.</summary>
     public long MaxDecodedGraphMembershipBytes { get; init; } = 128L * 1024 * 1024;
     public long MaxDocumentStoredBytes { get; init; } = 1024L * 1024 * 1024;
-    public long MaxStoredBytes { get; init; } = 10L * 1024 * 1024 * 1024;
-    public int MaxDocuments { get; init; } = 10_000;
     public long MaxObjectBytes { get; init; } = 512L * 1024 * 1024;
     public int MaxSaveReceipts { get; init; } = 10_000;
     public int MaxPendingExternalRevisions { get; init; } = 128;
@@ -21,6 +21,11 @@ public sealed record StorageLimits
     public int MaxWholeFileSaveReceipts { get; init; } = 10_000;
     public int MaxRetiredPathKeys { get; init; } = 128;
 
+    // Every distinct ancestor needs a retained graph element. Server operations
+    // use that admission bound, not the stand-alone parser's default depth cap.
+    internal GenericGraphLimits GraphTraversalLimits() => new(MaxElements: MaxGraphElements,
+        MaxPayloadBytes: MaxGraphBytes, MaxRevisionDepth: MaxGraphElements);
+
     public void Validate()
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocumentBytes);
@@ -28,8 +33,6 @@ public sealed record StorageLimits
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxGraphElements);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDecodedGraphMembershipBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocumentStoredBytes);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxStoredBytes);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxDocuments);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxObjectBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSaveReceipts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxRetainedStateSnapshots);
@@ -104,21 +107,18 @@ public static class StorageReferences
         yield return state.Content;
         if (state.Publication is { } publication)
             foreach (var revision in publication.Pending) yield return revision.Content;
-        foreach (var partition in state.Partitions)
-        {
-            yield return partition.Content;
-            foreach (var element in partition.Elements) yield return element.Payload;
-        }
+        foreach (var partition in state.Partitions) yield return partition.Content;
         foreach (var receipt in state.Receipts)
             if (receipt.Response is not null) yield return receipt.Response;
         foreach (var revision in state.Revisions)
         {
             yield return revision.Content;
-            foreach (var partition in revision.Partitions)
-            {
-                yield return partition.Content;
-                foreach (var element in partition.Elements) yield return element.Payload;
-            }
+            foreach (var partition in revision.Partitions) yield return partition.Content;
         }
+        // Union backing intervals, rather than expanding every historical prefix.
+        // All referenced descriptor variants still reach handle validation.
+        foreach (var element in GraphElementCollection.UniqueElements(state.Partitions
+            .Concat(state.Revisions.SelectMany(r => r.Partitions)).Select(p => p.Elements)))
+            yield return element.Payload;
     }
 }

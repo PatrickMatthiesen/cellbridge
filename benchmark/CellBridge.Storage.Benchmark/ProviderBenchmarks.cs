@@ -110,7 +110,7 @@ public class PostgreSqlServiceSaveBenchmarks
     private CellBridgeDocumentService service = null!;
     private readonly CellBridgeActor actor = new(new SubjectIdentity("benchmark:writer", "benchmark-writer", "Benchmark writer"), CanCreate: true);
     private readonly Dictionary<string, string> attributes = new();
-    private readonly DocumentState[] starting = new DocumentState[BatchSize];
+    private readonly DocumentHead[] starting = new DocumentHead[BatchSize];
     private readonly FsshttpbCellRequest[] requests = new FsshttpbCellRequest[BatchSize];
     private readonly CellExecution[] results = new CellExecution[BatchSize];
     private readonly byte[][] payloads = Enumerable.Range(0, 5 + BatchSize)
@@ -130,7 +130,7 @@ public class PostgreSqlServiceSaveBenchmarks
         provider = new(new PostgreSqlStateStore(database.Source, limits),
             new PostgreSqlContentStore(database.Source, limits.MaxObjectBytes), limits);
         provider.Require(durable: true, multipleInstances: false);
-        await provider.State.CheckHealthAsync();
+        await provider.Documents.CheckHealthAsync();
         service = new(provider);
         for (var doc = 0; doc < BatchSize; doc++)
         {
@@ -139,18 +139,18 @@ public class PostgreSqlServiceSaveBenchmarks
             var random = new Random(42 + doc);
             for (var save = 0; save < PriorSaves; save++)
             {
-                var restored = await StoredDocument.RestoreAsync(state, provider.Content);
+                var graph = await ReadGraphAsync(state);
                 var bytes = Mode == "changed-full" ? payloads[save + 1] : payloads[0];
-                var request = SyntheticWorkload.Save(restored, bytes, Mode, save, random);
+                var request = SyntheticWorkload.Save(graph, bytes, Mode, save, random);
                 var result = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
                     request, attributes, actor);
                 VerifyExecution(result, state);
                 state = result.State;
             }
-            if (state.Receipts.Length != PriorSaves || state.Revisions.Length != PriorSaves + 1)
+            if (state.Counters.SaveReceipts != PriorSaves || state.Counters.Revisions != PriorSaves + 1)
                 throw new InvalidDataException("Preparation did not establish the expected save history.");
             starting[doc] = state;
-            var current = await StoredDocument.RestoreAsync(state, provider.Content);
+            var current = await ReadGraphAsync(state);
             var measured = Mode == "changed-full" ? payloads[5 + doc] : payloads[0];
             requests[doc] = SyntheticWorkload.Save(current, measured, Mode, PriorSaves, random);
         }
@@ -172,14 +172,16 @@ public class PostgreSqlServiceSaveBenchmarks
         for (var doc = 0; doc < BatchSize; doc++)
         {
             VerifyExecution(results[doc], starting[doc]);
-            var state = await provider.State.FindByResourceIdAsync(results[doc].State.ResourceId)
+            var state = await provider.Documents.FindAsync(new DocumentIdentity.Resource(results[doc].State.ResourceId))
                 ?? throw new InvalidDataException("Saved document disappeared.");
-            if (state.Receipts.Length != PriorSaves + 1 || state.Revisions.Length != PriorSaves + 2)
+            if (state.Counters.SaveReceipts != PriorSaves + 1 || state.Counters.Revisions != PriorSaves + 2)
                 throw new InvalidDataException("Saved history or receipt count differs.");
             var expected = Mode == "changed-full" ? payloads[5 + doc] : payloads[0];
-            await ProviderBenchmarkInputs.VerifyContentAsync(provider.Content, state.Content, expected);
-            var restored = await StoredDocument.RestoreAsync(state, provider.Content);
-            if (!restored.Content.AsSpan().SequenceEqual(expected))
+            await using var stream = await provider.Packages.OpenReadAsync(state.Package);
+            using var bytes = new MemoryStream();
+            await stream.CopyToAsync(bytes);
+            var graph = await ReadGraphAsync(state);
+            if (!bytes.ToArray().AsSpan().SequenceEqual(expected) || !graph.Materialize().AsSpan().SequenceEqual(expected))
                 throw new InvalidDataException("Restored document differs from the expected content.");
         }
     }
@@ -190,7 +192,19 @@ public class PostgreSqlServiceSaveBenchmarks
         if (database is not null) await database.DisposeAsync();
     }
 
-    private static void VerifyExecution(CellExecution result, DocumentState previous)
+    private async Task<PartitionGraphSnapshot> ReadGraphAsync(DocumentHead head)
+    {
+        var request = new FsshttpbCellRequest();
+        request.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 1,
+            Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } });
+        var result = await service.ExecuteAsync(head.ResourceId, DocumentPartitionKind.FileContents, request, attributes, actor);
+        if (result.IsCancelled || result.Response.Status || result.Response.SubResponses.Count != 1 || result.Response.SubResponses[0].Status ||
+            result.Response.SubResponses[0].Data is not QueryChangesSubResponseData query)
+            throw new InvalidDataException("Preparation did not return a complete client graph.");
+        return PartitionGraphSnapshot.Create(result.Response.DataElementPackage!.DataElements, query.StorageIndexExtendedGuid);
+    }
+
+    private static void VerifyExecution(CellExecution result, DocumentHead previous)
     {
         if (result.IsCancelled || result.LockError is not null || result.Response.Status ||
             result.Response.SubResponses.Count != 1 || result.Response.SubResponses[0].Status ||

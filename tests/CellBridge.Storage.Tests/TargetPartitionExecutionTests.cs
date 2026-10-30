@@ -60,8 +60,7 @@ public sealed class TargetPartitionExecutionTests
         Assert.Equal(ErrorType.Cell, response.Error!.Type);
         Assert.Equal((ulong)CellErrorCode.RequestNotSupported, response.Error.ErrorCode);
         Assert.Empty(result.AcceptedSaves);
-        Assert.Equal(DocumentStateJson.Serialize(state),
-            DocumentStateJson.Serialize((await provider.State.FindByResourceIdAsync(state.ResourceId))!));
+        Assert.Equal(state,await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)));
         // Explicit zero means file, and does not inherit a metadata SOAP selector.
         var explicitFile = await service.ExecuteAsync(state.ResourceId, DocumentPartitionKind.Metadata,
             Request(RequestTypes.QueryAccess, Guid.Empty), new Dictionary<string, string>(), TestActor.Value);

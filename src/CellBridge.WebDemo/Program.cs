@@ -27,7 +27,6 @@ if (storageKind.Equals("PostgreSql", StringComparison.OrdinalIgnoreCase))
         ?? throw new InvalidOperationException("PostgreSql storage requires ConnectionStrings:cellbridge.");
     var dataSource = NpgsqlDataSource.Create(connectionString);
     builder.Services.AddSingleton(dataSource);
-    var state = new PostgreSqlStateStore(dataSource, limits);
     var maxBytes = limits.MaxObjectBytes;
     IContentStore content = builder.Configuration["Storage:ContentProvider"]?.ToLowerInvariant() switch
     {
@@ -37,6 +36,7 @@ if (storageKind.Equals("PostgreSql", StringComparison.OrdinalIgnoreCase))
             builder.Configuration.GetValue("Storage:SharedContent", false)),
         _ => throw new InvalidOperationException("Unknown binary content provider."),
     };
+    var state = new PostgreSqlStateStore(dataSource, limits, content);
     provider = new StorageProvider(state, content, limits);
 }
 else if (storageKind.Equals("SqlServer", StringComparison.OrdinalIgnoreCase))
@@ -47,7 +47,10 @@ else if (storageKind.Equals("SqlServer", StringComparison.OrdinalIgnoreCase))
     provider = new(new SqlServerStateStore(options, limits), new SqlServerContentStore(options, limits.MaxObjectBytes), limits);
 }
 else if (storageKind.Equals("InMemory", StringComparison.OrdinalIgnoreCase))
-    provider = new(new InMemoryStateStore(), new InMemoryContentStore(), limits);
+{
+    var content = new InMemoryContentStore(limits.MaxObjectBytes);
+    provider = new(new InMemoryDocumentRepository(content, limits), content, limits);
+}
 else throw new InvalidOperationException("Unknown document storage provider.");
 
 builder.Services.AddCellBridge(provider, requireDurability: !storageKind.Equals("InMemory", StringComparison.OrdinalIgnoreCase),

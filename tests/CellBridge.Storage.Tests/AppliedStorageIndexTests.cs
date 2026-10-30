@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
 using CellBridge.Storage;
@@ -18,12 +19,16 @@ public sealed class AppliedStorageIndexTests
         var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/applied-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        var request = Save(initial);
+        var request = await Save(service, initial);
         var saved = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
         var index = CheckIndex(saved.Response);
-        var stored = saved.State.Partitions[0].Elements.Single(e => StorageIds.Restore(e.Id).Equals(index.DataElementExtendedGuid));
-        Assert.Equal(new SerialNumber(stored.Serial.Guid, stored.Serial.Value), index.SerialNumber);
-        Assert.Equal(await provider.Content.ReadVerifiedAsync(stored.Payload), index.Data);
+        var stored = (await provider.Documents.ReadPartitionAsync(initial.ResourceId, new(0) { IncludeCatalog = true }))!;
+        Assert.Equal(IndexedDocumentGraph.Capture(index.DataElementExtendedGuid), stored.Partition.StorageIndex);
+        Assert.Equal(new SerialNumber(stored.Partition.StorageIndexSerial!.Guid, stored.Partition.StorageIndexSerial.Value), index.SerialNumber);
+        Assert.DoesNotContain(stored.Elements, element => element.Type == (uint)DataElementType.StorageIndexDataElementData);
+        var mappings = await provider.Documents.ReadMappingsAsync(new(initial.ResourceId, initial.LifecycleGeneration, 0), stored.Partition.PublicationSequence);
+        foreach (var mapping in IndexedDocumentGraph.ReadMetadata(new(initial.ResourceId, initial.LifecycleGeneration, 0), index).Mappings)
+            Assert.Contains(mappings, current => current.Key == mapping.Key && current.Target == mapping.Target && current.Serial == mapping.Serial);
         await using var recreated = ProtocolExecutionTestProvider.Create(postgreSql);
         var retry = await new CellBridgeDocumentService(postgreSql ? recreated.Provider : provider).ExecuteAsync(initial.ResourceId,
             DocumentPartitionKind.FileContents, request, new Dictionary<string, string>(), TestActor.Value);
@@ -40,7 +45,7 @@ public sealed class AppliedStorageIndexTests
         var provider = testProvider.Provider;
         var service = new CellBridgeDocumentService(provider);
         var initial = (await service.CreateAsync("/mixed-applied-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
-        var request = Save(initial);
+        var request = await Save(service, initial);
         request.SubRequests.Insert(0, Query(10));
         request.SubRequests.Add(Query(20));
         var response = (await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents, request,
@@ -67,14 +72,14 @@ public sealed class AppliedStorageIndexTests
         var initial = (await service.CreateAsync("/bounded-applied-" + Guid.NewGuid().ToString("N") + ".docx", MinimalDocx.Create(), TestActor.Value))!;
         var first = (await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
             new() { SubRequests = { Query(10) } }, new Dictionary<string, string>(), TestActor.Value)).Response;
-        var partition = initial.Partitions[0];
+        var partition = (await provider.Documents.ReadPartitionAsync(initial.ResourceId, new(0) { IncludeCatalog = true }))!;
         var oldIndex = first.DataElementPackage!.DataElements.Single(e =>
-            e.DataElementExtendedGuid.Equals(StorageIds.Restore(partition.StorageIndex!)));
+            e.DataElementExtendedGuid.Equals(StorageIds.Restore(partition.Partition.StorageIndex!)));
         var newId = new ExGuid(1, Guid.NewGuid());
         // A new index over the existing graph keeps the storage quota valid while
         // its mandatory response consumes the last bytes after the earlier query.
         var index = new DataElement(oldIndex.DataElementType, newId,
-            new SerialNumber(partition.Identity.SerialGuid, partition.Knowledge + 1)) { Data = oldIndex.Data };
+            new SerialNumber(partition.Partition.Identity.SerialGuid, partition.Partition.Knowledge + 1)) { Data = oldIndex.Data };
         var writer = new BinaryWriterEx();
         index.Serialize(writer);
         long earlierBytes = first.DataElementPackage.DataElements.Sum(e =>
@@ -83,23 +88,11 @@ public sealed class AppliedStorageIndexTests
         });
         long budget = earlierBytes + writer.Length + offset;
         Assert.True(budget >= partition.Elements.Sum(e => e.Payload.Length) + index.Data!.LongLength);
-        // Memory budgets must be composed before loading state. Copy the same
-        // graph into fresh stores so the measured wire boundary stays exact.
-        await using var boundedProvider = ProtocolExecutionTestProvider.Create(postgreSql);
-        var bounded = new StorageProvider(boundedProvider.Provider.State, boundedProvider.Provider.Content,
-            provider.Limits with { MaxGraphBytes = budget });
-        if (!postgreSql)
-        {
-            foreach (var handle in ContentStoreReader.UniqueHandles(StorageReferences.Handles(initial)))
-            {
-                await using var payload = await provider.Content.OpenReadAsync(handle);
-                Assert.Equal(handle, await bounded.Content.WriteAsync(payload));
-            }
-            Assert.True(await bounded.State.TryCreateAsync(initial));
-        }
+        // This tests the service's cumulative wire budget over an already valid repository.
+        var bounded = new StorageProvider(provider.Documents, provider.Content, provider.Limits with { MaxGraphBytes = budget });
         var request = new FsshttpbCellRequest
         {
-            DataElementPackage = new() { DataElements = { new(oldIndex.DataElementType, newId, SerialNumber.Null) { Data = oldIndex.Data } } },
+            DataElementPackage = new() { DataElements = { new(oldIndex.DataElementType, newId, SerialNumber.Null) { Data = oldIndex.Data }, oldIndex } },
             SubRequests =
             {
                 Query(10),
@@ -121,19 +114,19 @@ public sealed class AppliedStorageIndexTests
             Assert.Equal((ulong)CellErrorCode.RequestNotSupported, response.SubResponses[1].Error!.ErrorCode);
             Assert.Null(response.SubResponses[1].Data);
             Assert.Empty(result.AcceptedSaves);
-            Assert.Empty(result.State.Receipts);
-            Assert.Equal(DocumentStateJson.Serialize(initial), DocumentStateJson.Serialize(result.State));
+            Assert.Equal(0, result.State.Counters.SaveReceipts);
+            Assert.Equal(JsonSerializer.Serialize(initial), JsonSerializer.Serialize(result.State));
             Assert.DoesNotContain(response.DataElementPackage!.DataElements, e => e.DataElementExtendedGuid.Equals(newId));
         }
         else
         {
             var applied = Assert.IsType<PutChangesSubResponseData>(response.SubResponses[1].Data).PutChangesResponse!;
-            Assert.Equal(newId, applied.AppliedStorageIndexID);
-            var returned = Assert.Single(response.DataElementPackage!.DataElements, e => e.DataElementExtendedGuid.Equals(newId));
+            Assert.NotEqual(newId, applied.AppliedStorageIndexID);
+            var returned = Assert.Single(response.DataElementPackage!.DataElements, e => e.DataElementExtendedGuid.Equals(applied.AppliedStorageIndexID));
             var serialized = new BinaryWriterEx(); returned.Serialize(serialized);
             Assert.Equal(writer.Length, serialized.Length);
             Assert.Single(result.AcceptedSaves);
-            Assert.Single(result.State.Receipts);
+            Assert.Equal(1, result.State.Counters.SaveReceipts);
         }
         Assert.All(first.DataElementPackage.DataElements, element =>
             Assert.Contains(response.DataElementPackage!.DataElements, e => e.DataElementExtendedGuid.Equals(element.DataElementExtendedGuid)));
@@ -142,8 +135,8 @@ public sealed class AppliedStorageIndexTests
             var serialized = new BinaryWriterEx(); element.Serialize(serialized); return (long)serialized.Length;
         });
         Assert.Equal(earlierBytes + (offset < 0 ? 0 : writer.Length), responseBytes);
-        Assert.Equal(DocumentStateJson.Serialize(result.State),
-            DocumentStateJson.Serialize((await bounded.State.FindByResourceIdAsync(initial.ResourceId))!));
+        Assert.Equal(JsonSerializer.Serialize(result.State),
+            JsonSerializer.Serialize((await bounded.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)))!));
     }
 
     private static DataElement CheckIndex(FsshttpbResponse response)
@@ -160,11 +153,11 @@ public sealed class AppliedStorageIndexTests
         return index;
     }
 
-    private static FsshttpbCellRequest Save(DocumentState state)
+    private static async Task<FsshttpbCellRequest> Save(CellBridgeDocumentService service, DocumentHead state)
     {
         var request = StorageTests.Fixture("save-first");
         var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
-        put.ExpectedStorageIndex = StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        StorageTests.Rebase(request, await StorageTestDocuments.GraphAsync(service, state));
         put.AdditionalFlagsBits |= 1;
         return request;
     }

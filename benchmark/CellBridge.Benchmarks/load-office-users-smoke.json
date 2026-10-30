@@ -1,0 +1,39 @@
+{
+  "TestSuite": "CellBridge",
+  "TestName": "Office user workflow smoke",
+  "TargetScenarios": [
+    "document-http"
+  ],
+  "GlobalSettings": {
+    "ScenariosSettings": [
+      {
+        "ScenarioName": "document-http",
+        "WarmUpDuration": "00:00:00",
+        "CustomSettings": {
+          "Clients": 10,
+          "DocumentsPerClient": 2,
+          "Workload": "independent",
+          "UserModel": true,
+          "PackageKiB": 256,
+          "Seed": 42,
+          "Retry": false,
+          "SaveIntervalMs": 2000,
+          "QueryIntervalMs": 2000,
+          "OpenIntervalMs": 5000,
+          "UserWarmUpMs": 2000,
+          "UserMeasurementMs": 10000,
+          "ChangedPartKiB": 16
+        },
+        "LoadSimulationsSettings": [
+          {
+            "KeepConstant": [
+              10,
+              "00:00:12"
+            ]
+          }
+        ],
+        "MaxFailCount": 2147483647
+      }
+    ]
+  }
+}

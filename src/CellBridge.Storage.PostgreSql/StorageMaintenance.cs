@@ -17,7 +17,7 @@ public sealed class StorageMaintenance
     {
         limits?.Validate();
         options = PostgreSqlDatabase.NormalizeOptions(options);
-        maintenance = new(new PostgreSqlDocumentDatabase(options), limits);
+        maintenance = new(new PostgreSqlDocumentDatabase(options), new PostgreSqlRepositoryDatabase(options), limits);
     }
     public async Task<StorageMaintenanceReport> CollectOrphansAsync(bool apply = false, bool quiescent = false,
         string? fileSystemRoot = null, CancellationToken cancellationToken = default)

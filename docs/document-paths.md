@@ -92,7 +92,7 @@ membership or change permissions. Manage an actual workspace transfer separately
 
 Store the resource ID as the stable identity. CellBridge state and a host's
 metadata database do not share a transaction. A move may commit before the host
-updates its metadata or crashes. Read `Provider.State.FindByResourceIdAsync`
+updates its metadata or crashes. Read `Provider.Documents.FindAsync(new DocumentIdentity.Resource(id))`
 to recover the authoritative Path and StateVersion, then reconcile the host's
 stored URL and display name. Retrying the completed move to the same path is
 safe. Reconcile by ID before retrying a stale operation after another rename.

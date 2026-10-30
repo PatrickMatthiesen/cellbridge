@@ -193,9 +193,8 @@ public sealed class NestedDocumentEndpointTests
         using var pathOnly = await fixture.Soap("/shared/old/place.docx/_vti_bin/cellstorage.svc",
             "/shared/old/place.docx", "GetDocMetaInfo");
         Assert.Equal("FileNotExistsOrCannotBeCreated", FileError(XDocument.Parse(await pathOnly.Content.ReadAsStringAsync())));
-        await fixture.Provider.State.TransitionAsync(state.ResourceId, (current, _) =>
-            new StateTransition<bool>(current with { Security = current.Security with
-                { Owner = null, Grants = current.Security.Grants.SetItem("tests:writer", DocumentAccess.None) } }, true));
+        await TestStorage.SetPermissionsAsync(fixture.Provider, state.ResourceId, state.Security with
+            { Owner = null, Grants = state.Security.Grants.SetItem("tests:writer", DocumentAccess.None) });
         using var revoked = await fixture.Soap("/shared/old/place.docx/_vti_bin/cellstorage.svc",
             "/shared/old/place.docx", "GetDocMetaInfo", useResourceId: true, resourceId: state.ResourceId.ToString("D"));
         Assert.Equal("FileUnauthorizedAccess", FileError(XDocument.Parse(await revoked.Content.ReadAsStringAsync())));
@@ -208,9 +207,8 @@ public sealed class NestedDocumentEndpointTests
         var state = await fixture.Create("/shared/deep/private.docx", [1]);
         using var before = await fixture.Send(HttpMethod.Get, "/shared/deep/private.docx");
         Assert.Equal(HttpStatusCode.OK, before.StatusCode);
-        await fixture.Provider.State.TransitionAsync(state.ResourceId, (current, _) =>
-            new StateTransition<bool>(current with { Security = current.Security with
-                { Owner = null, Grants = current.Security.Grants.SetItem("tests:writer", DocumentAccess.None) } }, true));
+        await TestStorage.SetPermissionsAsync(fixture.Provider, state.ResourceId, state.Security with
+            { Owner = null, Grants = state.Security.Grants.SetItem("tests:writer", DocumentAccess.None) });
         using var download = await fixture.Send(HttpMethod.Get, "/shared/deep/private.docx");
         Assert.Equal(HttpStatusCode.NotFound, download.StatusCode);
         using var soap = await fixture.Soap("/shared/deep/private.docx/_vti_bin/cellstorage.svc",
@@ -291,7 +289,7 @@ public sealed class NestedDocumentEndpointTests
 
         public static async Task<Fixture> Start(string mount = "", bool kestrel = false)
         {
-            var provider = new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore());
+            var provider = TestStorage.Memory();
             var builder = WebApplication.CreateBuilder();
             if (kestrel) builder.WebHost.UseKestrel().UseUrls("http://127.0.0.1:0");
             else builder.WebHost.UseTestServer();
@@ -320,7 +318,7 @@ public sealed class NestedDocumentEndpointTests
             return new(app, provider, client, port);
         }
 
-        public async Task<DocumentState> Create(string decodedPath, byte[] bytes) =>
+        public async Task<DocumentHead> Create(string decodedPath, byte[] bytes) =>
             (await Service.CreateAsync(EncodePath(decodedPath), bytes, TestActor.Value))!;
 
         public Task<HttpResponseMessage> Send(HttpMethod method, string path) => client.SendAsync(new HttpRequestMessage(method, path));

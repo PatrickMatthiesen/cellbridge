@@ -14,8 +14,11 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
     private static DbContextOptions<SqlServerDocumentDbContext> Options(string connection) =>
         new DbContextOptionsBuilder<SqlServerDocumentDbContext>().UseSqlServer(connection).Options;
 
-    private static StorageProvider Provider(DbContextOptions<SqlServerDocumentDbContext> options) =>
-        new(new SqlServerStateStore(options), new SqlServerContentStore(options));
+    private static StorageProvider Provider(DbContextOptions<SqlServerDocumentDbContext> options)
+    {
+        var content = new SqlServerContentStore(options);
+        return new(new SqlServerStateStore(options, validationContent: content), content);
+    }
 
     [Fact]
     public void PackagedRegistrationNeedsNoDatabaseOrListsProvider()
@@ -50,6 +53,17 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
         var migrator = new SqlServerStorageMigrator(adminOptions);
         await migrator.MigrateAsync();
         await migrator.MigrateAsync();
+        var normalizedGrants = string.Join('\n',
+            new[] { "heads", "coordination", "editors", "partitions", "bindings", "paths", "deliveries", "references", "mappings" }
+                .Select(table => $"GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_documents.[repository_{table}] TO [runtime];")
+                .Concat(new[] { "elements", "graph", "binding_changes", "checkpoints", "revisions", "receipts", "deltas", "mapping_roots", "mapping_claims" }
+                    .Select(table => $"GRANT SELECT,INSERT ON cellbridge_documents.[repository_{table}] TO [runtime];"))) + """
+
+            GRANT SELECT,INSERT ON cellbridge_documents.repository_visibility TO [runtime];
+            GRANT UPDATE (EndSequence) ON cellbridge_documents.repository_visibility TO [runtime];
+            GRANT SELECT,INSERT ON cellbridge_documents.repository_mapping_intervals TO [runtime];
+            GRANT UPDATE (EndSequence) ON cellbridge_documents.repository_mapping_intervals TO [runtime];
+            """;
         var runtime = await database.RuntimeAsync("""
             GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_documents.documents TO [runtime];
             GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_documents.snapshots TO [runtime];
@@ -59,10 +73,8 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
             GRANT SELECT,INSERT,UPDATE,DELETE ON cellbridge_documents.recovery_receipts TO [runtime];
             GRANT SELECT,INSERT ON cellbridge_documents.objects TO [runtime];
             GRANT SELECT,INSERT ON cellbridge_documents.chunks TO [runtime];
-            GRANT SELECT ON cellbridge_documents.usage TO [runtime];
-            GRANT UPDATE (StoredBytes,DocumentCount) ON cellbridge_documents.usage TO [runtime];
             GRANT SELECT ON cellbridge_documents.schema_version TO [runtime];
-            """);
+            """ + normalizedGrants);
         var options = Options(runtime);
         var provider = Provider(options);
         await provider.CheckHealthAsync();
@@ -77,12 +89,17 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
         Assert.True(renamed.StateVersion > created.StateVersion);
         await migrator.MigrateAsync();
         var restarted = Provider(Options(runtime));
-        var reloaded = (await restarted.State.FindByResourceIdAsync(created.ResourceId))!;
+        var reloaded = (await restarted.Documents.FindAsync(new DocumentIdentity.Resource(created.ResourceId)))!;
         Assert.Equal("/shared/continued.bin", reloaded.Path);
         Assert.Equal(renamed.StateVersion, reloaded.StateVersion);
-        Assert.Equal(bytes, await restarted.Content.ReadVerifiedAsync(reloaded.Content));
+        await using (var package = await restarted.Packages.OpenReadAsync(reloaded.Package))
+        {
+            using var downloaded = new MemoryStream();
+            await package.CopyToAsync(downloaded);
+            Assert.Equal(bytes, downloaded.ToArray());
+        }
         Assert.Equal(created.Security.Owner, reloaded.Security.Owner);
-        Assert.Single(await restarted.State.ListAsync(0, 10));
+        Assert.Single(await restarted.Documents.ListAsync(0, 10));
         await using var restricted = new SqlServerDocumentDbContext(options);
         await Assert.ThrowsAsync<SqlException>(() => restricted.Database.ExecuteSqlRawAsync("CREATE TABLE cellbridge_documents.forbidden(id int)"));
         Assert.Equal(tables, await database.ScalarAsync<int>("SELECT COUNT(*) FROM sys.tables WHERE is_ms_shipped=0"));

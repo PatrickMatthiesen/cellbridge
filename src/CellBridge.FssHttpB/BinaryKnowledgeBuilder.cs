@@ -46,6 +46,16 @@ public static class BinaryKnowledgeBuilder
             .ThenBy(range => range.From)
             .ToArray();
 
+        return FromRanges(ranges, cellStorageId, waterline, versionToken);
+    }
+
+    /// <summary>Encodes already compressed serial ranges without expanding them into every known serial.</summary>
+    public static byte[] FromRanges(IEnumerable<(Guid Guid, ulong From, ulong To)> ranges, ExGuid cellStorageId,
+        ulong waterline, byte[]? versionToken = null)
+    {
+        ArgumentNullException.ThrowIfNull(ranges);
+        ArgumentNullException.ThrowIfNull(cellStorageId);
+
         var knowledge = new BinaryWriterEx();
         new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.Knowledge, 0).Serialize(knowledge);
 
@@ -54,6 +64,7 @@ public static class BinaryKnowledgeBuilder
         new StreamObjectHeaderStart16Bit(StreamObjectTypeHeaderStart.CellKnowledge, 0).Serialize(cell);
         foreach (var range in ranges)
         {
+            if (range.From > range.To) throw new InvalidDataException("Invalid cell knowledge range.");
             var payload = new BinaryWriterEx();
             ExGuid.WriteGuid(payload, range.Guid);
             new Compact64bitInt(range.From).Serialize(payload);

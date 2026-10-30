@@ -2,118 +2,122 @@ using CellBridge.Storage.Abstractions;
 
 namespace CellBridge.AspNetCore;
 
-/// <summary>A live newest-first page. Concurrent publications can move offsets between calls.</summary>
-public sealed record RevisionSummaryPage(IReadOnlyList<DocumentRevisionSummary> Revisions, int? NextOffset);
+public sealed record DocumentDownload(DocumentHead Current, DocumentPackage Package, Stream Content, DateTime ModifiedUtc) : IAsyncDisposable
+{
+    public ValueTask DisposeAsync() => Content.DisposeAsync();
+}
+
+public sealed record RevisionSummaryPage(IReadOnlyList<DocumentRevisionRecord> Revisions, int? NextOffset);
 
 public sealed partial class CellBridgeDocumentService
 {
-    private IDocumentReadStore? SelectiveReads => _access is null && _policy is StoredGrantAuthorizationPolicy
-        ? provider.State as IDocumentReadStore : null;
-
-    /// <summary>Authorizes current metadata without loading graphs when the provider and policy support it.</summary>
-    public async ValueTask<DocumentReadMetadata> GetDocumentMetadataAsync(Guid resourceId, CellBridgeActor actor,
+    /// <summary>Authorizes current metadata without reading graphs, receipts or history, for every policy type.</summary>
+    public async ValueTask<DocumentHead> GetDocumentMetadataAsync(Guid resourceId, CellBridgeActor actor,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(actor);
-        if (SelectiveReads is not { } reads)
-        {
-            var state = await CurrentAsync(resourceId, cancellationToken);
-            actor = await AuthorizeActorAsync(actor, state, DocumentAccess.Read, cancellationToken, fresh: true);
-            state = await RevalidateReadStateAsync(state, cancellationToken) ?? throw MissingDocument();
-            Demand(actor, state, DocumentAccess.Read);
-            return DocumentReadModels.Metadata(state);
-        }
-        var observed = await reads.FindReadMetadataByResourceIdAsync(resourceId, cancellationToken) ?? throw MissingDocument();
-        actor = await AuthorizeMetadataAsync(actor, observed, cancellationToken);
-        var current = _externalAuthorization is null ? observed :
-            await reads.FindReadMetadataByResourceIdAsync(resourceId, cancellationToken) ?? throw MissingDocument();
-        DemandMetadata(actor, current);
-        return current;
+        var observed = await CurrentAsync(resourceId, cancellationToken);
+        actor = await AuthorizeActorAsync(actor, observed, DocumentAccess.Read, cancellationToken, fresh: actor.Authorization is null);
+        var current = await RevalidateReadStateAsync(observed, cancellationToken) ?? throw MissingDocument();
+        Demand(actor, current, DocumentAccess.Read);
+        return await RefreshPresenceAsync(current, actor, cancellationToken);
     }
 
-    internal async ValueTask<DocumentReadMetadata?> FindDocumentMetadataByPathKeyAsync(string pathKey,
+    internal async ValueTask<DocumentHead?> FindDocumentMetadataByPathKeyAsync(string pathKey,
         CellBridgeActor actor, CancellationToken cancellationToken)
     {
-        if (SelectiveReads is not { } reads)
-        {
-            var state = await provider.State.FindByPathKeyAsync(pathKey, cancellationToken);
-            if (state is null) return null;
-            actor = await AuthorizeActorAsync(actor, state, DocumentAccess.Read, cancellationToken, fresh: true);
-            state = await RevalidateReadStateAsync(state, cancellationToken);
-            if (state is null) return null;
-            Demand(actor, state, DocumentAccess.Read);
-            return DocumentReadModels.Metadata(state);
-        }
-        var observed = await reads.FindReadMetadataByPathKeyAsync(pathKey, cancellationToken);
+        var observed = await provider.Documents.FindAsync(new DocumentIdentity.Path(pathKey), cancellationToken);
         if (observed is null) return null;
-        actor = await AuthorizeMetadataAsync(actor, observed, cancellationToken);
-        var current = _externalAuthorization is null ? observed :
-            await reads.FindReadMetadataByResourceIdAsync(observed.ResourceId, cancellationToken);
+        actor = await AuthorizeActorAsync(actor, observed, DocumentAccess.Read, cancellationToken, fresh: actor.Authorization is null);
+        var current = await RevalidateReadStateAsync(observed, cancellationToken);
         if (current is null) return null;
-        DemandMetadata(actor, current);
-        return current;
+        Demand(actor, current, DocumentAccess.Read);
+        return await RefreshPresenceAsync(current, actor, cancellationToken);
     }
 
-    /// <summary>Returns at most 256 revision headers, without partition graphs or content bytes.</summary>
+    private async ValueTask<DocumentHead> RefreshPresenceAsync(DocumentHead head, CellBridgeActor actor,
+        CancellationToken cancellationToken)
+    {
+        if (head.NextEditorExpiryUtc is null) return head;
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            // Presence expiry uses the provider clock. Documents without participants
+            // keep the metadata-only read path; active participants are bounded controls.
+            var control = await provider.Documents.ReadControlAsync(head.ResourceId, cancellationToken) ?? throw MissingDocument();
+            Demand(actor, control.Head, DocumentAccess.Read);
+            if (control.Head.NextEditorExpiryUtc is not { } expiry || expiry > control.UtcNow) return control.Head;
+            var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.ExpireEditors(
+                head.ResourceId, Admission(actor, control.Head)), cancellationToken);
+            Demand(actor, result.Current.Head, DocumentAccess.Read);
+            if (!result.Changed && result.Current.Head.StateVersion != control.Head.StateVersion) continue;
+            if (result.ErrorCode is not null) throw new UnauthorizedAccessException("Current presence access validation failed.");
+            return result.Current.Head;
+        }
+        throw new InvalidOperationException("The document changed while expiring editor presence.");
+    }
+
     public async ValueTask<RevisionSummaryPage> ListRevisionSummariesAsync(Guid resourceId, int offset, int limit,
         CellBridgeActor actor, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(actor);
-        DocumentReadModels.ValidatePage(offset, limit);
-        if (SelectiveReads is not { } reads)
-        {
-            // Arbitrary host policies still receive the complete current state.
-            var revisions = await ListRevisionsAsync(resourceId, actor, cancellationToken);
-            var selected = revisions.Skip(offset).Take(limit).Select(DocumentReadModels.Summary).ToArray();
-            return new(selected, (long)offset + selected.Length < revisions.Count ? checked(offset + selected.Length) : null);
-        }
-        var observed = await reads.FindReadMetadataByResourceIdAsync(resourceId, cancellationToken) ?? throw MissingDocument();
-        actor = await AuthorizeMetadataAsync(actor, observed, cancellationToken);
-        var page = await reads.ReadRevisionSummariesAsync(resourceId, offset, limit, cancellationToken) ?? throw MissingDocument();
-        DemandMetadata(actor, page.Current);
-        foreach (var revision in page.Revisions) ValidateRevision(page.Current, revision);
+        var page = await ReadRevisionPageAsync(resourceId, offset, limit, actor, null, cancellationToken);
         return new(page.Revisions, page.NextOffset);
     }
 
-    /// <summary>Returns one authorized historical content handle. A subsequent download must authorize again.</summary>
-    public async ValueTask<DocumentRevisionSummary> GetRevisionSummaryAsync(Guid resourceId, ulong revisionNumber,
+    private async ValueTask<DocumentRevisionPage> ReadRevisionPageAsync(Guid resourceId, int offset, int limit,
+        CellBridgeActor actor, ulong? beforeRevision, CancellationToken cancellationToken)
+    {
+        DocumentReadModels.ValidatePage(offset, limit);
+        actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Read, cancellationToken, fresh: actor.Authorization is null);
+        var page = await provider.Documents.ReadRevisionsAsync(resourceId, offset, limit, beforeRevision, cancellationToken) ?? throw MissingDocument();
+        Demand(actor, page.Current, DocumentAccess.Read);
+        foreach (var revision in page.Revisions) ValidateRevision(page.Current, revision);
+        return page;
+    }
+
+    public async ValueTask<DocumentRevisionRecord> GetRevisionSummaryAsync(Guid resourceId, ulong revisionNumber,
         CellBridgeActor actor, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(actor);
-        if (SelectiveReads is not { } reads)
-            return DocumentReadModels.Summary(await GetRevisionAsync(resourceId, revisionNumber, actor, cancellationToken));
-        var observed = await reads.FindReadMetadataByResourceIdAsync(resourceId, cancellationToken) ?? throw MissingDocument();
-        actor = await AuthorizeMetadataAsync(actor, observed, cancellationToken);
-        var result = await reads.ReadRevisionSummaryAsync(resourceId, revisionNumber, cancellationToken) ?? throw MissingDocument();
-        DemandMetadata(actor, result.Current);
+        actor = await AuthorizeResourceActorAsync(actor, resourceId, DocumentAccess.Read, cancellationToken, fresh: actor.Authorization is null);
+        var result = await provider.Documents.ReadRevisionAsync(resourceId, revisionNumber, cancellationToken) ?? throw MissingDocument();
+        if (result.Current.IsDeleted) throw MissingDocument();
+        Demand(actor, result.Current, DocumentAccess.Read);
         var revision = result.Revision ?? throw new KeyNotFoundException("The requested version does not exist.");
         ValidateRevision(result.Current, revision);
         if (revision.RevisionNumber != revisionNumber) throw new StorageCorruptionException("The selected revision number disagrees.");
         return revision;
     }
 
-    private ValueTask<CellBridgeActor> AuthorizeMetadataAsync(CellBridgeActor actor, DocumentReadMetadata state,
-        CancellationToken cancellationToken) => AuthorizeReadIdentityAsync(actor, state.ResourceId,
-            state.LifecycleGeneration, state.IsDeleted, state.Security.AuthorizationPolicy, DocumentAccess.Read, cancellationToken, fresh: true);
-
-    private void DemandMetadata(CellBridgeActor actor, DocumentReadMetadata state)
+    /// <summary>Returns headers and verified canonical bytes from one immutable selection.</summary>
+    public async ValueTask<DocumentDownload> OpenDocumentAsync(DocumentIdentity identity, ulong? revisionNumber, CellBridgeActor actor,
+        CancellationToken cancellationToken = default)
     {
-        var access = DocumentAccess.None;
-        if (!state.IsDeleted && !string.IsNullOrWhiteSpace(actor.Identity.Subject) &&
-            (actor.AccessLimit is null || actor.AccessLimit.ResourceId == state.ResourceId))
+        var head = await provider.Documents.FindAsync(identity, cancellationToken) ?? throw MissingDocument();
+        actor = await AuthorizeActorAsync(actor, head, DocumentAccess.Read, cancellationToken, fresh: actor.Authorization is null);
+        Demand(actor, head, DocumentAccess.Read);
+        DocumentPackage package;
+        var modifiedUtc = head.ModifiedUtc;
+        if (revisionNumber is { } number)
         {
-            if (_externalAuthorization is null)
-                access = state.Security.AuthorizationPolicy is null ? NormalizeAccess(state.Security.AccessFor(actor.Identity.Subject)) : DocumentAccess.None;
-            else if (actor.Authorization is { } admission && IsExternalBinding(state.Security.AuthorizationPolicy) &&
-                admission.Subject == actor.Identity.Subject && admission.ResourceId == state.ResourceId &&
-                admission.LifecycleGeneration == state.LifecycleGeneration && admission.Binding == state.Security.AuthorizationPolicy)
-                access = admission.Access;
-            if (actor.AccessLimit is { } ceiling) access &= ceiling.Access;
+            var selected = await provider.Documents.ReadRevisionAsync(head.ResourceId, number, cancellationToken) ?? throw MissingDocument();
+            Demand(actor, selected.Current, DocumentAccess.Read);
+            var revision = selected.Revision ?? throw new KeyNotFoundException("The requested version does not exist.");
+            ValidateRevision(selected.Current, revision);
+            head = selected.Current;
+            package = revision.Package;
+            modifiedUtc = revision.CreatedUtc;
         }
-        if (!access.HasFlag(DocumentAccess.Read)) throw new UnauthorizedAccessException("Document access denied.");
+        else package = head.Package;
+        var stream = await provider.Packages.OpenReadAsync(package, cancellationToken);
+        try
+        {
+            var current = await CurrentAsync(head.ResourceId, cancellationToken);
+            Demand(actor, current, DocumentAccess.Read);
+            if (current.LifecycleGeneration != package.LifecycleGeneration) throw new UnauthorizedAccessException("The document lifecycle changed.");
+            return new(head, package, stream, modifiedUtc);
+        }
+        catch { await stream.DisposeAsync(); throw; }
     }
 
-    private static void ValidateRevision(DocumentReadMetadata current, DocumentRevisionSummary revision)
+    private static void ValidateRevision(DocumentHead current, DocumentRevisionRecord revision)
     {
         if (revision.ResourceId != current.ResourceId || revision.LifecycleGeneration != current.LifecycleGeneration)
             throw new StorageCorruptionException("The selected revision identity disagrees with the current document.");

@@ -95,7 +95,17 @@ internal sealed class LoadResources : IAsyncDisposable
     private readonly Lazy<Task<LoadTestEnvironment>> environment;
     private IScenarioContext? current;
     private int failed;
-    public LoadResources(string backend) => environment = new(() => LoadTestEnvironment.StartAsync(cancellation.Token, backend));
+    private int userCount = 1;
+    private bool useDefaultAdmissionLimits;
+    public LoadResources(string backend) => environment = new(() => LoadTestEnvironment.StartAsync(
+        cancellation.Token, backend, userCount, useDefaultAdmissionLimits));
+    public void ConfigureDocumentUsers(int count, bool useShippingLimits)
+    {
+        if (environment.IsValueCreated)
+            throw new InvalidOperationException("Configure document users before starting the load environment. Run user capacity separately.");
+        userCount = count;
+        useDefaultAdmissionLimits = useShippingLimits;
+    }
     public CancellationToken CancellationToken => cancellation.Token;
     public bool Failed => Volatile.Read(ref failed) != 0;
     public Task<LoadTestEnvironment> EnvironmentAsync() => environment.Value;

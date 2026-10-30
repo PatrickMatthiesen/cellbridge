@@ -11,6 +11,9 @@ namespace CellBridge.SqlServer.Tests;
 [Collection("SQL Server")]
 public sealed class SqlServerContentTests(SqlServerFixture fixture)
 {
+    private const string ContentInventorySql = """
+        SELECT COALESCE(SUM(Length),0) FROM cellbridge_documents.objects
+        """;
     private string database = null!;
 
     private DbContextOptions<SqlServerDocumentDbContext> Options(string? connection = null) =>
@@ -53,7 +56,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
             await (index % 2 == 0 ? first : second).WriteAsync(new MemoryStream(bytes))));
         Assert.All(writes, handle => Assert.Equal(writes[0], handle));
         Assert.Equal(1, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
-        Assert.Equal(bytes.LongLength, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+        Assert.Equal(bytes.LongLength, await ScalarAsync<long>(database, ContentInventorySql));
         Assert.Equal(bytes, await second.ReadVerifiedAsync(writes[0]));
         var singleConnection = new SqlServerContentStore(Options(new SqlConnectionStringBuilder(runtime) { MaxPoolSize = 1 }.ConnectionString));
         await using (var stream = await singleConnection.OpenReadAsync(writes[0]))
@@ -88,37 +91,11 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         await Assert.ThrowsAsync<StorageQuotaExceededException>(async () =>
             await new SqlServerContentStore(options, 3).WriteAsync(new MemoryStream([1, 2, 3, 4])));
         Assert.Equal(0, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
-        Assert.Equal(0, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+        Assert.Equal(0, await ScalarAsync<long>(database, ContentInventorySql));
     }
 
     [Fact]
-    public async Task CompetingHostsSharePersistedByteQuotaAndDeduplicationDoesNotChargeAgain()
-    {
-        var runtime = await CreateRuntimeAsync();
-        var first = new SqlServerContentStore(Options(runtime));
-        var second = new SqlServerContentStore(Options(runtime));
-        byte[] bytes = [90, 91, 92, 93];
-        var handle = await first.WriteAsync(new MemoryStream(bytes));
-        await new SqlServerStorageMigrator(Options(), new StorageLimits { MaxStoredBytes = bytes.LongLength + 24 }).MigrateAsync();
-        var admitted = await Task.WhenAll(Enumerable.Range(1, 8).Select(async value =>
-        {
-            try
-            {
-                await (value % 2 == 0 ? first : second).WriteAsync(new MemoryStream(Enumerable.Repeat((byte)value, 10).ToArray()));
-                return true;
-            }
-            catch (StorageQuotaExceededException) { return false; }
-        }));
-        Assert.Equal(2, admitted.Count(value => value));
-        Assert.Equal(bytes.LongLength + 20, await ScalarAsync<long>(database,
-            "SELECT StoredBytes FROM cellbridge_documents.usage"));
-        Assert.Equal(handle, await second.WriteAsync(new MemoryStream(bytes)));
-        Assert.Equal(bytes.LongLength + 20, await ScalarAsync<long>(database,
-            "SELECT StoredBytes FROM cellbridge_documents.usage"));
-    }
-
-    [Fact]
-    public async Task CancellationDuringChunkInsertionRollsBackObjectAndByteLedger()
+    public async Task CancellationDuringChunkInsertionRollsBackObjectAndChunks()
     {
         var runtime = await CreateRuntimeAsync();
         using var cancellation = new CancellationTokenSource();
@@ -130,7 +107,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
         Assert.True(interceptor.Triggered);
         Assert.Equal(0, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
         Assert.Equal(0, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.chunks"));
-        Assert.Equal(0, await ScalarAsync<long>(database, "SELECT StoredBytes FROM cellbridge_documents.usage"));
+        Assert.Equal(0, await ScalarAsync<long>(database, ContentInventorySql));
     }
 
     [Fact]
@@ -162,6 +139,67 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
     }
 
     [Fact]
+    public async Task BatchWritesReadMetadataOnceAndStillVerifyExistingChunksAndMetadata()
+    {
+        var metadata = new CountBatchMetadataReads();
+        var options = new DbContextOptionsBuilder<SqlServerDocumentDbContext>(Options(await CreateRuntimeAsync()))
+            .AddInterceptors(metadata).Options;
+        var store = new SqlServerContentStore(options);
+        ReadOnlyMemory<byte>[] inputs = [new byte[] { 1, 2, 3 }, new byte[] { 4, 5 }, new byte[] { 1, 2, 3 }, ReadOnlyMemory<byte>.Empty];
+        var handles = await store.WriteManyAsync(inputs);
+        Assert.Equal(1, metadata.Reads);
+        Assert.Equal(handles[0], handles[2]);
+        for (var index = 0; index < handles.Count; index++)
+            Assert.Equal(inputs[index].ToArray(), await store.ReadVerifiedAsync(handles[index]));
+
+        metadata.Reads = 0;
+        Assert.Equal(handles, await store.WriteManyAsync(inputs));
+        Assert.Equal(1, metadata.Reads);
+        await using var admin = new SqlServerDocumentDbContext(Options());
+        await admin.Database.ExecuteSqlAsync($"UPDATE cellbridge_documents.chunks SET Bytes=0x030201 WHERE [Key]={handles[0].Key}");
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => store.WriteManyAsync(inputs).AsTask());
+        await admin.Database.ExecuteSqlAsync($"UPDATE cellbridge_documents.objects SET Length=1 WHERE [Key]={handles[3].Key}");
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => store.WriteManyAsync([ReadOnlyMemory<byte>.Empty]).AsTask());
+    }
+
+    private sealed class CountBatchMetadataReads : DbCommandInterceptor
+    {
+        public int Reads;
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.TrimStart().StartsWith("SELECT", StringComparison.Ordinal) &&
+                command.CommandText.Contains("[cellbridge_documents].[objects]", StringComparison.Ordinal) &&
+                command.CommandText.Contains("[Length]", StringComparison.Ordinal) &&
+                command.CommandText.Contains("[Sha256]", StringComparison.Ordinal)) Reads++;
+            return ValueTask.FromResult(result);
+        }
+    }
+
+    [Fact]
+    public async Task ReversedOverlappingBatchesDeduplicateWithoutDeadlocksOrExtraQuotaCharges()
+    {
+        var runtime = await CreateRuntimeAsync();
+        var first = new SqlServerContentStore(Options(runtime));
+        var second = new SqlServerContentStore(Options(runtime));
+        var a = RandomNumberGenerator.GetBytes(65537);
+        var b = RandomNumberGenerator.GetBytes(65538);
+        var outcomes = await Task.WhenAll(
+            first.WriteManyAsync(new ReadOnlyMemory<byte>[] { a, b, ReadOnlyMemory<byte>.Empty }).AsTask(),
+            second.WriteManyAsync(new ReadOnlyMemory<byte>[] { b, ReadOnlyMemory<byte>.Empty, a }).AsTask())
+            .WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(outcomes[0][0], outcomes[1][2]);
+        Assert.Equal(outcomes[0][1], outcomes[1][0]);
+        Assert.Equal(outcomes[0][2], outcomes[1][1]);
+        Assert.Equal(a, await first.ReadVerifiedAsync(outcomes[0][0]));
+        Assert.Equal(b, await second.ReadVerifiedAsync(outcomes[0][1]));
+        Assert.Empty(await second.ReadVerifiedAsync(outcomes[0][2]));
+        Assert.Equal(3, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.objects"));
+        Assert.Equal(4, await ScalarAsync<int>(database, "SELECT COUNT(*) FROM cellbridge_documents.chunks"));
+        Assert.Equal(a.LongLength + b.LongLength, await ScalarAsync<long>(database, ContentInventorySql));
+    }
+
+    [Fact]
     public void RetryingExecutionStrategiesAreRejectedWithoutConnecting()
     {
         var options = new DbContextOptionsBuilder<SqlServerDocumentDbContext>()
@@ -186,9 +224,7 @@ public sealed class SqlServerContentTests(SqlServerFixture fixture)
             CREATE USER [{name}] FOR LOGIN [{name}];
             GRANT SELECT,INSERT ON cellbridge_documents.objects TO [{name}];
             GRANT SELECT,INSERT ON cellbridge_documents.chunks TO [{name}];
-            GRANT SELECT ON cellbridge_documents.usage TO [{name}];
             GRANT SELECT ON cellbridge_documents.schema_version TO [{name}];
-            GRANT UPDATE (StoredBytes) ON cellbridge_documents.usage TO [{name}];
             """, connection);
         await command.ExecuteNonQueryAsync();
         var result = new SqlConnectionStringBuilder(database)

@@ -13,7 +13,8 @@ public sealed class DocumentStateJsonAdmissionTests
     [Fact]
     public async Task DecodedMembershipBudgetHasTheSameExactBoundaryForCompactExpandedAndWrites()
     {
-        var state = await HistoryStateAsync();
+        var content = new InMemoryContentStore();
+        var state = await HistoryStateAsync(content);
         var expected = state.Partitions.Sum(partition => (long)partition.Elements.Length) +
             state.Revisions.Sum(revision => revision.Partitions.Sum(partition => (long)partition.Elements.Length));
         expected *= IntPtr.Size;
@@ -35,10 +36,8 @@ public sealed class DocumentStateJsonAdmissionTests
         }
         admitted.CheckDocument(state);
         Assert.Throws<StorageQuotaExceededException>(() => rejected.CheckDocument(state));
-        Assert.True(await new InMemoryStateStore(new StorageBudget(admitted)).TryCreateAsync(state));
-        var refusedStore = new InMemoryStateStore(new StorageBudget(rejected));
-        await Assert.ThrowsAsync<StorageQuotaExceededException>(() => refusedStore.TryCreateAsync(state).AsTask());
-        Assert.Null(await refusedStore.FindByResourceIdAsync(state.ResourceId));
+        Assert.Equal(state.ResourceId, (await LegacyDocumentProjection.PrepareAsync(state, content, admitted)).Current.Head.ResourceId);
+        await Assert.ThrowsAsync<StorageQuotaExceededException>(() => LegacyDocumentProjection.PrepareAsync(state, content, rejected).AsTask());
     }
 
     [Fact]
@@ -151,9 +150,7 @@ public sealed class DocumentStateJsonAdmissionTests
         Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.Serialize(invalid));
         Assert.Throws<StorageCorruptionException>(() => DocumentStateJson.GetSerializedSize(invalid));
         Assert.Throws<StorageCorruptionException>(() => new StorageLimits().CheckDocument(invalid));
-        var store = new InMemoryStateStore();
-        await Assert.ThrowsAsync<StorageCorruptionException>(() => store.TryCreateAsync(invalid).AsTask());
-        Assert.Null(await store.FindByResourceIdAsync(invalid.ResourceId));
+        await Assert.ThrowsAsync<StorageCorruptionException>(() => LegacyDocumentProjection.PrepareAsync(invalid, new InMemoryContentStore(), new()).AsTask());
 
         var historicalDuplicate = state with
         {
@@ -190,9 +187,7 @@ public sealed class DocumentStateJsonAdmissionTests
         Assert.Throws<StorageQuotaExceededException>(() => limits.CheckDocument(invalid));
         foreach (var json in new[] { DocumentStateJson.Serialize(invalid), JsonSerializer.Serialize(invalid) })
             Assert.Throws<StorageQuotaExceededException>(() => DocumentStateJson.Deserialize(json, limits: limits));
-        var store = new InMemoryStateStore(new StorageBudget(limits));
-        await Assert.ThrowsAsync<StorageQuotaExceededException>(() => store.TryCreateAsync(invalid).AsTask());
-        Assert.Null(await store.FindByResourceIdAsync(invalid.ResourceId));
+        await Assert.ThrowsAsync<StorageQuotaExceededException>(() => LegacyDocumentProjection.PrepareAsync(invalid, new InMemoryContentStore(), limits).AsTask());
     }
 
     [Fact]
@@ -217,9 +212,9 @@ public sealed class DocumentStateJsonAdmissionTests
             decoded.Revisions[0].Partitions[partitionIndex].Elements[elementIndex]);
     }
 
-    private static async Task<DocumentState> HistoryStateAsync()
+    private static async Task<DocumentState> HistoryStateAsync(IContentStore? content = null)
     {
-        var content = new InMemoryContentStore();
+        content ??= new InMemoryContentStore();
         var state = await new DocumentStore().Put("/membership-admission.docx", MinimalDocx.Create("membership"))
             .CaptureAsync(content);
         var author = new SubjectIdentity("admission", "admission", "admission");

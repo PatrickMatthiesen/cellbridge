@@ -120,7 +120,7 @@ public sealed class AuthenticationTests
         builder.Services.AddCellBridgeAuthentication(builder.Configuration);
         builder.Services.Configure<CookieAuthenticationOptions>(IdentityConstants.ApplicationScheme, o => o.TimeProvider = clock);
         builder.Services.Configure<SecurityStampValidatorOptions>(o => o.TimeProvider = clock);
-        builder.Services.AddCellBridge(new StorageProvider(new InMemoryStateStore(), new InMemoryContentStore()), requireDurability: false);
+        builder.Services.AddCellBridge(StorageTestDocuments.Memory(), requireDurability: false);
         var app = builder.Build();
         app.UseAuthentication(); app.UseAuthorization(); app.UseRateLimiter(); app.UseRequestTimeouts(); app.UseAntiforgery();
         app.MapCellBridgeAuthentication();

@@ -43,12 +43,12 @@ public sealed class DocumentAccessLimit
 
 public interface ICellBridgeAccessEvaluator
 {
-    DocumentAccess Evaluate(CellBridgeActor actor, DocumentState state);
+    DocumentAccess Evaluate(CellBridgeActor actor, DocumentAuthorizationView state);
 }
 
 public sealed class StoredDocumentAccessEvaluator : ICellBridgeAccessEvaluator
 {
-    public DocumentAccess Evaluate(CellBridgeActor actor, DocumentState state) => state.Security.AccessFor(actor.Identity.Subject);
+    public DocumentAccess Evaluate(CellBridgeActor actor, DocumentAuthorizationView state) => state.Security.AccessFor(actor.Identity.Subject);
 }
 
 public static class CellBridgeAuthorization

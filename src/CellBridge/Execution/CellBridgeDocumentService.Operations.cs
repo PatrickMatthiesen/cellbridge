@@ -52,20 +52,12 @@ public sealed partial class CellBridgeDocumentService
             "The server does not apply this binary operation."),
     };
 
-    private FsshttpbResponse GeneratedPartitionQuery(StoredDocument document, DocumentPartition partition,
-        FsshttpbCellSubRequest operation, DocumentState state)
+    private static FsshttpbResponse ShapeGeneratedPartition(FsshttpbResponse response, DocumentPartition partition,
+        FsshttpbCellSubRequest operation)
     {
         var controls = operation.Data as QueryChangesSubRequestData;
         if (!FileQueryResponseBuilder.Supports(controls, partition.ProtocolIdentity.CellId))
             return FileQueryResponseBuilder.Unsupported(operation.RequestId);
-        // Uploaded metadata graphs and file graphs use the selective query handlers.
-        // Only generated metadata and editor snapshots reach this handler.
-        var response = partition.Kind == DocumentPartitionKind.EditorsTable
-            ? EditorsQuery(document, partition, operation.RequestId, state)
-            : StorageManifestBuilder.BuildStorageIndexOnlyQueryChangesResponse(operation.RequestId,
-                new ExGuid(1, partition.ProtocolIdentity.SerialGuid), partition.KnowledgeSequence,
-                emitNullManifestMapping: true, includeCellKnowledge: true,
-                waterlineCellStorage: partition.FssHttpBIdentity.CellId.ShortId);
         if (response.DataElementPackage is null || response.SubResponses.FirstOrDefault()?.Data is not QueryChangesSubResponseData data)
             return response;
         var elements = response.DataElementPackage.DataElements;

@@ -74,12 +74,7 @@ public sealed partial class StoredDocument
         _ = ContentStoreReader.UniqueHandles(StorageReferences.Handles(state));
         var handles = ContentStoreReader.UniqueHandles(state.Partitions.Where(p => p.Kind == 0)
             .SelectMany(p => p.Elements.Select(e => e.Payload).Append(p.Content)).Append(state.Content));
-        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-        foreach (var handle in handles)
-        {
-            var bytes = await content.ReadVerifiedAsync(handle, cancellationToken: cancellationToken);
-            payloads.Add(handle.Key, bytes);
-        }
+        var payloads = await content.ReadManyVerifiedAsync(handles, cancellationToken: cancellationToken);
         return new StoredDocument(state, payloads);
     }
 
@@ -136,16 +131,13 @@ public sealed partial class DocumentPartition
         StorageLimits.Check("graph bytes", partition.Elements.Sum(e => e.Payload.Length), limits.MaxGraphBytes);
         _ = ContentStoreReader.UniqueHandles(partition.Elements.Select(e => e.Payload));
         if (partition.StorageIndex is null) throw new StorageCorruptionException("Missing selected storage index.");
-        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var payloads = await content.ReadManyVerifiedAsync(partition.Elements.Select(e => e.Payload),
+            limits.MaxObjectBytes, cancellationToken);
         var elements = new List<DataElement>();
         foreach (var stored in partition.Elements)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!payloads.TryGetValue(stored.Payload.Key, out var bytes))
-            {
-                bytes = await content.ReadVerifiedAsync(stored.Payload, limits.MaxObjectBytes, cancellationToken);
-                payloads.Add(stored.Payload.Key, bytes);
-            }
+            var bytes = payloads[stored.Payload.Key];
             if (stored.Type == (uint)DataElementType.StorageIndexDataElementData &&
                 (stored.MappingSerials.IsDefault || !stored.MappingSerials.SequenceEqual(
                     StorageIndexMappingSerials.Read(bytes).Select(s => new SerialId(s.Guid, s.Value)))))
@@ -155,7 +147,7 @@ public sealed partial class DocumentPartition
         }
         cancellationToken.ThrowIfCancellationRequested();
         return GenericPartitionGraphSnapshot.Create(elements, StorageIds.Restore(partition.StorageIndex),
-            new GenericGraphLimits(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes));
+            limits.GraphTraversalLimits());
     }
 
     /// <summary>Stores all retained graph elements. The caller must still check access and commit the document state.</summary>
@@ -184,15 +176,13 @@ public sealed partial class DocumentPartition
             throw new StorageCorruptionException("Document and file partition content disagree.");
         if (partition.StorageIndex is null)
             throw new StorageCorruptionException("Missing selected file storage index.");
-        var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var payloads = await content.ReadManyVerifiedAsync(partition.Elements.Select(e => e.Payload),
+            limits.MaxObjectBytes, cancellationToken);
         var elements = new List<DataElement>();
         foreach (var stored in partition.Elements)
         {
-            if (!payloads.TryGetValue(stored.Payload.Key, out var bytes))
-            {
-                bytes = await content.ReadVerifiedAsync(stored.Payload, limits.MaxObjectBytes, cancellationToken);
-                payloads.Add(stored.Payload.Key, bytes);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytes = payloads[stored.Payload.Key];
             elements.Add(new DataElement((DataElementType)stored.Type, StorageIds.Restore(stored.Id),
                 new SerialNumber(stored.Serial.Guid, stored.Serial.Value)) { Data = bytes });
         }
@@ -210,6 +200,27 @@ public sealed partial class DocumentPartition
         return source with { Knowledge = knowledgeSequence, Content = package,
             StorageIndex = StorageIds.Capture(graph.StorageIndex), Elements = elements, InlineContent = [] };
     }
+    /// <summary>Appends newly admitted immutable payloads while preserving every retained descriptor.</summary>
+    internal static async ValueTask<PartitionState> CaptureFileDeltaAsync(PartitionState source, ExGuid storageIndex,
+        IReadOnlyCollection<DataElement> additions, ulong knowledgeSequence, ContentHandle package,
+        IContentStore content, CancellationToken cancellationToken = default)
+    {
+        if (source.Kind != 0) throw new ArgumentException("A file partition is required.", nameof(source));
+        var mappings = additions.Where(e => e.DataElementType == DataElementType.StorageIndexDataElementData)
+            .ToDictionary(e => e.DataElementExtendedGuid, e => StorageIndexMappingSerials.Read(e.Data ?? []));
+        async ValueTask VisitAsync(Func<DataElement, Stream, ValueTask> visit)
+        {
+            foreach (var element in additions)
+            {
+                using var payload = new MemoryStream(element.Data ?? [], writable: false);
+                await visit(element, payload);
+            }
+        }
+        var added = await CaptureElementsAsync(VisitAsync, mappings, null, content, cancellationToken);
+        return source with { Knowledge = knowledgeSequence, Content = package,
+            StorageIndex = StorageIds.Capture(storageIndex), Elements = source.Elements.Concat(added), InlineContent = [] };
+    }
+
     internal DocumentPartition(PartitionState state, IReadOnlyDictionary<string, byte[]> payloads, bool metadataOnly = false)
     {
         Kind = (DocumentPartitionKind)state.Kind;
@@ -242,11 +253,11 @@ public sealed partial class DocumentPartition
             graph is null ? Content.ToImmutableArray() : []);
     }
 
-    private static async ValueTask<ImmutableArray<GraphElementState>> CaptureElementsAsync(
+    private static async ValueTask<GraphElementCollection> CaptureElementsAsync(
         PartitionGraphSnapshot graph, PartitionState? source, IContentStore content, CancellationToken cancellationToken)
         => await CaptureElementsAsync(graph.VisitElementsAsync, graph.MappingSerials, source, content, cancellationToken);
 
-    private static async ValueTask<ImmutableArray<GraphElementState>> CaptureElementsAsync(
+    private static async ValueTask<GraphElementCollection> CaptureElementsAsync(
         Func<Func<DataElement, Stream, ValueTask>, ValueTask> visit,
         IReadOnlyDictionary<ExGuid, IReadOnlyList<SerialNumber>> mappingSerials, PartitionState? source,
         IContentStore content, CancellationToken cancellationToken, long maxObjectBytes = long.MaxValue,
@@ -254,6 +265,22 @@ public sealed partial class DocumentPartition
     {
         var elements = ImmutableArray.CreateBuilder<GraphElementState>();
         var previous = source?.Elements.ToDictionary(e => e.Id);
+        var pending = new List<ReadOnlyMemory<byte>>();
+        var pendingIndexes = new List<int>();
+        long pendingBytes = 0;
+        async ValueTask FlushAsync()
+        {
+            if (pending.Count == 0) return;
+            var handles = await content.WriteManyAsync(pending, cancellationToken);
+            for (var i = 0; i < handles.Count; i++)
+            {
+                var index = pendingIndexes[i];
+                elements[index] = elements[index] with { Payload = handles[i] };
+            }
+            pending.Clear();
+            pendingIndexes.Clear();
+            pendingBytes = 0;
+        }
         await visit(async (element, stream) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -277,7 +304,21 @@ public sealed partial class DocumentPartition
                     if (rejectIdentityReuse && retained is not null)
                         throw new InvalidDataException("Conflicting immutable data-element payload.");
                     stream.Position = 0;
-                    handle = await content.WriteAsync(stream, cancellationToken);
+                    // The visitor owns the stream. Retain only a bounded batch of
+                    // new payloads, then publish their durable handles together.
+                    if (pendingBytes + stream.Length > 8L * 1024 * 1024) await FlushAsync();
+                    if (stream.Length > 8L * 1024 * 1024)
+                        handle = await content.WriteAsync(stream, cancellationToken);
+                    else
+                    {
+                        using var buffer = new MemoryStream();
+                        await stream.CopyToAsync(buffer, cancellationToken);
+                        var bytes = buffer.ToArray();
+                        pending.Add(bytes);
+                        pendingIndexes.Add(elements.Count);
+                        pendingBytes += bytes.Length;
+                        handle = null!; // Replaced by FlushAsync before returning the graph.
+                    }
                 }
                 var mappings = mappingSerials.TryGetValue(element.DataElementExtendedGuid, out var serials)
                     ? serials.Select(s => new SerialId(s.Guid, s.Value)).ToImmutableArray() : [];
@@ -285,8 +326,22 @@ public sealed partial class DocumentPartition
                 elements.Add(old is not null && old.Type == (uint)element.DataElementType &&
                     old.Serial == serial && old.Payload == handle && old.MappingSerials.AsSpan().SequenceEqual(mappings.AsSpan())
                     ? old : new GraphElementState(id, (uint)element.DataElementType, serial, handle) { MappingSerials = mappings });
+                if (pending.Count == 64 || pendingBytes >= 8L * 1024 * 1024) await FlushAsync();
             });
-        return elements.ToImmutable();
+        await FlushAsync();
+        var captured = elements.ToImmutable();
+        if (source is not null && captured.Length >= source.Elements.Length)
+        {
+            var index = 0;
+            foreach (var old in source.Elements)
+            {
+                if (!ReferenceEquals(old, captured[index])) break;
+                index++;
+            }
+            if (index == source.Elements.Length)
+                return source.Elements.Concat((GraphElementCollection)ImmutableArray.Create(captured.AsSpan()[index..]));
+        }
+        return captured;
     }
 }
 

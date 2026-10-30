@@ -54,26 +54,15 @@ public sealed class ExternalRevisionPublicationWorker : BackgroundService
         {
             var delivered = 0;
             var transientFailure = false;
-            var offset = 0;
-            while (true)
+            var pending = await _provider.Documents.ListPendingDeliveriesAsync(int.MaxValue, token);
+            foreach (var resourceId in pending)
             {
                 token.ThrowIfCancellationRequested();
-                var page = await _provider.State.ListAsync(offset, 128, token);
-                if (page.Count == 0) break;
-                foreach (var summary in page)
-                {
-                    token.ThrowIfCancellationRequested();
-                    var state = await _provider.State.FindByResourceIdAsync(summary.ResourceId, token);
-                    if (state?.Publication is not { Pending.IsEmpty: false, BlockedReason: null }) continue;
-                    var attempt = await _publisher.PublishNextAsync(summary.ResourceId, token);
-                    if (attempt == PublicationAttempt.Delivered) delivered++;
-                    else if (attempt == PublicationAttempt.TransientFailure) transientFailure = true;
-                    else if (attempt is PublicationAttempt.Conflict or PublicationAttempt.ContentUnavailable)
-                        _logger.LogWarning("File delivery for {ResourceId} stopped with {Attempt}.",
-                            summary.ResourceId, attempt);
-                }
-                offset += page.Count;
-                if (page.Count < 128) break;
+                var attempt = await _publisher.PublishNextAsync(resourceId, token);
+                if (attempt == PublicationAttempt.Delivered) delivered++;
+                else if (attempt == PublicationAttempt.TransientFailure) transientFailure = true;
+                else if (attempt is PublicationAttempt.Conflict or PublicationAttempt.ContentUnavailable)
+                    _logger.LogWarning("File delivery for {ResourceId} stopped with {Attempt}.", resourceId, attempt);
             }
             return (delivered, transientFailure);
         }

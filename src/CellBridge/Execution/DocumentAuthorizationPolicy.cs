@@ -11,7 +11,7 @@ public interface ICellBridgeAuthorizationPolicy
 {
     string? PolicyDomain { get; }
     DocumentAuthorizationBinding? BindNewDocument(Guid resourceId);
-    ICellBridgeAuthorizationSnapshot? Resolve(DocumentState state);
+    ICellBridgeAuthorizationSnapshot? Resolve(DocumentAuthorizationView state);
 }
 
 /// <summary>
@@ -30,7 +30,7 @@ public sealed class StoredGrantAuthorizationPolicy : ICellBridgeAuthorizationPol
 {
     public string? PolicyDomain => null;
     public DocumentAuthorizationBinding? BindNewDocument(Guid resourceId) => null;
-    public ICellBridgeAuthorizationSnapshot? Resolve(DocumentState state) =>
+    public ICellBridgeAuthorizationSnapshot? Resolve(DocumentAuthorizationView state) =>
         state.Security.AuthorizationPolicy is null ? new Snapshot(state.ResourceId, state.Security) : null;
 
     private sealed record Snapshot(Guid ResourceId, DocumentSecurity Security) : ICellBridgeAuthorizationSnapshot

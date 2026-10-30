@@ -12,8 +12,11 @@ requests require a specific `AllowedHosts` list. A universal `*` does not establ
 trust; only loopback hosts work without a specific list. Keep forwarded headers
 restricted to known proxies.
 
-Protocol admission defaults to eight requests per process and two per subject,
-including response delivery. The absolute deadline defaults to two minutes.
+Cellstorage POSTs and current/historical document GETs share admission limits of
+eight requests per process and two per authenticated subject. A download holds
+its permit through package reconstruction and response delivery. The absolute
+deadline defaults to two minutes and covers both stages. Metadata-only HEAD
+requests and OPTIONS discovery do not reconstruct packages.
 Large request bodies spool to private temporary files before parsing. SOAP XML
 is limited to 16 Mi characters, so use MTOM attachments for large binary payloads.
 Binary PutChanges accepts at most 1,024 author logins with 65,536 cumulative

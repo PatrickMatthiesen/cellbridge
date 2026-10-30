@@ -1,9 +1,13 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Text.RegularExpressions;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Dotnet;
 using Aspire.Hosting.Testing;
+using CellBridge.Storage.Abstractions;
+using Microsoft.Extensions.Configuration;
+using Npgsql;
 
 namespace CellBridge.TestInfrastructure;
 
@@ -13,23 +17,53 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
     private readonly DistributedApplication application;
     private readonly IDistributedApplicationTestingBuilder builder;
     private readonly string password;
+    private readonly LoadIdentitySessions? sessions;
+    public int UserCount { get; }
+    public int ProtocolConcurrency { get; }
+    public int ProtocolConcurrencyPerSubject { get; }
+    public bool QueryStatisticsEnabled { get; }
+    public int? PostgreSqlPoolSize { get; }
+    public int? PostgreSqlMaxAutoPrepare { get; }
     public string Backend { get; }
     public Uri HttpEndpoint { get; }
+    public LoadHttpsEndpointInfo HttpsEndpointInfo { get; }
     public string DocumentConnectionString { get; }
     public string PostgreSqlDocumentConnectionString { get; }
     public string FileSystemConnectionString { get; }
     public string ListsConnectionString { get; }
     public string ListsRuntimeConnectionString { get; }
 
+    public OwnedWebDemoProcessProbe CreateWebDemoProcessProbe()
+    {
+        // Aspire.Hosting 17's KnownProperties.Executable.Pid is the snapshot key executable.pid.
+        if (!application.ResourceNotifications.TryGetCurrentState("webdemo", out var resource))
+            throw new InvalidOperationException("The owned WebDemo resource has no process snapshot.");
+        var value = resource.Snapshot.Properties.SingleOrDefault(property =>
+            string.Equals(property.Name, "executable.pid", StringComparison.OrdinalIgnoreCase))?.Value;
+        if (!int.TryParse(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture), out var pid) || pid <= 0)
+            throw new InvalidOperationException("The owned WebDemo resource has no executable process ID.");
+        return new OwnedWebDemoProcessProbe(pid);
+    }
+
     private LoadTestEnvironment(DistributedApplication application,
         IDistributedApplicationTestingBuilder builder, Uri endpoint, string documents, string postgreSqlDocuments, string filesystem,
-        string lists, string runtime, string password, string backend)
+        string lists, string runtime, string password, string backend, int userCount, LoadIdentitySessions? sessions,
+        int protocolConcurrency, int protocolConcurrencyPerSubject, bool queryStatisticsEnabled, int? postgreSqlPoolSize,
+        int? postgreSqlMaxAutoPrepare, LoadHttpsEndpointInfo httpsEndpointInfo)
     {
         this.application = application;
         this.builder = builder;
         this.password = password;
+        this.sessions = sessions;
         Backend = backend;
+        UserCount = userCount;
+        ProtocolConcurrency = protocolConcurrency;
+        ProtocolConcurrencyPerSubject = protocolConcurrencyPerSubject;
+        QueryStatisticsEnabled = queryStatisticsEnabled;
+        PostgreSqlPoolSize = postgreSqlPoolSize;
+        PostgreSqlMaxAutoPrepare = postgreSqlMaxAutoPrepare;
         HttpEndpoint = endpoint;
+        HttpsEndpointInfo = httpsEndpointInfo;
         DocumentConnectionString = documents;
         PostgreSqlDocumentConnectionString = postgreSqlDocuments;
         FileSystemConnectionString = filesystem;
@@ -38,26 +72,82 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
     }
 
     public static async Task<LoadTestEnvironment> StartAsync(CancellationToken cancellationToken = default,
-        string backend = "postgresql")
+        string backend = "postgresql", int userCount = 1, bool useDefaultAdmissionLimits = false)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(userCount);
         if (backend is not ("postgresql" or "sqlserver")) throw new ArgumentException("Unknown load-test backend.", nameof(backend));
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(5));
         var builder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
         DistributedApplication? application = null;
+        LoadIdentitySessions? sessions = null;
         try
         {
             var storage = builder.CreateResourceBuilder<PostgresServerResource>("storage");
+            var directPostgreSql = builder.Configuration.GetValue("Parameters:LoadDirectPostgreSql", false);
+            if (directPostgreSql)
+                storage.WithEndpoint("tcp", endpoint =>
+                {
+                    endpoint.IsProxied = false;
+                    endpoint.TargetHost = IPAddress.Loopback.ToString();
+                });
+            var queryStatisticsRequested = builder.Configuration.GetValue("Parameters:LoadQueryStatistics", false);
+            var queryStatisticsEnabled = queryStatisticsRequested && backend == "postgresql";
+            if (queryStatisticsRequested && !queryStatisticsEnabled)
+                Console.WriteLine("PostgreSQL query statistics are unavailable for the SQL Server document workload.");
+            if (queryStatisticsEnabled)
+                storage.WithArgs("-c", "shared_preload_libraries=pg_stat_statements", "-c", "track_io_timing=on",
+                    "-c", "track_wal_io_timing=on");
+            if (builder.Configuration.GetValue<int?>("Parameters:LoadPostgreSqlMaxWalSizeMiB") is { } walSize)
+            {
+                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(walSize);
+                storage.WithArgs("-c", "max_wal_size=" + walSize.ToString(System.Globalization.CultureInfo.InvariantCulture) + "MB");
+            }
             var initialization = builder.CreateResourceBuilder<DotnetProjectResource>("storage-init");
             var database = builder.CreateResourceBuilder<PostgresDatabaseResource>("cellbridge");
             var webdemo = builder.CreateResourceBuilder<DotnetProjectResource>("webdemo");
+            var directHttps = builder.Configuration.GetValue("Parameters:LoadDirectHttps", false);
+            if (directHttps)
+                webdemo.WithEndpoint("https", endpoint =>
+                {
+                    endpoint.IsProxied = false;
+                    endpoint.TargetHost = IPAddress.Loopback.ToString();
+                });
+            var configuredPoolSize = builder.Configuration.GetValue<int?>("Parameters:LoadPostgreSqlPoolSize");
+            if (configuredPoolSize is { } poolSize) ArgumentOutOfRangeException.ThrowIfNegativeOrZero(poolSize);
+            var postgreSqlPoolSize = backend == "postgresql" ? configuredPoolSize : null;
+            var configuredAutoPrepare = builder.Configuration.GetValue<int?>("Parameters:LoadPostgreSqlMaxAutoPrepare");
+            if (configuredAutoPrepare is { } autoPrepare) ArgumentOutOfRangeException.ThrowIfNegative(autoPrepare);
+            var postgreSqlMaxAutoPrepare = backend == "postgresql" ? configuredAutoPrepare : null;
+            var postgreSqlOverrides = new List<string>();
+            if (postgreSqlPoolSize is { } webPoolSize)
+                postgreSqlOverrides.Add("Maximum Pool Size=" + webPoolSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (postgreSqlMaxAutoPrepare is { } webAutoPrepare)
+                postgreSqlOverrides.Add("Max Auto Prepare=" + webAutoPrepare.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (postgreSqlOverrides.Count != 0)
+                webdemo.WithEnvironment("ConnectionStrings__cellbridge", ReferenceExpression.Create(
+                    $"{database.Resource.ConnectionStringExpression};{string.Join(';', postgreSqlOverrides)}"));
+            var protocolConcurrency = builder.Configuration.GetValue("Parameters:LoadMaxConcurrentRequests", useDefaultAdmissionLimits ? 8 : 16);
+            var protocolConcurrencyPerSubject = builder.Configuration.GetValue("Parameters:LoadMaxConcurrentRequestsPerSubject", useDefaultAdmissionLimits ? 2 : 16);
+            // Anchor configured paths before launching a process with another
+            // working directory. Explicit blank settings select the library's
+            // shared local default and override per-WebDemo configuration.
+            const string certificateKey = "Authentication:KeyProtection:CertificatePath";
+            var certificatePath = builder.Configuration[certificateKey];
+            builder.Configuration[certificateKey] = string.IsNullOrWhiteSpace(certificatePath)
+                ? "" : Path.GetFullPath(certificatePath);
+            const string certificatePasswordKey = "Authentication:KeyProtection:Password";
+            builder.Configuration[certificatePasswordKey] ??= "";
+            webdemo.WithEnvironment("Authentication__KeyProtection__CertificatePath", builder.Configuration[certificateKey])
+                .WithEnvironment("Authentication__KeyProtection__Password", builder.Configuration[certificatePasswordKey]);
             webdemo.WithEnvironment("Logging__LogLevel__Default", "Warning")
-                // One seeded account drives the load. Set explicit admission
-                // limits so this test can compare concurrent storage work.
+                // Set explicit admission limits so scenarios can compare
+                // concurrent storage work with their configured accounts.
                 .WithEnvironment("Protocol__MaxConcurrentRequests",
-                    builder.Configuration["Parameters:LoadMaxConcurrentRequests"] ?? "16")
+                    protocolConcurrency.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 .WithEnvironment("Protocol__MaxConcurrentRequestsPerSubject",
-                    builder.Configuration["Parameters:LoadMaxConcurrentRequestsPerSubject"] ?? "16");
+                    protocolConcurrencyPerSubject.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .WithEnvironment("Logging__LogLevel__Microsoft.AspNetCore.Antiforgery", "Error");
             var password = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)) + "Aa1!";
             builder.Configuration["Parameters:LoadTestPassword"] = password;
             var appHost = webdemo.ApplicationBuilder;
@@ -136,8 +226,10 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
                     Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../../tools/CellBridge.Admin/CellBridge.Admin.csproj")),
                     options => options.ExcludeLaunchProfile = true)
                 .WithArgs("seed-test-user")
+                .WithEnvironment("Logging__LogLevel__Default", "Warning")
                 .WithEnvironment("DOTNET_ENVIRONMENT", "Testing")
                 .WithEnvironment("Seed__Password", appHost.AddParameter("LoadTestPassword", secret: true))
+                .WithEnvironment("Seed__UserCount", userCount.ToString(System.Globalization.CultureInfo.InvariantCulture))
                 .WithEnvironment("TMPDIR", temporaryDirectory)
                 .WithEnvironment("TMP", temporaryDirectory)
                 .WithEnvironment("TEMP", temporaryDirectory)
@@ -156,36 +248,117 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
             await PostgreSqlEnvironment.WaitForInitializerAsync(application, "load-account", timeout.Token);
             await PostgreSqlEnvironment.WaitForInitializerAsync(application, "filesystem-init", timeout.Token);
             await application.ResourceNotifications.WaitForResourceHealthyAsync("webdemo", timeout.Token);
-            return new(application, builder, application.GetEndpoint("webdemo", "https"),
+            var endpoint = application.GetEndpoint("webdemo", "https");
+            var httpsEndpointInfo = ReadHttpsEndpoint(webdemo.GetEndpoint("https"), endpoint, directHttps);
+            var postgresEndpoint = application.GetEndpoint("storage", "tcp");
+            var postgresProxied = storage.GetEndpoint("tcp").EndpointAnnotation.IsProxied;
+            if (!postgresEndpoint.IsLoopback || postgresProxied == directPostgreSql)
+                throw new InvalidOperationException("The allocated load PostgreSQL endpoint does not match the requested private transport mode.");
+            if (directPostgreSql)
+            {
+                var targetHost = storage.GetEndpoint("tcp").EndpointAnnotation.TargetHost;
+                if (!IPAddress.TryParse(targetHost, out var address) || !IPAddress.IsLoopback(address))
+                    throw new InvalidOperationException("The direct load PostgreSQL published host binding is not loopback.");
+            }
+            Console.WriteLine($"Load PostgreSQL: mode={(postgresProxied ? "proxied" : "direct")}, service={postgresEndpoint.Host}:{postgresEndpoint.Port}, loopback binding requested={directPostgreSql}.");
+            var identityConnection = (await application.GetConnectionStringAsync("cellbridge", timeout.Token))!;
+            if (queryStatisticsEnabled)
+            {
+                // This connection comes only from this fixture's disposable Aspire database.
+                // An explicitly requested but unavailable extension is a setup failure.
+                await using var statistics = NpgsqlDataSource.Create(identityConnection);
+                await using var extension = statistics.CreateCommand("CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+                await extension.ExecuteNonQueryAsync(timeout.Token);
+            }
+            if (userCount > 1)
+                sessions = await LoadIdentitySessions.CreateAsync(identityConnection, endpoint, builder.Configuration,
+                    userCount, timeout.Token);
+            return new(application, builder, endpoint,
                 (await application.GetConnectionStringAsync(documentConnectionName, timeout.Token))!,
                 (await application.GetConnectionStringAsync("cellbridge", timeout.Token))!,
                 (await application.GetConnectionStringAsync("filesystem", timeout.Token))!,
                 (await application.GetConnectionStringAsync("lists", timeout.Token))!,
                 (await application.GetConnectionStringAsync("lists-runtime", timeout.Token))!,
-                password, backend);
+                password, backend, userCount, sessions, protocolConcurrency, protocolConcurrencyPerSubject,
+                queryStatisticsEnabled, postgreSqlPoolSize, postgreSqlMaxAutoPrepare, httpsEndpointInfo);
         }
         catch
         {
-            try { if (application is not null) await application.DisposeAsync(); }
-            finally { await builder.DisposeAsync(); }
+            try { if (sessions is not null) await sessions.DisposeAsync(); }
+            finally
+            {
+                try { if (application is not null) await application.DisposeAsync(); }
+                finally { await builder.DisposeAsync(); }
+            }
             throw;
         }
     }
 
-    public async Task<HttpClient> CreateClientAsync(CancellationToken cancellationToken = default)
+    private static LoadHttpsEndpointInfo ReadHttpsEndpoint(EndpointReference reference, Uri origin, bool requestedDirect)
     {
-        var client = new HttpClient(new HttpClientHandler
+        var annotation = reference.EndpointAnnotation;
+        if (origin.Scheme != "https" || !origin.IsLoopback || annotation.IsProxied == requestedDirect)
+            throw new InvalidOperationException("The allocated load HTTPS endpoint does not match the requested private transport mode.");
+        var targetHost = annotation.TargetHost ?? "localhost";
+        // A non-proxied endpoint is served on its allocated service port. The
+        // proxied endpoint's dynamic target port is not exposed by this API.
+        int? targetPort = annotation.IsProxied ? annotation.TargetPort : origin.Port;
+        if (requestedDirect)
         {
-            CookieContainer = new CookieContainer(),
-            ServerCertificateCustomValidationCallback = (request, _, _, errors) =>
-                errors == System.Net.Security.SslPolicyErrors.None || request.RequestUri?.IsLoopback == true,
-        }) { BaseAddress = HttpEndpoint };
+            if (!IPAddress.TryParse(targetHost, out var address) || !IPAddress.IsLoopback(address))
+                throw new InvalidOperationException("The direct load HTTPS target host is not loopback.");
+            var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+                .Where(listener => listener.Port == origin.Port).ToArray();
+            if (listeners.Length == 0 || listeners.Any(listener => !IPAddress.IsLoopback(listener.Address)))
+                throw new InvalidOperationException("The direct load HTTPS endpoint does not have an exclusively loopback listener.");
+        }
+        var result = new LoadHttpsEndpointInfo(annotation.IsProxied, origin.Host, origin.Port, targetHost, targetPort);
+        Console.WriteLine($"Load HTTPS: mode={(result.IsProxied ? "proxied" : "direct")}, service={result.ServiceHost}:{result.ServicePort}, target={result.TargetHost}:{result.TargetPort?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}, loopback listener verified={requestedDirect}.");
+        return result;
+    }
+
+    public SubjectIdentity GetUserIdentity(int userIndex)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(userIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(userIndex, UserCount);
+        var suffix = userIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var login = userIndex == 0 ? "integration-writer" : "integration-writer-" + suffix;
+        return new("local:" + login, login, userIndex == 0 ? "Integration writer" : "Integration writer " + suffix);
+    }
+
+    public Task<HttpClient> CreateClientAsync(CancellationToken cancellationToken = default) =>
+        CreateClientAsync(0, cancellationToken);
+
+    public async Task<HttpClient> CreateClientAsync(int userIndex, CancellationToken cancellationToken = default)
+    {
+        _ = GetUserIdentity(userIndex);
+        if (sessions is null) return await CreateLoginClientAsync(userIndex, cancellationToken);
+        var cookies = new CookieContainer();
+        cookies.Add(HttpEndpoint, new Cookie(sessions.CookieName, sessions[userIndex], sessions.CookiePath)
+        { Secure = true, HttpOnly = true });
+        var client = CreateHttpClient(cookies);
+        try
+        {
+            // The server still decrypts and validates the normal Identity ticket.
+            using var accepted = await client.GetAsync("/auth/complete", cancellationToken);
+            accepted.EnsureSuccessStatusCode();
+            client.DefaultRequestHeaders.Add("X-CellBridge-CSRF", await LoginTokenAsync(client, cancellationToken));
+            return client;
+        }
+        catch { client.Dispose(); throw; }
+    }
+
+    /// <summary>Measures the actual password login path when a test explicitly needs it.</summary>
+    public async Task<HttpClient> CreateLoginClientAsync(int userIndex = 0, CancellationToken cancellationToken = default)
+    {
+        var identity = GetUserIdentity(userIndex);
+        var client = CreateHttpClient(new CookieContainer());
         try
         {
             var token = await LoginTokenAsync(client, cancellationToken);
             using var login = await client.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                ["login"] = "integration-writer", ["password"] = password,
+                ["login"] = identity.Login, ["password"] = password,
                 ["__RequestVerificationToken"] = token, ["returnUrl"] = "/auth/complete",
             }), cancellationToken);
             login.EnsureSuccessStatusCode();
@@ -197,6 +370,14 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
         catch { client.Dispose(); throw; }
     }
 
+    private HttpClient CreateHttpClient(CookieContainer cookies) =>
+        new(new HttpClientHandler
+        {
+            CookieContainer = cookies,
+            ServerCertificateCustomValidationCallback = (request, _, _, errors) =>
+                errors == System.Net.Security.SslPolicyErrors.None || request.RequestUri?.IsLoopback == true,
+        }) { BaseAddress = HttpEndpoint };
+
     private static async Task<string> LoginTokenAsync(HttpClient client, CancellationToken cancellationToken)
     {
         var html = await client.GetStringAsync("/auth/login", cancellationToken);
@@ -207,7 +388,13 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        try { await application.DisposeAsync(); }
-        finally { await builder.DisposeAsync(); }
+        try { if (sessions is not null) await sessions.DisposeAsync(); }
+        finally
+        {
+            try { await application.DisposeAsync(); }
+            finally { await builder.DisposeAsync(); }
+        }
     }
 }
+
+public sealed record LoadHttpsEndpointInfo(bool IsProxied, string ServiceHost, int ServicePort, string TargetHost, int? TargetPort);

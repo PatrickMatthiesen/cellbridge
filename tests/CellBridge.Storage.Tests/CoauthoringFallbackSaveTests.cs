@@ -20,7 +20,7 @@ public sealed class CoauthoringFallbackSaveTests
         var service = new CellBridgeDocumentService(test.Provider);
         var state = (await service.CreateAsync("/fallback-" + Guid.NewGuid().ToString("N") + ".docx",
             MinimalDocx.Create(), TestActor.Value))!;
-        var request = Save(state);
+        var request = await Save(service,state);
         var processor = new CellBridgeRequestProcessor(service);
 
         var saved = await processor.ExecuteAsync(request, "https://host.test", TestActor.Value);
@@ -28,11 +28,11 @@ public sealed class CoauthoringFallbackSaveTests
         var accepted = Assert.Single(saved.AcceptedSaves);
         Assert.False(accepted.IsReplay);
         Assert.Equal(state.ContentVersion + 1, accepted.ContentVersion);
-        var stored = (await test.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(accepted.Content, stored.Content);
+        var stored = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(accepted.Package, stored.Package);
         Assert.Equal(accepted.ContentVersion, stored.ContentVersion);
-        Assert.Single(stored.Receipts);
-        await using (var content = await test.Provider.Content.OpenReadAsync(stored.Content))
+        Assert.Equal(1,stored.Counters.SaveReceipts);
+        await using (var content = await test.Provider.Packages.OpenReadAsync(stored.Package))
         {
             using var downloaded = new MemoryStream();
             await content.CopyToAsync(downloaded);
@@ -45,7 +45,7 @@ public sealed class CoauthoringFallbackSaveTests
         AssertResponses(replay.Response);
         Assert.Equal(accepted with { IsReplay = true }, Assert.Single(replay.AcceptedSaves));
         Assert.Equal(stored.ContentVersion,
-            (await test.Provider.State.FindByResourceIdAsync(state.ResourceId))!.ContentVersion);
+            (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.ContentVersion);
     }
 
     [Theory]
@@ -66,15 +66,15 @@ public sealed class CoauthoringFallbackSaveTests
         var granted = await processor.ExecuteAsync(new() { Requests = { locked } }, "https://host.test", TestActor.Value);
         Assert.Equal("Success", granted.Response.Responses[0].SubResponses[0].ErrorCode);
 
-        var rejected = await processor.ExecuteAsync(Save(state), "https://host.test", TestActor.Value);
+        var rejected = await processor.ExecuteAsync(await Save(service,state), "https://host.test", TestActor.Value);
         Assert.NotEqual("Success", rejected.Response.Responses[0].SubResponses[0].ErrorCode);
         Assert.Equal("DependentOnlyOnNotSupportedRequestGetSupported", rejected.Response.Responses[0].SubResponses[1].ErrorCode);
         Assert.Equal("DependentOnlyOnSuccessRequestFailed", rejected.Response.Responses[0].SubResponses[2].ErrorCode);
         Assert.Empty(rejected.AcceptedSaves);
-        var stored = (await test.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(state.Content, stored.Content);
+        var stored = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(state.Package, stored.Package);
         Assert.Equal(state.ContentVersion, stored.ContentVersion);
-        Assert.Empty(stored.Receipts);
+        Assert.Equal(0,stored.Counters.SaveReceipts);
     }
 
     [Theory]
@@ -87,16 +87,16 @@ public sealed class CoauthoringFallbackSaveTests
         var state = (await service.CreateAsync("/fallback-reader-" + Guid.NewGuid().ToString("N") + ".docx",
             MinimalDocx.Create(), TestActor.Value))!;
         var reader = TestActor.Value with { AccessLimit = new(state.ResourceId, DocumentAccess.Read) };
-        var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(Save(state), "https://host.test", reader);
+        var result = await new CellBridgeRequestProcessor(service).ExecuteAsync(await Save(service,state), "https://host.test", reader);
         Assert.Empty(result.AcceptedSaves);
         Assert.NotEqual("Success", result.Response.Responses[0].SubResponses[2].ErrorCode);
-        var stored = (await test.Provider.State.FindByResourceIdAsync(state.ResourceId))!;
-        Assert.Equal(state.Content, stored.Content);
+        var stored = (await test.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!;
+        Assert.Equal(state.Package, stored.Package);
         Assert.Equal(state.ContentVersion, stored.ContentVersion);
-        Assert.Empty(stored.Receipts);
+        Assert.Equal(0,stored.Counters.SaveReceipts);
     }
 
-    private static CellStorageRequest Save(DocumentState state)
+    private static async Task<CellStorageRequest> Save(CellBridgeDocumentService service,DocumentHead state)
     {
         var file = HostIntegrationTests.File(state.ResourceId, SubRequestType.Coauth, SubRequestType.SchemaLock, SubRequestType.Cell);
         var client = Guid.NewGuid().ToString();
@@ -119,8 +119,7 @@ public sealed class CoauthoringFallbackSaveTests
         cell.SubRequestDataAttributes["BypassLockID"] = schema;
         cell.SubRequestDataAttributes["SchemaLockID"] = schema;
         var binary = StorageTests.Fixture("save-first");
-        Assert.IsType<PutChangesSubRequestData>(binary.SubRequests[0].Data).ExpectedStorageIndex =
-            StorageIds.Restore(state.Partitions[0].StorageIndex!);
+        StorageTests.Rebase(binary,await StorageTestDocuments.GraphAsync(service,state));
         HostIntegrationTests.SetBinary(cell, binary.ToByteArray());
         return new() { Requests = { file } };
     }
