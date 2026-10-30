@@ -552,6 +552,13 @@ budget. `Parameters__LoadQueryStatistics=true` captures normalized statement tot
 I/O and WAL deltas, durability settings and connection samples in
 `artifacts/load-tests/*.pgstats.json`, covering warm-up and measurement before validation.
 
+`Parameters__LoadDirectHttps=true` selects the owned WebDemo HTTPS listener over
+loopback for a proxy-path experiment. The default `false` keeps the Aspire HTTPS
+proxy. HTTP health checks and PostgreSQL routing remain unchanged. Setup reports
+the allocated mode and ports and verifies the direct listener's loopback binding.
+Compare both modes on the same commit, profile and resource limits, and retain
+their results as separate configurations.
+
 Independent clocks schedule saves at the profile's interval, queries every
 30 seconds and opens every 120 seconds, with random initial phases. Each user
 edits one active document; an open selects the next, downloads it and queries its

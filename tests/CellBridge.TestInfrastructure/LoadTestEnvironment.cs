@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Text.RegularExpressions;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
@@ -25,6 +26,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
     public int? PostgreSqlMaxAutoPrepare { get; }
     public string Backend { get; }
     public Uri HttpEndpoint { get; }
+    public LoadHttpsEndpointInfo HttpsEndpointInfo { get; }
     public string DocumentConnectionString { get; }
     public string PostgreSqlDocumentConnectionString { get; }
     public string FileSystemConnectionString { get; }
@@ -47,7 +49,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
         IDistributedApplicationTestingBuilder builder, Uri endpoint, string documents, string postgreSqlDocuments, string filesystem,
         string lists, string runtime, string password, string backend, int userCount, LoadIdentitySessions? sessions,
         int protocolConcurrency, int protocolConcurrencyPerSubject, bool queryStatisticsEnabled, int? postgreSqlPoolSize,
-        int? postgreSqlMaxAutoPrepare)
+        int? postgreSqlMaxAutoPrepare, LoadHttpsEndpointInfo httpsEndpointInfo)
     {
         this.application = application;
         this.builder = builder;
@@ -61,6 +63,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
         PostgreSqlPoolSize = postgreSqlPoolSize;
         PostgreSqlMaxAutoPrepare = postgreSqlMaxAutoPrepare;
         HttpEndpoint = endpoint;
+        HttpsEndpointInfo = httpsEndpointInfo;
         DocumentConnectionString = documents;
         PostgreSqlDocumentConnectionString = postgreSqlDocuments;
         FileSystemConnectionString = filesystem;
@@ -96,6 +99,13 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
             var initialization = builder.CreateResourceBuilder<DotnetProjectResource>("storage-init");
             var database = builder.CreateResourceBuilder<PostgresDatabaseResource>("cellbridge");
             var webdemo = builder.CreateResourceBuilder<DotnetProjectResource>("webdemo");
+            var directHttps = builder.Configuration.GetValue("Parameters:LoadDirectHttps", false);
+            if (directHttps)
+                webdemo.WithEndpoint("https", endpoint =>
+                {
+                    endpoint.IsProxied = false;
+                    endpoint.TargetHost = IPAddress.Loopback.ToString();
+                });
             var configuredPoolSize = builder.Configuration.GetValue<int?>("Parameters:LoadPostgreSqlPoolSize");
             if (configuredPoolSize is { } poolSize) ArgumentOutOfRangeException.ThrowIfNegativeOrZero(poolSize);
             var postgreSqlPoolSize = backend == "postgresql" ? configuredPoolSize : null;
@@ -232,6 +242,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
             await PostgreSqlEnvironment.WaitForInitializerAsync(application, "filesystem-init", timeout.Token);
             await application.ResourceNotifications.WaitForResourceHealthyAsync("webdemo", timeout.Token);
             var endpoint = application.GetEndpoint("webdemo", "https");
+            var httpsEndpointInfo = ReadHttpsEndpoint(webdemo.GetEndpoint("https"), endpoint, directHttps);
             var identityConnection = (await application.GetConnectionStringAsync("cellbridge", timeout.Token))!;
             if (queryStatisticsEnabled)
             {
@@ -251,7 +262,7 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
                 (await application.GetConnectionStringAsync("lists", timeout.Token))!,
                 (await application.GetConnectionStringAsync("lists-runtime", timeout.Token))!,
                 password, backend, userCount, sessions, protocolConcurrency, protocolConcurrencyPerSubject,
-                queryStatisticsEnabled, postgreSqlPoolSize, postgreSqlMaxAutoPrepare);
+                queryStatisticsEnabled, postgreSqlPoolSize, postgreSqlMaxAutoPrepare, httpsEndpointInfo);
         }
         catch
         {
@@ -263,6 +274,29 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
             }
             throw;
         }
+    }
+
+    private static LoadHttpsEndpointInfo ReadHttpsEndpoint(EndpointReference reference, Uri origin, bool requestedDirect)
+    {
+        var annotation = reference.EndpointAnnotation;
+        if (origin.Scheme != "https" || !origin.IsLoopback || annotation.IsProxied == requestedDirect)
+            throw new InvalidOperationException("The allocated load HTTPS endpoint does not match the requested private transport mode.");
+        var targetHost = annotation.TargetHost ?? "localhost";
+        // A non-proxied endpoint is served on its allocated service port. The
+        // proxied endpoint's dynamic target port is not exposed by this API.
+        int? targetPort = annotation.IsProxied ? annotation.TargetPort : origin.Port;
+        if (requestedDirect)
+        {
+            if (!IPAddress.TryParse(targetHost, out var address) || !IPAddress.IsLoopback(address))
+                throw new InvalidOperationException("The direct load HTTPS target host is not loopback.");
+            var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+                .Where(listener => listener.Port == origin.Port).ToArray();
+            if (listeners.Length == 0 || listeners.Any(listener => !IPAddress.IsLoopback(listener.Address)))
+                throw new InvalidOperationException("The direct load HTTPS endpoint does not have an exclusively loopback listener.");
+        }
+        var result = new LoadHttpsEndpointInfo(annotation.IsProxied, origin.Host, origin.Port, targetHost, targetPort);
+        Console.WriteLine($"Load HTTPS: mode={(result.IsProxied ? "proxied" : "direct")}, service={result.ServiceHost}:{result.ServicePort}, target={result.TargetHost}:{result.TargetPort?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}, loopback listener verified={requestedDirect}.");
+        return result;
     }
 
     public SubjectIdentity GetUserIdentity(int userIndex)
@@ -344,3 +378,5 @@ public sealed class LoadTestEnvironment : IAsyncDisposable
         }
     }
 }
+
+public sealed record LoadHttpsEndpointInfo(bool IsProxied, string ServiceHost, int ServicePort, string TargetHost, int? TargetPort);

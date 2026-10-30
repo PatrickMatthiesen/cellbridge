@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using Xunit.Abstractions;
 using System.Xml.Linq;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttpB;
@@ -25,12 +27,13 @@ public sealed class LoadEnvironmentOptionTests
 }
 
 [Collection("benchmark-database")]
-public sealed class LoadIdentityTests(BenchmarkEnvironment fixture)
+public sealed class LoadIdentityTests(BenchmarkEnvironment fixture, ITestOutputHelper output)
 {
     [Fact]
     public async Task DistinctSignedInAccountsOwnSeparateDocumentsAndCannotReadOrSaveEachOthersFiles()
     {
         var environment = fixture.Environment;
+        output.WriteLine("Allocated HTTPS: " + JsonSerializer.Serialize(environment.HttpsEndpointInfo));
         Assert.Equal(3, environment.UserCount);
         Assert.Equal("local:integration-writer", environment.GetUserIdentity(0).Subject);
         Assert.Equal("integration-writer-1", environment.GetUserIdentity(1).Login);
@@ -101,5 +104,40 @@ public sealed class LoadIdentityTests(BenchmarkEnvironment fixture)
         var changed = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         Assert.True(changed.StateVersion > before.StateVersion);
         Assert.Equal(updatedBytes, await BenchmarkTestDocuments.PackageAsync(provider, changed.Package));
+        using var downloaded = await first.GetAsync(paths[0]);
+        Assert.Equal(HttpStatusCode.OK, downloaded.StatusCode);
+        Assert.Equal(updatedBytes, await downloaded.Content.ReadAsByteArrayAsync());
+        var query = new FsshttpbCellRequest();
+        query.SubRequests.Add(new(RequestTypes.QueryChanges) { RequestId = 1, Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true } });
+        var queried = await new CellStorageTransport(first, endpoint).SendCellAsync(fileUrl,
+            query.ToByteArray(), null, true, query.UserAgentGuid);
+        Assert.Equal(HttpStatusCode.OK, queried.StatusCode);
+        Assert.NotNull(queried.Binary);
+        var decoded = FsshttpbResponse.Deserialize(new BinaryReaderEx(queried.Binary));
+        Assert.False(decoded.Status);
+        Assert.False(Assert.Single(decoded.SubResponses).Status);
+        Assert.Equal(updatedBytes, PartitionGraphSnapshot.Create(decoded.DataElementPackage!.DataElements,
+            ((QueryChangesSubResponseData)decoded.SubResponses[0].Data!).StorageIndexExtendedGuid).Materialize());
+        var transport = environment.HttpsEndpointInfo;
+        var requestedDirect = string.Equals(Environment.GetEnvironmentVariable("Parameters__LoadDirectHttps"), "true", StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(!requestedDirect, transport.IsProxied);
+        Assert.Equal(environment.HttpEndpoint.Host, transport.ServiceHost);
+        Assert.Equal(environment.HttpEndpoint.Port, transport.ServicePort);
+        if (requestedDirect) Assert.Equal(transport.ServicePort, transport.TargetPort);
+        var csrf = Assert.Single(first.DefaultRequestHeaders.GetValues("X-CellBridge-CSRF"));
+        first.DefaultRequestHeaders.Remove("X-CellBridge-CSRF");
+        try
+        {
+            using var rejectedCsrf = await first.PostAsJsonAsync("/api/documents", new { name = "missing-csrf", type = "docx" });
+            Assert.Equal(HttpStatusCode.BadRequest, rejectedCsrf.StatusCode);
+        }
+        finally { first.DefaultRequestHeaders.Add("X-CellBridge-CSRF", csrf); }
+        await using var durability = source.CreateCommand("SELECT current_setting('fsync'),current_setting('full_page_writes'),current_setting('synchronous_commit')");
+        await using var settings = await durability.ExecuteReaderAsync();
+        Assert.True(await settings.ReadAsync());
+        Assert.Equal("on", settings.GetString(0)); Assert.Equal("on", settings.GetString(1)); Assert.Equal("on", settings.GetString(2));
+        var databaseTarget = new NpgsqlConnectionStringBuilder(environment.PostgreSqlDocumentConnectionString);
+        Assert.True(databaseTarget.Host == "localhost" || System.Net.IPAddress.TryParse(databaseTarget.Host, out var address) && System.Net.IPAddress.IsLoopback(address));
+
     }
 }
