@@ -1,8 +1,8 @@
 # External host reliability
 
 CellBridge can retain accepted revisions for ordered delivery into another host's
-file store. This is an opt-in integration contract. A host must implement durable
-compare-and-swap at the destination and use the same CellBridge provider for both
+file store. This is an opt-in integration contract. The destination must persist each revision change atomically with its content
+and operation receipt. The host must use the same CellBridge provider for both
 WOPI and FSSHTTP write authority. `OpenWriteAsync` without a revision precondition
 cannot satisfy the contract.
 
@@ -18,7 +18,7 @@ WOPI HTTP routes or upstream WopiHost changes are included.
 
 After importing and verifying the initial external file, call
 `ExternalRevisionPublisher.BindAsync` with its resource ID, lifecycle generation,
-state version, a new durable binding GUID, the destination ID and its current
+state version, a new binding GUID, the destination ID and its current
 opaque revision token. The binding is immutable. Binding to a baseline asserts
 that the imported package corresponds to that external revision. The host must
 establish that correspondence before binding.
@@ -45,7 +45,7 @@ with `ExternalRevisionPublisher` directly.
 
 Offset pagination provides eventual discovery in ordinary workloads; it does not
 guarantee fairness under sustained path churn. Passes are serialized only within
-one worker instance. Destination compare-and-swap and durable receipts remain
+one worker instance. Destination compare-and-swap and stored receipts remain
 required across multiple hosts.
 
 The publisher verifies the whole immutable file into temporary disk storage
@@ -58,7 +58,7 @@ The next attempt uses the same operation identity and expected revision.
 The destination implementation must atomically persist:
 
 - File bytes and a new external revision token.
-- A receipt keyed by durable binding and operation identity, with the complete
+- A receipt keyed by binding and operation identity, with the complete
   request fingerprint including resource, generation, sequence, content hash,
   length and expected external revision.
 - The resulting revision token needed to recover a lost acknowledgement.
@@ -75,7 +75,7 @@ must retain deduplication protection and return `Stale` for compacted operations
 An unresolved operation must retain its resulting revision receipt. Deduplication
 protection survives file deletion, local recreation and binding changes.
 
-Two publishers can submit the same head. Destination CAS and durable receipts
+Two publishers can submit the same head. Destination CAS and stored receipts
 make that safe. CellBridge acknowledges only the exact matching current head.
 Delayed acknowledgements and failure reports cannot remove or block another
 head. The next entry uses the acknowledged resulting external revision as its
@@ -135,7 +135,7 @@ token never becomes an unlocked write. The service checks permission inside both
 transitions and fences preparation against the original lifecycle, state version
 and coordination generation. A competing edit or lock change rejects the save.
 
-Use a stable operation key for retries. The durable receipt records the subject,
+Use a stable operation key for retries. The stored receipt records the subject,
 lifecycle, content and lock fingerprint, and accepted revision number. A repeat
 returns that original revision even after later saves; it still requires current
 write permission. Reusing a key with different bytes or a different lock fails.
@@ -225,8 +225,8 @@ a newly verified baseline; the destination retains old deduplication protection.
 
 `DocumentStore.TryEvict` affects only the compatibility context's local cache.
 It requires the exact cached object and expected content version. A replaced
-attachment or newer content prevents stale eviction. It does not change durable
-state, delete external bytes or invalidate detached readers. The reusable durable
+attachment or newer content prevents stale eviction. It does not change stored
+state, delete external bytes or invalidate detached readers. The reusable
 service reads provider snapshots and has no process-wide document cache to evict.
 
 ## Storage compatibility and validation

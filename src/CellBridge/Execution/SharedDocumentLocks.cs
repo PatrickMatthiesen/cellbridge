@@ -49,7 +49,7 @@ public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
     }
 
     /// <summary>
-    /// Publishes a typed, durably staged host write through the same document fence used by Office.
+    /// Publishes a typed host write after staging its content, through the same document fence used by Office.
     /// </summary>
     public async ValueTask<bool> TryCommitAsync(HostWriteToken token, PreparedDocumentPublication publication,
         CellBridgeActor actor, CancellationToken cancellationToken = default)

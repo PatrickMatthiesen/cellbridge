@@ -66,6 +66,6 @@ public sealed class PostgreSqlLinuxFactAttribute : FactAttribute
 {
     public PostgreSqlLinuxFactAttribute()
     {
-        if (!OperatingSystem.IsLinux()) Skip = "Durable filesystem reclamation is qualified on Linux only.";
+        if (!OperatingSystem.IsLinux()) Skip = "Filesystem reclamation is qualified on Linux only.";
     }
 }

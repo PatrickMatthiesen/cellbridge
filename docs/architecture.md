@@ -114,7 +114,7 @@ The service prepares changed canonical elements and resolved object bindings bef
 taking a document lock. It reconstructs the selected package into an exclusive
 temporary file, checks ZIP members against the expanded-byte limit, and records
 its exact length and digest. It deletes the temporary file when preparation ends.
-It stores new canonical elements and the protocol acknowledgement durably. It does
+It persists new canonical elements and the protocol acknowledgement. It does
 not store another complete downloadable package for every change.
 
 Publication then locks the affected document row, reads database time, and checks

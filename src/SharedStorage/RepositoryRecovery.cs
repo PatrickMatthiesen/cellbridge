@@ -173,14 +173,14 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
             try { await transaction.CommitAsync(CancellationToken.None); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (IOException error)
-            { throw new StorageUnavailableException("The recovery commit outcome is unknown. Resolve it through its durable recovery receipt before retrying.", error); }
+            { throw new StorageUnavailableException("The recovery commit outcome is unknown. Resolve it through its recovery receipt before retrying.", error); }
             return receipt;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) when (database.IsUniqueViolation(error))
         { throw new RecoveryConflictException("A document identity or filename was claimed during recovery. No normalized state was imported."); }
         catch (Exception error) when (database.IsDatabaseException(error))
-        { throw new StorageUnavailableException("Recovery publication failed or its commit outcome is unknown. Resolve the operation through its durable recovery receipt.", error); }
+        { throw new StorageUnavailableException("Recovery publication failed or its commit outcome is unknown. Resolve the operation through its recovery receipt.", error); }
     }
     private async Task ValidatePhysicalSnapshotAsync(NormalizedDocumentSnapshot snapshot, IContentStore content, CancellationToken ct)
     {

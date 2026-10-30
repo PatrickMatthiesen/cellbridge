@@ -43,14 +43,14 @@ public sealed class ExternalPublicationTests
         Assert.Equal(PublicationAttempt.TransientFailure, await publisher.PublishNextAsync(state.ResourceId));
         Assert.Equal(head, (await peer.Documents.ReadNextDeliveryAsync(state.ResourceId))!.Revision);
         Assert.Equal(first.State.Package.Sha256, (await destination.ReadAsync()).Hash);
-        // Recreate publisher and destination objects over the shared durable stores.
+        // Recreate publisher and destination objects over the shared stores.
         var replay = new ExternalRevisionPublisher(peer, restartedDestination);
         var attempts = await Task.WhenAll(Enumerable.Range(0, 2).Select(_ => replay.PublishNextAsync(state.ResourceId).AsTask()));
         Assert.Contains(PublicationAttempt.Delivered, attempts);
         while ((await provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Counters.PendingDeliveries != 0)
             Assert.Equal(PublicationAttempt.Delivered, await replay.PublishNextAsync(state.ResourceId));
         Assert.Equal(second.State.Package.Sha256, (await destination.ReadAsync()).Hash);
-        // A delayed earlier delivery must return its durable receipt without changing the newer bytes.
+        // A delayed earlier delivery must return its receipt without changing the newer bytes.
         await using var oldBytes = await provider.Packages.OpenReadAsync(head.Package);
         var old = await destination.CompareExchangeAsync(new(state.Delivery!.BindingId, state.Delivery.Destination, "r0", head), oldBytes);
         Assert.Equal(ExternalDeliveryStatus.Applied, old.Status);
@@ -199,7 +199,7 @@ public sealed class ExternalPublicationTests
         public async ValueTask<ExternalDeliveryResult> CompareExchangeAsync(ExternalDeliveryRequest request, Stream bytes, CancellationToken cancellationToken = default)
         {
             var result = await inner.CompareExchangeAsync(request, bytes, cancellationToken);
-            if (Interlocked.Exchange(ref _failed, 1) == 0) throw new IOException("Acknowledgement lost after durable external commit.");
+            if (Interlocked.Exchange(ref _failed, 1) == 0) throw new IOException("Acknowledgement lost after the external commit.");
             return result;
         }
     }

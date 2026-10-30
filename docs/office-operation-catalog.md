@@ -64,7 +64,7 @@ For `b` binary bytes, inline base64 needs `4 * ceil(b / 3)` ASCII characters bef
 XML/HTTP overhead. MTOM carries binary parts with MIME boundaries, headers and
 XOP references. Binary framing adds its own stream-object headers, compact
 integers, GUIDs, serials and knowledge. Neither transport expansion nor a repeated
-query response implies new durable content. [Outer Cell][O2.3.1.1],
+query response implies new stored content. [Outer Cell][O2.3.1.1],
 [transport][O2.1], [binary request][B2.2.2].
 
 ## HTTP entry points and batch envelope
@@ -79,7 +79,7 @@ query response implies new durable content. [Outer Cell][O2.3.1.1],
 | Historical URL returned by GetVersions, HTTP GET/HEAD | Version URL plus credentials | GET `F` for that revision; HEAD zero body plus headers | Read one immutable revision and lifecycle generation | Implemented `/_cellbridge/history/...` URL is a host delivery mechanism for the result, not a new normative SOAP operation. [GetVersions][O3.1.4.10]. |
 
 A Request identifies a document; SubRequest tokens correlate operations and are
-not durable idempotency keys. A supplied resource ID must resolve explicitly;
+do not guarantee idempotency. A supplied resource ID must resolve explicitly;
 CellBridge does not create documents on a failed lookup or silently substitute the
 URL. A collection is not a cross-document transaction. Independent earlier
 operations can succeed even if a later operation fails. Binary subrequests share
@@ -343,7 +343,7 @@ These are design deductions from the catalog, not benchmark results.
 Prefer separate measurements for control reads, lease mutations, namespace rename,
 history list/restore, full sync, unchanged poll, incremental sync and complete
 save. A single average request size or a single document bucket hides these
-costs. Durable content, immutable graph/index state, authorization, session leases,
+costs. Stored content, immutable graph/index state, authorization, session leases,
 history references and receipts need independent size/accounting dimensions.
 Any proposed global lock or serialization point should identify the protocol
 invariant requiring that exact scope.

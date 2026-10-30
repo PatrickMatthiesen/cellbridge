@@ -27,47 +27,21 @@ MS-FSSHTTPB for desktop Office editing, saving and coauthoring. Read
 - Compare decoded requests and responses with SharePoint reference traffic and
   the OfficeDev Interop-TestSuites. Log enough detail to diagnose wire failures.
 
-## Repository map
-
-- `src/CellBridge.WebDemo`: non-packable development host, Razor Pages library and document catalog.
-- `src/CellBridge`: SOAP and MTOM handling, protocol execution, document state and persistence contracts.
-- `src/CellBridge.AspNetCore`: reusable discovery, download, authentication and cellstorage endpoints.
-- `src/CellBridge.FssHttpB`: binary serialization and object graphs.
-- `src/CellBridge.Storage.*`: document persistence backends.
-- `src/CellBridge.AppHost/CellBridge.AppHost.csproj`: development AppHost for `webdemo`, PostgreSQL, initialization and optional capture.
-- `benchmark/`: isolated measurements using the shared disposable environment.
-- `tests/`: protocol, storage and interoperability tests.
-- `tools/capture/`: SharePoint capture tooling.
-
 ## Run and validate
 
-Use the Aspire CLI to run the app, rather than raw `dotnet run`:
-
-```sh
-aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-aspire wait webdemo --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-aspire ps --non-interactive
-aspire describe --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
-```
-
+- Use the Aspire CLI to run the app. Follow the commands in
+  [automated testing](docs/automated-testing.md) and the
+  [README](README.md).
 - Stop Aspire before building outputs that its processes have locked.
-- Run checks relevant to the change. Main solution: `CellBridge.slnx`.
-  Linux PostgreSQL and replay fixtures reuse the main AppHost with disposable storage.
-  Live remote Office tests are opt-in; see
-  [interop instructions](tests/CellBridge.Interop.Tests/README.md).
+- Run checks relevant to the change in `CellBridge.slnx`. Live remote Office
+  tests are opt-in; see [interop instructions](tests/CellBridge.Interop.Tests/README.md).
 - For desktop Office failures, inspect request logs first. Use a hostname Windows
-  can resolve; Aspire allocates the local HTTPS origin. Use `Parameters__PublicOrigin`
-  for an external browser/Office origin.
+  can resolve and the origin reported by Aspire.
 - During an active capture, stop it with `tools/capture/stop.py` before stopping
   Aspire, then validate the capture. See [the capture guide](docs/capture-kit.md).
 
 ## Implementation constraints
 
-- Aspire uses PostgreSQL for state and content by default. The in-memory provider
-  loses its contents when the process stops. Imports create only missing documents.
-  Saves do not write back to the import directory. See
-  [storage setup and provider contracts](docs/storage-providers.md).
 - Resolve supplied resource IDs correctly. Do not create documents on SOAP lookup
   misses or hide unknown IDs with a URL fallback. See
   [document identity and save evidence](docs/demo-library.md).
@@ -76,8 +50,7 @@ aspire stop --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-int
 - Preserve explicit errors for unsupported partial, multi-request and non-file
   partition uploads. Do not claim support from package creation or download alone.
 - Distinguish offline replay, local desktop package checks and live remote editing.
-  Two-desktop coauthoring and distinct authenticated identities remain unverified
-  or unimplemented; consult the README before describing support.
+  Consult the README before describing current client or authentication support.
 
 ## Documentation
 
@@ -87,15 +60,20 @@ other standalone reports unless requested or needed for ongoing work. Keep
 AGENTS.md limited to current instructions and links. Retain only reviewed fixtures
 required by automated tests under `testdata/`.
 
-Use `artifacts/tmp/<task>/` or a private directory under disk-backed system temp
-for disposable tooling. The agent that creates task files must remove them when
-finished. Preserve only files still needed, such as uncommitted patches, captures
-needed to reproduce an open issue, or raw results for an unfinished benchmark.
-Keep those in the primary checkout's ignored `artifacts/<task>/` before removing
-a task worktree. Remove them when that work finishes or replaces them. Do not
-archive all ignored files as a default cleanup step, or force-add artifacts to Git.
-Reuse suitable checkouts and avoid worktrees for read-only reviews. Follow the
+Use ignored `artifacts/tmp/<task>/` for disposable tooling and remove it when
+finished. Preserve files needed to reproduce open issues or unfinished work.
+Do not force-add artifacts to Git. Reuse suitable checkouts and avoid worktrees
+for read-only reviews. Follow the
 [worktree cleanup instructions](docs/automated-testing.md#generated-files-and-worktree-cleanup).
+
+## Writing
+
+Use plain, specific English. Describe what persists, what commits, or what survives
+a restart instead of calling a host, execution path, save or fix "durable".
+Preserve exact API names and established technical terms when required. Do not
+replace vague wording with a different vague adjective or claim an untested guarantee.
+
+## Guides
 
 - [Architecture](docs/architecture.md)
 - [Demo library and desktop validation](docs/demo-library.md)

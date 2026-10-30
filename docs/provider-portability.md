@@ -75,12 +75,12 @@ both context files must contain the same entry:
 {
   "BindingId": "00000000-0000-0000-0000-000000000001",
   "Destination": "application-document-store",
-  "ReceiptDomain": "the-same-durable-external-delivery-ledger"
+  "ReceiptDomain": "the-same-external-delivery-ledger"
 }
 ```
 
 Add entries to `ExternalDestinations` only when the destination name resolves to
-the same external system and durable delivery receipt ledger. Unknown, absent or
+the same external system and delivery receipt ledger. Unknown, absent or
 foreign bindings reject export/import. The archive preserves binding IDs, expected
 external revisions, operation IDs, sequences, blocked state and queued content
 pins. It does not create an external system or reconstruct its delivery ledger.
@@ -127,7 +127,7 @@ dotnet tools/CellBridge.Storage.Portability/bin/Release/net11.0/CellBridge.Stora
 
 The operator supplies the actor's stable subject. The regular document service
 still requires its current Write access and checks lifecycle, locks and expected
-history. Restore creates a new publication and durable restore receipt; it does
+history. Restore creates a new publication and stored restore receipt; it does
 not replace history or bypass permissions. Reuse the same key after an uncertain
 commit. Existing unsupported legacy metadata/graph restoration cases remain
 explicit errors, as described in the revision guide.
@@ -140,7 +140,7 @@ The manifest carries:
 
 - A new archive operation ID and versioned authorization/external context.
 - Explicit current heads and every retained provider state snapshot, including
-  tombstones, replacement links, retired names, histories and durable receipts.
+  tombstones, replacement links, retired names, histories and stored receipts.
 - All referenced immutable content handles, including handles used only by an old
   provider snapshot, retained binary response, historical graph or external pin.
 - Previous recovery receipts, so repeated recovery remains recognizable after
@@ -169,7 +169,7 @@ for unused missing ancestors remains; recovery does not claim that every such
 graph supports historical rebase. DOCX, XLSX and PPTX packages are supported.
 
 Import completes validation in temporary local files before writing destination
-content. Only after every required immutable object is durable and verified does
+content. Only after every required immutable object is stored and verified does
 the provider publish all snapshots, heads and one recovery receipt in an atomic
 operation. Readers observe the prior empty namespace or the complete import.
 A competing creation either commits before recovery, causing recovery to reject,
@@ -186,7 +186,7 @@ repacking identical logical contents changes its fingerprint.
 Malformed/incompatible input performs zero destination content writes. Cancellation,
 content-store failure, quota rejection or interruption before commit publishes no
 document. A commit whose reply is lost is resolved by importing the same archive
-again. The provider checks its durable receipt before destination emptiness. Do
+again. The provider checks its stored receipt before destination emptiness. Do
 not treat cancellation or a transport failure as evidence that commit rolled back.
 
 Import leaves validated staged immutable objects charged when later publication
@@ -222,8 +222,8 @@ rejection. The isolated runner exercises PostgreSQL chunks to accounted filesyst
 content to PostgreSQL chunks, including content referenced only by an old state
 snapshot. These are server recovery checks, not desktop compatibility evidence.
 
-The supported durable path uses initialized PostgreSQL and Windows/Linux filesystem
-stores with their existing flush/rename requirements. Power-loss, PostgreSQL
+The supported configuration uses initialized PostgreSQL and Windows/Linux
+filesystem stores with their existing flush/rename requirements. Power-loss, PostgreSQL
 replication/failover, arbitrary shared filesystems, external policy-system recovery
 and real external-host adoption require environment-specific qualification. This
 workflow adds no OneNote or two-desktop coauthoring claim and does not publish new
