@@ -147,7 +147,7 @@ public sealed partial class DocumentPartition
         }
         cancellationToken.ThrowIfCancellationRequested();
         return GenericPartitionGraphSnapshot.Create(elements, StorageIds.Restore(partition.StorageIndex),
-            new GenericGraphLimits(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes));
+            limits.GraphTraversalLimits());
     }
 
     /// <summary>Stores all retained graph elements. The caller must still check access and commit the document state.</summary>

@@ -41,7 +41,7 @@ public static class IndexedDocumentPublicationBuilder
         var cell = IndexedDocumentGraph.Capture(graph.FileCell);
         var revision = IndexedDocumentGraph.Capture(graph.Revision!);
         var resolved = await IndexedDocumentGraph.ResolveFileCellAsync(scope, index, cell, revision,
-            new IndexedGraphOverlaySource(scope, records), cancellationToken: cancellationToken);
+            new IndexedGraphOverlaySource(scope, records), limits.GraphTraversalLimits(), cancellationToken);
         var root = new DocumentPackageRoot(scope, index, cell, revision, IndexedDocumentGraph.Capture(graph.RootObject!));
         var package = new DocumentPackage(resourceId, lifecycleGeneration, 1, DocumentPackage.CurrentReconstructionVersion, root,
             bytes.LongLength, Convert.ToHexStringLower(SHA256.HashData(bytes)));

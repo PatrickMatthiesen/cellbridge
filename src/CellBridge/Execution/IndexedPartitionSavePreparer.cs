@@ -189,13 +189,13 @@ public static class IndexedPartitionSavePreparer
                         var baseline = new IndexedResolvedCell(scope, cell, oldRevision, [],
                             preparation.Partition.Bindings.Where(binding => binding.Key.Cell == cell).ToImmutableArray());
                         resolved = await IndexedDocumentGraph.ResolveCellWithCurrentAsync(scope, index, cell, revision, overlay, baseline,
-                            before.Kind == 0, new(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes), cancellationToken);
+                            before.Kind == 0, limits.GraphTraversalLimits(), cancellationToken);
                     }
                     else resolved = before.Kind == 0
                         ? await IndexedDocumentGraph.ResolveFileCellAsync(scope, index, cell, revision, overlay,
-                            new(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes), cancellationToken)
+                            limits.GraphTraversalLimits(), cancellationToken)
                         : await IndexedDocumentGraph.ResolveCellAsync(scope, index, cell, revision, overlay,
-                            new(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes), cancellationToken);
+                            limits.GraphTraversalLimits(), cancellationToken);
                     resolvedCells.Add(cell, resolved); bindings.AddRange(resolved.Bindings);
                 }
                 if (storageManifest is not null)
@@ -241,7 +241,7 @@ public static class IndexedPartitionSavePreparer
                 // historical ancestry, even when intervening inline metadata retired that catalog.
                 foreach (var cell in resolvedCells.Values)
                     required.UnionWith(await IndexedDocumentGraph.RequiredElementsAsync(scope,index,cell,overlay,
-                        (_,id,ct) => loader.ReadAsync(id,ct),new(MaxElements:limits.MaxGraphElements,MaxPayloadBytes:limits.MaxGraphBytes),cancellationToken));
+                        (_,id,ct) => loader.ReadAsync(id,ct),limits.GraphTraversalLimits(),cancellationToken));
             }
             // Ordinary saves reuse IDs visited while resolving and validating their candidate.
             // This does not walk older base chains already represented by current bindings.

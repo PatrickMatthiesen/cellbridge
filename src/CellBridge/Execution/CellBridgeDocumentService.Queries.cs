@@ -73,8 +73,12 @@ public sealed partial class CellBridgeDocumentService
                 ?? throw new StorageCorruptionException("Missing selected revision manifest.");
             var selected = new IndexedResolvedCell(scope, indexedCell, revisionId, revision.Roots,
                 read.Bindings.Where(binding => binding.Key.Cell == indexedCell).ToImmutableArray());
+            // Save preparation can reuse a resolved base past the generic parser's
+            // default depth. Each distinct ancestor needs a catalog element, so the
+            // coherent catalog bounds this iterative walk without a second policy cap.
+            var queryLimits = provider.Limits.GraphTraversalLimits() with { MaxRevisionDepth = Math.Max(1, read.Elements.Length) };
             required = (await IndexedDocumentGraph.RequiredElementsAsync(scope, indexId, selected, provider.Documents,
-                ReadElement, new(MaxElements: provider.Limits.MaxGraphElements, MaxPayloadBytes: provider.Limits.MaxGraphBytes), cancellationToken))
+                ReadElement, queryLimits, cancellationToken))
                 .Select(StorageIds.Restore).ToHashSet();
         }
         var metadata = read.Elements.Select(element => new DataElement((DataElementType)element.Type,

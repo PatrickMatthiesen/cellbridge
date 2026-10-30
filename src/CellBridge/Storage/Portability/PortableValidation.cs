@@ -48,9 +48,9 @@ public sealed partial class PortableArchive
                         var metadata = snapshot.Cells.Single(value => value.Scope == root.Scope && value.ElementId == mapping.Target);
                         var resolved = root.Scope.TargetPartition == 0
                             ? await IndexedDocumentGraph.ResolveFileCellAsync(root.Scope, root.Id, cell, metadata.RevisionId, source,
-                                new(MaxElements: _storage.MaxGraphElements, MaxPayloadBytes: _storage.MaxGraphBytes), ct)
+                                _storage.GraphTraversalLimits(), ct)
                             : await IndexedDocumentGraph.ResolveCellAsync(root.Scope, root.Id, cell, metadata.RevisionId, source,
-                                new(MaxElements: _storage.MaxGraphElements, MaxPayloadBytes: _storage.MaxGraphBytes), ct);
+                                _storage.GraphTraversalLimits(), ct);
                         bindings.AddRange(resolved.Bindings);
                     }
                     Equal(IndexedDocumentGraph.Checkpoint(root.Scope, root.Sequence, bindings),

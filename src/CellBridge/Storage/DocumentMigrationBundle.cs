@@ -206,9 +206,9 @@ public static class LegacyDocumentProjection
                             throw new StorageCorruptionException("A legacy cell mapping is unresolved.");
                         var resolved = partition.Kind == 0
                             ? await IndexedDocumentGraph.ResolveFileCellAsync(scope, index, cell, manifest.RevisionId, source,
-                                new(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes), cancellationToken)
+                                limits.GraphTraversalLimits(), cancellationToken)
                             : await IndexedDocumentGraph.ResolveCellAsync(scope, index, cell, manifest.RevisionId, source,
-                                new(MaxElements: limits.MaxGraphElements, MaxPayloadBytes: limits.MaxGraphBytes), cancellationToken);
+                                limits.GraphTraversalLimits(), cancellationToken);
                         bindings.AddRange(resolved.Bindings);
                     }
                 }

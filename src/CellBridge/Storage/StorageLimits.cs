@@ -1,3 +1,5 @@
+using CellBridge.FssHttpB;
+
 namespace CellBridge.Storage.Abstractions;
 
 /// <summary>Admission limits, not a claim about supported Office file sizes.</summary>
@@ -18,6 +20,11 @@ public sealed record StorageLimits
     public int MaxRestoreReceipts { get; init; } = 1_000;
     public int MaxWholeFileSaveReceipts { get; init; } = 10_000;
     public int MaxRetiredPathKeys { get; init; } = 128;
+
+    // Every distinct ancestor needs a retained graph element. Server operations
+    // use that admission bound, not the stand-alone parser's default depth cap.
+    internal GenericGraphLimits GraphTraversalLimits() => new(MaxElements: MaxGraphElements,
+        MaxPayloadBytes: MaxGraphBytes, MaxRevisionDepth: MaxGraphElements);
 
     public void Validate()
     {
