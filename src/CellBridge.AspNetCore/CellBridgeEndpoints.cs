@@ -61,6 +61,8 @@ public static class CellBridgeEndpoints
         if (options.RequestTimeout <= TimeSpan.Zero || options.RequestTimeout > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(options.RequestTimeout));
         CellBridgePublicOrigin.Validate(options.PublicOrigin);
+        if (options.DocumentLibraryId == Guid.Empty)
+            throw new ArgumentException("DocumentLibraryId must be a stable, nonempty catalog GUID.", nameof(configure));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomParts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomHeaderBytes);
         if (options.MaxRequestBytes > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(options.MaxRequestBytes));
@@ -85,6 +87,21 @@ public static class CellBridgeEndpoints
             ? Results.BadRequest() : await next(context));
         if (office is null) routes.RequireAuthorization();
         else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.CookieScheme });
+        routes.MapMethods("/", ["OPTIONS"], Discovery);
+        routes.MapGet("/_cellbridge/history/settings", (HttpContext context, CellBridgeDocumentService service, CellBridgeOptions options) =>
+        {
+            if (options.DocumentLibraryId is null) return Results.NotFound();
+            context.Response.Headers.CacheControl = "private, no-store";
+            context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; frame-ancestors 'self'";
+            context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+            return Results.Content($"""
+                <!doctype html><html lang="en"><meta charset="utf-8"><title>Version history settings</title>
+                <h1>Version history settings</h1>
+                <p>A document can have up to {service.Provider.Limits.MaxHistoryRevisions} saved revisions.</p>
+                <p>The server rejects a publication that would exceed this limit. It does not automatically delete older revisions.</p>
+                <p>These settings are managed by the server administrator.</p></html>
+                """, "text/html; charset=utf-8");
+        });
         routes.MapMethods("/_cellbridge/history/{resourceId:guid}/{generation:long}/{revisionNumber}", ["GET", "HEAD"],
             async (Guid resourceId, long generation, string revisionNumber, HttpContext context, CellBridgeDocumentService service) =>
             {
@@ -212,7 +229,9 @@ private static string PublicOrigin(HttpContext context) => CellBridgePublicOrigi
 
 private static IResult Discovery(HttpContext context)
 {
-    context.Response.Headers["X-MSFSSHTTP"] = "1.0";
+    // MS-FSSHTTP 3.1.4.10 requires at least 1.1 for GetVersions.
+    // Microsoft 365's observed native history workflow uses discovery 1.5.
+    context.Response.Headers["X-MSFSSHTTP"] = "1.5";
     context.Response.Headers["X-MS-AuthDomainSupport"] = "False";
     context.Response.Headers["X-FORMS_BASED_AUTH_ACCEPTED"] = "t";
     context.Response.Headers["X-MSGETWEBURL"] = PublicOrigin(context) + context.Request.PathBase.ToUriComponent() + "/shared/";

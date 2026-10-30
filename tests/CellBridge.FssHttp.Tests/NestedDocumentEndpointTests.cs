@@ -63,7 +63,7 @@ public sealed class NestedDocumentEndpointTests
         {
             using var result = await fixture.Send(HttpMethod.Options, mount + suffix);
             Assert.Equal(HttpStatusCode.OK, result.StatusCode);
-            Assert.Equal("1.0", Assert.Single(result.Headers.GetValues("X-MSFSSHTTP")));
+            Assert.Equal("1.5", Assert.Single(result.Headers.GetValues("X-MSFSSHTTP")));
             Assert.Equal("http://localhost" + mount + "/shared/", Assert.Single(result.Headers.GetValues("X-MSGETWEBURL")));
         }
     }
@@ -99,6 +99,10 @@ public sealed class NestedDocumentEndpointTests
             (string?)xml.Descendants(Protocol + "Response").Single().Attribute("Url"));
         var history = xml.Descendants().Single(x => x.Name.LocalName == "result").Attribute("url")?.Value;
         Assert.StartsWith("http://localhost/mount/_cellbridge/history/", history);
+        var settings = xml.Descendants().Single(x => x.Name.LocalName == "settings").Attribute("url")?.Value;
+        Assert.Equal("http://localhost/mount/_cellbridge/history/settings", settings);
+        using var settingsResult = await fixture.Send(HttpMethod.Get, settings!);
+        Assert.Equal(HttpStatusCode.OK, settingsResult.StatusCode);
         using var historical = await fixture.Send(HttpMethod.Get, history!);
         Assert.Equal(new byte[] { 1, 2, 3, 4 }, await historical.Content.ReadAsByteArrayAsync());
     }
@@ -294,7 +298,8 @@ public sealed class NestedDocumentEndpointTests
             if (kestrel) builder.WebHost.UseKestrel().UseUrls("http://127.0.0.1:0");
             else builder.WebHost.UseTestServer();
             TestActor.Register(builder.Services);
-            builder.Services.AddCellBridge(provider, requireDurability: false);
+            builder.Services.AddCellBridge(provider, requireDurability: false, configure: options =>
+                options.DocumentLibraryId = Guid.Parse("8c51b086-c566-4b12-b4d2-d37847129acc"));
             var app = builder.Build();
             if (mount.Length > 0) app.UsePathBase(mount);
             app.Use(async (context, next) =>

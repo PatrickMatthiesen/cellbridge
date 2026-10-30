@@ -2,6 +2,11 @@ namespace CellBridge.AspNetCore;
 
 public sealed class CellBridgeOptions
 {
+    /// <summary>Stable identity of the host's single document catalog. Configure the same GUID on every host and restart to enable Office GetVersions.</summary>
+    public Guid? DocumentLibraryId { get; set; }
+
+    internal OfficeDocumentLibrary? DocumentLibrary(string publicBase) => DocumentLibraryId is { } id
+        ? new(id, publicBase.TrimEnd('/') + "/_cellbridge/history/settings") : null;
     /// <summary>Wire-hash configuration, independent of stored-content integrity.</summary>
     public CellBridge.FssHttpB.ProtocolHashingOptions Hashing { get; set; } = CellBridge.FssHttpB.ProtocolHashingOptions.Default;
     public long MaxRequestBytes { get; set; } = 128L * 1024 * 1024;

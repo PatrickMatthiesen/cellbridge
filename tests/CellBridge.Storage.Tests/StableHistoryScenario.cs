@@ -15,6 +15,7 @@ namespace CellBridge.Tests;
 internal static class StableHistoryScenario
 {
     private static readonly CellBridgeActor Owner = new(new("history:owner", "owner", "Owner"), CanCreate: true);
+    private static readonly Guid DocumentLibraryId = Guid.Parse("c4aa42f0-0c5c-4b8d-a3cf-733ff51ed962");
 
     internal static async Task RunAsync(StorageProvider provider)
     {
@@ -33,7 +34,8 @@ internal static class StableHistoryScenario
             {
                 var sub = new FssHttpSubRequest { Type = mode == 1 ? SubRequestType.GetVersions : SubRequestType.Versioning, SubRequestToken = 1 };
                 if (mode == 2) sub.SubRequestDataAttributes["VersioningRequestType"] = "GetVersionList";
-                var processor = new CellBridgeRequestProcessor(reader);
+                var processor = new CellBridgeRequestProcessor(reader,
+                    options: mode == 1 ? new() { DocumentLibraryId = DocumentLibraryId } : null);
                 var result = await processor.ExecuteAsync(new() { Requests = { new() { Url = "https://host.test/absent.docx",
                     ResourceId = head.ResourceId.ToString(), UseResourceId = true, RequestToken = 1, SubRequests = { sub } } } }, "https://host.test", Owner);
                 var response = Assert.Single(Assert.Single(result.Response.Responses).SubResponses);

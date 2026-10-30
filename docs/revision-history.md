@@ -30,6 +30,19 @@ authenticated subject and lifecycle generation; a revoked caller cannot replay t
 /_cellbridge/history/{resourceId}/{lifecycleGeneration}/{revisionNumber}
 ```
 
+`GetVersions` also requires the host's document-library identity. Configure
+`CellBridgeOptions.DocumentLibraryId` with one nonempty GUID for the catalog and
+keep it unchanged across documents, hosts and restarts. Without this setting,
+`GetVersions` returns `RequestNotSupported`; the reusable revision API and
+`Versioning/GetVersionList` remain available. The response includes the library
+GUID and the authenticated `/_cellbridge/history/settings` page, with the host's
+mount path and validated public origin. That read-only page describes the actual
+publication limit and does not offer settings changes or automatic pruning.
+
+For WebDemo, set `Protocol:DocumentLibraryId`. Through the Aspire AppHost, set
+`Parameters__DocumentLibraryId`. Generate the catalog GUID once, for example with
+PowerShell's `[guid]::NewGuid()`, and retain it in the host configuration.
+
 The resource and generation identify the document independently of renames.
 Unavailable revisions return 404 and denied access returns 403. Downloads carry
 private/no-store caching, an immutable revision ETag and the recorded timestamp.
@@ -90,11 +103,23 @@ Recreated resources require explicit matching `UseResourceID` for SOAP mutations
 Unknown IDs are omitted. These read operations do not implement SharePoint lists,
 search, application-metadata mutation or arbitrary property storage.
 
-The server follows the SharePoint 2010/2013 profile for `QueryChangesVersioning`:
-it ignores the bounded extension and queries current state. This is the product
-behavior in [MS-FSSHTTPB Appendix B, notes 4 and 17][products]. It does not implement
-Version Token Knowledge or higher-profile historical binary queries. Legacy
-Waterline remains knowledge and cannot be serialized as a version selector.
+`QueryChangesVersioning` selects the retained file and application-metadata graphs.
+The documented eight-byte numeric major/minor form uses `N.0` for revision N and
+`0.0` for current state. Microsoft 365 16.0.20527 instead sends a compact version
+token for the numbers in `Versioning/GetVersionList`. CellBridge accepts the
+observed canonical form (compact major, compact minor, zero) and rejects other
+token formats. An unavailable revision returns an error; it never falls back to
+the current graph. Editors and permissions remain current state. Legacy Waterline
+remains knowledge and cannot be serialized as a version selector. CellBridge does
+not issue Version Token Knowledge or accept arbitrary server-issued token formats.
+
+The observed native `RestoreVersion` request supplies the reserved schema marker
+as `LockID`, without its editing session's schema ID or client ID. For that exact
+request form, CellBridge resolves one active schema lease owned by the authenticated
+subject. It then validates the actual schema and client IDs through the existing
+save preparation and atomic publication checks. Multiple active clients, another
+subject's lease, host locks and exclusive locks do not use this resolution path.
+Ordinary requests still require their explicit lock identifiers.
 
 ## Retention and upgrades
 
@@ -121,7 +146,7 @@ Rolling downgrade compatibility is not supported.
 ## Evidence and remaining gates
 
 `RevisionHistoryTests`, `RestoreFencingTests`, `OuterDocumentOperationTests`,
-`HistoricalGraphRestorerTests` and `HistoryProfileFallbackTests` cover publications,
+`HistoricalGraphRestorerTests`, `NativeHistoryRestoreTests` and `HistoryProfileFallbackTests` cover publications,
 keyed retries, lost commit replies, authority changes, quotas, codec round trips,
 wire XML, inherited BLOBs/multiple cells and canonical history downloads.
 PostgreSQL tests recreate independent providers; `RevisionHistoryInteropTests`
@@ -131,9 +156,18 @@ with the shared lifecycle providers, including old history retention, foreign al
 reservation, clean replacement history and recreated SOAP mutation fencing.
 `CombinedPublicationTests` checks metadata and file publication with queued external publication,
 restoration, exact retries, atomic quota rejection and recreated resources on both providers.
-Independent SharePoint version/rename/property traces and desktop version restoration
-qualification remain open in [#7][history-issue] and [#30][outer-issue]. No OneNote or
-two-desktop coauthoring compatibility follows from these checks.
+Native Word, Excel and PowerPoint `16.0.20527` listed persisted revisions, opened
+older content and restored it through their Version History controls on
+2026-10-30. Each restore created revision 3 with the original revision's SHA-256;
+revision 2 retained its saved marker. After a server restart, all nine retained
+downloads kept their hashes. Fresh Office processes listed the three revisions
+and opened revision 2 with its marker. See [client coverage](interoperability.md#client-coverage)
+for the trial's scope.
+
+Independent decoded SharePoint version/rename/property reference traces and
+qualification on other Office builds remain open in [#7][history-issue] and
+[#30][outer-issue]. No OneNote or two-desktop coauthoring compatibility follows
+from these checks.
 
 [products]: https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/d006ebd9-c3df-4ef5-8be0-1c1db78c6d2c
 [index]: https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/f5724986-bd0f-488d-9b85-7d5f954d8e9a

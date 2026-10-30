@@ -12,14 +12,20 @@ namespace CellBridge.AspNetCore;
 ///
 /// The DocumentState overload lists versions that can be restored. The legacy
 /// detached-document overload reports only current state with versioning disabled.
-/// Neither invents SharePoint list identity or settings URLs.
+/// The host supplies the catalog identity and its versioning settings page.
 /// </summary>
 public static class MetadataVersioningResponseBuilder
 {
     /// <summary>Lists exactly the resource revisions available through the authorized history route.</summary>
-    public static FssHttpSubResponse BuildGetVersions(IReadOnlyList<DocumentRevisionRecord> revisions, string publicOrigin)
+    public static FssHttpSubResponse BuildGetVersions(IReadOnlyList<DocumentRevisionRecord> revisions, string publicOrigin,
+        OfficeDocumentLibrary library)
     {
-        var results = new XElement("results", new XElement("versioning", new XAttribute("enabled", revisions.Count == 0 ? "0" : "1")));
+        ArgumentNullException.ThrowIfNull(library);
+        if (revisions.Count == 0) throw new ArgumentException("GetVersions requires at least one publication.", nameof(revisions));
+        var results = new XElement("results",
+            new XElement("list", new XAttribute("id", library.Id.ToString("B"))),
+            new XElement("versioning", new XAttribute("enabled", "1")),
+            new XElement("settings", new XAttribute("url", library.SettingsUrl)));
         for (int i = 0; i < revisions.Count; i++)
         {
             var revision = revisions[i];
@@ -96,10 +102,12 @@ public static class MetadataVersioningResponseBuilder
     public static FssHttpSubResponse BuildGetVersions(
         StoredDocument document,
         string publicOrigin,
+        OfficeDocumentLibrary library,
         string? userName = null)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentException.ThrowIfNullOrWhiteSpace(publicOrigin);
+        ArgumentNullException.ThrowIfNull(library);
 
         string user = document.Security.ModifiedBy?.Login ?? userName ?? "unknown";
         string documentUrl = DocumentRequestResolver.CanonicalUrl(document, publicOrigin);
@@ -110,10 +118,12 @@ public static class MetadataVersioningResponseBuilder
         var nested = new XElement("GetVersionsResponse",
             new XElement("GetVersionsResult",
                 new XElement("results",
+                    new XElement("list", new XAttribute("id", library.Id.ToString("B"))),
                     // This detached-document overload has no revision repository.
                     // Only the DocumentState overload can advertise retained
                     // history through the authorized download route.
                     new XElement("versioning", new XAttribute("enabled", "0")),
+                    new XElement("settings", new XAttribute("url", library.SettingsUrl)),
                     new XElement("result",
                         new XAttribute("version", version),
                         new XAttribute("url", documentUrl),

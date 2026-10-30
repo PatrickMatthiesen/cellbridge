@@ -14,7 +14,7 @@ internal static class OuterDocumentOperations
 
     public static async Task ExecuteAsync(CellBridgeDocumentService service, Guid resourceId,
         FssHttpSubRequest request, FssHttpSubResponse response, string origin, CellBridgeActor actor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, OfficeDocumentLibrary? library = null)
     {
         var attributes = request.SubRequestDataAttributes;
         try
@@ -42,7 +42,8 @@ internal static class OuterDocumentOperations
                 switch (request.Type)
                 {
                     case SubRequestType.GetVersions:
-                        response.SubResponseXml = MetadataVersioningResponseBuilder.BuildGetVersions(await service.ListRevisionsAsync(resourceId, actor, cancellationToken), origin).SubResponseXml;
+                        if (library is null) { response.ErrorCode = "RequestNotSupported"; break; }
+                        response.SubResponseXml = MetadataVersioningResponseBuilder.BuildGetVersions(await service.ListRevisionsAsync(resourceId, actor, cancellationToken), origin, library).SubResponseXml;
                         break;
                     case SubRequestType.Versioning:
                         if (attributes.GetValueOrDefault("VersioningRequestType") != "GetVersionList")

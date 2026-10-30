@@ -119,8 +119,10 @@ may describe many graph elements. A small delta response is not necessarily
 `O(delta)` overall. Requested scopes, conservative unknown-knowledge fallback,
 whole-cell rounding and negotiated hashes change `R`. Hash records can reduce
 transferred data while still requiring content reads/hashing. Fragment delivery,
-continuation and higher historical version-token profiles remain unsupported;
-the selected profile ignores QueryChangesVersioning as documented in the ledger.
+continuation and arbitrary higher historical version-token profiles remain
+unsupported. Bounded numeric and observed Office16.0.20527 selectors resolve
+retained revisions; unsupported selectors reject. See the ledger and
+[revision history](revision-history.md).
 
 SOAP batches, dependency evaluation and binary packages compose these rows.
 One HTTP request can contain several outer and binary subrequests; repeated

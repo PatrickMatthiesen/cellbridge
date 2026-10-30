@@ -10,6 +10,27 @@ public sealed partial class CellBridgeDocumentService
     private async ValueTask<CellExecution> QueryPartitionAsync(Guid id, DocumentPartitionKind kind,
         FsshttpbCellSubRequest operation, CellBridgeActor actor, CancellationToken cancellationToken)
     {
+        var request = operation.Data as QueryChangesSubRequestData;
+        ulong? revisionNumber = null;
+        if (request?.Version is { } version)
+        {
+            if (!OfficeHistoryVersion.TryRead(version, out var major, out var minor) || minor != 0)
+                return new(FileQueryResponseBuilder.Unsupported(operation.RequestId), await CurrentAsync(id, cancellationToken));
+            // MS-FSSHTTPB 2.2.2.1.3 defines 0.0 as current. Published Office
+            // version N.0 selects the same immutable revision as GetVersions.
+            if (major != 0)
+            {
+                try { revisionNumber = (await GetRevisionAsync(id, major, actor, cancellationToken)).RevisionNumber; }
+                catch (KeyNotFoundException)
+                {
+                    var missing = new FsshttpbResponse { SubResponses = { new() {
+                        RequestId = operation.RequestId, RequestType = RequestTypes.QueryChanges, Status = true,
+                        Error = new ResponseError(ErrorType.Cell, (ulong)CellErrorCode.RevisionIDNotFound,
+                            "The selected document revision does not exist.") } } };
+                    return new(missing, await CurrentAsync(id, cancellationToken));
+                }
+            }
+        }
         if (kind == DocumentPartitionKind.EditorsTable)
         {
             var controls = await provider.Documents.ReadControlAsync(id, cancellationToken) ?? throw MissingDocument();
@@ -26,9 +47,9 @@ public sealed partial class CellBridgeDocumentService
             return new(ShapeGeneratedPartition(EditorsQuery(document, editors, operation.RequestId, controls.Head), editors,
                 operation), controls.Head);
         }
-        var request = operation.Data as QueryChangesSubRequestData;
         var read = await provider.Documents.ReadPartitionAsync(id,
-            new((int)kind) { IncludeCatalog = true, IncludeBindings = FileQueryResponseBuilder.IsScoped(request), IncludeMappings = true }, cancellationToken) ?? throw MissingDocument();
+            new((int)kind) { RevisionNumber = revisionNumber, IncludeCatalog = true,
+                IncludeBindings = FileQueryResponseBuilder.IsScoped(request), IncludeMappings = true }, cancellationToken) ?? throw MissingDocument();
         Demand(actor, read.Current, DocumentAccess.Read);
         var partition = read.Partition;
         if (partition.StorageIndex is null)

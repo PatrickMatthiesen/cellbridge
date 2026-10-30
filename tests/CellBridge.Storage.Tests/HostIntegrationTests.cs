@@ -7,12 +7,14 @@ using CellBridge.Storage.InMemory;
 using CellBridge.Storage.PostgreSql;
 using CellBridge.TestFixtures;
 using Npgsql;
+using System.Xml.Linq;
 
 namespace CellBridge.Storage.Tests;
 
 [Collection("PostgreSQL")]
 public sealed class HostIntegrationTests
 {
+    private static readonly Guid DocumentLibraryId = Guid.Parse("c4aa42f0-0c5c-4b8d-a3cf-733ff51ed962");
     [Fact]
     public Task HostIdentitySurvivesCreationImportAndRestoration() => CheckIdentity(Memory());
 
@@ -46,11 +48,14 @@ public sealed class HostIntegrationTests
             await StorageTestDocuments.PackageAsync(restarted.Provider, restored.Package));
         var request = File(id, SubRequestType.GetDocMetaInfo, SubRequestType.GetVersions);
         request.Url = "https://unrelated.invalid/absent.docx";
-        var result = await new CellBridgeRequestProcessor(restarted).ExecuteAsync(new() { Requests = { request } }, "https://host.test", TestActor.Value);
+        var processor = new CellBridgeRequestProcessor(restarted, options: new() { DocumentLibraryId = DocumentLibraryId });
+        var result = await processor.ExecuteAsync(new() { Requests = { request } }, "https://host.test", TestActor.Value);
         var response = Assert.Single(result.Response.Responses);
         Assert.Equal(id, response.ResourceId);
         Assert.Equal("https://host.test" + path, response.Url);
         Assert.All(response.SubResponses, sub => Assert.Equal("Success", sub.ErrorCode));
+        var versions = XElement.Parse(response.SubResponses[1].SubResponseXml!);
+        Assert.Equal(DocumentLibraryId.ToString("B"), (string?)versions.Descendants("list").Single()?.Attribute("id"));
         Assert.Equal("https://unrelated.invalid/absent.docx", request.Url);
         request.ResourceId = Guid.NewGuid().ToString();
         request.Url = "https://host.test" + state.Path;
