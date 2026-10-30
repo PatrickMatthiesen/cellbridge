@@ -13,7 +13,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
             return await MutateAsync(command.ResourceId, async (db, row, now) =>
             {
                 var head = row is null || row.IsDeleted ? throw new KeyNotFoundException("Document does not exist.") : Head(row);
-                var control = (await ControlAsync(db, head, cancellationToken)) with { UtcNow = now };
+                var control = await ControlAsync(db, head, cancellationToken, knownNow: now);
                 if (DocumentControlReducer.ValidateWrite(control, command.Admission, command.LockAttributes) is { } error)
                     return new PathChangeResult(head, false, error);
                 if (command.NewPathKey != StorageIds.PathKey(command.NewPath)) throw new ArgumentException("The filename key is not canonical.");

@@ -43,6 +43,25 @@ public static class RecoveryJson
         return options;
     }
 
+    /// <summary>Reads stored JSON text through a validated document.</summary>
+    public static T Read<T>(string text)
+    {
+        try
+        {
+            _ = StrictUtf8.GetByteCount(text);
+            using var json = ParseRawJson(text);
+            return json.RootElement.Deserialize<T>(Options) ?? throw new JsonException("Null recovery record.");
+        }
+        catch (Exception ex) when (ex is JsonException or EncoderFallbackException)
+        { throw new StorageCorruptionException("Unsupported or invalid recovery JSON.", ex); }
+    }
+
+    private static JsonDocument ParseRawJson(string text)
+    {
+        try { return JsonDocument.Parse(text, new() { MaxDepth = 64, AllowDuplicateProperties = false }); }
+        catch (InvalidOperationException ex) { throw new JsonException("Invalid recovery JSON text.", ex); }
+    }
+
     public static T Read<T>(ReadOnlySpan<byte> bytes)
     {
         try

@@ -25,4 +25,5 @@
     <Compile Include="../CellBridge.Storage.Tests/CurrentMetadataReadScenario.cs" Link="CurrentMetadataReadScenario.cs" />
     <Using Include="Xunit" />
   </ItemGroup>
+  <ItemGroup><Compile Include="../CellBridge.Storage.Tests/ControlReadBatchScenario.cs" Link="ControlReadBatchScenario.cs" /></ItemGroup>
 </Project>

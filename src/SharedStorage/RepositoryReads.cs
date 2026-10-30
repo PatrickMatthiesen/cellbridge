@@ -20,7 +20,7 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
         var result = configured ?? new(); result.Validate(); return result;
     }
     private static string Encode<T>(T value) => JsonSerializer.Serialize(value);
-    private static T Decode<T>(string json) => RecoveryJson.Read<T>(Encoding.UTF8.GetBytes(json));
+    private static T Decode<T>(string json) => RecoveryJson.Read<T>(json);
     private static string Hash(string value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
     private static string ElementKey(ExtendedId id) => id.Guid.ToString("N") + id.Value.ToString("x8");
     private static string RecordKey<T>(T value) => Hash(Encode(value));
@@ -121,20 +121,31 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
         return partition;
     }
     private async Task<DocumentControlRead> ControlAsync(TContext db, DocumentHead head, CancellationToken ct,
-        IReadOnlyList<RepositoryPartitionRow>? knownPartitions = null)
+        IReadOnlyList<RepositoryPartitionRow>? knownPartitions = null, DateTime? knownNow = null)
     {
-        var coordination = await db.Set<RepositoryCoordinationRow>().AsNoTracking()
-            .Where(row => row.ResourceId == head.ResourceId).Select(row => row.Json).SingleOrDefaultAsync(ct)
+        var rows = await database.ReadControlRowsAsync(db, head.ResourceId, head.LifecycleGeneration,
+            includePartitions: knownPartitions is null, includeClock: knownNow is null, ct);
+        var coordinationRow = rows.SingleOrDefault(row => row.Kind == 1)
             ?? throw new StorageCorruptionException("Missing normalized coordination record.");
-        var editors = await db.Set<RepositoryEditorRow>().AsNoTracking().Where(row => row.ResourceId == head.ResourceId)
-            .OrderBy(row => row.ClientId).Select(row => row.Json).ToArrayAsync(ct);
-        var partitions = knownPartitions ?? await PartitionRowsAsync(db, head, ct);
+        var coordination = ControlJson(coordinationRow);
         var decodedCoordination = Decode<CoordinationState>(coordination);
         if (head.CoordinationGeneration != decodedCoordination.Generation)
             throw new StorageCorruptionException("The document head disagrees with its coordination generation.");
-        return new(head, await database.ClockAsync(db, ct), decodedCoordination,
-            editors.Select(Decode<EditorState>).ToImmutableArray(), partitions.Select(row => ReadPartitionHead(head, row)).ToImmutableArray());
+        var partitions = knownPartitions ?? rows.Where(row => row.Kind == 3).Select(row => new RepositoryPartitionRow
+        {
+            ResourceId = head.ResourceId, Lifecycle = head.LifecycleGeneration,
+            Partition = row.Partition ?? throw new StorageCorruptionException("Missing control partition identity."),
+            Sequence = row.Sequence ?? throw new StorageCorruptionException("Missing control partition sequence."),
+            Json = ControlJson(row),
+        }).ToArray();
+        var now = knownNow ?? DateTime.SpecifyKind(rows.Single(row => row.Kind == 0).UtcNow
+            ?? throw new StorageCorruptionException("Missing provider control time."), DateTimeKind.Utc);
+        return new(head, now, decodedCoordination,
+            rows.Where(row => row.Kind == 2).Select(row => Decode<EditorState>(ControlJson(row))).ToImmutableArray(),
+            partitions.Select(row => ReadPartitionHead(head, row)).ToImmutableArray());
     }
+    private static string ControlJson(RepositoryControlRow row) => row.Json ?? (row.EncodedJson is { } bytes
+        ? DocumentEncoding.Decode(bytes) : throw new StorageCorruptionException("Missing control metadata."));
     public ValueTask<DocumentControlRead?> ReadControlAsync(Guid id, CancellationToken cancellationToken = default) =>
         ReadAsync(async db => await HeadAsync(db, id, cancellationToken) is { IsDeleted: false } head
             ? await ControlAsync(db, head, cancellationToken) : null, cancellationToken);

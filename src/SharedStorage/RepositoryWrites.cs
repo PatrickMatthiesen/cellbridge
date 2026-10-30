@@ -311,8 +311,8 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         MutateAsync(command.ResourceId, async (db, row, now) =>
         {
             var head = row is null ? throw new KeyNotFoundException("Document does not exist.") : Head(row);
-            var control = await ControlAsync(db, head, cancellationToken);
-            var result = DocumentControlReducer.Apply(control with { UtcNow = now }, command, limits);
+            var control = await ControlAsync(db, head, cancellationToken, knownNow: now);
+            var result = DocumentControlReducer.Apply(control, command, limits);
             if (result.Changed)
             {
                 if (result.Current.Head.ResourceId != head.ResourceId || result.Current.Head.LifecycleGeneration != head.LifecycleGeneration)
@@ -356,7 +356,7 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
         MutateAsync(publication.ResourceId, async (db, row, now) =>
         {
             var head = row is null || row.IsDeleted ? throw new KeyNotFoundException("Document does not exist.") : Head(row);
-            var control = (await ControlAsync(db, head, cancellationToken)) with { UtcNow = now };
+            var control = await ControlAsync(db, head, cancellationToken, knownNow: now);
             if (DocumentPublicationRules.CheckAuthority(control, publication) is { } denied) return denied;
             var receipt = await ReceiptAsync(db, head.ResourceId, publication.Receipt.Operation, cancellationToken);
             if (receipt is not null) return DocumentPublicationRules.MatchReceipt(head, receipt, publication,

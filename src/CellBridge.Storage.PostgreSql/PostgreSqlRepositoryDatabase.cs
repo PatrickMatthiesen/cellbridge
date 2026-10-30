@@ -20,6 +20,31 @@ internal sealed class PostgreSqlRepositoryDatabase(DbContextOptions<CellBridgeDb
         var (connection, transaction) = PostgreSqlDatabase.GetTransaction(db);
         await PostgreSqlStateMigration.ValidateRecoverySchemaAsync(connection, transaction, ct);
     }
+    public Task<RepositoryControlRow[]> ReadControlRowsAsync(CellBridgeDbContext db, Guid id, long lifecycle,
+        bool includePartitions, bool includeClock, CancellationToken ct)
+    {
+        var sql = """
+            SELECT 1 AS "Kind", "Json", NULL::bytea AS "EncodedJson", NULL::uuid AS "ClientId", NULL::integer AS "Partition", NULL::bigint AS "Sequence", NULL::timestamptz AS "UtcNow"
+            FROM cellbridge_repository_coordination WHERE "ResourceId"=@id
+            UNION ALL
+            SELECT 2, "Json", NULL::bytea, "ClientId", NULL::integer, NULL::bigint, NULL::timestamptz
+            FROM cellbridge_repository_editors WHERE "ResourceId"=@id
+            """;
+        if (includePartitions) sql += """
+
+            UNION ALL
+            SELECT 3, "Json", NULL::bytea, NULL::uuid, "Partition", "Sequence", NULL::timestamptz
+            FROM cellbridge_repository_partitions WHERE "ResourceId"=@id AND "Lifecycle"=@lifecycle
+            """;
+        if (includeClock) sql += """
+
+            UNION ALL
+            SELECT 0, NULL::text, NULL::bytea, NULL::uuid, NULL::integer, NULL::bigint, clock_timestamp()
+            """;
+        return db.Database.SqlQueryRaw<RepositoryControlRow>(sql, new NpgsqlParameter("id", id),
+            new NpgsqlParameter("lifecycle", lifecycle)).TagWith("CellBridge coherent control batch")
+            .OrderBy(row => row.Kind).ThenBy(row => row.ClientId).ThenBy(row => row.Partition).ToArrayAsync(ct);
+    }
     public Task<DateTime> ClockAsync(CellBridgeDbContext db, CancellationToken ct) =>
         db.Database.SqlQueryRaw<DateTime>("SELECT clock_timestamp() AS \"Value\"").SingleAsync(ct);
     public async Task GuardAsync(CellBridgeDbContext db, Guid id, CancellationToken ct)

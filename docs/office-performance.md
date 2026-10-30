@@ -1,11 +1,13 @@
 # Measuring active Office user capacity
 
-The 10,000 successful commits/minute target remains unmet on the local Linux
-host. The atomic SQL candidate acknowledged 5,295 saves inside a minute while
-offering 11,250, with HTTP 503 overload failures. Its matched preceding
-implementation acknowledged 4,576 in the same workload. Both used 1,500
-authenticated users and 15,000 documents. A retained lower-load run of the
-preceding implementation offered 3,000 saves/minute without HTTP failures.
+The 10,000 successful commits/minute target remains unmet. The latest local
+Linux candidate with control-read batching and native JSON decoding acknowledged
+5,863 saves inside a minute while offering 11,250, with HTTP 503 overload
+failures. Batching alone acknowledged 5,813, compared with its matched atomic SQL
+baseline of 5,519. These runs used 1,500 authenticated users and 15,000
+documents. A retained lower-load run of the preceding implementation offered
+3,000 saves/minute without HTTP failures. Snowfall results and their comparison
+limits are recorded below.
 
 The archived implementation reached 8,151 inside a measured minute with HTTP
 failures. The rewrite has not demonstrated a throughput gain over that result.
@@ -53,7 +55,74 @@ not change the offered workload. Raw paired evidence is retained under
 `artifacts/office-atomic/`, including `local-comparison.json`, the baseline
 qualification patch and original CSV/pgstats files.
 
-## Snowfall baseline
+## Coherent control-read batching experiment
+
+The next local pair compared `e147d204` with control-read batching, keeping the
+same atomic SQL save path, workload, durable database settings and verifier.
+One tagged command returns coordination, editors, partition heads and optional
+database time. It returns separate rows rather than multiplying editors by
+partitions. Preparation reuses the partition rows it already read. Mutations
+reuse their existing guarded database time. Transaction isolation, head checks,
+authorization and document row locks are unchanged.
+
+A normal control read changes from five reader commands to two, including its
+head lookup. Save preparation plus publication removes five reader commands.
+The actual workload recorded one preparation batch and one publication batch per
+acknowledgement, with two and four rows respectively for these documents.
+
+| Measurement | Atomic SQL before batching | Batched control reads |
+| --- | ---: | ---: |
+| In-window acknowledgements/minute | 5,519 | 5,813 |
+| Excluded late acknowledgements | 110 | 107 |
+| Failed HTTP steps including warm-up/drain | 11,789 | 11,255 |
+| All byte-verified acknowledgements | 7,933 | 8,396 |
+| Successful measured save-step p95 | 1,293 ms | 1,236 ms |
+| Successful measured query-step p95 | 646 ms | 636 ms |
+| WebDemo CPU cores during measurement | 1.56 | 1.61 |
+| Peak sampled measurement working set | 719 MiB | 717 MiB |
+| Workload-wide committed database transactions/all ACK | 47.91 | 47.46 |
+| Cluster WAL/all ACK | 47.59 KiB | 47.51 KiB |
+
+This single pair recorded 5.3% more strict acknowledgements. Both runs overloaded
+with HTTP 503 failures and neither missed a cadence slot. All acknowledgements
+passed historical-package hashes and one-to-one revision coverage after timing.
+The database sampler observed zero blocked backends; database counters recorded
+zero deadlocks and rollbacks. Small changes in latency and memory are not
+repeated estimates. Batching removes commands; it does not remove transactions
+or change the graph algorithm's scaling. Raw paired evidence and source hashes
+remain under `artifacts/office-control-batch/`.
+
+## Native JSON decoding experiment
+
+Repository reads previously encoded each JSON string into a new UTF-8 array,
+then copied that array for strict document validation before deserialization.
+The native text overload validates a JSON document and deserializes its root
+while the document is alive. It preserves duplicate-name checks throughout ignored
+and converter-skipped subtrees, depth and schema checks, Unicode validation and
+exception distinctions. The raw-byte recovery decoder is unchanged.
+
+An isolated Release allocation experiment used 1,000 warm-ups per path/type and
+five alternating rounds of 10,000 decodes. Canonical decoded values matched.
+
+| Record | Previous allocations/decode | Native text allocations/decode |
+| --- | ---: | ---: |
+| Document head, 1,598 UTF-8 bytes | 8,544 B | 5,296 B |
+| Graph element, 393 UTF-8 bytes | 2,992 B | 2,144 B |
+| Object binding, 441 UTF-8 bytes | 3,272 B | 2,328 B |
+
+The reductions were stable across these rounds, about 28–38% for the tested
+record types. They are not endpoint allocation rates or CPU improvements.
+The subsequent unchanged AutoSave workload recorded 5,863 in-window saves,
+compared with 5,813 before this decoder change, with HTTP 503 failures in both.
+That difference is below 1% and does not demonstrate an endpoint throughput gain.
+Save/query p95 was 1,226/633 ms, compared with 1,236/636 ms. WebDemo used 1.61
+CPU equivalents and peak sampled measurement RSS was 714 MiB, compared with
+1.61 and 717 MiB. All 8,447 acknowledgements passed historical-byte and
+one-to-one verification after timing, with no missed cadence slots. Raw results,
+source hashes and the allocation experiment remain under
+`artifacts/office-json-decode/`.
+
+## Snowfall measurements
 
 The same application commit, `b41e42b`, was also measured on Snowfall before
 atomic SQL publication. Snowfall runs Windows with a Ryzen 7 9800X3D (8 cores,
@@ -78,6 +147,85 @@ Raw baseline and separate diagnostic evidence remain on Snowfall under
 waits and are not scheduler CPU samples. Allocation ticks estimated 781 MB/s
 in the separate instrumented run; that rate is approximate and does not describe
 the untraced qualification runs.
+
+The first atomic SQL candidate runs used commit `0b9a2d0`. They did not reproduce
+the local Linux improvement.
+
+| Measurement | Preceding AutoSave | Atomic AutoSave | Atomic, 15-second saves |
+| --- | ---: | ---: | ---: |
+| Offered saves/minute | 11,250 | 11,250 | 6,000 |
+| In-window acknowledgements/minute | 9,386 | 7,984 | 5,607 |
+| Excluded late acknowledgements | 112 | 105 | 39 |
+| Measured save failures | 1,745 | 3,156 | 354 |
+| Failed HTTP steps including warm-up/drain | 4,071 | 6,551 | 635 |
+| Successful measured save-step p95 | 1,180 ms | 1,602 ms | 1,458 ms |
+| WebDemo CPU cores during measurement | 4.39 | 3.91 | 3.32 |
+| Peak sampled working set | 740 MB | 730 MB | 655 MB |
+| Cluster WAL including warm-up/drain | 679 MB | 567 MB | 419 MB |
+
+All failures were HTTP 503. Candidate primary throughput remained 2,996/minute
+without failures, but its successful-save p95 increased to 557 ms, compared with
+128 ms in the baseline. The candidate verified historical bytes and one-to-one
+revision coverage for all 11,657 AutoSave, 8,553 bounded and 4,484 primary
+acknowledgements after timing. The earlier baseline used the final-package checks
+described above.
+
+These single runs do not isolate the implementation's effect. Unrelated Picknic
+containers were running during the candidate measurements and were absent from
+the saved baseline inventory. A separate traced candidate run reached 9,403
+in-window acknowledgements with failures. It is a diagnostic result, not a clean
+comparison or evidence of failure-free capacity. The controlled comparison below tests that direction at a lower cadence.
+
+The separate candidate trace estimated 883 MB/s of allocations, with byte arrays,
+strings and character arrays leading the sampled types. Working stacks include
+PostgreSQL byte-array reads, EF expression processing and object-group parsing.
+The baseline diagnostic estimate was 781 MB/s. Neither sample establishes the
+allocation rate of an untraced run. Sampled blocked-backend observations were
+zero in the three untraced candidate runs; deadlocks and rollbacks were also
+zero. This does not exclude short waits. Raw candidate evidence remains on
+Snowfall under `artifacts/office-snowfall-atomic/`.
+
+## Controlled Snowfall comparison
+
+Four subsequent untraced runs compared A=`b41e42b` and B=`0b9a2d0` in A/B/B/A
+order at 6,000 offered saves/minute. All four retained the same account/document
+counts, package sizes, read cadences and database limits. No runs were discarded.
+Container inventories and limits matched before and after every run.
+
+| Run | In-window ACK/minute | Late ACK | Measured save failures | All HTTP failures | Successful save p95/p99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A1, preceding implementation | 5,033 | 20 | 951 | 3,186 | 2,024/2,789 ms |
+| B1, atomic SQL | 5,637 | 14 | 352 | 972 | 1,383/1,848 ms |
+| B2, atomic SQL | 5,978 | 23 | 0 | 0 | 472/601 ms |
+| A2, preceding implementation | 5,120 | 85 | 796 | 1,721 | 1,964/2,605 ms |
+
+Both atomic runs exceeded both preceding runs in strict acknowledgements and
+had lower successful save/query latency. The earlier atomic regression did not
+reproduce at this cadence. B2 completed without HTTP failures, but this single
+6,000-offered cadence establishes neither maximum capacity nor the 10,000 target.
+All 8,342 B1 and 8,963 B2 acknowledgements passed historical-byte and one-to-one
+revision verification; A retained the older final-byte/count verifier.
+
+Host pressure varied. Sampled host CPU averaged 97.7%, 86.2%, 94.1% and 98.7%
+in run order; minimum available memory was 208, 786, 1,843 and 1,263 MiB.
+Mean CPU queues were 20.9, 12.3, 10.5 and 18.5. WebDemo used 3.45–3.59 CPU cores
+and peak measurement RSS of 594–637 MiB. These observations limit a precise
+code-only effect estimate. They do not establish that unrelated containers caused
+the differences. Sampled blocked backends and recorded rollbacks were zero.
+
+Host CPU counts the load generator as well as the server and Docker Desktop.
+The generator's CPU and memory were not captured separately in these Windows
+runs, so the remaining host CPU cannot be attributed to a process. Container CPU
+is already included in host totals. Low available RAM and aggregate disk activity
+alone do not establish paging. A later idle inventory found about 17.4 GiB
+available, which cannot explain consumption during the earlier runs. Future
+qualification needs generator and host-process measurements alongside the server.
+
+Raw CSV, database reports, host samples, inventories and verifier evidence remain
+on Snowfall under `artifacts/office-snowfall-controlled/`. The A1 console log was
+truncated during redaction; its raw results and previously captured verifier
+evidence survived. All owned fixtures stopped and the user's checkout was
+restored without changing its existing deletion.
 
 ## Retained document staging admission measurements
 
