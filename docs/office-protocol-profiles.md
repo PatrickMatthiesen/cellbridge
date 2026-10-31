@@ -59,6 +59,8 @@ encodes the same 16-byte identifier. Numeric `BlobSize` values
 match the associated payload lengths in the examined exchanges.
 
 This framing is sufficient for a bounded codec and opaque blob identification.
+The codec lives in the standalone `CellBridge.FssHttpB` serialization assembly,
+separate from document execution and storage contracts.
 It does not define WPM merging or host publication. In an accepted update, the
 service changed one 12,800-byte input blob to a different 12,822-byte result;
 its revision sequence and the client's clock also advanced independently.

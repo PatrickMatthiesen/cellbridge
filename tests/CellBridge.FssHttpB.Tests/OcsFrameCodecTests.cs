@@ -1,8 +1,8 @@
 using System.Buffers.Binary;
 using System.Text;
-using CellBridge.OfficeCollaboration;
+using CellBridge.FssHttpB.OfficeCollaboration;
 
-namespace CellBridge.FssHttp.Tests;
+namespace CellBridge.FssHttpB.Tests;
 
 public sealed class OcsFrameCodecTests
 {

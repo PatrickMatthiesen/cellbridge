@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using System.Text;
 
-namespace CellBridge.OfficeCollaboration;
+namespace CellBridge.FssHttpB.OfficeCollaboration;
 
 internal enum OcsFrameType : uint
 {
