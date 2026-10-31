@@ -4,8 +4,9 @@ The kit uses a pinned mitmproxy source revision to record Office traffic for
 comparison with SharePoint. It streams HTTP application bodies unchanged, records WebSocket
 application messages and provides offline validation and SOAP/MTOM extraction.
 
-Choose reverse mode through Aspire to open a local HTTPS URL, or standalone
-forward mode to keep the original SharePoint URL and configure a client proxy.
+Choose reverse mode through Aspire to open a local HTTPS URL, standalone
+forward mode with a client proxy, or process-local mode to capture a selected
+native Office process while keeping the original document URL.
 
 ## Setup
 
@@ -39,7 +40,8 @@ validation before replacing an established reference setup.
 ## Capture the CellBridge server
 
 Server capture records the SOAP/MTOM bodies handled by
-`/_vti_bin/cellstorage.svc`. It is separate from the SharePoint proxy below.
+`/_vti_bin/cellstorage.svc` and the bounded MS-SHDACCWS `IsOnlyClient` operation
+at `/_vti_bin/sharedaccess.asmx`. It is separate from the SharePoint proxy below.
 Capture is off by default. The sample host reads `Protocol:CaptureDirectory`;
 an absent, empty or whitespace-only value disables recording. For a host
 configuration file, use an absolute directory:
@@ -207,6 +209,38 @@ from `captures/.mitmproxy` in the test environment. Remove that trust after the
 trial. Keep `mitmproxy-ca.pem` private because it contains the CA key.
 The kit does not install trust. For private upstream certificates, pass
 `--upstream-ca path/to/lab-ca.pem`; verification stays enabled.
+
+### Capture one native Office process on Windows
+
+Process-local mode uses mitmproxy's Windows redirector and does not change the
+system proxy. Supply explicit process basenames or positive PIDs and exact
+destination hosts observed in the reference session:
+
+```powershell
+./tools/capture/.venv/Scripts/python.exe tools/capture/run.py --local-processes WINWORD.EXE --hosts sharepoint.example.test --http2 --name native-word
+```
+
+Comma-separated process names or PIDs select multiple processes. This launcher
+rejects all-process selections, negations, wildcards and executable paths.
+The Windows redirector requires administrator approval. Process selection applies
+to the whole process, including any other documents it has open.
+
+Connections outside the host allowlist pass through without TLS interception.
+A decoded request whose HTTP hostname conflicts with its TLS hostname is
+rejected and marks the run incomplete. This differs from forward and reverse
+mode, which reject requests outside the allowlist. Add a destination only after
+observing that the native reference session uses it.
+
+HTTPS capture requires temporary trust in the CA under the selected output
+root's `.mitmproxy` directory. Verify the public certificate fingerprint before
+trusting it, retain the same output root for the capture, and remove that trust
+afterwards. The launcher does not install trust. `--http2` enables HTTP/2;
+other modes also accept it, but the default remains disabled.
+
+Compare direct and intercepted native behavior before treating recorded traffic
+as a working reference. The manifest records the selected processes, hosts,
+HTTP/2 setting and bounded transport failure diagnostics. A running manifest or
+an empty run does not establish successful capture.
 
 ## Capture constraints
 

@@ -29,7 +29,7 @@ internal sealed class ProtocolCaptureStore(CellBridgeOptions options, ILogger<Pr
                 if (_used is null)
                 {
                     ConfidentialFileSystem.CreateDirectory(directory);
-                    _used = Directory.EnumerateFiles(directory).Sum(p => new FileInfo(p).Length);
+                    _used = new DirectoryInfo(directory).EnumerateFiles().Sum(file => file.Length);
                 }
                 if (length < 0 || length > options.MaxCaptureBytes - _used.Value)
                 {

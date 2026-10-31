@@ -1,3 +1,4 @@
+using System.Xml.Linq;
 using CellBridge.FssHttp;
 using Xunit;
 
@@ -46,6 +47,33 @@ public class CellStorageRequestParserTests
         Assert.Equal(0UL, subRequest.SubRequestToken);
         Assert.Equal("0", subRequest.SubRequestDataAttributes["ContentVersion"]);
         Assert.Equal("6B29FC40-CA47-1067-B31D-00DD010662DB", subRequest.SubRequestDataAttributes["CoauthID"]);
+        Assert.Equal(CellStorageRequest.Soap11Namespace, request.SoapNamespace);
+    }
+
+    [Theory]
+    [InlineData(CellStorageRequest.Soap11Namespace)]
+    [InlineData(CellStorageRequest.Soap12Namespace)]
+    public void ParsesSupportedSoapEnvelopeNamespaces(string soapNamespace)
+    {
+        var envelope = SampleQueryAccessEnvelope.Replace(CellStorageRequest.Soap11Namespace, soapNamespace);
+
+        Assert.Equal(soapNamespace, CellStorageRequestParser.Parse(envelope).SoapNamespace);
+    }
+
+    [Fact]
+    public void ParsesDirectBodyRequestWithSoap12()
+    {
+        var document = System.Xml.Linq.XDocument.Parse(SampleQueryAccessEnvelope.Replace(
+            CellStorageRequest.Soap11Namespace, CellStorageRequest.Soap12Namespace));
+        XNamespace soap = CellStorageRequest.Soap12Namespace;
+        var body = document.Root!.Element(soap + "Body")!;
+        var operation = body.Element(XName.Get("ExecuteCellStorageRequest", CellStorageRequest.Namespace))!;
+        body.ReplaceNodes(operation.Nodes());
+
+        var request = CellStorageRequestParser.Parse(document.ToString());
+
+        Assert.Equal(CellStorageRequest.Soap12Namespace, request.SoapNamespace);
+        Assert.Single(request.Requests);
     }
 
     [Fact]
@@ -183,6 +211,14 @@ public class CellStorageRequestParserTests
             CellStorageRequestParser.Parse("<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"/>"));
     }
 
+    [Fact]
+    public void DuplicateBody_ThrowsInvalidDataException()
+    {
+        var envelope = SampleQueryAccessEnvelope.Replace("</soap:Envelope>", "<soap:Body /></soap:Envelope>");
+
+        Assert.Throws<InvalidDataException>(() => CellStorageRequestParser.Parse(envelope));
+    }
+
     [Theory]
     [InlineData("<!DOCTYPE soap:Envelope [<!ENTITY target 'https://example.test/expanded.docx'>]>")]
     [InlineData("<!DOCTYPE soap:Envelope SYSTEM 'file:///not-read-by-the-parser'>")]
@@ -296,6 +332,23 @@ public class CellStorageResponseTests
         Assert.Contains("WebUrl=\"https://example.com/shared\"", envelope);
     }
 
+    [Theory]
+    [InlineData(CellStorageRequest.Soap11Namespace, "text/xml; charset=utf-8")]
+    [InlineData(CellStorageRequest.Soap12Namespace, "application/soap+xml; charset=utf-8")]
+    public void ToSoapEnvelopeUsesDirectProtocolBodyForSupportedSoapVersions(
+        string soapNamespace, string expectedContentType)
+    {
+        var response = new CellStorageResponse { SoapNamespace = soapNamespace };
+
+        var document = System.Xml.Linq.XDocument.Parse(response.ToSoapEnvelope());
+        XNamespace soap = soapNamespace;
+        XNamespace protocol = CellStorageRequest.Namespace;
+        Assert.Equal(soap + "Envelope", document.Root!.Name);
+        Assert.Equal(new[] { protocol + "ResponseVersion", protocol + "ResponseCollection" },
+            document.Root.Element(soap + "Body")!.Elements().Select(element => element.Name));
+        Assert.Equal(expectedContentType, response.SoapContentType);
+    }
+
     [Fact]
     public void ToSoapEnvelope_EscapesUrl()
     {
@@ -325,7 +378,6 @@ public class CellStorageResponseTests
         {
             Version = 2,
             MinorVersion = 3,
-            UsesDirectBody = true,
             WebUrl = "https://example.com",
             Responses =
             {
@@ -351,6 +403,12 @@ public class CellStorageResponseTests
         };
 
         string envelope = response.ToSoapEnvelope();
+
+        var document = System.Xml.Linq.XDocument.Parse(envelope);
+        XNamespace soap = CellStorageRequest.Soap11Namespace;
+        XNamespace protocol = CellStorageRequest.Namespace;
+        Assert.Equal(new[] { protocol + "ResponseVersion", protocol + "ResponseCollection" },
+            document.Root!.Element(soap + "Body")!.Elements().Select(element => element.Name));
 
         Assert.Contains("ResponseVersion xmlns=\"http://schemas.microsoft.com/sharepoint/soap/\" Version=\"2\" MinorVersion=\"3\"", envelope);
         Assert.Contains("WebUrl=\"https://example.com\"", envelope);

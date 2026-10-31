@@ -44,7 +44,8 @@ provide their own customer lifecycle and user interface.
 | Persistent storage | PostgreSQL document state with PostgreSQL or filesystem file content. |
 | Revision history | Native Word, Excel and PowerPoint version listing, historical open and restore tested on Microsoft 365 16.0.20527. Authorized SOAP and reusable APIs use the same persisted history. |
 | Incremental transfers | Reuse stored file parts and send parts the client does not already have. |
-| Coauthoring | Editor sessions and locks are implemented; two-desktop editing remains unverified. |
+| Coauthoring | Two Windows desktops exchanged Word, Excel and PowerPoint changes under distinct accounts with AutoSave. Independent downloads retained both editors' changes. See the bounded [client coverage](docs/interoperability.md#client-coverage). |
+| Real-time collaboration | Single-host RTC is enabled by default. Set `CellBridgeOptions.EnableOfficeRealTime = false` to disable it, or `Protocol:EnableOfficeRealTime=false` in WebDemo. Remote Excel selections and Word cursor indicators were observed. Participant names, typing latency and reliable startup across all three apps remain unqualified. OCS is not implemented. |
 
 Some advanced synchronization options and automatic graph pruning remain
 unimplemented or disabled. See [revision history](docs/revision-history.md),

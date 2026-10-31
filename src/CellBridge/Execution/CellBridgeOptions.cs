@@ -2,6 +2,10 @@ namespace CellBridge.AspNetCore;
 
 public sealed class CellBridgeOptions
 {
+    /// <summary>Enables Office RTC transport on a single host. Set false to disable RTC discovery and endpoints.</summary>
+    /// <remarks>Requires stored grants or an immutable versioned policy, without an ordinary async provider or legacy access evaluator.</remarks>
+    public bool EnableOfficeRealTime { get; set; } = true;
+
     /// <summary>Stable identity of the host's single document catalog. Configure the same GUID on every host and restart to enable Office GetVersions.</summary>
     public Guid? DocumentLibraryId { get; set; }
 
@@ -10,10 +14,14 @@ public sealed class CellBridgeOptions
     /// <summary>Wire-hash configuration, independent of stored-content integrity.</summary>
     public CellBridge.FssHttpB.ProtocolHashingOptions Hashing { get; set; } = CellBridge.FssHttpB.ProtocolHashingOptions.Default;
     public long MaxRequestBytes { get; set; } = 128L * 1024 * 1024;
-    /// <summary>Maximum active cellstorage POSTs and document GETs per process, through response delivery.</summary>
+    /// <summary>Maximum active protocol POSTs and document GETs per process, through response delivery.</summary>
     public int MaxConcurrentRequests { get; set; } = 8;
     /// <summary>Maximum admitted requests for one authenticated subject within this process.</summary>
     public int MaxConcurrentRequestsPerSubject { get; set; } = 2;
+    /// <summary>Maximum requests waiting for global execution capacity.</summary>
+    public int MaxQueuedRequests { get; set; } = 128;
+    /// <summary>Maximum requests waiting for one subject's execution capacity.</summary>
+    public int MaxQueuedRequestsPerSubject { get; set; } = 32;
     /// <summary>Absolute deadline covering request reading, download reconstruction and response delivery.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromMinutes(2);
     /// <summary>Fixed external HTTPS origin. Required for remote hosts unless AllowedHosts validates their authority.</summary>

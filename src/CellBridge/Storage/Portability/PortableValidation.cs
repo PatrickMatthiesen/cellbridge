@@ -177,7 +177,18 @@ public sealed partial class PortableArchive
             !CanonicalPath(head.Path) || head.PathKey != StorageIds.PathKey(head.Path) || head.CreatedUtc.Kind != DateTimeKind.Utc ||
             head.ModifiedUtc.Kind != DateTimeKind.Utc || head.Security.Grants is null || head.Security.Grants.Any(grant =>
                 string.IsNullOrWhiteSpace(grant.Key) || (grant.Value & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0) ||
-            coordination.SchemaOwners.IsDefault || coordination.CoauthorClients.IsDefault || coordination.Generation < 0 ||
+            coordination.SchemaOwners.IsDefault || coordination.CoauthorClients.IsDefault ||
+            coordination.DeletedCoauthorParticipants.IsDefault ||
+            coordination.DeletedCoauthorParticipants.Length > CoordinationState.MaxCoauthorSessionParticipants ||
+            coordination.Generation < 0 ||
+            coordination.DeletedCoauthorParticipants.Any(participant =>
+                string.IsNullOrWhiteSpace(participant.Client) || participant.Client.Length > 1024 ||
+                string.IsNullOrWhiteSpace(participant.SchemaId) || participant.SchemaId.Length > 1024 ||
+                string.IsNullOrWhiteSpace(participant.OwnerSubject) || participant.OwnerSubject.Length > 1024) ||
+            coordination.LastDeletedCoauthorSession is { } deletedSession &&
+                (string.IsNullOrWhiteSpace(deletedSession.Client) || deletedSession.Client.Length > 1024 ||
+                 string.IsNullOrWhiteSpace(deletedSession.SchemaId) || deletedSession.SchemaId.Length > 1024 ||
+                 string.IsNullOrWhiteSpace(deletedSession.OwnerSubject) || deletedSession.OwnerSubject.Length > 1024) ||
             !snapshot.Partitions.Select(partition => partition.Head.Kind).Order().SequenceEqual(new[] { 0, 1, 2 }) ||
             head.IsDeleted != head.DeletedFromStateVersion.HasValue || head.DeletedFromStateVersion >= head.StateVersion ||
             head.DeletedFromStateVersion < 0 || head.ReplacedBy is not null && !head.IsDeleted ||

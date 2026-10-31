@@ -14,7 +14,8 @@ internal static class OuterDocumentOperations
 
     public static async Task ExecuteAsync(CellBridgeDocumentService service, Guid resourceId,
         FssHttpSubRequest request, FssHttpSubResponse response, string origin, CellBridgeActor actor,
-        CancellationToken cancellationToken, OfficeDocumentLibrary? library = null)
+        CancellationToken cancellationToken, OfficeDocumentLibrary? library = null,
+        IOfficeRealTimePropertiesProvider? realTimeProperties = null)
     {
         var attributes = request.SubRequestDataAttributes;
         try
@@ -61,7 +62,7 @@ internal static class OuterDocumentOperations
                         response.SubResponseDataXml = string.Concat(xml.Elements().Select(e => e.ToString(SaveOptions.DisableFormatting)));
                         break;
                     case SubRequestType.Properties:
-                        Properties(state, request, response);
+                        await PropertiesAsync(state, request, response, actor, origin, realTimeProperties, cancellationToken);
                         break;
                 }
 
@@ -89,7 +90,9 @@ internal static class OuterDocumentOperations
         return true;
     }
 
-    private static void Properties(DocumentHead state, FssHttpSubRequest request, FssHttpSubResponse response)
+    private static async ValueTask PropertiesAsync(DocumentHead state, FssHttpSubRequest request,
+        FssHttpSubResponse response, CellBridgeActor actor, string publicBase,
+        IOfficeRealTimePropertiesProvider? realTimeProperties, CancellationToken cancellationToken)
     {
         var props = XElement.Parse(MetadataVersioningResponseBuilder.BuildGetDocMetaInfo(state).SubResponseDataXml!).Elements()
             .ToDictionary(e => (string)e.Attribute("Key")!, e => (string)e.Attribute("Value")!, StringComparer.Ordinal);
@@ -97,6 +100,8 @@ internal static class OuterDocumentOperations
         switch (request.SubRequestDataAttributes.GetValueOrDefault("Properties"))
         {
             case "PropertyEnumerate":
+                if (realTimeProperties is not null)
+                    foreach (var name in realTimeProperties.PropertyNames) props.TryAdd(name, "");
                 result = new("PropertyIds", props.Keys.Select(id => new XElement("PropertyId", new XAttribute("id", id))));
                 break;
             case "PropertyGet":
@@ -110,6 +115,12 @@ internal static class OuterDocumentOperations
                 var ids = container.Elements().ToArray();
                 if (ids.Length > 256 || ids.Any(e => e.Name.LocalName != "PropertyId" || e.Attribute("id") is null))
                 { response.ErrorCode = "InvalidArgument"; return; }
+                if (realTimeProperties is not null && ids.Any(e => realTimeProperties.PropertyNames.Contains((string)e.Attribute("id")!, StringComparer.Ordinal)))
+                {
+                    var extra = await realTimeProperties.GetPropertiesAsync(state.ResourceId, actor, publicBase, cancellationToken);
+                    foreach (var pair in extra)
+                        if (realTimeProperties.PropertyNames.Contains(pair.Key, StringComparer.Ordinal)) props.TryAdd(pair.Key, pair.Value);
+                }
                 result = new("PropertyValues", ids.Select(e => (string)e.Attribute("id")!).Where(props.ContainsKey)
                     .Select(id => new XElement("PropertyValue", new XAttribute("id", id), new XAttribute("value", props[id]))));
                 break;

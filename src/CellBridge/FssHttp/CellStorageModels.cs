@@ -41,6 +41,12 @@ public sealed class CellStorageRequest
     /// <summary>The protocol namespace.</summary>
     public const string Namespace = "http://schemas.microsoft.com/sharepoint/soap/";
 
+    /// <summary>The SOAP 1.1 envelope namespace used by default.</summary>
+    public const string Soap11Namespace = "http://schemas.xmlsoap.org/soap/envelope/";
+
+    /// <summary>The SOAP 1.2 envelope namespace.</summary>
+    public const string Soap12Namespace = "http://www.w3.org/2003/05/soap-envelope";
+
     /// <summary>The protocol version carried in RequestVersion (major).</summary>
     public uint Version { get; set; } = 2;
 
@@ -53,8 +59,8 @@ public sealed class CellStorageRequest
     /// <summary>The per-file requests.</summary>
     public List<FssHttpRequest> Requests { get; set; } = new();
 
-    /// <summary>Whether the request used the wire form with protocol elements directly under SOAP Body.</summary>
-    public bool UsesDirectBody { get; set; }
+    /// <summary>The SOAP envelope namespace used by the request.</summary>
+    public string SoapNamespace { get; set; } = Soap11Namespace;
 }
 
 /// <summary>
@@ -143,8 +149,13 @@ public sealed class CellStorageResponse
     /// <summary>The per-file responses.</summary>
     public List<FssHttpResponse> Responses { get; set; } = new();
 
-    /// <summary>Whether to serialize protocol elements directly under SOAP Body.</summary>
-    public bool UsesDirectBody { get; set; }
+    /// <summary>The SOAP envelope namespace used by the response.</summary>
+    public string SoapNamespace { get; set; } = CellStorageRequest.Soap11Namespace;
+
+    /// <summary>The SOAP media type for a standalone XML response.</summary>
+    public string SoapContentType => SoapNamespace == CellStorageRequest.Soap12Namespace
+        ? "application/soap+xml; charset=utf-8"
+        : "text/xml; charset=utf-8";
 
     /// <summary>Serializes this response to a SOAP envelope string.</summary>
     public string ToSoapEnvelope() => SerializeSoapEnvelope(null);
@@ -154,20 +165,16 @@ public sealed class CellStorageResponse
         var sb = new StringBuilder();
         if (binaryParts is null)
             sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
-        sb.Append("<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\" ");
+        sb.Append("<soap:Envelope xmlns:soap=\"").Append(XmlEscape(SoapNamespace)).Append("\" ");
         sb.Append("xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" ");
         sb.Append("xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"");
         if (binaryParts is not null)
             sb.Append(" xmlns:xop=\"http://www.w3.org/2004/08/xop/include\"");
         sb.Append('>');
         sb.Append("<soap:Body>");
-        if (!UsesDirectBody)
-        {
-            sb.Append("<ExecuteCellStorageResponse xmlns=\"").Append(CellStorageRequest.Namespace).Append("\">");
-        }
-                sb.Append("<ResponseVersion xmlns=\"").Append(CellStorageRequest.Namespace)
-                    .Append("\" Version=\"").Append(Version)
-          .Append("\" MinorVersion=\"").Append(MinorVersion).Append("\"");
+        sb.Append("<ResponseVersion xmlns=\"").Append(CellStorageRequest.Namespace)
+            .Append("\" Version=\"").Append(Version)
+            .Append("\" MinorVersion=\"").Append(MinorVersion).Append("\"");
         if (VersionErrorCode is not null)
         {
             sb.Append(" ErrorCode=\"").Append(VersionErrorCode).Append("\"");
@@ -178,14 +185,9 @@ public sealed class CellStorageResponse
         }
 
         sb.Append(" />");
-                sb.Append("<ResponseCollection");
-                if (UsesDirectBody)
-                {
-                        sb.Append(" xmlns=\"").Append(CellStorageRequest.Namespace).Append("\"");
-                }
-
-                sb.Append(" WebUrl=\"").Append(XmlEscape(WebUrl))
-          .Append("\" WebUrlIsEncoded=\"false\">");
+        sb.Append("<ResponseCollection xmlns=\"").Append(CellStorageRequest.Namespace)
+            .Append("\" WebUrl=\"").Append(XmlEscape(WebUrl))
+            .Append("\" WebUrlIsEncoded=\"false\">");
 
         foreach (var response in Responses)
         {
@@ -307,10 +309,6 @@ public sealed class CellStorageResponse
         }
 
         sb.Append("</ResponseCollection>");
-        if (!UsesDirectBody)
-        {
-            sb.Append("</ExecuteCellStorageResponse>");
-        }
         sb.Append("</soap:Body>");
         sb.Append("</soap:Envelope>");
         return sb.ToString();
@@ -342,7 +340,8 @@ public sealed class CellStorageResponse
         // a successful Word exchange. Word rejected our previous framing with
         // "Xml stream exists": false, before interpreting any subresponses.
         AddAscii($"\r\n--{boundary}\r\n");
-        AddAscii($"Content-ID: <{rootContentId}>\r\nContent-Transfer-Encoding: 8bit\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"text/xml\"\r\n\r\n");
+        var soapMediaType = SoapNamespace == CellStorageRequest.Soap12Namespace ? "application/soap+xml" : "text/xml";
+        AddAscii($"Content-ID: <{rootContentId}>\r\nContent-Transfer-Encoding: 8bit\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"{soapMediaType}\"\r\n\r\n");
         segments.Add(soapBytes);
         AddAscii("\r\n");
 
@@ -354,7 +353,7 @@ public sealed class CellStorageResponse
         }
 
         AddAscii($"--{boundary}--\r\n");
-        return new MtomResponseMessage($"multipart/related; type=\"application/xop+xml\"; boundary=\"{boundary}\"; start=\"<{rootContentId}>\"; start-info=\"text/xml\"", segments);
+        return new MtomResponseMessage($"multipart/related; type=\"application/xop+xml\"; boundary=\"{boundary}\"; start=\"<{rootContentId}>\"; start-info=\"{soapMediaType}\"", segments);
 
         void AddAscii(string value) => segments.Add(Encoding.ASCII.GetBytes(value));
     }

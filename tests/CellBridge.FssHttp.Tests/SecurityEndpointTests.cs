@@ -92,7 +92,11 @@ public sealed class SecurityEndpointTests
     [Fact]
     public async Task DiscoveryUsesFixedOriginInsteadOfUntrustedHost()
     {
-        await using var fixture = await Fixture.Start(options => options.PublicOrigin = "https://office.example:8443");
+        await using var fixture = await Fixture.Start(options =>
+        {
+            options.PublicOrigin = "https://office.example:8443";
+            options.EnableOfficeRealTime = false;
+        });
         using var client = fixture.Client("writer");
         using var request = new HttpRequestMessage(HttpMethod.Options, "/shared");
         request.Headers.Host = "attacker.example";
@@ -180,6 +184,32 @@ public sealed class SecurityEndpointTests
         Assert.Equal(HttpStatusCode.RequestTimeout, timedOut.StatusCode);
         using var next = await Post(client);
         Assert.Equal(HttpStatusCode.BadRequest, next.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("POST", "/_vti_bin/cellstorage.svc")]
+    [InlineData("PROPFIND", "/shared/probe.xlsx")]
+    public async Task QueuedNativeRequestsUseTheDeadlineInsteadOfImmediateRejection(string method, string path)
+    {
+        await using var fixture = await Fixture.Start(options =>
+        {
+            options.EnableOfficeRealTime = true;
+            options.MaxConcurrentRequests = 1;
+            options.MaxConcurrentRequestsPerSubject = 1;
+            options.MaxQueuedRequests = 1;
+            options.MaxQueuedRequestsPerSubject = 1;
+            options.RequestTimeout = TimeSpan.FromMilliseconds(500);
+        });
+        using var writer = fixture.Client("writer");
+        using (var held = (await fixture.Admission.AcquireAsync("tests:writer")).Lease!)
+        {
+            using var request = new HttpRequestMessage(new(method), path)
+                { Content = new StringContent("<invalid/>", Encoding.UTF8, "text/xml") };
+            using var response = await writer.SendAsync(request).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(HttpStatusCode.RequestTimeout, response.StatusCode);
+        }
+        using var afterTimeout = await Post(writer);
+        Assert.Equal(HttpStatusCode.BadRequest, afterTimeout.StatusCode);
     }
 
     [Fact]
@@ -482,6 +512,7 @@ public sealed class SecurityEndpointTests
             Assert.True(completions.TryAdd(id, completion)); return completion.Task;
         }
         public CellBridgeDocumentService Service => app.Services.GetRequiredService<CellBridgeDocumentService>();
+        public ProtocolRequestAdmission Admission => app.Services.GetRequiredService<ProtocolRequestAdmission>();
         public HttpClient Client(string subject) => TestActor.CreateClient(app.GetTestServer(), subject);
         public BlockingBody BlockBody(string id)
         {
@@ -506,7 +537,13 @@ public sealed class SecurityEndpointTests
             var memory = TestStorage.Memory();
             var content = new ProbeContent(memory.Content);
             builder.Services.AddCellBridge(new(memory.Documents, content),
-                requireDurability: false, configure: configure);
+                requireDurability: false, configure: options =>
+                {
+                    // These rejection/deadline tests select fail-fast admission explicitly.
+                    options.MaxQueuedRequests = 0;
+                    options.MaxQueuedRequestsPerSubject = 0;
+                    configure?.Invoke(options);
+                });
             var app = builder.Build();
             var bodies = new ConcurrentDictionary<string, BlockingBody>();
             var responses = new ConcurrentDictionary<string, ResponseGate>();

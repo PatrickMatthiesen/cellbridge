@@ -13,7 +13,7 @@ namespace CellBridge.FssHttp.Tests;
 public sealed class AsyncAuthorizationEndpointTests
 {
     [Fact]
-    public async Task SharedAndHistoryDownloadsHideHeadersAndBytesAfterRevocation()
+    public async Task DocumentReadEndpointsHideTheirResultsAfterAsyncAuthorityRevocation()
     {
         var authority = new MutableAuthority();
         var provider = TestStorage.Memory();
@@ -21,7 +21,8 @@ public sealed class AsyncAuthorizationEndpointTests
         builder.WebHost.UseTestServer();
         TestActor.Register(builder.Services);
         builder.Services.AddSingleton<IDocumentAuthorizationProvider>(authority);
-        builder.Services.AddCellBridge(provider, requireDurability: false);
+        builder.Services.AddCellBridge(provider, requireDurability: false,
+            configure: options => options.EnableOfficeRealTime = false);
         var app = builder.Build();
         app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
         var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
@@ -42,6 +43,12 @@ public sealed class AsyncAuthorizationEndpointTests
                 Assert.Equal(HttpStatusCode.OK, head.StatusCode);
             }
 
+            using (var transition = await ReadTransition())
+            {
+                Assert.Equal(HttpStatusCode.OK, transition.StatusCode);
+                Assert.Contains("<IsOnlyClientResult>true</IsOnlyClientResult>", await transition.Content.ReadAsStringAsync());
+            }
+
             authority.Allow = false;
             foreach (var path in paths)
             foreach (var method in new[] { HttpMethod.Get, HttpMethod.Head })
@@ -51,6 +58,20 @@ public sealed class AsyncAuthorizationEndpointTests
                 Assert.Null(result.Headers.ETag);
                 Assert.Null(result.Content.Headers.LastModified);
                 Assert.Empty(await result.Content.ReadAsByteArrayAsync());
+            }
+            using var hiddenTransition = await ReadTransition();
+            Assert.Equal(HttpStatusCode.NotFound, hiddenTransition.StatusCode);
+            Assert.Empty(await hiddenTransition.Content.ReadAsByteArrayAsync());
+
+            async Task<HttpResponseMessage> ReadTransition()
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/sharedaccess.asmx")
+                {
+                    Content = new StringContent($"<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><IsOnlyClient xmlns=\"http://schemas.microsoft.com/sharepoint/soap/\"><id>{id:D}</id></IsOnlyClient></s:Body></s:Envelope>",
+                        System.Text.Encoding.UTF8, "text/xml"),
+                };
+                request.Headers.TryAddWithoutValidation("SOAPAction", "\"http://schemas.microsoft.com/sharepoint/soap/IsOnlyClient\"");
+                return await client.SendAsync(request);
             }
         }
         finally { await app.DisposeAsync(); }

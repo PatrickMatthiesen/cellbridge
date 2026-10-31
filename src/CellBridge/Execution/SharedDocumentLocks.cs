@@ -6,10 +6,51 @@ public enum HostLockOperation { Acquire, Refresh, Release, Replace }
 public sealed record HostWriteToken(Guid ResourceId, long LifecycleGeneration, long CoordinationGeneration,
     string LockToken, string OwnerSubject);
 public sealed record HostLockResult(bool Success, HostWriteToken? WriteToken, string? CurrentLock);
+/// <summary>A current, authorized lock snapshot without exposing FSSHTTP lock identifiers.</summary>
+public sealed record HostLockSnapshot(long LifecycleGeneration, long CoordinationGeneration,
+    bool OfficeLockActive, string? HostLockToken);
 
 /// <summary>Authoritative base WOPI lock integration. Hosts must route both protocols through the same provider.</summary>
 public sealed class SharedDocumentLocks(CellBridgeDocumentService service)
 {
+    /// <summary>Reads current lock authority for a writer without exposing schema or exclusive lock tokens.</summary>
+    public async ValueTask<HostLockSnapshot> ReadAsync(Guid resourceId, CellBridgeActor actor,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var observed = await service.Provider.Documents.ReadControlAsync(resourceId, cancellationToken)
+                ?? throw new KeyNotFoundException("Document does not exist.");
+            if (observed.Head.IsDeleted) throw new KeyNotFoundException("Document does not exist.");
+
+            var admitted = await service.AuthorizeActorAsync(actor, observed.Head, DocumentAccess.Write,
+                cancellationToken, fresh: true);
+
+            // Authorization can wait on a host policy. Re-read the control row after that await
+            // so a lifecycle replacement or policy rebind cannot reuse the older decision.
+            var current = await service.Provider.Documents.ReadControlAsync(resourceId, cancellationToken)
+                ?? throw new KeyNotFoundException("Document does not exist.");
+            if (current.Head.IsDeleted) throw new KeyNotFoundException("Document does not exist.");
+            if (current.Head.LifecycleGeneration != observed.Head.LifecycleGeneration ||
+                current.Head.Security.AuthorizationPolicy != observed.Head.Security.AuthorizationPolicy)
+                continue;
+            if (!service.Access(admitted, current.Head).HasFlag(DocumentAccess.Write))
+                throw new UnauthorizedAccessException("Write access denied.");
+
+            var now = current.UtcNow;
+            var coordination = current.Coordination;
+            var officeLockActive = coordination.Exclusive is { } exclusive && exclusive.ExpiresUtc > now ||
+                coordination.SchemaOwners.Any(owner => owner.ExpiresUtc > now);
+            var hostLockToken = coordination.HostLock is { } host && host.ExpiresUtc > now
+                ? host.Token
+                : null;
+            return new(current.Head.LifecycleGeneration, coordination.Generation, officeLockActive, hostLockToken);
+        }
+
+        throw new InvalidOperationException("The document changed while reading its host lock.");
+    }
+
     public async ValueTask<HostLockResult> ApplyAsync(Guid resourceId, HostLockOperation operation, string token,
         CellBridgeActor actor, string? replacementToken = null, CancellationToken cancellationToken = default)
     {

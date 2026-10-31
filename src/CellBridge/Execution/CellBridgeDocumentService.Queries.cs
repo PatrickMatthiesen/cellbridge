@@ -145,8 +145,9 @@ public sealed partial class CellBridgeDocumentService
 
     private FsshttpbResponse EditorsQuery(StoredDocument document, DocumentPartition partition, ulong requestId, DocumentHead state) =>
         EditorsTablePartitionBuilder.BuildSharePointV13QueryChangesResponse(requestId,
-            document.Sessions.Select(session => new EditorsTableEditor(session.ClientId.ToString("D"), session.ExpiresUtc.Ticks,
+            document.Sessions.Select(session => new EditorsTableEditor(session.ClientId.ToString("B"), session.ExpiresUtc.Ticks,
                 session.Owner?.DisplayName ?? session.UserName, session.Owner?.Login ?? session.UserName,
+                SipAddress: session.Owner?.SipAddress, EmailAddress: session.Owner?.EmailAddress,
                 HasEditorPermission: session.AsEditor && session.Owner is not null &&
                     (_externalAuthorization is not null || Access(new(session.Owner), state).HasFlag(DocumentAccess.Write)), Metadata: session.Metadata)),
             partition.FssHttpBIdentity.CellId, partition.FssHttpBIdentity.SerialGuid, partition.KnowledgeSequence);

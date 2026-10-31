@@ -1,20 +1,19 @@
 # Office operation and storage design review
 
-The user approved this replacement design on 2026-10-28. Implementation proceeds
-from archived commit `1e35edd`; PR #104 was closed without merging. This document
-describes the replacement contract and acceptance criteria. The implementation
-costs and remaining algorithmic limits are recorded in
+This document describes the current storage design contract and acceptance
+criteria. The implementation costs and remaining algorithmic limits are recorded in
 [operation costs](office-operation-costs.md#costs-of-the-replacement-implementation);
 measurements are recorded separately in [Office performance](office-performance.md).
-The user explicitly approved removing provider-wide byte and document-count
-quotas, including shared accounting and buckets. Per-request/per-document bounds,
-permissions, coherency and durability remain requirements.
+The storage design has no provider-wide byte or document-count quotas, shared
+accounting or quota buckets. Per-request and per-document bounds, permissions,
+coherency and durability remain requirements.
 
 - [Microsoft operation catalog](office-operation-catalog.md) lists requests,
   responses, advertised profiles, implementation coverage and size drivers.
 - [Operation costs and priorities](office-operation-costs.md) separates protocol
   bounds, planning assumptions, observed fixtures and unknown production averages.
-- [Existing measurements](office-performance.md) describe the previous experiments.
+- [Performance measurements](office-performance.md) record benchmark results and
+  their limits.
 
 ## Storage-index semantics checked during implementation
 
@@ -329,8 +328,8 @@ admission and their accounting. Do not add another quota framework, soft-cap
 implementation or automatically growing buckets. Per-request/per-document limits
 remain; resource exhaustion still causes an explicit storage failure. Historical
 migrations remain intact, with new migrations retiring the accounting tables.
-The alternatives above record why the removed policy had shared coordination;
-they are not runtime modes to implement in this rewrite.
+The alternatives above record why the removed policy required shared
+coordination. They are not runtime modes.
 
 Document limits also cover content prepared by saves that fail to publish.
 Before writing each batch, a save reserves its unique content handles and their

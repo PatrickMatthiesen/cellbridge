@@ -19,6 +19,7 @@ operations.
 | Read changes | `QueryChanges` supports repeated and mixed file, metadata and editor queries with independent knowledge/errors and one shared data package. Explicit binary targets override the SOAP default. Mapped file-cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
 | Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Complete application metadata graphs publish atomically with key-level coherency. Requested applied-index entries are returned and preserved in stored receipts. |
 | Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
+| Coauthor transition discovery | MS-SHDACCWS `IsOnlyClient` reports whether a transition is pending, using the persisted tracker and current read authorization. |
 | Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` and `Versioning/GetVersionList` report servable history. |
 
 File content, application metadata and editor presence have separate synchronization
@@ -102,40 +103,80 @@ when client knowledge is complete. Reducing those reads is performance work #33.
 | Native Version History | Word, Excel and PowerPoint 16.0.20527 listed persisted revisions, opened older content and restored it as a new revision. Fresh processes repeated listing and historical open after server restart. |
 | Blank Office file creation | Automated package checks. |
 | Two service instances | Automated identity, shared lease and protocol routing checks against one database. |
-| Two desktop clients coauthoring | Unverified, including simultaneous changes and reconnect/recovery. |
+| Two Word desktop clients | Distinct accounts exchanged paragraph changes in both directions, including receipt while idle. Concurrent offline paragraph additions survived reconnect; one client needed manual Save to recover. |
+| Two PowerPoint desktop clients | Distinct accounts preserved slide 1 and added slide 2; the first client received the new slide while idle. |
+| Two Excel desktop clients | Distinct accounts edited concurrently with AutoSave and exchanged cell values and remote selections. Participant names remained unresolved. |
 | Large files and production concurrency | Not qualified. Synthetic benchmarks measure provider behavior. |
 
-The recorded Word trial on 2026-10-03 used Word `16.0.20430`, Tailscale HTTPS
-and PostgreSQL. Ten saves matched client ETags, all 17 binary responses passed
-the independent Office Inspectors parser, and the final download matched the
-client's SHA-256. Reopen used a new Word process. That trial used the earlier
-anonymous host.
+### Tested scope
 
-A separate authenticated trial on the same date verified writer/reader access
-and revocation. Word required explicit forms-sign-in host approval. Repeated
-authenticated save/reopen and the complex PowerPoint test were confirmed by the
-project maintainer.
+Native tests cover Microsoft 365 Word, Excel and PowerPoint 16.0.20527 on
+Windows x64 and ARM64 with distinct CellBridge accounts and a PostgreSQL-backed
+HTTPS host. Both editors exchanged saved changes with AutoSave; independent
+server downloads retained their changes. Word cursor indicators and Excel
+remote selections appeared. Participant names remained unresolved.
 
-On 2026-10-05, the maintainer created and edited `excel-test.xlsx` and
-`word-test.docx` through the authenticated Tailscale HTTPS host backed by
-PostgreSQL. Server captures recorded three successful Excel `PutChanges`
-operations and two successful Word `PutChanges` operations. The downloaded
-files had content versions 4 and 3 respectively; both passed ZIP integrity
-and XML parsing checks. The maintainer confirmed that edits remained in both
-documents after fully closing and reopening them from the library. This was
-a single-desktop test, with no coauthoring transition qualification.
+Version History tests used one Windows desktop and one account. Each app listed
+persisted revisions, opened older content and restored it as a new revision.
+Downloads verified the restored bytes and retained revisions after a server
+restart. Fresh Office processes repeated listing and historical open.
 
-On 2026-10-30, native Microsoft 365 Word, Excel and PowerPoint `16.0.20527`
-were tested against an authenticated localhost HTTPS host backed by PostgreSQL.
-Each document had an original revision and a saved revision with a distinct
-marker. Each app listed both revisions, opened the original content and used its
-native Restore command. Server captures recorded successful `RestoreVersion`
-requests. Authenticated downloads confirmed that the new third revision matched
-the original file's SHA-256 and that the second revision retained its marker.
-After stopping and restarting the host, all nine revision downloads retained
-their hashes. Fresh Office processes listed all three revisions and opened the
-second revision with its saved marker. This was a single-user trial on one
-Windows desktop. It does not qualify other Office builds or coauthoring.
+Word outage tests preserved separate paragraph additions from both editors;
+one client needed manual Save to recover. An iPhone edit reached both open
+Windows clients and a server download. These checks establish saved-change
+propagation, not character-by-character delivery or measured latency.
+
+Native Word requested replacement RTC tickets before expiry in a short-lifetime
+test. Native Excel continued saving after more than one normal ticket lifetime.
+The Excel result establishes continued file saving, not RTC renewal. Recovery
+after missed renewal remains untested.
+
+These tests do not establish compatibility with other Office builds, reliable
+cold startup across all three apps, same-content conflict resolution or
+production concurrency. See the remaining work below.
+
+## Real-time collaboration
+
+The single-host RTC relay implements the observed SignalR methods for typing,
+presence and client notifications. `CellBridgeOptions.EnableOfficeRealTime`
+defaults to true. Set it to false to disable discovery and endpoints. WebDemo
+accepts `Protocol:EnableOfficeRealTime=false`; AppHost accepts
+`Parameters:EnableOfficeRealTime=false`.
+
+RTC requires stored grants or an immutable versioned authorization policy so
+that each delivery can check participants against one permission snapshot.
+Enabling it with an ordinary asynchronous authorization provider, a legacy
+access evaluator or `multipleInstances: true` fails at startup.
+
+Discovery exposes storage and authoring headers and authenticated file metadata
+through `PROPFIND` with `Depth: 0`. Resource IDs, replication tags, file sizes,
+ETags and timestamps come from persisted metadata. Document and SOAP routes
+use the same discovery profile and advertise only their implemented methods.
+Presence is keyed to the authenticated client; payloads need not contain an
+`A` sender field.
+
+RTC does not publish file revisions or implement OCS or WOPI. The separate
+MS-SHDACCWS `IsOnlyClient` operation reports pending coauthor transitions;
+it is not the RTC transport. See [protocol profiles](office-protocol-profiles.md)
+for the service boundaries and reference protocols.
+
+## Remaining collaboration work
+
+This inventory separates missing implementation from observed defects and missing
+test coverage. It is not an exhaustive Office conformance audit.
+
+| Area | Current gap |
+| --- | --- |
+| Participant names | Observed defect: remote selections/cursor indicators appear, but names show `Loading name...` or `Getting name...`. The missing identity lookup contract is not established. |
+| OCS | Missing service: the frame codec does not implement session state, WPM merging, revision clocks or saving merged content to the file host. RTC can operate without OCS. |
+| Publication notifications | Missing integration: the RTC hub relays client notifications, but persisted file publication does not generate a server notification. |
+| Multiple RTC hosts | Missing coordination: rooms and presence are process-local. Multi-instance hosts must disable RTC. Shared file storage and locking are separate and support multiple hosts. |
+| Ticket renewal and reconnect | RTC tickets last 20 minutes. Native Word proactively renewed tickets in a short-lifetime test. Recovery after missed renewal, disconnect and presence loss needs coverage. |
+| Startup | Bounded admission queues absorb opening bursts. Reliable cold startup across all three apps needs broader coverage. |
+| Typing and latency | Test gap: saved edits and selection changes propagated, but character-by-character delivery and measured end-to-end latency are not established for CellBridge. |
+| Conflicting/offline edits | Test gap: separate Word paragraph additions survived one outage/reconnect trial. Same-text, same-cell and same-object conflicts, undo and longer outages need coverage. |
+| Native sharing | Owner-only service APIs now read, grant and revoke stored access with lifecycle and authority checks. Native Share endpoints and host recipient resolution are not implemented. OneDrive traffic exposed CSOM sharing reads and `/_vti_bin/DocumentSharing.svc`; see [protocol profiles](office-protocol-profiles.md#native-sharing). Email invitations and anonymous links are not supported. |
+| WOPI integration | A host adapter must use indexed APIs, supply a production conditional revision destination and qualify OOS framing. CSPP Plus coauthor locks, chunk operations and sequence operations are not implemented by the RTC hub. |
 
 ## Automated checks
 

@@ -64,7 +64,7 @@ public sealed class NestedDocumentEndpointTests
             using var result = await fixture.Send(HttpMethod.Options, mount + suffix);
             Assert.Equal(HttpStatusCode.OK, result.StatusCode);
             Assert.Equal("1.5", Assert.Single(result.Headers.GetValues("X-MSFSSHTTP")));
-            Assert.Equal("http://localhost" + mount + "/shared/", Assert.Single(result.Headers.GetValues("X-MSGETWEBURL")));
+            Assert.Equal("1", Assert.Single(result.Headers.GetValues("MS-Storage")));
         }
     }
 
@@ -227,7 +227,7 @@ public sealed class NestedDocumentEndpointTests
         using var host = await fixture.Send(HttpMethod.Get, "/shared/deep/health");
         Assert.Equal("host", await host.Content.ReadAsStringAsync());
         using var options = await fixture.Send(HttpMethod.Options, "/shared/deep/health");
-        Assert.Equal("http://localhost/shared/", Assert.Single(options.Headers.GetValues("X-MSGETWEBURL")));
+        Assert.Equal("1", Assert.Single(options.Headers.GetValues("MS-Storage")));
         using var post = await fixture.Send(HttpMethod.Post, "/shared/deep/health");
         Assert.Equal(HttpStatusCode.NotFound, post.StatusCode);
     }

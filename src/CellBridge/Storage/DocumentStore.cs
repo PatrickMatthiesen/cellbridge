@@ -491,12 +491,22 @@ public sealed partial class StoredDocument
         foreach (var session in _sessions)
         {
             var editor = new XElement("Editor",
-                new XElement("CacheID", session.ClientId.ToString("D")));
+                new XElement("CacheID", session.ClientId.ToString("B")));
 
             if (!string.IsNullOrWhiteSpace(session.UserName))
             {
                 editor.Add(new XElement("FriendlyName", session.Owner?.DisplayName ?? session.UserName));
                 editor.Add(new XElement("LoginName", session.Owner?.Login ?? session.UserName));
+            }
+
+            if (session.Owner?.SipAddress is { Length: > 0 } sipAddress)
+            {
+                editor.Add(new XElement("SIPAddress", sipAddress));
+            }
+
+            if (session.Owner?.EmailAddress is { Length: > 0 } emailAddress)
+            {
+                editor.Add(new XElement("EmailAddress", emailAddress));
             }
 
             editor.Add(new XElement("HasEditorPermission", session.AsEditor ? "true" : "false"));

@@ -12,7 +12,7 @@ public static class CellStorageRequestParser
     /// <summary>Maximum number of characters accepted in a SOAP request document.</summary>
     public const long MaximumSoapCharacters = 16 * 1024 * 1024;
 
-    private static readonly XNamespace Tns = "http://schemas.microsoft.com/sharepoint/soap/";
+    private static readonly XNamespace Tns = CellStorageRequest.Namespace;
     private static readonly XNamespace XopIncludeNs = "http://www.w3.org/2004/08/xop/include";
 
     /// <summary>
@@ -31,25 +31,32 @@ public static class CellStorageRequestParser
         using var textReader = new StringReader(soapXml);
         using var xmlReader = XmlReader.Create(textReader, settings);
         var doc = XDocument.Load(xmlReader);
-        // Word has used both SOAP 1.1 and SOAP 1.2 envelopes. The protocol
-        // payload is identical, so identify the envelope elements by local
-        // name rather than rejecting the SOAP 1.2 namespace.
-        var body = doc.Root?.Elements().FirstOrDefault(e => e.Name.LocalName == "Body")
-            ?? throw new InvalidDataException("SOAP envelope is missing a Body element.");
+        var envelope = doc.Root;
+        var parsedSoapNamespace = envelope?.Name.NamespaceName;
+        if (envelope?.Name.LocalName != "Envelope" || parsedSoapNamespace is not
+            ("" or CellStorageRequest.Soap11Namespace or CellStorageRequest.Soap12Namespace))
+            throw new InvalidDataException("SOAP envelope namespace is not supported.");
+        var soapNamespace = parsedSoapNamespace is CellStorageRequest.Soap11Namespace or CellStorageRequest.Soap12Namespace
+            ? parsedSoapNamespace
+            : CellStorageRequest.Soap11Namespace;
+        var bodies = envelope.Elements().Where(e => e.Name.LocalName == "Body" &&
+            (parsedSoapNamespace == "" ? e.Name.NamespaceName == "" : e.Name == XName.Get("Body", soapNamespace))).ToArray();
+        if (bodies.Length != 1)
+            throw new InvalidDataException("SOAP envelope must contain exactly one Body element.");
+        var body = bodies[0];
 
         var execute = body.Elements().FirstOrDefault(e =>
             e.Name.LocalName == "ExecuteCellStorageRequest");
         var protocolContainer = execute ?? body;
 
         var request = new CellStorageRequest();
+        request.SoapNamespace = soapNamespace;
 
         var requestVersion = SingleRequiredElement(protocolContainer, "RequestVersion");
         request.Version = ParseRequiredUInt16(requestVersion, "Version");
         request.MinorVersion = ParseRequiredUInt16(requestVersion, "MinorVersion");
 
         var requestCollection = SingleRequiredElement(protocolContainer, "RequestCollection");
-
-        request.UsesDirectBody = execute is null;
 
         request.CorrelationId = ParseRequiredGuid(requestCollection, "CorrelationId");
 

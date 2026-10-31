@@ -12,10 +12,16 @@ requests require a specific `AllowedHosts` list. A universal `*` does not establ
 trust; only loopback hosts work without a specific list. Keep forwarded headers
 restricted to known proxies.
 
-Cellstorage POSTs and current/historical document GETs share admission limits of
-eight requests per process and two per authenticated subject. A download holds
-its permit through package reconstruction and response delivery. The absolute
-deadline defaults to two minutes and covers both stages. Metadata-only HEAD
+Cellstorage POSTs, PROPFIND and current/historical document GETs share admission
+limits of eight executing requests per process and two per authenticated subject.
+Bounded FIFO queues absorb short native-client bursts, with up to 32 requests
+waiting for one subject and 128 waiting for global capacity. A subject wait does
+not reserve global capacity. Set either queue limit to zero for fail-fast
+admission at that boundary. A full subject queue returns 429; a full global queue
+returns 503. Both responses include `Retry-After: 1`.
+A download holds its permit through package reconstruction and response delivery.
+The absolute deadline defaults to two minutes and covers queuing and execution.
+Metadata-only HEAD
 requests and OPTIONS discovery do not reconstruct packages.
 Large request bodies spool to private temporary files before parsing. SOAP XML
 is limited to 16 Mi characters, so use MTOM attachments for large binary payloads.
@@ -149,10 +155,10 @@ Office applications may share their cookie store, so signing into one can sign
 the others in too. Identity's two-factor checks still run before issuing an
 application cookie; this option does not remember a two-factor device.
 
-The helper does not select a default authentication scheme. ASP.NET Core can use
-a sole scheme as its implicit default, but adding another scheme removes that
-implicit choice. Mixed-scheme applications must explicitly select defaults or
-name schemes in their authorization policies. An existing explicit bearer or
+The login helper does not select a default authentication scheme. ASP.NET Core
+can use a sole scheme as its implicit default; RTC registration preserves that
+choice for a single host scheme. Mixed-scheme applications must explicitly select
+defaults or name schemes in their authorization policies. An existing explicit bearer or
 cookie default stays unchanged; CellBridge's Office endpoints select the login
 cookie explicitly. Keep `AddCellBridgeLogin<TAuthenticator>("Cookies")` when the
 host already registers that cookie. Do not register the same scheme twice.
@@ -263,6 +269,16 @@ before routing; prefixed route groups are rejected. Office must reach the extern
 HTTPS origin. Configure trusted forwarded headers before authentication behind a proxy,
 or set `PublicOrigin` to a fixed HTTPS origin without a path.
 
+Office RTC is enabled by default. To disable its discovery and endpoints, configure
+`AddCellBridge(..., configure: options => options.EnableOfficeRealTime = false)`.
+WebDemo uses `Protocol:EnableOfficeRealTime=false`; AppHost uses
+`Parameters:EnableOfficeRealTime=false`. Disable RTC for multi-instance hosts or
+ordinary asynchronous authorization providers. The relay requires a single host
+and stored grants or an immutable versioned authorization policy.
+
+RTC tickets expire after 20 minutes. Ticket issuance logs include resource,
+lifecycle and expiry time, without the ticket itself.
+
 Cookie schemes using `CookieAuthenticationOptions.EventsType` are unsupported here;
 use an `Events` instance. `IsRequestAllowed` gates every packaged GET and POST before
 credential or token processing. Connect host rate limiting and other admission policy
@@ -271,6 +287,22 @@ request gate; real account policy belongs to the account system.
 
 CellBridge and
 its storage/authentication dependencies have not been qualified under Native AOT.
+
+## Manage named-user document access
+
+For documents using stored grants, `CellBridgeDocumentService.GetSharingAsync`
+returns the current owner's grant snapshot. `SetRecipientGrantAsync` adds,
+changes or revokes one recipient's grant. Both require the current owner and
+current Write access, including any actor access ceiling. Resolve the recipient
+through the host's trusted directory before passing its `SubjectIdentity`.
+
+Pass the snapshot's lifecycle and authority generations to `SetRecipientGrantAsync`.
+Supported grants are `Read`, `Read | Write`, and `None` for revocation. A stale
+snapshot or concurrent document change returns `Conflict`; read a fresh snapshot
+before retrying. The API preserves document ownership and content author metadata.
+External policies and legacy access evaluators must manage sharing through their
+own authority. These APIs do not implement native Office Share endpoints, email
+invitations or anonymous links.
 
 ## Execute parsed SOAP requests
 

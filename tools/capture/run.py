@@ -1,4 +1,4 @@
-"""Start a local diagnostic forward or reverse proxy without changing OS settings."""
+"""Capture selected destinations through a forward, reverse or process-local proxy."""
 from __future__ import annotations
 
 import argparse
@@ -46,12 +46,33 @@ def parse_hosts(value: str) -> list[str]:
     return hosts
 
 
+def parse_local_processes(value: str) -> str:
+    """Accept only explicit process basenames or positive PIDs, never all-process specs."""
+    processes = value.split(",")
+    for process in processes:
+        if (not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", process)
+                or (process.isdecimal() and int(process) <= 0)
+                or process.lower() in ("all", "none")):
+            raise argparse.ArgumentTypeError(
+                "local processes must be explicit comma-separated process basenames or positive PIDs; "
+                "paths, arguments, whitespace, wildcards and negations are not allowed")
+    return ",".join(processes)
+
+
+def allow_host_pattern(host: str) -> str:
+    # mitmproxy compares these expressions with destination host:port and TLS SNI.
+    return rf"^{re.escape(host)}(?::[0-9]+)?$"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hosts", default=os.getenv("CAPTURE_HOSTS"),
                         help="required comma-separated exact destination hostnames")
     parser.add_argument("--reverse-upstream", default=os.getenv("CAPTURE_REVERSE_UPSTREAM"),
                         help="fixed HTTP or HTTPS upstream origin; enables reverse proxy mode")
+    parser.add_argument("--local-processes", type=parse_local_processes,
+                        help="process-local capture for explicit comma-separated process basenames or positive PIDs")
+    parser.add_argument("--http2", action="store_true", help="enable HTTP/2 (disabled by default)")
     parser.add_argument("--tls-cert", type=Path, default=os.getenv("CAPTURE_TLS_CERT"))
     parser.add_argument("--tls-key", type=Path, default=os.getenv("CAPTURE_TLS_KEY"))
     parser.add_argument("--port", type=positive_int, default=int(os.getenv("CAPTURE_PORT", "8877")))
@@ -69,6 +90,8 @@ def main() -> int:
     parser.add_argument("--upstream-ca", type=Path, default=os.getenv("CAPTURE_UPSTREAM_CA"),
                         help="PEM CA bundle for validating a private upstream certificate")
     args = parser.parse_args()
+    if args.local_processes and args.reverse_upstream:
+        parser.error("--local-processes and --reverse-upstream are mutually exclusive")
     if args.reverse_upstream:
         try:
             upstream = urlsplit(args.reverse_upstream)
@@ -135,6 +158,8 @@ def main() -> int:
         "CAPTURE_MAX_WEBSOCKET_MESSAGE_BYTES": str(args.max_websocket_message_bytes),
         "CAPTURE_MAX_WEBSOCKET_MESSAGES": str(args.max_websocket_messages),
         "CAPTURE_REVERSE_UPSTREAM": args.reverse_upstream or "",
+        "CAPTURE_LOCAL_PROCESSES": args.local_processes or "",
+        "CAPTURE_HTTP2": str(args.http2).lower(),
     })
 
     from mitmproxy import ctx
@@ -153,17 +178,28 @@ def main() -> int:
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, lambda *_: ctx.master.shutdown())
 
+    mode = (f"local:{args.local_processes}" if args.local_processes else
+            f"reverse:{args.reverse_upstream}" if args.reverse_upstream else "regular")
     options = [
-        "--mode", f"reverse:{args.reverse_upstream}" if args.reverse_upstream else "regular",
-        "--listen-host", "127.0.0.1", "--listen-port", str(args.port),
+        "--mode", mode,
         "--set", f"confdir={output_root / '.mitmproxy'}",
-        "--set", "http2=false", "--set", "connection_strategy=eager",
+        "--set", f"http2={str(args.http2).lower()}", "--set", "connection_strategy=eager",
         "--set", "termlog_verbosity=warn", "--set", "flow_detail=0",
         "--scripts", str(ROOT / "capture_addon.py"),
     ]
+    if args.local_processes:
+        # Ignore unrelated connections before TLS interception and HTTP hooks.
+        # The addon's requestheaders check still rejects decoded Host mismatches.
+        for host in hosts:
+            options.extend(["--set", f"allow_hosts={allow_host_pattern(host)}"])
+        options.extend(["--set", "show_ignored_hosts=false"])
+        print(f"Process-local capture: {args.local_processes}; run: {run}", flush=True)
+        print("Windows may request UAC approval for mitmproxy's local redirector.", flush=True)
+    else:
+        options.extend(["--listen-host", "127.0.0.1", "--listen-port", str(args.port)])
+        print(f"Capture proxy: 127.0.0.1:{args.port}; run: {run}", flush=True)
     if args.upstream_ca:
         options.extend(["--set", f"ssl_verify_upstream_trusted_ca={args.upstream_ca.resolve()}"])
-    print(f"Capture proxy: 127.0.0.1:{args.port}; run: {run}", flush=True)
     print("Local raw evidence only. OS proxy settings and certificate trust are unchanged.", flush=True)
     if args.reverse_upstream:
         # Aspire owns the input files. Keep mitmproxy's combined PEM temporary,

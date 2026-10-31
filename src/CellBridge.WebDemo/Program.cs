@@ -56,9 +56,12 @@ else throw new InvalidOperationException("Unknown document storage provider.");
 builder.Services.AddCellBridge(provider, requireDurability: !storageKind.Equals("InMemory", StringComparison.OrdinalIgnoreCase),
     multipleInstances: builder.Configuration.GetValue("Storage:MultipleInstances", false), configure: options =>
     {
+        options.EnableOfficeRealTime = builder.Configuration.GetValue("Protocol:EnableOfficeRealTime", true);
         options.MaxRequestBytes = builder.Configuration.GetValue("Protocol:MaxRequestBytes", options.MaxRequestBytes);
         options.MaxConcurrentRequests = builder.Configuration.GetValue("Protocol:MaxConcurrentRequests", options.MaxConcurrentRequests);
         options.MaxConcurrentRequestsPerSubject = builder.Configuration.GetValue("Protocol:MaxConcurrentRequestsPerSubject", options.MaxConcurrentRequestsPerSubject);
+        options.MaxQueuedRequests = builder.Configuration.GetValue("Protocol:MaxQueuedRequests", options.MaxQueuedRequests);
+        options.MaxQueuedRequestsPerSubject = builder.Configuration.GetValue("Protocol:MaxQueuedRequestsPerSubject", options.MaxQueuedRequestsPerSubject);
         options.RequestTimeout = builder.Configuration.GetValue("Protocol:RequestTimeout", options.RequestTimeout);
         options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"];
         options.DocumentLibraryId = builder.Configuration.GetValue<Guid?>("Protocol:DocumentLibraryId");

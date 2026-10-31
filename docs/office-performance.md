@@ -1,32 +1,32 @@
 # Measuring active Office user capacity
 
 The retained candidate reached 11,234 successful saves in a measured
-Snowfall minute with direct PostgreSQL and proxied HTTPS, with no measured HTTP
+Windows-host minute with direct PostgreSQL and proxied HTTPS, with no measured HTTP
 failures. All 16,760 acknowledgments passed final historical verification.
 Warm-up still had 49 HTTP 503s. This is a bounded synthetic result, not production
 or near-limit history qualification. The [database audit](#database-transaction-and-connection-audit)
 records the separate code improvement and endpoint-control results.
 
-Earlier exact-current Snowfall measurements at `fd6b8e0` and local Linux runs are
+Earlier exact-current Windows-host measurements at `fd6b8e0` and local Linux runs are
 retained below. The Linux control-read/native-JSON candidate acknowledged 5,863
 saves/minute under overload; batching alone reached 5,813 against 5,519. Those
 runs used 1,500 authenticated users and 15,000 documents. They are not matched
-comparisons with the later Snowfall endpoint control.
+comparisons with the later endpoint control.
 
 The archived implementation reached 8,151 inside a measured minute with HTTP
-failures. The rewrite has not demonstrated a throughput gain over that result.
+failures. The replacement implementation has not demonstrated a throughput gain over that result.
 These synthetic workloads do not validate desktop Office capacity.
 
 The earlier retained runs below predate shared download admission. Their document GETs
 did not consume the SOAP concurrency budget or use its deadline. Current GETs
 share that budget through reconstruction and transfer. Qualification of this
-combined request policy is included in the exact-current Snowfall runs.
+combined request policy is included in the exact-current Windows-host runs.
 
-## Exact-current Snowfall qualification
+## Exact-current Windows-host qualification
 
 On 2026-10-30, the clean isolated Windows checkout matched
 `fd6b8e012dedd0e354be2383efc35d2149d6f561` before building or measuring.
-The private SDK was `11.0.100-rc.3.26522.148`. PostgreSQL 18.3 ran in Docker
+The SDK was `11.0.100-rc.3.26522.148`. PostgreSQL 18.3 ran in Docker
 Desktop. The existing NBomber HTTP workload used 1,500 authenticated users,
 15,000 documents, 256 KiB packages, 16 KiB changed XML, no retries, seed 42,
 30 seconds warm-up and 60 seconds measurement. Queries remained at 30 seconds
@@ -148,10 +148,8 @@ Windows diagnostic copy reproduced the original Linux SHA-256 exactly.
 This changes the separate provider benchmark fixture, not the Office-user
 HTTP corpus used for these measurements.
 
-Raw commands, profiles, source/binary hashes, candidate patch, counters, trace,
-reports, collector sources and final verifier logs remain in the ignored
-`artifacts/office-snowfall-current/` directory. The candidate is not a shipping
-change. No archived implementation comparison was rerun.
+The candidate is not part of the implementation. No archived implementation
+comparison was rerun.
 
 ### Architecture and remaining capacity work
 
@@ -418,10 +416,8 @@ remain unqualified. The indexed/immutable architecture and durability contracts
 can support other feature work while those capacity gates remain explicit. The
 retained access changes add no migration or global coordination mechanism.
 
-Raw controls, candidate source patches, binary hashes, isolated SQL logs,
-collector sources, profiles, reports and final verification output remain under
-`artifacts/office-db-attribution/` on Snowfall. The profiles use the existing
-NBomber generator and verifier; they are not a new benchmark framework.
+The profiles use the existing NBomber generator and verifier; they are not a new
+benchmark framework.
 
 ## Atomic SQL publication experiment
 
@@ -461,9 +457,7 @@ inside one save.
 After timing, each retained acknowledged package was materialized and hashed.
 The candidate additionally checks one-to-one acknowledgement/index coverage;
 the baseline used the first historical-byte verifier. Those untimed checks do
-not change the offered workload. Raw paired evidence is retained under
-`artifacts/office-atomic/`, including `local-comparison.json`, the baseline
-qualification patch and original CSV/pgstats files.
+not change the offered workload.
 
 ## Coherent control-read batching experiment
 
@@ -499,8 +493,7 @@ passed historical-package hashes and one-to-one revision coverage after timing.
 The database sampler observed zero blocked backends; database counters recorded
 zero deadlocks and rollbacks. Small changes in latency and memory are not
 repeated estimates. Batching removes commands; it does not remove transactions
-or change the graph algorithm's scaling. Raw paired evidence and source hashes
-remain under `artifacts/office-control-batch/`.
+or change the graph algorithm's scaling.
 
 ## Native JSON decoding experiment
 
@@ -528,14 +521,12 @@ That difference is below 1% and does not demonstrate an endpoint throughput gain
 Save/query p95 was 1,226/633 ms, compared with 1,236/636 ms. WebDemo used 1.61
 CPU equivalents and peak sampled measurement RSS was 714 MiB, compared with
 1.61 and 717 MiB. All 8,447 acknowledgements passed historical-byte and
-one-to-one verification after timing, with no missed cadence slots. Raw results,
-source hashes and the allocation experiment remain under
-`artifacts/office-json-decode/`.
+one-to-one verification after timing, with no missed cadence slots.
 
-## Snowfall measurements
+## Windows-host measurements
 
-The same application commit, `b41e42b`, was also measured on Snowfall before
-atomic SQL publication. Snowfall runs Windows with a Ryzen 7 9800X3D (8 cores,
+The same application commit, `b41e42b`, was also measured on a Windows host before
+atomic SQL publication. The host had a Ryzen 7 9800X3D (8 cores,
 16 threads), 31.2 GiB RAM and PostgreSQL 18.3 through Docker Desktop. The
 benchmark retained the pool/preparation caps of 64, admission 128/two per subject,
 1,500 users, 15,000 documents, PostgreSQL settings and the same cadence.
@@ -552,9 +543,8 @@ acknowledged historical package. The current verifier additionally materializes
 and hashes each acknowledged revision after measurement. That check is outside
 the measured window and database-statistics capture.
 
-Raw baseline and separate diagnostic evidence remain on Snowfall under
-`artifacts/office-snowfall-baseline/`. The diagnostic thread-stack samples include
-waits and are not scheduler CPU samples. Allocation ticks estimated 781 MB/s
+The diagnostic thread-stack samples include waits and are not scheduler CPU
+samples. Allocation ticks estimated 781 MB/s
 in the separate instrumented run; that rate is approximate and does not describe
 the untraced qualification runs.
 
@@ -580,7 +570,7 @@ revision coverage for all 11,657 AutoSave, 8,553 bounded and 4,484 primary
 acknowledgements after timing. The earlier baseline used the final-package checks
 described above.
 
-These single runs do not isolate the implementation's effect. Unrelated Picknic
+These single runs do not isolate the implementation's effect. Unrelated
 containers were running during the candidate measurements and were absent from
 the saved baseline inventory. A separate traced candidate run reached 9,403
 in-window acknowledgements with failures. It is a diagnostic result, not a clean
@@ -592,10 +582,9 @@ PostgreSQL byte-array reads, EF expression processing and object-group parsing.
 The baseline diagnostic estimate was 781 MB/s. Neither sample establishes the
 allocation rate of an untraced run. Sampled blocked-backend observations were
 zero in the three untraced candidate runs; deadlocks and rollbacks were also
-zero. This does not exclude short waits. Raw candidate evidence remains on
-Snowfall under `artifacts/office-snowfall-atomic/`.
+zero. This does not exclude short waits.
 
-## Controlled Snowfall comparison
+## Controlled Windows-host comparison
 
 Four subsequent untraced runs compared A=`b41e42b` and B=`0b9a2d0` in A/B/B/A
 order at 6,000 offered saves/minute. All four retained the same account/document
@@ -631,13 +620,7 @@ alone do not establish paging. A later idle inventory found about 17.4 GiB
 available, which cannot explain consumption during the earlier runs. Future
 qualification needs generator and host-process measurements alongside the server.
 
-Raw CSV, database reports, host samples, inventories and verifier evidence remain
-on Snowfall under `artifacts/office-snowfall-controlled/`. The A1 console log was
-truncated during redaction; its raw results and previously captured verifier
-evidence survived. All owned fixtures stopped and the user's checkout was
-restored without changing its existing deletion.
-
-## Snowfall with process attribution
+## Windows-host runs with process attribution
 
 Commit `2025796` was measured with separate generator, server and DCP process
 samples. These runs precede shared download admission.
@@ -664,8 +647,7 @@ the whole host limit to the library.
 Available RAM remained above 9.4 GiB. Windows page-output and sampled Linux swap
 counters stayed zero; paging was not demonstrated. SQL samples recorded no blocked
 backends or deadlocks. WAL was 733,373,576/676,126,427 bytes across warm-up,
-measurement and drain. Raw evidence and the interruption/sampler limitations are
-retained on Snowfall under `artifacts/office-snowfall-2025796/`.
+measurement and drain.
 
 ## HTTPS proxy comparison
 
@@ -691,8 +673,7 @@ Both Windows functional preflights passed. Docker reader delays invalidated
 PostgreSQL CPU, memory and I/O measurements for the timed windows; host/process
 sampling also missed its one-second target. Those measurements cannot establish
 a database CPU improvement or a precise explanation for the run differences.
-No runs were discarded or repeated. Raw evidence remains on Snowfall under
-`artifacts/office-snowfall-https-abba-91bcf77/`.
+No runs were discarded or repeated.
 
 ## Immutable group-read experiment
 
@@ -719,8 +700,7 @@ All failures were HTTP 503 overload; cadence misses, deadlocks, rollbacks and
 sampled blocked observations were zero. Short waits remain possible. SQL reports
 retained the same leading costs: binding metadata reads, ordered chunk reads and
 visibility lookups. No PostgreSQL process CPU or allocation measurement was
-collected. Raw evidence and the discarded candidate remain under
-`artifacts/office-group-read/`. This experiment establishes no clean capacity gain.
+collected. This experiment establishes no clean capacity gain.
 
 ## Save package stream experiment
 
@@ -748,7 +728,6 @@ These counters do not establish physical disk traffic. CPU and allocation
 counters include runtime activity and small measurement overhead; these short
 component runs establish no HTTP throughput or capacity gain. Full validation and
 hashing remained in both paths.
-Raw code and results remain under `artifacts/office-segmented-package/component/`.
 
 ### Full HTTP result and decision
 
@@ -791,8 +770,6 @@ Iteration stops at this measured plateau. No clean 10,000/minute point has been
 established. Further changes need evidence that reducing verified-content reads,
 graph parsing or publication work improves the full mixed workload; removing
 more guards or changing representation on these samples alone is unjustified.
-Raw comparisons, trace, analysis and restoration evidence remain under
-`artifacts/office-segmented-package/capacity/`.
 
 ## Retained document staging admission measurements
 
@@ -821,7 +798,7 @@ The AutoSave step totals, including warm-up/drain
 and queries/opens, include 12,956 HTTP 503 responses; they are not a count confined
 to saves in the measured minute.
 
-The AutoSave result is about 8% below the earlier 5,286 run. These single local
+The AutoSave result is about 8% below the earlier 5,286 run. These single
 runs do not isolate the exact cost of the added transaction. The primary workload
 still passed at 3,000 offered saves/minute; it does not establish the target
 capacity. The earlier measurements below precede this staging-admission fix.
@@ -834,11 +811,6 @@ sampling can miss short waits. Physical object growth remained about 17.47 KiB
 per acknowledgement. Document charged bytes grew about 33.55 KiB per
 acknowledgement, including the new ownership metadata; this is not physical
 database or WAL growth.
-
-The retained reports are
-`artifacts/load-tests/office-users-1500-20261029T0658326926623Z-bce1fe02890940d2afdaf6ce8eb9fdb9.pgstats.json`
-and
-`artifacts/load-tests/office-users-1500-20261029T0703328924140Z-b302b928a68e47ab9e5401d527833992.pgstats.json`.
 
 ## Initial replacement measurements
 
@@ -881,19 +853,14 @@ inclusive paths overlap. The captured per-record publication paths were replaced
 by the subsequent bounded prefetch implementation; the trace does not measure
 that later code.
 
-Import setup is outside request timing. Bounded EF flushes and a verified private
+Import setup is outside request timing. Bounded EF flushes and a verified temporary
 payload spool reduced one 15,000-document import from 336 seconds to about
-80 seconds. The earlier attempt stalled during account setup and was stopped;
-it produced no capacity result. The change keeps all import flushes and its
-recovery receipt inside one atomic transaction. Batching bounds extra EF tracking,
-not the caller-supplied complete snapshot's memory.
+80 seconds. The change keeps all import flushes and its recovery receipt inside
+one atomic transaction. Batching bounds extra EF tracking, not the caller-supplied
+complete snapshot's memory.
 
-Raw local results are under `artifacts/office-rewrite/` and
-`artifacts/load-tests/office-users-1500-20261029T0019338889908Z-38cca6a2250940648cd74c72bebd06da.pgstats.json`.
-The traced report is
-`office-users-1500-20261029T0036130440825Z-3de6b77dc7a54257a31e2f148023f069.pgstats.json`
-in the same load-test directory. Query statistics cover warm-up, measurement and
-drain before final validation. They are not per-request wall-clock traces.
+Query statistics cover warm-up, measurement and drain before final validation.
+They are not per-request wall-clock traces.
 The [implementation cost table](office-operation-costs.md#costs-of-the-replacement-implementation)
 records remaining catalog scans, package-sized validation and checkpoint costs.
 
@@ -942,9 +909,8 @@ more than the preceding run with the same pool and preparation settings.
 All 7,652 acknowledged saves including warm-up/drain passed final validation.
 WebDemo used 159% of one logical CPU and at most 756,051,968 sampled RSS bytes
 during measurement. The PostgreSQL sampler observed no blocked backends; short
-waits can escape its sampling. The report is
-`artifacts/load-tests/office-users-1500-20261029T0321148414127Z-e77cbfcd7d784055a990a9768b7d91cd.pgstats.json`.
-This is still an overload result with HTTP 503 failures.
+waits can escape its sampling. This is still an overload result with HTTP 503
+failures.
 
 A fresh run of the primary profile used the same final source, pool cap 64 and
 automatic preparation cap 64, with each user saving every 30 seconds. It passed
@@ -954,8 +920,7 @@ All 4,482 acknowledged saves including warm-up passed final content, revision,
 receipt and distinct-payload checks. Queries and opens ran alongside saves.
 WebDemo used 143% of one logical CPU and at most 579,747,840 sampled RSS bytes
 during measurement. This single passing run supports approximately 3,000 offered
-saves/minute on this host, not the 10,000 target. Its report is
-`artifacts/load-tests/office-users-1500-20261029T0326070813059Z-61dbd9ee51f842ee9a6cf421564e1211.pgstats.json`.
+saves/minute on the measured host, not the 10,000 target.
 
 That primary run made 80,814 document-head SELECTs. The service paths account
 for them exactly: seven per save, eight per query and four per download. Each
@@ -963,8 +928,8 @@ open performs both a download and a query. These are current metadata reads,
 not history scans. An experiment reused the entry head for the first operation
 to remove one read per Cell request. It failed the existing file/metadata tests
 where a lease is reacquired after the entry snapshot but before operation
-admission: a successful save became a conflict. The experiment was reverted;
-all 70 focused tests then passed. This rejects that reuse strategy, rather than
+admission: a successful save became a conflict. The experiment was reverted.
+This rejects that reuse strategy, rather than
 establishing that the current number of reads is minimal.
 
 The archived 8,151/minute overload result remains higher than these replacement
@@ -1037,9 +1002,6 @@ five-sample run allocated 1,827,888 bytes for the aged save; the final run alloc
 1,063,208. Different sample counts and runtime tiering prevent a clean CPU speedup
 claim. Process CPU can include background GC triggered by setup; short wall times
 also depend on the shared host. Allocation counts are the useful evidence here.
-Raw results are `artifacts/office-rewrite/history-scaling-final.json` and
-`history-scaling-before-selected-claims.json` in that directory.
-
 ## Workload profiles
 
 Maintained profiles use distinct authenticated users and ten documents per user:
@@ -1152,14 +1114,12 @@ each allowed 24 connections. PostgreSQL used a 4,096 MiB WAL allowance with
 `fsync`, synchronous commit and full-page writes enabled. The document quotas
 were explicitly 15,000 for the 1,500-user profiles and 50,000 for stretch.
 
-CSV files below are local generated reports under `artifacts/load-tests/`.
-
-| Profile | Commits inside measured minute | Save starts | Late acknowledgements | Failed HTTP steps, including warm-up | CSV filename |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Primary | 2,998 | 3,000 | 2 | 0 | `nbomber_report_2026-10-27--23-40-21.csv` |
-| Larger documents | 2,966 | 2,998 | 23 | 33 | `nbomber_report_2026-10-27--23-43-50.csv` |
-| Frequent AutoSave | 6,569 | 11,244 | 117 | 9,529 | `nbomber_report_2026-10-27--23-23-19.csv` |
-| Stretch | 5,690 | 9,997 | 79 | 14,677 | `nbomber_report_2026-10-27--23-18-09.csv` |
+| Profile | Commits inside measured minute | Save starts | Late acknowledgements | Failed HTTP steps, including warm-up |
+| --- | ---: | ---: | ---: | ---: |
+| Primary | 2,998 | 3,000 | 2 | 0 |
+| Larger documents | 2,966 | 2,998 | 23 | 33 |
+| Frequent AutoSave | 6,569 | 11,244 | 117 | 9,529 |
+| Stretch | 5,690 | 9,997 | 79 | 14,677 |
 
 Only primary passed the check requiring no HTTP failures. All reported failures
 in these runs were HTTP 503 admission rejections. Late acknowledgements are
@@ -1178,7 +1138,7 @@ include late completions. Use the strict counter above for commits/minute.
 
 A separate eight-client, 1 MiB full-replacement diagnostic improved from 297 to
 377 saves in 30 seconds, or 9.90 to 12.57 saves/second, without HTTP failures in
-the final run (`nbomber_report_2026-10-27--23-46-41.csv`).
+the final run.
 It reused a fixed 16-file palette: 488 commits including warm-up produced only
 16 distinct payload hashes. It measures a different workload from unique paced
 incremental saves and does not establish active-user capacity. Longer runs and
@@ -1251,16 +1211,16 @@ admission, pool, WAL and durability settings as above. Each HTTP run offered
 11,250 saves/minute from 1,500 users at an eight-second cadence, plus queries and
 downloads, with 30 seconds of continuous warm-up and 60 seconds of measurement.
 
-| Implementation | Strict commits/minute | Failed HTTP steps including warm-up | Local CSV |
-| --- | ---: | ---: | --- |
-| Baseline | 6,481 | 9,591 | `nbomber_report_2026-10-28--04-59-44.csv` |
-| Shared memberships only | 6,297 | 9,938 | `nbomber_report_2026-10-28--05-14-15.csv` |
-| Optimistic preparation only | 6,914 | 8,478 | `nbomber_report_2026-10-28--05-09-58.csv` |
-| Shared memberships and optimistic preparation | 6,928 | 8,617 | `nbomber_report_2026-10-28--05-22-29.csv` |
-| Plus selective delta loading | 7,579 | 7,737 | `nbomber_report_2026-10-28--05-43-31.csv` |
-| Plus one fresh save-entry view | 7,919 | 6,998 | `nbomber_report_2026-10-28--05-53-33.csv` |
-| Combined publication read, reverted | 7,886 | 7,123 | `nbomber_report_2026-10-28--06-01-52.csv` |
-| Deferred initial binary read, reverted | 7,905 | 7,069 | `nbomber_report_2026-10-28--06-19-23.csv` |
+| Implementation | Strict commits/minute | Failed HTTP steps including warm-up |
+| --- | ---: | ---: |
+| Baseline | 6,481 | 9,591 |
+| Shared memberships only | 6,297 | 9,938 |
+| Optimistic preparation only | 6,914 | 8,478 |
+| Shared memberships and optimistic preparation | 6,928 | 8,617 |
+| Plus selective delta loading | 7,579 | 7,737 |
+| Plus one fresh save-entry view | 7,919 | 6,998 |
+| Combined publication read, reverted | 7,886 | 7,123 |
+| Deferred initial binary read, reverted | 7,905 | 7,069 |
 
 All runs overloaded. Every acknowledged expected payload hash was distinct,
 and all runs reported zero missed cadence slots. Verification covered final
@@ -1273,11 +1233,11 @@ about 22% over this fresh baseline, but did not meet the 10,000/minute target.
 
 The retained implementation was also checked below the overloaded stress rate:
 
-| Save interval, 1,500 users | Strict commits/minute | Save starts | Late acknowledgements | Failed HTTP steps including warm-up | Successful-save p95 | Local CSV |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 30 seconds | 2,998 | 3,000 | 2 | 0 | 35.49 ms | `nbomber_report_2026-10-28--06-35-57.csv` |
-| 15 seconds | 5,994 | 5,998 | 4 | 0 | 133.63 ms | `nbomber_report_2026-10-28--06-44-45.csv` |
-| 12 seconds | 7,337 | 7,497 | 104 | 565 | 926.72 ms | `nbomber_report_2026-10-28--06-40-59.csv` |
+| Save interval, 1,500 users | Strict commits/minute | Save starts | Late acknowledgements | Failed HTTP steps including warm-up | Successful-save p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 30 seconds | 2,998 | 3,000 | 2 | 0 | 35.49 ms |
+| 15 seconds | 5,994 | 5,998 | 4 | 0 | 133.63 ms |
+| 12 seconds | 7,337 | 7,497 | 104 | 565 | 926.72 ms |
 
 All retained-profile acknowledgements had distinct expected payload hashes and
 zero missed cadence slots. These runs checked final packages and revision/receipt
@@ -1308,9 +1268,7 @@ allocate more despite lower CPU time: the intermediate full-save diagnostic allo
 9.35 MB versus 8.01 MB in the baseline. Selective delta capture lowered the retained
 implementation's full-save allocation to 6.01 MB. Both states
 still represented 1,250 current elements and 158,125 logical graph memberships.
-Local raw results are `artifacts/office-performance/history-scaling-baseline.json`
-and `history-scaling-final.json`; the intermediate result is
-`history-scaling-combined.json`. The repeated-save diagnostic uses warm shared
+The repeated-save diagnostic uses warm shared
 immutable content; the HTTP workload above uses globally distinct edits.
 
 The final diagnostic also checked 999 revisions before a measured save appended
@@ -1384,8 +1342,7 @@ design completed 7,492 strict commits and seven late acknowledgements, but had
 68 warm-up HTTP failures. It did not pass the no-failures gate despite zero
 measurement-period HTTP failures. Startup allowance funding then completed 7,453
 strict commits with 188 HTTP failures, including 19 during measurement, and was
-also reverted. Raw comparisons and report filenames are in the local generated
-`artifacts/office-performance/quota-experiment-comparison.json`.
+also reverted.
 
 A final control rebuilt commit `07db700` with the same activity sampler and
 pre/post inventory checks as the final implementation. It completed 7,974 strict
@@ -1394,8 +1351,7 @@ these single runs. Failed HTTP steps including warm-up were 6,349 and 6,334,
 respectively. Save p95 was 1,084.41 ms and 1,122.30 ms. The earlier exploratory
 high of 8,690 is not the final build's qualified result. Both final runs failed
 the overload gate. Quota-class lock blocked backend observations fell from 780
-to 121 across 378 samples per run. Raw results are listed in
-`artifacts/office-performance/quota-final-comparison.json`.
+to 121 across 378 samples per run.
 
 At a thirteen-second cadence, all 6,923 measurement-period saves succeeded;
 6,913 acknowledgements arrived inside the minute and ten arrived late. Queries
@@ -1437,8 +1393,7 @@ still allowed 75% within-document byte reuse when fixed-size XML stayed at the
 ZIP tail. Moving XML before padding and growing it by seventeen bytes per edit
 reduced that reuse to zero as later chunk boundaries shifted. This check split
 whole ZIP bytes into 64 KiB chunks; it did not measure HTTP, database storage or
-throughput, and excluded protocol graph metadata. The local raw result is
-`artifacts/office-performance/quota-chunk-reuse.json`. It supports further
+throughput, and excluded protocol graph metadata. It supports further
 qualification of package layouts, not a large storage-format rewrite or claims
 about ordinary Office files.
 

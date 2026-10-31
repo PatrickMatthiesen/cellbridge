@@ -14,7 +14,9 @@ public sealed class FssHttpLockCoordinator
     private readonly object _gate = new();
     private readonly StoredDocument _document;
     private readonly HashSet<string> _coauthors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<LastDeletedCoauthorSessionState> _deletedCoauthorParticipants = [];
     private bool _transitionPending;
+    private LastDeletedCoauthorSessionState? _lastDeletedCoauthorSession;
 
     private FssHttpLockCoordinator(StoredDocument document) => _document = document;
     private string? _schemaLockId;
@@ -31,6 +33,10 @@ public sealed class FssHttpLockCoordinator
         coordinator._schemaLockId = state.SchemaId;
         coordinator._generation = state.Generation;
         coordinator._hostLock = state.HostLock;
+        coordinator._lastDeletedCoauthorSession = state.LastDeletedCoauthorSession;
+        coordinator._deletedCoauthorParticipants.Clear();
+        foreach (var participant in state.DeletedCoauthorParticipants.IsDefault ? [] : state.DeletedCoauthorParticipants)
+            coordinator.AddDeletedCoauthorParticipant(participant);
         coordinator._authoritativeNow = now;
         coordinator._schemaOwners.Clear();
         foreach (var owner in state.SchemaOwners)
@@ -56,6 +62,8 @@ public sealed class FssHttpLockCoordinator
                 HostLock = _hostLock,
                 CoauthorClients = _coauthors.Order(StringComparer.Ordinal).ToImmutableArray(),
                 CoauthorTransitionPending = _transitionPending,
+                LastDeletedCoauthorSession = _lastDeletedCoauthorSession,
+                DeletedCoauthorParticipants = _deletedCoauthorParticipants.ToImmutableArray(),
             };
     }
 
@@ -107,7 +115,14 @@ public sealed class FssHttpLockCoordinator
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
                     if (_schemaLockId is not null && !Same(_schemaLockId, schemaId))
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
-                    _schemaLockId ??= schemaId;
+                    if (_schemaLockId is null)
+                    {
+                        // A new shared-lock generation must not inherit replay
+                        // permission from an earlier coauthor session.
+                        _deletedCoauthorParticipants.Clear();
+                        _lastDeletedCoauthorSession = null;
+                        _schemaLockId = schemaId;
+                    }
                     var refreshed = _schemaOwners.ContainsKey(client);
                     _schemaOwners[client] = new Lease(schemaId, client,
                         instant.AddSeconds(timeout), LockKind.Schema, OwnerSubject: _actor.Subject) { TimeoutSeconds = timeout };
@@ -139,11 +154,23 @@ public sealed class FssHttpLockCoordinator
                     return LockOperationResult.Refreshed;
 
                 case "ReleaseLock":
-                    if (client is null || !Same(_schemaLockId, schemaId) || !_schemaOwners.Remove(client))
+                    if (client is null || _exclusive is not null ||
+                        _schemaLockId is not null && !Same(_schemaLockId, schemaId) ||
+                        _schemaLockId is null && _schemaOwners.Count != 0)
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    if (!_schemaOwners.ContainsKey(client))
+                    {
+                        if (_schemaOwners.Count != 0)
+                            return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
+                        return LockOperationResult.Released;
+                    }
+                    _schemaOwners.Remove(client);
                     RemoveCoauthor(client);
                     if (_schemaOwners.Count == 0)
+                    {
+                        _lastDeletedCoauthorSession = new LastDeletedCoauthorSessionState(client, schemaId, _actor.Subject);
                         _schemaLockId = null;
+                    }
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return LockOperationResult.Released;
 
@@ -225,6 +252,8 @@ public sealed class FssHttpLockCoordinator
                         _document.GetSession(editorClient) is { } editor && editor.Owner?.Subject != _actor.Subject)
                         return Denied(response);
                     _exclusive = null;
+                    _lastDeletedCoauthorSession = null;
+                    _deletedCoauthorParticipants.Clear();
                     _schemaLockId = schemaId;
                     _schemaOwners[client] = new Lease(schemaId, client, instant.AddSeconds(timeout),
                         LockKind.Schema, OwnerSubject: _actor.Subject) { TimeoutSeconds = timeout };
@@ -325,7 +354,7 @@ public sealed class FssHttpLockCoordinator
         var attrs = request.SubRequestDataAttributes;
         if (!TryRead(attrs, "CoauthRequestType", out var operation) ||
             ReadClient(attrs) is not { } clientText ||
-            !TryRead(attrs, "SchemaLockID", out _))
+            !TryRead(attrs, "SchemaLockID", out var schemaId))
             return Fail(response, LockOperationResult.InvalidArgument,
                 "CoauthRequestType, ClientID, and SchemaLockID are required");
 
@@ -345,6 +374,8 @@ public sealed class FssHttpLockCoordinator
             {
                 case "JoinCoauthoring":
                 {
+                    if (!CanJoinCoauthor(clientText, schemaId))
+                        return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
                     var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "GetLock"), response, instant);
                     if (result is not (LockOperationResult.Granted or LockOperationResult.Refreshed))
                         return result;
@@ -355,6 +386,8 @@ public sealed class FssHttpLockCoordinator
                 }
                 case "RefreshCoauthoring":
                 {
+                    if (!CanJoinCoauthor(clientText, schemaId))
+                        return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
                     // An expired tracker entry refreshes through Join. Legacy states
                     // acquire explicit membership only on this coauthoring request.
                     _schemaOwners.TryGetValue(clientText, out var previous);
@@ -374,6 +407,19 @@ public sealed class FssHttpLockCoordinator
                 }
                 case "ExitCoauthoring":
                 {
+                    // MS-FSSHTTP 3.1.4.3.2 accepts an absent client while
+                    // same-schema peers remain and a repeated exit after the
+                    // session was deleted. Keep a different schema or an active
+                    // exclusive lock fenced from this stale request.
+                    if (_exclusive is not null || _schemaLockId is not null && !Same(_schemaLockId, schemaId) ||
+                        _schemaLockId is null && _schemaOwners.Count != 0)
+                        return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    if (!_schemaOwners.ContainsKey(clientText))
+                    {
+                        if (_schemaOwners.Count != 0 || WasDeletedCoauthorParticipant(clientText, schemaId, _actor.Subject))
+                            return LockOperationResult.Released;
+                        return Fail(response, LockOperationResult.NotFound, "FileNotLockedOnServer");
+                    }
                     var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "ReleaseLock"), response, instant);
                     if (result != LockOperationResult.Released)
                         return result;
@@ -608,6 +654,7 @@ public sealed class FssHttpLockCoordinator
 
     private void JoinCoauthor(string client, int timeout)
     {
+        RemoveDeletedCoauthorParticipant(client, _schemaLockId, _actor!.Subject);
         int previous = _coauthors.Count;
         if (_coauthors.Add(client) && previous == 1) _transitionPending = true;
         if (Guid.TryParse(client, out var id))
@@ -616,9 +663,42 @@ public sealed class FssHttpLockCoordinator
 
     private void RemoveCoauthor(string client)
     {
-        if (_coauthors.Remove(client) && Guid.TryParse(client, out var id)) _document.LeaveSession(id);
+        if (_coauthors.Remove(client))
+        {
+            if (_schemaLockId is { } schemaId && _actor is { } actor)
+                AddDeletedCoauthorParticipant(new(client, schemaId, actor.Subject));
+            if (Guid.TryParse(client, out var id)) _document.LeaveSession(id);
+        }
         if (_coauthors.Count == 0) _transitionPending = false;
     }
+
+    private bool CanJoinCoauthor(string client, string schemaId)
+    {
+        if (_schemaLockId is null || !Same(_schemaLockId, schemaId) || _coauthors.Contains(client) ||
+            WasDeletedCoauthorParticipant(client, schemaId, _actor!.Subject)) return true;
+        int knownParticipants = _coauthors.Count + _deletedCoauthorParticipants.Count(participant =>
+            Same(participant.SchemaId, schemaId));
+        return knownParticipants < CoordinationState.MaxCoauthorSessionParticipants;
+    }
+
+    private bool WasDeletedCoauthorParticipant(string client, string schemaId, string ownerSubject) =>
+        _deletedCoauthorParticipants.Any(participant => Same(participant.Client, client) &&
+            Same(participant.SchemaId, schemaId) &&
+            string.Equals(participant.OwnerSubject, ownerSubject, StringComparison.Ordinal)) ||
+        _lastDeletedCoauthorSession is { } lastDeleted && Same(lastDeleted.Client, client) &&
+            Same(lastDeleted.SchemaId, schemaId) &&
+            string.Equals(lastDeleted.OwnerSubject, ownerSubject, StringComparison.Ordinal);
+
+    private void AddDeletedCoauthorParticipant(LastDeletedCoauthorSessionState participant)
+    {
+        RemoveDeletedCoauthorParticipant(participant.Client, participant.SchemaId, participant.OwnerSubject);
+        _deletedCoauthorParticipants.Add(participant with { Client = CanonicalizeId(participant.Client) });
+    }
+
+    private void RemoveDeletedCoauthorParticipant(string client, string? schemaId, string ownerSubject) =>
+        _deletedCoauthorParticipants.RemoveAll(participant => Same(participant.Client, client) &&
+            Same(participant.SchemaId, schemaId) &&
+            string.Equals(participant.OwnerSubject, ownerSubject, StringComparison.Ordinal));
 
     private void SetCoauthStatus(FssHttpSubResponse response, bool includeTransition)
     {

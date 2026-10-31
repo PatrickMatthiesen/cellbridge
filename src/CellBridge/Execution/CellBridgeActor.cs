@@ -14,13 +14,19 @@ public sealed record CellBridgeActor(SubjectIdentity Identity, bool CanCreate = 
     public const string SubjectClaim = "cellbridge:subject";
     public const string CreateClaim = "cellbridge:create";
     public const string DisplayNameClaim = "cellbridge:display-name";
+    public const string SipAddressClaim = "cellbridge:sip-address";
     public static CellBridgeActor? FromPrincipal(ClaimsPrincipal principal)
     {
         var identity = principal.Identities.FirstOrDefault(i => i.IsAuthenticated && i.HasClaim(c => c.Type == SubjectClaim));
         var subject = identity?.FindFirst(SubjectClaim)?.Value;
         if (string.IsNullOrWhiteSpace(subject)) return null;
         var login = identity!.Name ?? subject;
-        return new(new(subject, login, identity.FindFirst(DisplayNameClaim)?.Value ?? login),
+        var subjectIdentity = new SubjectIdentity(subject, login, identity.FindFirst(DisplayNameClaim)?.Value ?? login)
+        {
+            EmailAddress = identity.FindFirst(ClaimTypes.Email)?.Value,
+            SipAddress = identity.FindFirst(SipAddressClaim)?.Value,
+        };
+        return new(subjectIdentity,
             identity.HasClaim(CreateClaim, "true"));
     }
 }

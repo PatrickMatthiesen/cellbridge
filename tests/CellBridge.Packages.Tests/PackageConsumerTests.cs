@@ -28,7 +28,7 @@ public sealed class PackageConsumerTests
             sp.GetRequiredService<MutableDocumentAuthority>(),
             new() { Capacity = 8, DecisionTtl = TimeSpan.FromMinutes(1) }));
         builder.Services.AddCellBridgeWithExternalAuthorization<CachedDocumentAuthorizationProvider>(
-            provider, requireDurability: false);
+            provider, requireDurability: false, configure: options => options.EnableOfficeRealTime = false);
 
         await using var app = builder.Build();
         app.UseAuthentication();

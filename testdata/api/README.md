@@ -1,7 +1,7 @@
-# Word against our API
+# Native Word request fixtures
 
-`word-enable-editing.xml` is the SOAP part logged by the local API during the
-2026-09-25 desktop Word attempt. The coauthor join was logged at 10:30:50 UTC.
+`word-enable-editing.xml` is the SOAP part of a native Word Enable Editing
+request to CellBridge.
 All three binary Cell requests are inline base64, so this preserves their protocol structure
 without needing separate MTOM attachments. The original request used MTOM; the
 live regression wraps the extracted envelope in multipart MIME so it exercises

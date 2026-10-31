@@ -49,6 +49,183 @@ public sealed class FssHttpLockCoordinatorTests
     }
 
     [Fact]
+    public void RepeatedCoauthorExitSucceedsAndPreservesOtherSharedOwner()
+    {
+        var document = NewDocument();
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
+        var schema = Guid.NewGuid().ToString();
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        FssHttpSubRequest Session(Guid client, string operation) => Request(
+            ("ClientID", client.ToString()), ("SchemaLockID", schema), ("CoauthRequestType", operation));
+
+        Assert.Equal(LockOperationResult.Granted,
+            coordinator.ApplyCoauthSession(document, Session(first, "JoinCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Granted,
+            coordinator.ApplyCoauthSession(document, Session(second, "JoinCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Session(first, "ExitCoauthoring"), new()));
+
+        var schemaReleaseWhilePeerRemains = Request(
+            ("ClientID", first.ToString()), ("SchemaLockID", schema), ("SchemaLockRequestType", "ReleaseLock"));
+        var invalidSchemaRelease = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.Conflict,
+            coordinator.ApplySchemaLock(schemaReleaseWhilePeerRemains, invalidSchemaRelease));
+        Assert.Equal("InvalidCoauthSession", invalidSchemaRelease.ErrorCode);
+
+        var repeated = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Session(first, "ExitCoauthoring"), repeated));
+        Assert.Null(repeated.ErrorCode);
+        Assert.Equal(second.ToString(), Assert.Single(coordinator.Capture().SchemaOwners).Client);
+        Assert.Equal(second, Assert.Single(document.Sessions).ClientId);
+
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Session(second, "ExitCoauthoring"), new()));
+        var released = coordinator.Capture();
+        Assert.Equal(new LastDeletedCoauthorSessionState(second.ToString(), schema, TestActor.Value.Identity.Subject),
+            released.LastDeletedCoauthorSession);
+        Assert.Equal(
+            [
+                new LastDeletedCoauthorSessionState(first.ToString(), schema, TestActor.Value.Identity.Subject),
+                new LastDeletedCoauthorSessionState(second.ToString(), schema, TestActor.Value.Identity.Subject),
+            ],
+            released.DeletedCoauthorParticipants.ToArray());
+        var repeatedSchemaRelease = Request(
+            ("ClientID", second.ToString()), ("SchemaLockID", schema), ("SchemaLockRequestType", "ReleaseLock"));
+        var releasedSchema = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplySchemaLock(repeatedSchemaRelease, releasedSchema));
+        Assert.Null(releasedSchema.ErrorCode);
+
+        var restoredState = JsonSerializer.Deserialize<CoordinationState>(JsonSerializer.Serialize(released))!;
+        var fenced = CoordinationFencing.Capture(released with { LastDeletedCoauthorSession = null }, released);
+        Assert.Equal(released.Generation + 1, fenced.Generation);
+        var restarted = FssHttpLockCoordinator.Restore(document, restoredState, DateTime.UtcNow,
+            TestActor.Value.Identity);
+        var afterSessionDeletion = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.Released,
+            restarted.ApplyCoauthSession(document, Session(second, "ExitCoauthoring"), afterSessionDeletion));
+        var repeatedFirstAfterSessionDeletion = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.Released,
+            restarted.ApplyCoauthSession(document, Session(first, "ExitCoauthoring"), repeatedFirstAfterSessionDeletion));
+        Assert.Null(repeatedFirstAfterSessionDeletion.ErrorCode);
+        Assert.Null(afterSessionDeletion.ErrorCode);
+        Assert.Empty(restarted.Capture().SchemaOwners);
+        Assert.Empty(document.Sessions);
+
+        var anotherActor = new SubjectIdentity("other", "other", "Other");
+        var unauthorizedReplay = FssHttpLockCoordinator.Restore(document, restoredState, DateTime.UtcNow,
+            anotherActor);
+        var unknownSession = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.NotFound,
+            unauthorizedReplay.ApplyCoauthSession(document, Session(first, "ExitCoauthoring"), unknownSession));
+        Assert.Equal("FileNotLockedOnServer", unknownSession.ErrorCode);
+    }
+
+    [Fact]
+    public void CoauthorExitReplayHistoryHasPerSessionParticipantLimit()
+    {
+        var document = NewDocument();
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
+        var schema = Guid.NewGuid().ToString();
+        var clients = Enumerable.Range(0, CoordinationState.MaxCoauthorSessionParticipants)
+            .Select(_ => Guid.NewGuid()).ToArray();
+        FssHttpSubRequest Session(Guid client, string operation) => Request(
+            ("ClientID", client.ToString()), ("SchemaLockID", schema), ("CoauthRequestType", operation));
+
+        foreach (var client in clients)
+            Assert.Equal(LockOperationResult.Granted,
+                coordinator.ApplyCoauthSession(document, Session(client, "JoinCoauthoring"), new()));
+        foreach (var client in clients.Take(clients.Length - 1))
+            Assert.Equal(LockOperationResult.Released,
+                coordinator.ApplyCoauthSession(document, Session(client, "ExitCoauthoring"), new()));
+
+        var overflow = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.Conflict,
+            coordinator.ApplyCoauthSession(document, Session(Guid.NewGuid(), "JoinCoauthoring"), overflow));
+        Assert.Equal("FileAlreadyLockedOnServer", overflow.ErrorCode);
+        var anotherActor = new SubjectIdentity("another-subject", "another", "Another");
+        var otherCoordinator = FssHttpLockCoordinator.Restore(document, coordinator.Capture(),
+            DateTime.UtcNow, anotherActor);
+        Assert.Equal(LockOperationResult.Conflict,
+            otherCoordinator.ApplyCoauthSession(document, Session(Guid.NewGuid(), "JoinCoauthoring"), new()));
+        coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
+        Assert.Equal(CoordinationState.MaxCoauthorSessionParticipants - 1,
+            coordinator.Capture().DeletedCoauthorParticipants.Length);
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Session(clients[^1], "ExitCoauthoring"), new()));
+        Assert.Equal(CoordinationState.MaxCoauthorSessionParticipants,
+            coordinator.Capture().DeletedCoauthorParticipants.Length);
+    }
+
+    [Fact]
+    public void ExclusiveConversionStartsNewCoauthorReplayHistory()
+    {
+        var document = NewDocument();
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
+        var schema = Guid.NewGuid().ToString();
+        var previous = Guid.NewGuid().ToString();
+        var current = Guid.NewGuid().ToString();
+        var exclusive = Guid.NewGuid().ToString();
+        FssHttpSubRequest Session(string client, string operation) => Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("CoauthRequestType", operation));
+
+        Assert.Equal(LockOperationResult.Granted,
+            coordinator.ApplyCoauthSession(document, Session(previous, "JoinCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Session(previous, "ExitCoauthoring"), new()));
+        Assert.Single(coordinator.Capture().DeletedCoauthorParticipants);
+        Assert.Equal(LockOperationResult.Granted, coordinator.ApplyExclusiveLock(Request(
+            ("ClientID", current), ("ExclusiveLockID", exclusive), ("ExclusiveLockRequestType", "GetLock")), new()));
+        Assert.Equal(LockOperationResult.Completed, coordinator.ApplyExclusiveLock(Request(
+            ("ClientID", current), ("ExclusiveLockID", exclusive), ("SchemaLockID", schema),
+            ("ExclusiveLockRequestType", "ConvertToSchemaJoinCoauth"), ("Timeout", "3600")), new()));
+
+        Assert.Empty(coordinator.Capture().DeletedCoauthorParticipants);
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Session(current, "ExitCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.NotFound,
+            coordinator.ApplyCoauthSession(document, Session(previous, "ExitCoauthoring"), new()));
+    }
+
+    [Fact]
+    public void StaleCoauthorExitDoesNotReleaseNewSchemaOwner()
+    {
+        var document = NewDocument();
+        var coordinator = FssHttpLockCoordinator.For(document, TestActor.Value.Identity);
+        var oldSchema = Guid.NewGuid().ToString();
+        var newSchema = Guid.NewGuid().ToString();
+        var previous = Guid.NewGuid();
+        var current = Guid.NewGuid();
+        FssHttpSubRequest Session(Guid client, string schema, string operation) => Request(
+            ("ClientID", client.ToString()), ("SchemaLockID", schema), ("CoauthRequestType", operation));
+
+        var neverJoined = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.NotFound,
+            coordinator.ApplyCoauthSession(document, Session(previous, oldSchema, "ExitCoauthoring"), neverJoined));
+        Assert.Equal("FileNotLockedOnServer", neverJoined.ErrorCode);
+
+        Assert.Equal(LockOperationResult.Granted,
+            coordinator.ApplyCoauthSession(document, Session(previous, oldSchema, "JoinCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Session(previous, oldSchema, "ExitCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Granted,
+            coordinator.ApplyCoauthSession(document, Session(current, newSchema, "JoinCoauthoring"), new()));
+        Assert.Null(coordinator.Capture().LastDeletedCoauthorSession);
+        Assert.Empty(coordinator.Capture().DeletedCoauthorParticipants);
+
+        var stale = new FssHttpSubResponse();
+        Assert.Equal(LockOperationResult.Conflict,
+            coordinator.ApplyCoauthSession(document, Session(previous, oldSchema, "ExitCoauthoring"), stale));
+        Assert.Equal("FileAlreadyLockedOnServer", stale.ErrorCode);
+        var state = coordinator.Capture();
+        Assert.Equal(newSchema, state.SchemaId);
+        Assert.Equal(current.ToString(), Assert.Single(state.SchemaOwners).Client);
+        Assert.Equal(current, Assert.Single(document.Sessions).ClientId);
+    }
+
+    [Fact]
     public void SchemaLock_AllowsAnotherClientWithTheSameSchemaId()
     {
         var document = NewDocument();

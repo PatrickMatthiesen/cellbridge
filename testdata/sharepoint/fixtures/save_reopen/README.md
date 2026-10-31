@@ -1,7 +1,7 @@
 # Word open, save and reopen exchanges
 
-These four paired SOAP/MTOM fixtures come from local run
-`20260925T084814Z-session-f088f59e` against the SharePoint reference farm.
+These four paired SOAP/MTOM fixtures come from a native Word open, save and
+reopen sequence against a SharePoint reference farm.
 
 | File | Flow | Scenario |
 | --- | ---: | --- |
@@ -10,7 +10,7 @@ These four paired SOAP/MTOM fixtures come from local run
 | save-second.json | 59 | AutoSaveFile_Save |
 | reopen.json | 71 | OpenFile_Open |
 
-The user confirmed editing, saving, closing, reopening and further editing.
+The source scenario included editing, saving, closing, reopening and further editing.
 Each selected exchange is complete; both bodies were checked against recorded
 lengths and SHA-256 hashes before extraction. The source run as a whole is
 incomplete and is not a validated session fixture. These are selected exchanges,
