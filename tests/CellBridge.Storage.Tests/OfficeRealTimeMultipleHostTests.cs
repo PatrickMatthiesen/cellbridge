@@ -699,6 +699,13 @@ public sealed partial class OfficeRealTimeMultipleHostTests
             int recipient = index;
             recipients[index].Connection.On<int, string>("updateNotification", (_, payload) => OnUpdate(recipient, payload));
         }
+        // StartAsync completes the transport handshake, not room admission.
+        // Do not count pre-admission notifications as missing warmup deliveries.
+        await sender.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState")
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        foreach (var recipient in recipients)
+            await recipient.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState")
+                .WaitAsync(TimeSpan.FromSeconds(5));
         int warmupAccepted = 0;
         int accepted = 0;
         int rejected = 0;
