@@ -13,12 +13,15 @@ standalone binary protocol package. PostgreSQL is the
 sample host's default storage. `CellBridge.Storage.InMemory` loses its contents
 when the process stops. Applications provide authentication and
 document permissions. `AddCellBridgeIdentityLogin<TUser>` reuses existing Identity
-accounts and cookies, with packaged browser and Office pages, authenticator codes
+accounts and cookies, with packaged browser pages, authenticator codes
 and recovery codes. `AddCellBridgeCookieLogin` sets up a cookie and connects custom account systems
 through `ICellBridgeLoginAuthenticator`. Use `AddCellBridgeLogin` when a host
-already registers that cookie. These integrations supply CSRF protection and the Office
-challenge/completion flow. Custom HTML is optional.
-`AddCellBridgeOfficeFormsAuthentication` can connect an existing complete login flow.
+already registers that cookie. These integrations supply CSRF protection. Custom HTML
+is optional. Enable MS-OFBA separately with
+`AddCellBridgeOfficeFormsAuthentication` for the same cookie scheme, using the
+packaged pages or an existing complete login flow. OAuth-to-MS-OFBA fallback is
+a separate opt-in and defaults to disabled. WebDemo explicitly enables forms
+authentication for testing; its configuration is not the library default.
 The sample account database is not packaged.
 
 `CellBridge.Storage.SqlServer` supplies document state and content. It is

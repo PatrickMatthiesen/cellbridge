@@ -108,12 +108,15 @@ Follow the [hosting guide](docs/storage-providers.md#consume-the-packages) for
 provider setup and the [authentication guide](docs/authentication.md#reusable-hosts)
 for identity mapping. The [package consumer](examples/NuGetConsumer/README.md)
 provides a complete example with bearer authentication and in-memory storage.
-For standard browser and Office login pages, use `AddCellBridgeIdentityLogin<TUser>`
+For standard browser login pages, use `AddCellBridgeIdentityLogin<TUser>`
 with existing ASP.NET Core Identity accounts, including authenticator and recovery-code
 sign-in. For a custom account system, `AddCellBridgeCookieLogin` registers a cookie and the
 standard pages with a credential checker. Use `AddCellBridgeLogin` for an existing cookie.
-Custom HTML is optional. CellBridge handles sign-in, CSRF
-and the Office challenge/completion flow; see [login integration](docs/package-integration.md#use-the-built-in-login-page).
+Custom HTML is optional. These helpers handle sign-in and CSRF. Enable the Office
+forms challenge/completion flow separately with
+`AddCellBridgeOfficeFormsAuthentication` for the selected cookie. OAuth-to-forms
+fallback requires another explicit opt-in and defaults to disabled. See
+[login integration](docs/package-integration.md#use-the-built-in-login-page).
 
 For applications with their own document permissions, start with
 [async host authorization](docs/async-document-authorization.md).

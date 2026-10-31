@@ -6,7 +6,8 @@ Each document has an owner and explicit user grants. Access is denied unless
 ownership or a grant permits it. Owners can read and write; Write implies Read.
 Creating documents requires a separate account permission.
 
-Desktop Office signs in through the [MS-OFBA challenge](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-ofba/c2c4baef-c611-4e7b-9a4c-d009e678e3d2).
+WebDemo explicitly enables Office forms authentication for testing. With Entra
+disabled, desktop Office signs in through the [MS-OFBA challenge](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-ofba/c2c4baef-c611-4e7b-9a4c-d009e678e3d2).
 Office displays the host's sign-in form and uses the resulting cookie for
 document requests.
 
@@ -56,6 +57,20 @@ returns discovery information without issuing a cookie. Other missing or invalid
 credentials cannot create a session.
 An empty `Authorization: Bearer` probe on a document request permits cookie
 authentication. A nonempty invalid token does not fall back to a cookie.
+
+WebDemo keeps OAuth-to-MS-OFBA fallback disabled by default, independently of its
+explicit forms registration. Set `Authentication:AllowOAuthToFormsFallback=true`
+only when the test host should offer its forms login for unauthenticated protocol
+requests or empty Bearer probes. Invalid nonempty credentials still receive the
+OAuth failure, and the native cookie-exchange endpoint never uses forms fallback.
+
+The implemented native integration is restricted to the configured Entra tenant,
+its registered API resource and the Windows Office client ID above. Browser OIDC
+sign-in and server-side acceptance of a host-validated token do not establish that
+stock Office can discover another provider or acquire and renew its credentials.
+Other native providers, including personal Microsoft accounts, need their own
+implemented and qualified discovery, acquisition and session flow. The FSSHTTP
+and FSSHTTPB implementations do not choose an identity provider.
 
 The operator must link each Entra tenant ID and user object ID to a local account.
 Email addresses and display names do not establish a link. Existing links keep
@@ -209,8 +224,10 @@ handler validates the token and credentials.
 
 ## Protocol behavior
 
-Authentication runs before SOAP/MTOM parsing. Anonymous Office requests receive
-HTTP 403 with MS-OFBA login and completion URLs. JSON APIs return 401; browser
+Authentication runs before SOAP/MTOM parsing. In WebDemo's forms mode, anonymous
+Office requests receive HTTP 403 with MS-OFBA login and completion URLs. Entra
+mode returns its bearer challenge unless fallback is explicitly enabled.
+JSON APIs return 401; browser
 library requests redirect to login. Authenticated denials do not start another
 sign-in exchange.
 
@@ -248,14 +265,17 @@ validated principals to these claims:
 | `cellbridge:create=true` | Permission to create documents. |
 
 The [package consumer](../examples/NuGetConsumer/README.md) demonstrates JWT
-validation and claim mapping. For packaged default browser and Office login pages, use
+validation and claim mapping. Core registration and browser-login helpers do not
+enable MS-OFBA. For packaged browser login pages, use
 `AddCellBridgeIdentityLogin<TUser>` with existing Identity accounts. It supplies
 authenticator and recovery-code continuation without a custom authenticator.
 For custom account systems, use `AddCellBridgeLogin` with your cookie scheme and
 a host credential checker. Supplying custom HTML is optional.
-If you already have a login page, use `AddCellBridgeOfficeFormsAuthentication`
-for just the Office challenge and completion endpoint.
-See [login integration](package-integration.md#use-the-built-in-login-page).
+To enable the Office forms challenge and completion endpoint, separately register
+`AddCellBridgeOfficeFormsAuthentication` with the same cookie scheme. This can
+use the packaged pages or an existing complete host login flow. Enabling forms
+authentication leaves OAuth-to-forms fallback disabled. See the
+[explicit options](package-integration.md#enable-office-forms-authentication).
 
 ### Integration constraints
 

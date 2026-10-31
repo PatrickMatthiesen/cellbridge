@@ -4,6 +4,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using CellBridge.AspNetCore;
 using CellBridge.Authentication;
+using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -32,6 +33,80 @@ public sealed class EntraAuthenticationTests
     private static readonly Guid ObjectId = Guid.Parse("b725e35c-6850-4b60-92f8-2aa1d48ea291");
     private static readonly Guid OtherTenantId = Guid.Parse("8f4053cc-bb16-4a55-9f3a-47ef7fa5d8e2");
     private static readonly string Issuer = $"https://login.microsoftonline.com/{TenantId:D}/v2.0";
+
+    [Theory]
+    [InlineData(false, false, null, false)]
+    [InlineData(false, true, "Bearer", false)]
+    [InlineData(true, false, null, false)]
+    [InlineData(true, false, "Bearer", false)]
+    [InlineData(true, true, null, true)]
+    [InlineData(true, true, "  bEaReR   ", true)]
+    public async Task ProtocolFormsFallbackRequiresBothExplicitOptIns(bool forms, bool allowFallback,
+        string? authorization, bool expectedForms)
+    {
+        await using var fixture = await Fixture.CreateAsync(forms: forms, allowFallback: allowFallback);
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", authorization: authorization);
+        Assert.Equal(expectedForms ? System.Net.HttpStatusCode.Forbidden : System.Net.HttpStatusCode.Unauthorized,
+            response.StatusCode);
+        Assert.Equal(expectedForms, response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+        Assert.Equal(!expectedForms, response.Headers.WwwAuthenticate.Any());
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+    }
+
+    [Theory]
+    [InlineData("Bearer invalid-token")]
+    [InlineData("Basic credentials")]
+    [InlineData("Bearer\tinvalid-token")]
+    public async Task EnabledFallbackNeverDowngradesSuppliedCredentialsEvenWithValidCookie(string authorization)
+    {
+        await using var fixture = await Fixture.CreateAsync(allowFallback: true);
+        var cookie = await fixture.CreateCookieAsync();
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", cookie, authorization);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+        Assert.Contains(response.Headers.WwwAuthenticate, value => value.Scheme == "Bearer");
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+    }
+
+    [Fact]
+    public async Task EnabledFallbackDoesNotAffectNativeExchangeOrNonProtocolChallenges()
+    {
+        await using var fixture = await Fixture.CreateAsync(allowFallback: true);
+        using var exchange = await fixture.ExchangeCookieAsync(null);
+        using var ordinary = await fixture.Client.GetAsync("/office");
+        foreach (var response in new[] { exchange, ordinary })
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+            Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+            Assert.False(response.Headers.Contains("Set-Cookie"));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BearerAndCookieUseTheSameDocumentGrantsAndObserveRevocation(bool allowFallback)
+    {
+        await using var fixture = await Fixture.CreateAsync(allowFallback: allowFallback);
+        var documents = fixture.Services.GetRequiredService<CellBridgeDocumentService>();
+        var head = (await documents.CreateAsync("/shared/grants.bin", [1, 2, 3], TestActor.Value))!;
+        var cookie = await fixture.CreateCookieAsync();
+        var authorization = "Bearer " + fixture.CreateToken();
+        foreach (var grant in new[] { false, true, false })
+        {
+            await TestStorage.SetPermissionsAsync(documents.Provider, head.ResourceId, head.Security with
+            {
+                Grants = grant ? head.Security.Grants.Add("local:" + fixture.User.Id, DocumentAccess.Read) : head.Security.Grants,
+            });
+            using var bearer = await fixture.SendOfficeRequestAsync(HttpMethod.Get, head.Path, authorization: authorization);
+            using var session = await fixture.SendOfficeRequestAsync(HttpMethod.Get, head.Path, cookie);
+            foreach (var response in new[] { bearer, session })
+            {
+                Assert.Equal(grant ? System.Net.HttpStatusCode.OK : System.Net.HttpStatusCode.NotFound, response.StatusCode);
+                Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+            }
+        }
+    }
 
     [Fact]
     public async Task SignedOfficeBearerMapsOnlyLinkedLocalIdentityAndUsesBearerChallenge()
@@ -88,9 +163,11 @@ public sealed class EntraAuthenticationTests
     [InlineData("wrong-signing-key")]
     public async Task BearerRejectsInvalidTokenProperties(string change)
     {
-        await using var fixture = await Fixture.CreateAsync();
-        using var response = await fixture.Client.SendAsync(new BearerToken(fixture.CreateToken(change)).Request());
+        await using var fixture = await Fixture.CreateAsync(allowFallback: true);
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/",
+            authorization: "Bearer " + fixture.CreateToken(change));
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
     }
 
     [Theory]
@@ -100,7 +177,7 @@ public sealed class EntraAuthenticationTests
     [InlineData("two-factor")]
     public async Task BearerRequiresAnEnabledUnrestrictedLinkedLocalAccount(string state)
     {
-        await using var fixture = await Fixture.CreateAsync();
+        await using var fixture = await Fixture.CreateAsync(allowFallback: true);
         if (state == "unknown")
             await fixture.RemoveLoginAsync();
         else
@@ -115,8 +192,10 @@ public sealed class EntraAuthenticationTests
             await fixture.UpdateUserAsync();
         }
 
-        using var response = await fixture.Client.SendAsync(new BearerToken(fixture.CreateToken()).Request());
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/",
+            authorization: "Bearer " + fixture.CreateToken());
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
     }
 
     [Fact]
@@ -422,7 +501,7 @@ public sealed class EntraAuthenticationTests
         }
 
         public static async Task<Fixture> CreateAsync(TimeSpan? cookieSpan = null, string? pathBase = null,
-            bool forceCookieRenewal = false)
+            bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true)
         {
             var key = RSA.Create(2048);
             var otherKey = RSA.Create(2048);
@@ -479,10 +558,16 @@ public sealed class EntraAuthenticationTests
                             };
                         });
                     EntraAuthentication.AddCellBridgeEntraAuthentication(services, configuration);
+                    if (!forms) services.Configure<AuthenticationOptions>(options =>
+                        options.DefaultScheme = EntraAuthentication.OfficeScheme);
                     services.AddCellBridge(TestStorage.Memory(), requireDurability: false,
                         configure: options => options.EnableOfficeRealTime = false);
-                    services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
-                        options => options.ProtocolAuthenticationScheme = EntraAuthentication.OfficeScheme);
+                    if (forms) services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
+                        options =>
+                        {
+                            options.ProtocolAuthenticationScheme = EntraAuthentication.OfficeScheme;
+                            options.AllowOAuthToFormsFallback = allowFallback;
+                        });
                     services.AddAuthorization();
                     services.AddRouting();
                     services.PostConfigure<JwtBearerOptions>(EntraAuthentication.BearerScheme, options =>

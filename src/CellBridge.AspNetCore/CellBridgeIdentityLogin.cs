@@ -47,12 +47,45 @@ public static class CellBridgeIdentityLogin
                 throw new InvalidOperationException("The Identity two-factor cookie must use Events, not EventsType.");
             cookie.Events = new PendingCookieEvents(cookie.Events);
         });
+        services.PostConfigure<CookieAuthenticationOptions>(IdentityConstants.ApplicationScheme, cookie =>
+        {
+            if (cookie.EventsType is not null)
+                throw new InvalidOperationException("The Identity application cookie must use Events, not EventsType.");
+            cookie.Events = new ApplicationCookieEvents(cookie.Events);
+        });
         return services;
     }
 
     internal const string AttemptItem = "CellBridge.IdentityLogin.Attempt";
     internal const string AttemptClaim = "cellbridge:login-attempt";
     internal static readonly object PersistentRecoverySignIn = new();
+
+    private sealed class ApplicationCookieEvents(CookieAuthenticationEvents original) : CookieAuthenticationEvents
+    {
+        public override async Task ValidatePrincipal(CookieValidatePrincipalContext context)
+        {
+            await original.ValidatePrincipal(context);
+            if (context.Principal is not null && context.HttpContext.RequestServices.GetService<IdentityLoginRegistration>() is { } identity &&
+                !identity.MapPrincipal(context.HttpContext, context.Principal)) context.RejectPrincipal();
+        }
+        public override Task CheckSlidingExpiration(CookieSlidingExpirationContext context) => original.CheckSlidingExpiration(context);
+        public override async Task SigningIn(CookieSigningInContext context)
+        {
+            if (context.HttpContext.Items[CellBridgeIdentityLogin.PersistentRecoverySignIn] is bool persistent &&
+                context.Scheme.Name == Microsoft.AspNetCore.Identity.IdentityConstants.ApplicationScheme)
+                context.Properties.IsPersistent = persistent;
+            await original.SigningIn(context);
+            if (context.HttpContext.RequestServices.GetService<IdentityLoginRegistration>() is { } identity &&
+                !identity.MapPrincipal(context.HttpContext, context.Principal))
+                throw new InvalidOperationException("Identity sign-in requires one authenticated identity with a stable user ID or explicit CellBridge subject.");
+        }
+        public override Task SignedIn(CookieSignedInContext context) => original.SignedIn(context);
+        public override Task SigningOut(CookieSigningOutContext context) => original.SigningOut(context);
+        public override Task RedirectToLogin(RedirectContext<CookieAuthenticationOptions> context) => original.RedirectToLogin(context);
+        public override Task RedirectToAccessDenied(RedirectContext<CookieAuthenticationOptions> context) => original.RedirectToAccessDenied(context);
+        public override Task RedirectToLogout(RedirectContext<CookieAuthenticationOptions> context) => original.RedirectToLogout(context);
+        public override Task RedirectToReturnUrl(RedirectContext<CookieAuthenticationOptions> context) => original.RedirectToReturnUrl(context);
+    }
 
     private sealed class PendingCookieEvents(CookieAuthenticationEvents original) : CookieAuthenticationEvents
     {
