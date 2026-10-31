@@ -861,8 +861,9 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                         !_backplane.IsHealthy || _backplane.Generation != authorizationGeneration) continue;
                     if (!departure && (IsExpired(item.Sender.Ticket) ||
                         (item.Sender.HostId == _hostId && !_connections.Values.Any(x => x.Member.Incarnation == item.Sender.Incarnation)))) continue;
-                    if (departure && members.Members.Any(x => ClientKey(x.Ticket.ClientId) == item.ClientKey &&
-                        x.Incarnation != item.Sender.Incarnation)) continue;
+                    // Departures precede any replacement presence in the room
+                    // log. Snapshot watermarks suppress departures already
+                    // superseded by that recipient's snapshot, not membership.
                 }
                 var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 deadline.CancelAfter(SendTimeout);

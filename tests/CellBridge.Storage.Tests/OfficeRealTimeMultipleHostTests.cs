@@ -37,6 +37,37 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     private static readonly CellBridgeActor ReaderActor = new(new("tests:reader", "test-reader", "Test reader"));
 
     [Fact]
+    public async Task Reconnect_without_new_presence_removes_the_original_presence_from_existing_peers()
+    {
+        await using var fixture = await Fixture.StartAsync();
+        var file = await fixture.CreateDocumentAsync();
+        Guid originalClient = await fixture.JoinCoauthoringAsync(file.Path);
+        Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
+        await using var original = await fixture.ConnectAsync(fixture.First,
+            await fixture.GetDocumentTicketAsync(fixture.First, file.Path), originalClient);
+        await using var peer = await fixture.ConnectAsync(fixture.Second,
+            await fixture.GetDocumentTicketAsync(fixture.Second, file.Path), peerClient);
+        await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
+        string key = originalClient.ToString("B").ToLowerInvariant();
+        var present = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var departed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.Connection.On<Dictionary<string, string>, string[]>("presenceUpdated", (values, removed) =>
+        {
+            if (values.ContainsKey(key)) present.TrySetResult();
+            if (removed.Contains(key)) departed.TrySetResult();
+        });
+        await original.Connection.InvokeAsync("UpdatePresence", "{\"state\":\"original\"}");
+        await present.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var replacement = await fixture.ConnectAsync(fixture.Second,
+            await fixture.GetDocumentTicketAsync(fixture.Second, file.Path), originalClient);
+        await departed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await replacement.Connection.StopAsync();
+        var snapshot = await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
+        Assert.DoesNotContain(key, snapshot.Keys);
+        Assert.False(peer.Closed.Task.IsCompleted);
+    }
+
+    [Fact]
     public async Task Oversized_notification_is_rejected_without_disconnecting_healthy_collaborators()
     {
         await using var fixture = await Fixture.StartAsync();
