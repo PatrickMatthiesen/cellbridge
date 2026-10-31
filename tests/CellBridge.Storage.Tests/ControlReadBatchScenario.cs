@@ -11,7 +11,8 @@ namespace CellBridge.Tests;
 
 public static class ControlReadBatchScenario
 {
-    public static async Task RunAsync(StorageProvider provider, Func<IInterceptor[], IDocumentRepository> observed)
+    public static async Task RunAsync(StorageProvider provider, Func<IInterceptor[], IDocumentRepository> observed,
+        bool combinedControlSnapshot = false)
     {
         var actor = new CellBridgeActor(new("control:owner", "owner", "Owner"), CanCreate: true);
         var seed = await IndexedDocumentPublicationBuilder.CreateAsync(Guid.NewGuid(), "/control-batch.docx", MinimalDocx.Create(),
@@ -29,6 +30,7 @@ public static class ControlReadBatchScenario
             Assert.True(changed.Changed);
         });
         var repository = observed([trace]);
+        var beforeReadUtc = DateTime.UtcNow.AddSeconds(-1);
         var selected = (await repository.ReadControlAsync(initial.Head.ResourceId))!;
         Assert.True(trace.Injected);
         Assert.Equal(initial.Head.StateVersion, selected.Head.StateVersion);
@@ -36,14 +38,16 @@ public static class ControlReadBatchScenario
         Assert.Equal(initial.Coordination.Generation, selected.Coordination.Generation);
         Assert.False(selected.Head.Security.Grants.ContainsKey("other"));
         Assert.Equal(DateTimeKind.Utc, selected.UtcNow.Kind);
+        Assert.InRange(selected.UtcNow, beforeReadUtc, DateTime.UtcNow.AddSeconds(1));
         Assert.Equal(3, selected.Editors.Length);
         Assert.Equal(3, selected.Editors.Select(editor => editor.ClientId).Distinct().Count());
         Assert.Equal(initial.Editors.Select(editor => editor.ClientId), selected.Editors.Select(editor => editor.ClientId));
         Assert.Equal(JsonSerializer.Serialize(initial.Partitions), JsonSerializer.Serialize(selected.Partitions));
-        var batch = Assert.Single(trace.Sql, sql => sql.Contains("CellBridge coherent control batch", StringComparison.Ordinal));
+        string readTag = combinedControlSnapshot ? "CellBridge coherent control snapshot" : "CellBridge coherent control batch";
+        var batch = Assert.Single(trace.Sql, sql => sql.Contains(readTag, StringComparison.Ordinal));
         Assert.Equal(1, trace.ControlRows);
         Assert.Contains("UNION ALL", batch, StringComparison.Ordinal);
-        Assert.Equal(2, trace.Sql.Count(sql => sql.TrimStart().StartsWith("SELECT", StringComparison.OrdinalIgnoreCase) || sql.Contains("CellBridge coherent control batch", StringComparison.Ordinal)));
+        Assert.Equal(combinedControlSnapshot ? 1 : 2, trace.Sql.Count(sql => sql.TrimStart().StartsWith("SELECT", StringComparison.OrdinalIgnoreCase) || sql.Contains(readTag, StringComparison.Ordinal)));
         var current = (await provider.Documents.ReadControlAsync(initial.Head.ResourceId))!;
         Assert.True(current.Head.Security.Grants.ContainsKey("other"));
         Assert.True(current.Coordination.Generation > selected.Coordination.Generation);
@@ -84,7 +88,8 @@ public static class ControlReadBatchScenario
         {
             if (!Injected && command.CommandText.Contains("repository_heads", StringComparison.Ordinal))
             { Injected = true; try { await inject(); } catch { await result.DisposeAsync(); throw; } }
-            if (command.CommandText.Contains("CellBridge coherent control batch", StringComparison.Ordinal)) ControlRows++;
+            if (command.CommandText.Contains("CellBridge coherent control snapshot", StringComparison.Ordinal) ||
+                command.CommandText.Contains("CellBridge coherent control batch", StringComparison.Ordinal)) ControlRows++;
             return result;
         }
     }

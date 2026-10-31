@@ -7,11 +7,11 @@ namespace CellBridge.AspNetCore;
 internal sealed class OfficeRealTimeHub : Hub
 {
     private const int MaximumCapturedRequestBytes = 64 * 1024;
-    private readonly OfficeRealTimeSessionStore sessions;
+    private readonly IOfficeRealTimeSessionStore sessions;
     private readonly ProtocolCaptureStore captures;
     private readonly bool captureEnabled;
 
-    public OfficeRealTimeHub(OfficeRealTimeSessionStore sessions, ProtocolCaptureStore captures, CellBridgeOptions options)
+    public OfficeRealTimeHub(IOfficeRealTimeSessionStore sessions, ProtocolCaptureStore captures, CellBridgeOptions options)
     {
         this.sessions = sessions;
         this.captures = captures;

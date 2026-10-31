@@ -18,7 +18,7 @@ SharePoint Online tenant or Office Online Server.
 | SOAP envelope | Carries typed file, lock, identity and history operations. | MS-FSSHTTP runs at `/_vti_bin/cellstorage.svc` for native Office. The captured OneDrive exchanges use SOAP 1.1. CellBridge accepts SOAP 1.1 and 1.2 and preserves the namespace and media type in its response. |
 | FSSHTTP request/response version | Versions the outer request collection. | `RequestVersion` and `ResponseVersion` are distinct from both SOAP's version and the HTTP discovery value. |
 | FSSHTTPB | Synchronizes file graphs, application metadata and editor information. | CellBridge accepts request versions 12, 13 and 14 with minimum 11, using its implemented common subset. The HTTP processor writes the `SharePoint13_11` response profile. |
-| RTC | Transfers transient typing, presence and notifications. | The observed service uses SignalR over a WebSocket. CellBridge's single-host relay is enabled by default and implements a bounded observed subset. It does not publish file revisions. |
+| RTC | Transfers transient typing, presence and notifications. | The observed service uses SignalR over a WebSocket. CellBridge's relay is enabled by default and implements a bounded observed subset. Multiple hosts require explicit Redis coordination. RTC does not publish file revisions. |
 | OCS | Maintains and merges an active collaboration session and periodically saves to the host. | Observed in the Word reference flow. CellBridge does not implement OCS. |
 | WOPI | Connects an Office client/service to a host's file, identity and lock operations. | CellBridge supplies execution and shared-authority integration APIs, rather than WOPI HTTP endpoints. |
 
@@ -102,8 +102,8 @@ RTC discovery and endpoints. OCS remains unimplemented and is not advertised.
 Remaining modern-collaboration work includes reliable native startup, resolved
 participant identity, token recovery after interruption, server-generated notifications
 after publication, measured delivery latency and any OCS behavior actually
-required by the supported client workflow. The relay currently implements no
-multi-host room coordination. Native discovery must describe capabilities the
+required by the supported client workflow. Multiple hosts require explicit
+[Redis room coordination](multi-host-rtc.md). Native discovery must describe capabilities the
 host actually provides, with its own identity and endpoints.
 
 ## Native sharing

@@ -53,8 +53,10 @@ public static class CellBridgeEndpoints
         provider.Require(requireDurability, multipleInstances);
         var options = new CellBridgeOptions();
         configure?.Invoke(options);
-        if (options.EnableOfficeRealTime && multipleInstances)
-            throw new NotSupportedException("Office RTC requires a single host. Set EnableOfficeRealTime to false when using multiple instances.");
+        if (options.EnableOfficeRealTime && multipleInstances &&
+            (string.IsNullOrWhiteSpace(options.OfficeRealTimeRedisConnectionString) ||
+             string.IsNullOrWhiteSpace(options.OfficeRealTimeRedisNamespace) || options.OfficeRealTimeRedisNamespace.Length > 256))
+            throw new ArgumentException("Multi-host Office RTC requires a Redis primary connection and an application/library namespace of at most 256 characters.", nameof(configure));
         ArgumentNullException.ThrowIfNull(options.Hashing);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxRequestBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequests);
@@ -79,7 +81,7 @@ public static class CellBridgeEndpoints
         services.TryAddSingleton<ICellBridgeAuthorizationPolicy, StoredGrantAuthorizationPolicy>();
         services.AddSingleton<CellBridgeDocumentService>();
         services.AddSingleton<CellBridgeRequestProcessor>();
-        if (options.EnableOfficeRealTime) services.AddOfficeRealTime();
+        if (options.EnableOfficeRealTime) services.AddOfficeRealTime(multipleInstances);
         services.AddHealthChecks().AddCheck<CellBridgeStorageHealthCheck>("cellbridge-storage");
         return services;
     }

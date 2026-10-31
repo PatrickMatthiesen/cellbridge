@@ -47,7 +47,11 @@ var content = new PostgreSqlContentStore(source, limits.MaxObjectBytes);
 var documents = new PostgreSqlStateStore(source, limits, content);
 var provider = new StorageProvider(documents, content, limits);
 builder.Services.AddCellBridge(provider, multipleInstances: true,
-    configure: options => options.EnableOfficeRealTime = false);
+    configure: options =>
+    {
+        options.OfficeRealTimeRedisConnectionString = redisConnectionString;
+        options.OfficeRealTimeRedisNamespace = "customer-workspace-documents";
+    });
 
 // Register authentication and map validated claims to cellbridge:subject.
 var app = builder.Build();
@@ -61,6 +65,7 @@ await app.RunAsync();
 
 See [authentication integration](authentication.md#reusable-hosts) for the subject
 claim and Office sign-in exchange. Stored document grants deny access by default.
+See [multi-host RTC](multi-host-rtc.md) for shared key, affinity, Redis, and delivery requirements.
 The host must authorize document creation and provide the authenticated actor.
 GUID-first creation/import overloads preserve a host's stable resource identity.
 Unknown resource IDs never fall back to a path or create a document.

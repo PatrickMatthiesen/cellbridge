@@ -11,14 +11,25 @@ namespace CellBridge.AspNetCore;
 
 internal static class OfficeRealTimeEndpoints
 {
-    internal static void AddOfficeRealTime(this IServiceCollection services)
+    internal static void AddOfficeRealTime(this IServiceCollection services, bool multipleInstances)
     {
         services.AddDataProtection();
         services.TryAddSingleton<TimeProvider>(TimeProvider.System);
         services.AddSingleton<OfficeRealTimeAccess>();
         services.AddSingleton<IOfficeRealTimePropertiesProvider>(provider => provider.GetRequiredService<OfficeRealTimeAccess>());
         services.AddSingleton<IOfficeRealTimeAuthorizer>(provider => provider.GetRequiredService<OfficeRealTimeAccess>());
-        services.AddSingleton<OfficeRealTimeSessionStore>();
+        if (multipleInstances)
+        {
+            services.AddSingleton<IOfficeRealTimeBackplane, RedisOfficeRealTimeBackplane>();
+            services.AddSingleton<DistributedOfficeRealTimeSessionStore>();
+            services.AddSingleton<IOfficeRealTimeSessionStore>(provider => provider.GetRequiredService<DistributedOfficeRealTimeSessionStore>());
+            services.AddHostedService(provider => provider.GetRequiredService<DistributedOfficeRealTimeSessionStore>());
+        }
+        else
+        {
+            services.AddSingleton<OfficeRealTimeSessionStore>();
+            services.AddSingleton<IOfficeRealTimeSessionStore>(provider => provider.GetRequiredService<OfficeRealTimeSessionStore>());
+        }
         services.AddAuthentication().AddScheme<AuthenticationSchemeOptions, OfficeRealTimeAuthenticationHandler>(
             OfficeRealTimeRequest.AuthenticationScheme, _ => { });
         services.PostConfigure<AuthenticationOptions>(options =>

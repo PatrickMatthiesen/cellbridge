@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.SignalR;
 
 namespace CellBridge.AspNetCore;
 
-internal sealed class OfficeRealTimeSessionStore
+internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
 {
     private readonly IOfficeRealTimeAuthorizer authorizer;
     private readonly IHubContext<OfficeRealTimeHub> hubContext;
@@ -35,7 +35,7 @@ internal sealed class OfficeRealTimeSessionStore
         time = timeProvider ?? TimeProvider.System;
     }
 
-    internal async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
+    public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
         CancellationToken cancellationToken)
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
@@ -102,7 +102,7 @@ internal sealed class OfficeRealTimeSessionStore
         }
     }
 
-    internal async Task<Dictionary<string, string>> GetCompletePresenceStateAsync(
+    public async Task<Dictionary<string, string>> GetCompletePresenceStateAsync(
         OfficeRealTimeTicket ticket, string connectionId, CancellationToken cancellationToken)
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
@@ -173,7 +173,7 @@ internal sealed class OfficeRealTimeSessionStore
         finally { ExitRoom(room); }
     }
 
-    internal async Task<bool> UpdatePresenceAsync(OfficeRealTimeTicket ticket, string connectionId,
+    public async Task<bool> UpdatePresenceAsync(OfficeRealTimeTicket ticket, string connectionId,
         string payload, CancellationToken cancellationToken)
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
@@ -201,7 +201,7 @@ internal sealed class OfficeRealTimeSessionStore
             }, cancellationToken).ConfigureAwait(false);
     }
 
-    internal async Task<bool> SendUpdateNotificationAsync(OfficeRealTimeTicket ticket, string connectionId,
+    public async Task<bool> SendUpdateNotificationAsync(OfficeRealTimeTicket ticket, string connectionId,
         int channel, string payload, CancellationToken cancellationToken)
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
@@ -244,7 +244,7 @@ internal sealed class OfficeRealTimeSessionStore
             [channel, payload], (_, _) => Task.FromResult(true), cancellationToken).ConfigureAwait(false);
     }
 
-    internal async Task DisconnectAsync(string connectionId, CancellationToken cancellationToken)
+    public async Task DisconnectAsync(string connectionId, CancellationToken cancellationToken)
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
         cancellationToken = operationDeadline.Token;

@@ -18,6 +18,23 @@ internal interface IRepositoryDatabase<TContext> where TContext : DbContext
     bool IsUniqueViolation(Exception error);
 }
 
+// Providers that can return the normalized head and control records from one
+// statement implement this optional interface. Other providers keep the
+// existing two-query repository path.
+internal interface IRepositoryControlSnapshotDatabase<TContext> where TContext : DbContext
+{
+    Task<RepositoryControlSnapshot?> ReadControlSnapshotAsync(TContext db, Guid id, CancellationToken ct);
+}
+
+internal sealed record RepositoryControlSnapshot(RepositoryHeadRow Head, RepositoryControlRow[] Rows);
+
+// Provider query projection for a coherent control snapshot.
+internal sealed class RepositoryControlSnapshotRow
+{
+    public required string HeadJson { get; set; }
+    public required string RowsJson { get; set; }
+}
+
 // Tagged rows keep the result linear in editors and partitions, without joins.
 internal sealed class RepositoryControlRow
 {
