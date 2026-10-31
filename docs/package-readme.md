@@ -52,20 +52,27 @@ PowerPoint has one blank slide with its master, layout and theme. File compatibi
 metadata is independent of negotiated Office protocol versions. Imported files
 and custom templates remain unchanged. See the embedding guide below for usage.
 
-Desktop Word and Excel have been tested for authenticated editing, saving and
-reopening. OneNote desktop synchronization, two-desktop coauthoring and Office
-Online Server integration remain unqualified. True partial and unsupported non-file uploads
-are rejected. Shared base-lock authority, recoverable external publication and
+Desktop Word, Excel and PowerPoint have been tested for authenticated editing,
+saving and reopening on a PostgreSQL-backed host. Bounded two-desktop tests
+verified saved-change propagation; they do not establish reliable startup,
+character-by-character delivery or production concurrency. RTC is enabled by
+default. Multiple hosts require Redis coordination and shared document storage;
+multi-host validation uses simulated protocol/SignalR traffic rather than native
+Office. OneNote desktop synchronization and Office Online Server integration
+remain unqualified. True partial and unsupported non-file uploads are rejected.
+Shared base-lock authority, recoverable external publication and
 conditional document lifecycle APIs are available for hosts to adopt. Their
 presence does not qualify every external backend or desktop client.
 
-PostgreSQL setup explicitly migrates schema 3, 4 or 5 to 6 with hosts stopped. Back up
-state and content before upgrading. See the upgrade and tested recovery limits
-in the repository guides before changing an installation with stored documents.
+Existing database installations require explicit migration with hosts stopped.
+Back up state and content before upgrading. Follow the current provider upgrade
+instructions and tested recovery limits in the hosting guide before changing an
+installation with stored documents. Do not run old writers against a migrated schema.
 
 - [Hosting and provider contracts](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/storage-providers.md)
 - [Embedding in another host](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/package-integration.md)
 - [Capabilities and limitations](https://github.com/PatrickMatthiesen/cellbridge/blob/main/README.md)
+- [Multi-host RTC setup and limits](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/multi-host-rtc.md)
 - [Package consumer example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/NuGetConsumer)
 - [HostAuthorizedLists example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/HostAuthorizedLists)
 - [DocumentLibrary example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/DocumentLibrary)
