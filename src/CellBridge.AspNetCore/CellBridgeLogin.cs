@@ -26,12 +26,17 @@ public interface ICellBridgeLoginAuthenticator
 public sealed record CellBridgeLoginPageContext(string ApplicationName, AntiforgeryTokenSet Antiforgery,
     string ReturnUrl, bool SignInFailed, string FormAction, string ReturnUrlParameter)
 {
+    /// <summary>Optional external sign-in action shown in the browser login card.</summary>
+    public CellBridgeLoginExternalAction? ExternalSignIn { get; init; }
     public bool IsOffice { get; init; }
     public bool RequiresTwoFactor { get; init; }
     public bool UseRecoveryCode { get; init; }
     public string? ProtectedState { get; init; }
     public string? RestartAction { get; init; }
 }
+
+/// <summary>A navigation action to another sign-in provider, rendered by the standard login page.</summary>
+public sealed record CellBridgeLoginExternalAction(string Label, string Url);
 
 /// <summary>Settings for the packaged login page and Office sign-in flow.</summary>
 public class CellBridgeLoginOptions

@@ -1,5 +1,6 @@
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -25,8 +26,24 @@ public static class AuthenticationEndpoints
             var tokens = antiforgery.GetAndStoreTokens(context);
             var page = new LoginPageContext(options.Value.ApplicationName, tokens, returnUrl,
                 context.Request.Query.ContainsKey("failed"));
-            return Results.Content((renderLoginPage ?? LoginPage.Render)(page), "text/html");
+            var html = renderLoginPage is not null
+                ? renderLoginPage(page)
+                : LoginPage.Render(page, options.Value.EntraLoginEnabled);
+            return Results.Content(html, "text/html");
         }).AllowAnonymous();
+        if (app.ServiceProvider.GetService<EntraAuthenticationOptions>() is not null)
+        {
+            EntraAuthentication.MapNativeCookieExchange(app);
+            app.MapGet("/auth/entra", (HttpContext context) =>
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                var properties = new AuthenticationProperties
+                {
+                    RedirectUri = LocalReturnUrl(context.Request.Query["returnUrl"]),
+                };
+                return Results.Challenge(properties, [EntraAuthentication.OidcScheme]);
+            }).AllowAnonymous();
+        }
         app.MapPost("/auth/login", async (HttpContext context, IAntiforgery antiforgery, SignInManager<CellBridgeUser> signIn) =>
         {
             context.Response.Headers.CacheControl = "no-store";

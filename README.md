@@ -40,7 +40,7 @@ provide their own customer lifecycle and user interface.
 | Excel editing | Open, edit, save and reopen tested while signed in on the PostgreSQL-backed host. |
 | PowerPoint editing | Save and reopen presentations, including complex Copilot-generated slides. |
 | Document library | Create blank Office files, import existing documents and download saved files. |
-| Accounts and permissions | Local sign-in, document ownership, read-only/editing access and revocation. |
+| Accounts and permissions | Local and optional [Microsoft Entra sign-in](docs/authentication.md), document ownership, read-only/editing access and revocation. |
 | Persistent storage | PostgreSQL document state with PostgreSQL or filesystem file content. |
 | Revision history | Native Word, Excel and PowerPoint version listing, historical open and restore tested on Microsoft 365 16.0.20527. Authorized SOAP and reusable APIs use the same persisted history. |
 | Incremental transfers | Reuse stored file parts and send parts the client does not already have. |

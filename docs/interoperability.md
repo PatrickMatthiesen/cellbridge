@@ -100,6 +100,7 @@ when client knowledge is complete. Reducing those reads is performance work #33.
 | Word permissions | Manual sign-in, writer saves, reader read-only open and Write revocation while editing tested. |
 | Excel save and reopen | Authenticated desktop saves and reopen tested on the current PostgreSQL host. Captured saves also run in automated replay. |
 | PowerPoint save and reopen | Manually tested, including complex Copilot-generated slides. |
+| Microsoft Entra authentication | Browser sign-in and native Excel open, edit and save. Native Word, PowerPoint and multi-client Entra editing lack complete desktop coverage. |
 | Native Version History | Word, Excel and PowerPoint 16.0.20527 listed persisted revisions, opened older content and restored it as a new revision. Fresh processes repeated listing and historical open after server restart. |
 | Blank Office file creation | Automated package checks. |
 | Two service instances | Automated identity, shared lease and protocol routing checks against one database. |

@@ -35,6 +35,7 @@ public static class AuthenticationServices
         services.AddSingleton(new AuthenticationOrigin(origin.GetLeftPart(UriPartial.Authority)));
         services.AddOptions<AuthenticationPageOptions>()
             .Bind(configuration.GetSection("Authentication"))
+            .Configure(o => o.EntraLoginEnabled = configuration.GetValue<bool>("Authentication:Entra:Enabled"))
             .Validate(o => !string.IsNullOrWhiteSpace(o.ApplicationName), "Authentication:ApplicationName must not be blank.")
             .ValidateOnStart();
         services.AddDbContextFactory<AuthenticationDatabase>(o => o.UseNpgsql(connectionString));
@@ -75,8 +76,17 @@ public static class AuthenticationServices
             o.Events.OnRedirectToAccessDenied = context =>
             { context.Response.StatusCode = StatusCodes.Status403Forbidden; return Task.CompletedTask; };
         });
+        var entraEnabled = configuration.GetValue<bool>("Authentication:Entra:Enabled");
+        EntraAuthentication.AddCellBridgeEntraAuthentication(services, configuration);
         services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
-            o => o.PublicOrigin = origin.GetLeftPart(UriPartial.Authority));
+            o =>
+            {
+                o.PublicOrigin = origin.GetLeftPart(UriPartial.Authority);
+                if (entraEnabled)
+                {
+                    o.ProtocolAuthenticationScheme = EntraAuthentication.OfficeScheme;
+                }
+            });
         services.AddAuthorization();
         services.AddAntiforgery(o =>
         {

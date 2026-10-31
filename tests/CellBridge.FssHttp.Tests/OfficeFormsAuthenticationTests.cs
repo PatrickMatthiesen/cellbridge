@@ -19,6 +19,48 @@ namespace CellBridge.FssHttp.Tests;
 public sealed class OfficeFormsAuthenticationTests
 {
     [Fact]
+    public async Task DiscoveryAndDocumentOperationsRequireAuthentication()
+    {
+        await using var fixture = await Fixture.Start();
+        foreach (var path in new[] { "/", "/shared/", "/shared/unknown.docx", "/_vti_bin/cellstorage.svc" })
+        {
+            using var response = await fixture.Client.SendAsync(new(HttpMethod.Options, path));
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.True(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+        }
+        foreach (var (method, path) in new[]
+        {
+            (HttpMethod.Get, "/shared/secret.docx"), (HttpMethod.Head, "/shared/secret.docx"),
+            (new HttpMethod("PROPFIND"), "/shared/secret.docx"),
+            (HttpMethod.Post, "/_vti_bin/cellstorage.svc"),
+            (HttpMethod.Post, "/shared/nested/_vti_bin/cellstorage.svc"),
+            (HttpMethod.Get, "/_cellbridge/history/settings"),
+        })
+        {
+            using var response = await fixture.Client.SendAsync(new(method, path));
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task ProtocolSchemeCanSelectBearerWhileCompletionStillRequiresCookie()
+    {
+        await using var fixture = await Fixture.Start(protocolScheme: "bearer");
+        using var discovery = await fixture.Client.SendAsync(new(HttpMethod.Options, "/"));
+        Assert.Equal(HttpStatusCode.OK, discovery.StatusCode);
+        using var completion = await fixture.Client.GetAsync("/_cellbridge/auth/complete");
+        Assert.Equal(HttpStatusCode.Unauthorized, completion.StatusCode);
+    }
+
+    [Fact]
+    public async Task UnknownProtocolSchemeFailsAtStartup()
+    {
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        { await using var fixture = await Fixture.Start(protocolScheme: "missing-protocol"); });
+        Assert.Contains("registered protocol scheme", error.Message);
+    }
+
+    [Fact]
     public async Task NamedOfficeCookieWorksAlongsideBearerDefaultAndPreservesCookieEvents()
     {
         await using var fixture = await Fixture.Start();
@@ -138,7 +180,8 @@ public sealed class OfficeFormsAuthenticationTests
         public WebApplication App => app;
         public HttpClient Client => client;
         public HostCookieEvents Events => events;
-        public static async Task<Fixture> Start(string pathBase = "", string? publicOrigin = null, string configuration = "valid", string? completionPath = null)
+        public static async Task<Fixture> Start(string pathBase = "", string? publicOrigin = null, string configuration = "valid", string? completionPath = null,
+            string? protocolScheme = null)
         {
             var events = new HostCookieEvents();
             var builder = WebApplication.CreateBuilder();
@@ -157,6 +200,7 @@ public sealed class OfficeFormsAuthenticationTests
                 o =>
                 {
                     o.PublicOrigin = publicOrigin;
+                    o.ProtocolAuthenticationScheme = protocolScheme;
                     if (completionPath is not null) o.CompletionPath = completionPath;
                 });
             var app = builder.Build();
