@@ -23,13 +23,25 @@ concurrency:
   group: nuget-release
   cancel-in-progress: false
 jobs:
-  validate:
-    if: github.ref == 'refs/heads/main' && inputs.artifact-run-id == ''
+  tests:
+    if: (github.ref == 'refs/heads/main' || !inputs.publish) && inputs.artifact-run-id == ''
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: storage
+            project: tests/CellBridge.Storage.Tests
+          - suite: sqlserver
+            project: tests/CellBridge.SqlServer.Tests
+          - suite: other
+            project: artifacts/tmp/release-other.slnf
     services:
       postgres:
-        image: postgres:18
+        # Only the remaining solution tests use this external Lists database.
+        # Storage and SQL Server fixtures own their disposable databases.
+        image: ${{ matrix.suite == 'other' && 'postgres:18' || '' }}
         env:
           POSTGRES_DB: cellbridge
           POSTGRES_USER: cellbridge
@@ -45,6 +57,54 @@ jobs:
       ConnectionStrings__cellbridge: Host=localhost;Port=5432;Database=cellbridge;Username=cellbridge;Password=cellbridge-tests
       CELLBRIDGE_LISTS_TEST_CONNECTION_STRING: Host=localhost;Port=5432;Database=cellbridge;Username=cellbridge;Password=cellbridge-tests
       CELLBRIDGE_LISTS_REQUIRE_DATABASE: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '11.0.100-rc.3.26522.148'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('global.json', 'Directory.*', 'nuget.config', '**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+      - name: Select the remaining solution projects
+        if: matrix.suite == 'other'
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          solution = Path('CellBridge.slnx').resolve()
+          projects = [p.attrib['Path'] for p in ET.parse(solution).iter('Project')]
+          separate = {'tests/CellBridge.Storage.Tests/CellBridge.Storage.Tests.csproj',
+                      'tests/CellBridge.SqlServer.Tests/CellBridge.SqlServer.Tests.csproj'}
+          assert separate.issubset(projects)
+          output = Path('artifacts/tmp/release-other.slnf')
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(json.dumps({'solution': {
+              'path': str(solution), 'projects': [p for p in projects if p not in separate]}}))
+          PY
+      - name: Initialize the external Lists test database
+        if: matrix.suite == 'other'
+        run: |
+          dotnet build tools/CellBridge.Storage.Setup -c Release --nologo
+          dotnet tools/CellBridge.Storage.Setup/bin/Release/net11.0/CellBridge.Storage.Setup.dll
+      - name: Run dotnet test ${{ matrix.project }} (Release)
+        run: >-
+          dotnet test ${{ matrix.project }} -m:1 -c Release --nologo --verbosity minimal
+          --logger trx --results-directory artifacts/release-tests
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-tests-${{ matrix.suite }}-${{ github.sha }}
+          path: artifacts/release-tests/*.trx
+  validate:
+    if: (github.ref == 'refs/heads/main' || !inputs.publish) && inputs.artifact-run-id == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
       RELEASE_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -53,6 +113,11 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: '11.0.100-rc.3.26522.148'
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('global.json', 'Directory.*', 'nuget.config', '**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
@@ -63,9 +128,6 @@ jobs:
           if os.environ['RELEASE_VERSION'] != ET.parse('Directory.Build.props').findtext('.//Version'):
               raise SystemExit('Release version must match the committed source.')
           PY
-      - run: dotnet build tools/CellBridge.Storage.Setup -c Release --nologo
-      - run: dotnet tools/CellBridge.Storage.Setup/bin/Release/net11.0/CellBridge.Storage.Setup.dll
-      - run: dotnet test CellBridge.slnx -m:1 -c Release --nologo --verbosity minimal
       - run: python -m pip install --require-hashes -r tools/capture/requirements-dev.txt
       - run: python -m pytest tools/capture tools/testing -q
       - run: python tools/verify_packages.py
@@ -81,9 +143,9 @@ jobs:
   publish:
     if: >-
       always() && github.ref == 'refs/heads/main' &&
-      ((inputs.artifact-run-id == '' && needs.validate.result == 'success') ||
-       (inputs.artifact-run-id != '' && needs.validate.result == 'skipped'))
-    needs: validate
+      ((inputs.artifact-run-id == '' && needs.validate.result == 'success' && needs.tests.result == 'success') ||
+       (inputs.artifact-run-id != '' && needs.validate.result == 'skipped' && needs.tests.result == 'skipped'))
+    needs: [validate, tests]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: nuget

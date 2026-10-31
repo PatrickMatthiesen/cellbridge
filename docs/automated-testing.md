@@ -162,8 +162,17 @@ The build workflow uses path filters for .NET source, tests, examples, package
 tooling and build configuration. Capture and Python tooling checks use a
 separate workflow, so capture-only changes do not start database jobs. Both
 workflows accept manual dispatch. New PR updates cancel superseded runs;
-main-branch runs complete without cancellation. Release validation still runs
-the full solution and tooling checks through the publish workflow.
+main-branch runs complete without cancellation.
+
+The publish workflow runs storage tests, SQL Server tests and the remaining
+solution projects in parallel, all in Release configuration. It also packs and
+verifies the packages independently. Publication waits for every test partition
+and the package checks to pass. The remaining-project solution filter derives
+from `CellBridge.slnx`, so new projects stay covered without namespace-based
+test exclusions. Each partition uploads its TRX results.
+
+Use `publish=false` to validate a branch without uploading packages. Uploads
+remain restricted to committed `main` source and use the exact validated artifacts.
 
 ## SQL Server engine checks
 

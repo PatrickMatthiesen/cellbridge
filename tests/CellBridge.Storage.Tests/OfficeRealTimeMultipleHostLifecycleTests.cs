@@ -19,7 +19,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task DeletingAndRecreatingDocumentFencesOldRtcGenerationAndAllowsFreshProtocolSession()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid oldClient = await fixture.JoinCoauthoringAsync(file.Path);
         string oldTicket = await fixture.GetDocumentTicketAsync(fixture.First, file.Path);
@@ -54,7 +54,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task ExpiredProtocolEditorLeaseClosesRtcSocketAndProtocolRefreshRenewsTheSameTicket()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid client = Guid.NewGuid();
         Guid schema = Guid.NewGuid();
