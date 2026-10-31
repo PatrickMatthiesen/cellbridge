@@ -22,6 +22,10 @@ public sealed class CellBridgeOfficeFormsAuthenticationOptions
     /// <summary>Optional host authentication scheme for protocol routes, for example a policy choosing bearer or cookie authentication.</summary>
     public string? ProtocolAuthenticationScheme { get; set; }
 
+    /// <summary>Allows a host OAuth challenge handler to request forms fallback for requests without credentials.
+    /// Disabled by default. Nonempty Authorization credentials never qualify.</summary>
+    public bool AllowOAuthToFormsFallback { get; set; }
+
 }
 
 /// <summary>Connects the host's cookie login to Office's MS-OFBA challenge and completion flow.</summary>
@@ -54,7 +58,7 @@ public static class CellBridgeOfficeFormsAuthentication
             origin = uri.GetLeftPart(UriPartial.Authority);
         }
         var registration = new OfficeFormsRegistration(cookieScheme, settings.CompletionPath, origin,
-            settings.ProtocolAuthenticationScheme ?? cookieScheme);
+            settings.ProtocolAuthenticationScheme ?? cookieScheme, settings.AllowOAuthToFormsFallback);
         services.AddSingleton(registration);
         services.PostConfigure<CookieAuthenticationOptions>(cookieScheme, options =>
         {
@@ -71,13 +75,27 @@ public static class CellBridgeOfficeFormsAuthentication
         return services;
     }
 
+    /// <summary>Attempts the explicitly enabled forms fallback from a host OAuth protocol challenge.
+    /// Returns false without changing the response unless this is a CellBridge protocol request with
+    /// no Authorization header or a single empty Bearer discovery probe. Never call this for access denial.</summary>
+    public static async Task<bool> TryCellBridgeOfficeFormsFallbackAsync(this HttpContext context,
+        AuthenticationProperties? properties = null)
+    {
+        var registration = context.RequestServices.GetService<OfficeFormsRegistration>();
+        if (registration?.AllowOAuthToFormsFallback != true ||
+            context.GetEndpoint()?.Metadata.GetMetadata<OfficeEndpointMetadata>() is null) return false;
+        if (context.Request.Headers.TryGetValue("Authorization", out var values) &&
+            (values.Count != 1 || !string.Equals(values[0]?.Trim(), "Bearer", StringComparison.OrdinalIgnoreCase))) return false;
+        await context.ChallengeAsync(registration.CookieScheme, properties);
+        return true;
+    }
+
     internal static OfficeFormsRegistration? MapCompletion(IEndpointRouteBuilder app)
     {
         var registration = app.ServiceProvider.GetService<OfficeFormsRegistration>();
         if (registration is null) return null;
         if (app is RouteGroupBuilder)
             throw new InvalidOperationException("MapCellBridge with Office forms authentication must be mapped at the application root. Use PathBase for a mounted application.");
-        CellBridgeLogin.MapLogin(app, registration);
         app.MapMethods(registration.CompletionPath.Value!, ["GET", "HEAD"], async (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-store";
@@ -98,7 +116,7 @@ public static class CellBridgeOfficeFormsAuthentication
     }
 
     internal sealed record OfficeFormsRegistration(string CookieScheme, PathString CompletionPath, string? PublicOrigin,
-        string ProtocolAuthenticationScheme);
+        string ProtocolAuthenticationScheme, bool AllowOAuthToFormsFallback);
     internal sealed class OfficeEndpointMetadata { }
 
     private sealed class OfficeCookieSchemeValidator(IAuthenticationSchemeProvider schemes,
@@ -151,23 +169,9 @@ public static class CellBridgeOfficeFormsAuthentication
             return Task.CompletedTask;
         }
 
-        public override async Task ValidatePrincipal(CookieValidatePrincipalContext context)
-        {
-            await original.ValidatePrincipal(context);
-            if (context.Principal is not null && context.HttpContext.RequestServices.GetService<IdentityLoginRegistration>() is { } identity &&
-                !identity.MapPrincipal(context.HttpContext, context.Principal)) context.RejectPrincipal();
-        }
+        public override Task ValidatePrincipal(CookieValidatePrincipalContext context) => original.ValidatePrincipal(context);
         public override Task CheckSlidingExpiration(CookieSlidingExpirationContext context) => original.CheckSlidingExpiration(context);
-        public override async Task SigningIn(CookieSigningInContext context)
-        {
-            if (context.HttpContext.Items[CellBridgeIdentityLogin.PersistentRecoverySignIn] is bool persistent &&
-                context.Scheme.Name == Microsoft.AspNetCore.Identity.IdentityConstants.ApplicationScheme)
-                context.Properties.IsPersistent = persistent;
-            await original.SigningIn(context);
-            if (context.HttpContext.RequestServices.GetService<IdentityLoginRegistration>() is { } identity &&
-                !identity.MapPrincipal(context.HttpContext, context.Principal))
-                throw new InvalidOperationException("Identity sign-in requires one authenticated identity with a stable user ID or explicit CellBridge subject.");
-        }
+        public override Task SigningIn(CookieSigningInContext context) => original.SigningIn(context);
         public override Task SignedIn(CookieSignedInContext context) => original.SignedIn(context);
         public override Task SigningOut(CookieSigningOutContext context) => original.SigningOut(context);
         public override Task RedirectToLogout(RedirectContext<CookieAuthenticationOptions> context) => original.RedirectToLogout(context);

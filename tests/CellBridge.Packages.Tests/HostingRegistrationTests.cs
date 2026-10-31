@@ -20,6 +20,33 @@ public sealed class HostingRegistrationTests
 {
     private static StorageProvider Memory() => TestStorage.Memory();
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CoreAndBrowserHelperRegistrationDoNotEnableFormsChallenges(bool browserHelper)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddCellBridge(Memory(), requireDurability: false);
+        if (browserHelper) builder.Services.AddCellBridgeCookieLogin<AccountChecker>();
+        else builder.Services.AddAuthentication("host").AddCookie("host");
+        await using var app = builder.Build();
+        app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
+        await app.StartAsync();
+        using var client = app.GetTestClient(); client.BaseAddress = new("https://localhost");
+        using var challenge = await client.SendAsync(new(HttpMethod.Options, "/shared/"));
+        Assert.False(challenge.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+        using var office = await client.GetAsync("/_cellbridge/auth/login");
+        using var completion = await client.GetAsync("/_cellbridge/auth/complete");
+        Assert.Equal(HttpStatusCode.NotFound, office.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, completion.StatusCode);
+        if (browserHelper)
+        {
+            using var login = await client.GetAsync("/auth/login");
+            Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        }
+    }
+
     [Fact]
     public async Task TypedPolicyReusesHostSingletonAndActuallyControlsDocumentAccess()
     {
@@ -71,6 +98,7 @@ public sealed class HostingRegistrationTests
         builder.WebHost.UseTestServer();
         builder.Services.AddCellBridge(Memory(), requireDurability: false);
         builder.Services.AddCellBridgeCookieLogin<AccountChecker>();
+        builder.Services.AddCellBridgeOfficeFormsAuthentication("CellBridge");
         await using var app = builder.Build();
         app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
         await app.StartAsync();

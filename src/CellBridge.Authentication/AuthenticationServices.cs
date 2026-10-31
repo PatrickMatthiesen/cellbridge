@@ -82,6 +82,7 @@ public static class AuthenticationServices
             o =>
             {
                 o.PublicOrigin = origin.GetLeftPart(UriPartial.Authority);
+                o.AllowOAuthToFormsFallback = configuration.GetValue<bool>("Authentication:AllowOAuthToFormsFallback");
                 if (entraEnabled)
                 {
                     o.ProtocolAuthenticationScheme = EntraAuthentication.OfficeScheme;

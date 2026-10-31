@@ -12,6 +12,7 @@ var documents = new StorageProvider(new InMemoryDocumentRepository(content), con
 
 builder.Services.AddCellBridge(documents, requireDurability: false);
 builder.Services.AddAuthentication("CellBridge");
+builder.Services.AddCellBridgeOfficeFormsAuthentication("CellBridge");
 builder.Services.AddCellBridgeCookieLogin<ExampleLoginAuthenticator>("CellBridge");
 
 var listConnection = builder.Configuration.GetConnectionString("lists")

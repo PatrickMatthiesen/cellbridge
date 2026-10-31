@@ -86,6 +86,7 @@ public static class CellBridgeEndpoints
 
     public static IEndpointRouteBuilder MapCellBridge(this IEndpointRouteBuilder app)
     {
+        CellBridgeLogin.MapLogin(app);
         var office = CellBridgeOfficeFormsAuthentication.MapCompletion(app);
         app.MapOfficeRealTime();
         var routes = app.MapGroup("").WithMetadata(new CellBridgeOfficeFormsAuthentication.OfficeEndpointMetadata());

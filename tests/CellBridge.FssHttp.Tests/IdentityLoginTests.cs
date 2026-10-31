@@ -19,6 +19,29 @@ namespace CellBridge.FssHttp.Tests;
 
 public sealed class IdentityLoginTests
 {
+    [Fact]
+    public async Task BrowserIdentityLoginAlonePreservesMappingHostValidationAndRevocation()
+    {
+        await using var f = await Fixture.Start(forms: false);
+        using var office = await f.Get(f.Office);
+        using var completion = await f.Get(f.Completion);
+        Assert.Equal(HttpStatusCode.NotFound, office.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, completion.StatusCode);
+        var html = await f.Html(f.Login);
+        using var success = await f.Post(f.Login, Fields(html, ("login", "alice"), ("password", Fixture.Password)));
+        Assert.Equal("/mount/", success.Headers.Location!.ToString());
+        using var identity = await f.Get("/mount/who");
+        Assert.Equal(HttpStatusCode.OK, identity.StatusCode);
+        var subject = await identity.Content.ReadAsStringAsync();
+        Assert.Contains("identity:", subject);
+        Assert.Contains("host:claim=preserved", subject);
+        Assert.Contains("create=False", subject);
+        await f.Users(async users => Assert.True((await users.UpdateSecurityStampAsync((await users.FindByNameAsync("alice"))!)).Succeeded));
+        using var revoked = await f.Get("/mount/who");
+        Assert.NotEqual(HttpStatusCode.OK, revoked.StatusCode);
+        Assert.False(revoked.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -640,7 +663,7 @@ public sealed class IdentityLoginTests
         internal static async Task<Fixture> Start(bool explicitSubject = false, string? twoFactorPath = null,
             bool? customRenderer = null, string? userIdClaim = null, string? configuration = null,
             bool? persistOfficeSession = null, TimeSpan? cookieLifetime = null, TimeSpan? signInLifetime = null,
-            bool? signInPersistence = null)
+            bool? signInPersistence = null, bool forms = true)
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
@@ -690,6 +713,7 @@ public sealed class IdentityLoginTests
             });
             builder.Services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.Zero);
             builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false);
+            if (forms) builder.Services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme);
             builder.Services.AddCellBridgeIdentityLogin<IdentityUser>(o =>
             {
                 o.IdentityAuthority = "test:accounts";

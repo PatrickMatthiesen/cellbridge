@@ -16,6 +16,31 @@ namespace CellBridge.FssHttp.Tests;
 
 public sealed class BuiltInLoginTests
 {
+    [Fact]
+    public async Task BrowserLoginAloneAuthenticatesWithoutEnablingOfficeForms()
+    {
+        await using var app = await Start(forms: false);
+        using var client = app.GetTestClient(); client.BaseAddress = new("https://localhost");
+        using var challenge = await client.SendAsync(new(HttpMethod.Options, "/mount/shared/"));
+        Assert.False(challenge.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+        using var office = await client.GetAsync("/mount/_cellbridge/auth/login");
+        using var completion = await client.GetAsync("/mount/_cellbridge/auth/complete");
+        Assert.Equal(HttpStatusCode.NotFound, office.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, completion.StatusCode);
+        using var page = await client.GetAsync("/mount/sign-in");
+        Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+        var html = await page.Content.ReadAsStringAsync();
+        client.DefaultRequestHeaders.Add("Cookie", page.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
+        using var invalid = await client.PostAsync("/mount/sign-in", Form(html, "user", "wrong-password", "/mount/"));
+        Assert.False(invalid.Headers.Contains("Set-Cookie"));
+        Assert.False(invalid.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+        using var success = await client.PostAsync("/mount/sign-in", Form(html, "user", "correct-test-password-29", "/mount/"));
+        Assert.Equal(HttpStatusCode.Redirect, success.StatusCode);
+        Assert.Equal("/mount/", success.Headers.Location!.ToString());
+        var cookie = success.Headers.GetValues("Set-Cookie").Single(value => value.StartsWith("Office.Login="));
+        Assert.Equal("test:user", CellBridgeActor.FromPrincipal(Ticket(app, cookie).Principal)!.Identity.Subject);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -277,7 +302,7 @@ public sealed class BuiltInLoginTests
             .TicketDataFormat.Unprotect(cookie.Split(';')[0].Split('=', 2)[1])!;
 
     private static async Task<WebApplication> Start(bool custom = false, bool blocked = false, bool missingAuthenticator = false, string returnField = "next", string tokenField = "__RequestVerificationToken", string? defaultReturnPath = null,
-        bool? persistOfficeSession = null, TimeSpan? cookieLifetime = null, TimeSpan? signInLifetime = null)
+        bool? persistOfficeSession = null, TimeSpan? cookieLifetime = null, TimeSpan? signInLifetime = null, bool forms = true)
     {
         var builder = WebApplication.CreateBuilder(); builder.WebHost.UseTestServer();
         var clock = new TestClock();
@@ -298,6 +323,7 @@ public sealed class BuiltInLoginTests
         builder.Services.AddAntiforgery(options => options.FormFieldName = tokenField);
         builder.Services.AddSingleton<LoginStats>();
         if (!missingAuthenticator) builder.Services.AddScoped<ICellBridgeLoginAuthenticator, LoginAuthenticator>();
+        if (forms) builder.Services.AddCellBridgeOfficeFormsAuthentication("office");
         builder.Services.AddCellBridgeLogin("office", options =>
         {
             options.ApplicationName = "Portal <Team>";

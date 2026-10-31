@@ -47,6 +47,9 @@ it is not a document-management application.
 minimal API endpoints. The browser gets a centered card; the Office dialog gets a
 white page with padding. Both use the same protected submission handler. No Razor
 Pages or Blazor registration is required, and custom HTML is optional.
+`AddCellBridge`, `AddCellBridgeLogin`, `AddCellBridgeCookieLogin` and
+`AddCellBridgeIdentityLogin` do not enable MS-OFBA. Browser login works without
+Office forms registration. Enable Office forms separately when your host needs it.
 
 ### Use existing ASP.NET Core Identity accounts
 
@@ -114,7 +117,7 @@ external-provider cookies and pending MFA cookies are not mapped by this adapter
 Signing in does not grant access to every document. The configured document policy
 still checks ownership, grants or host-owned permission revisions on each operation.
 An API's default bearer authentication can remain unchanged; CellBridge's Office
-endpoints select `Identity.Application` explicitly.
+endpoints select `Identity.Application` explicitly when Office forms is registered.
 
 ### Connect a custom account system
 
@@ -159,8 +162,9 @@ The login helper does not select a default authentication scheme. ASP.NET Core
 can use a sole scheme as its implicit default; RTC registration preserves that
 choice for a single host scheme. Mixed-scheme applications must explicitly select
 defaults or name schemes in their authorization policies. An existing explicit bearer or
-cookie default stays unchanged; CellBridge's Office endpoints select the login
-cookie explicitly. Keep `AddCellBridgeLogin<TAuthenticator>("Cookies")` when the
+cookie default stays unchanged. With Office forms registered, CellBridge's Office
+endpoints select its configured protocol scheme, which defaults to the login cookie.
+Keep `AddCellBridgeLogin<TAuthenticator>("Cookies")` when the
 host already registers that cookie. Do not register the same scheme twice.
 Identity applications should use `AddCellBridgeIdentityLogin<TUser>` instead.
 
@@ -208,6 +212,51 @@ Polling intervals must be at least one millisecond and fit a timer. Transient
 failures delay background retries by that interval, including when wakes arrive. Stopping the worker cancels
 active and waiting passes and waits for the active pass within the shutdown timeout; interrupted revisions remain queued for recovery.
 
+### Enable Office forms authentication
+
+Register the Office integration separately, using the same cookie as your login:
+
+```csharp
+// With AddCellBridgeIdentityLogin<ApplicationUser>:
+builder.Services.AddCellBridgeOfficeFormsAuthentication(
+    Microsoft.AspNetCore.Identity.IdentityConstants.ApplicationScheme);
+
+// With AddCellBridgeCookieLogin<MyAccountAuthenticator>("documents") instead:
+// builder.Services.AddCellBridgeOfficeFormsAuthentication("documents");
+```
+
+The packaged browser pages remain available without this call. This call enables
+MS-OFBA challenges and the Office login/completion endpoints. It does not enable
+fallback from a selected OAuth flow. WebDemo explicitly selects forms
+authentication for its development and testing configuration.
+If you customize `CompletionPath` on the packaged login options, use the same
+path in the forms options.
+
+For a host that selects OAuth on protocol routes, name that scheme and separately
+opt into fallback:
+
+```csharp
+builder.Services.AddCellBridgeOfficeFormsAuthentication("Cookies", options =>
+{
+    options.ProtocolAuthenticationScheme = "MyOfficeOAuth";
+    options.AllowOAuthToFormsFallback = true;
+});
+```
+
+`AllowOAuthToFormsFallback` defaults to false. The selected host OAuth scheme's
+challenge handler calls `await context.TryCellBridgeOfficeFormsFallbackAsync()`.
+When it returns false, continue reporting the OAuth failure or challenge. It
+returns true and challenges the configured forms cookie only on CellBridge
+protocol endpoints with forms and fallback explicitly enabled, and only when
+`Authorization` is absent or contains a single empty Bearer probe. Nonempty or
+malformed credentials cannot trigger this fallback. Authenticated document
+denials never start a new login flow. WebDemo uses the same helper; its native
+cookie-exchange endpoint remains OAuth-only.
+
+This fallback option does not implement OAuth discovery or native Office
+credential acquisition for a host's provider. See the implemented
+[Entra integration and restrictions](authentication.md#microsoft-entra-sign-in).
+
 ### Routes and custom HTML
 
 The selected cookie's `LoginPath` and `ReturnUrlParameter` determine the browser GET
@@ -254,8 +303,9 @@ to retain the protected primary destination. `RenderBrowserPage` and
 ### Use an existing complete host login
 
 Register `AddCellBridgeOfficeFormsAuthentication("Cookies")` instead of a packaged
-login integration. This supplies the Office challenge and completion endpoint while
-leaving your existing login routes and UI in charge. The challenge uses the selected
+login integration, or alongside packaged browser login. This supplies the Office
+challenge and completion endpoint while leaving your existing login routes and
+UI in charge. The challenge uses the selected
 cookie's `LoginPath` and `ReturnUrlParameter`. Your flow must return to the validated
 local completion path after all authentication steps succeed.
 

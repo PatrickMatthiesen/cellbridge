@@ -1,4 +1,5 @@
 using System.Text.Encodings.Web;
+using CellBridge.AspNetCore;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Http;
@@ -24,8 +25,11 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
         return result;
     }
 
-    protected override Task HandleChallengeAsync(AuthenticationProperties properties) =>
-        Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
+    protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
+    {
+        if (!await Context.TryCellBridgeOfficeFormsFallbackAsync(properties))
+            await Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
+    }
 
     protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>
         Context.ForbidAsync(EntraAuthentication.BearerScheme, properties);
