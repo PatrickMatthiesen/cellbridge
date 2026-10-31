@@ -53,6 +53,8 @@ public static class CellBridgeEndpoints
         provider.Require(requireDurability, multipleInstances);
         var options = new CellBridgeOptions();
         configure?.Invoke(options);
+        if (options.EnableOfficeRealTime && multipleInstances)
+            throw new NotSupportedException("The experimental Office RTC channel currently requires a single host.");
         ArgumentNullException.ThrowIfNull(options.Hashing);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxRequestBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequests);
@@ -75,6 +77,7 @@ public static class CellBridgeEndpoints
         services.TryAddSingleton<ICellBridgeAuthorizationPolicy, StoredGrantAuthorizationPolicy>();
         services.AddSingleton<CellBridgeDocumentService>();
         services.AddSingleton<CellBridgeRequestProcessor>();
+        if (options.EnableOfficeRealTime) services.AddOfficeRealTime();
         services.AddHealthChecks().AddCheck<CellBridgeStorageHealthCheck>("cellbridge-storage");
         return services;
     }
@@ -82,12 +85,14 @@ public static class CellBridgeEndpoints
     public static IEndpointRouteBuilder MapCellBridge(this IEndpointRouteBuilder app)
     {
         var office = CellBridgeOfficeFormsAuthentication.MapCompletion(app);
+        app.MapOfficeRealTime();
         var routes = app.MapGroup("").WithMetadata(new CellBridgeOfficeFormsAuthentication.OfficeEndpointMetadata());
         routes.AddEndpointFilter(async (context, next) => CellBridgePublicOrigin.Resolve(context.HttpContext) is null
             ? Results.BadRequest() : await next(context));
         if (office is null) routes.RequireAuthorization();
         else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.CookieScheme });
-        routes.MapMethods("/", ["OPTIONS"], Discovery);
+        routes.MapMethods("/", ["OPTIONS"], (HttpContext context) => Discovery(context));
+        routes.MapSharedAccess();
         routes.MapGet("/_cellbridge/history/settings", (HttpContext context, CellBridgeDocumentService service, CellBridgeOptions options) =>
         {
             if (options.DocumentLibraryId is null) return Results.NotFound();
@@ -154,9 +159,12 @@ public static class CellBridgeEndpoints
                 }
             });
         routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], (HttpContext context) =>
-            HttpDocumentPath.TryRequestPath(context, out _) ? Results.Ok() : Results.BadRequest());
+            HttpDocumentPath.TryRequestPath(context, out _) ? Discovery(context, serviceEndpoint: true) : Results.BadRequest());
         routes.MapPost("/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
-        routes.MapMethods("/shared/{**documentPath}", ["GET", "HEAD", "OPTIONS", "POST"], HandleSharedRequest);
+        routes.MapMethods("/shared/{**documentPath}",
+            app.ServiceProvider.GetRequiredService<CellBridgeOptions>().EnableOfficeRealTime
+                ? ["GET", "HEAD", "OPTIONS", "POST", "PROPFIND"]
+                : ["GET", "HEAD", "OPTIONS", "POST"], HandleSharedRequest);
         return app;
     }
 
@@ -168,9 +176,15 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
     var protocol = path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
     if (protocol >= 0 && (protocol + marker.Length == path.Length || path[protocol + marker.Length] == '/'))
     {
-        if (HttpMethods.IsOptions(context.Request.Method)) return Results.Ok();
+        if (HttpMethods.IsOptions(context.Request.Method)) return Discovery(context, serviceEndpoint: true);
         return HttpMethods.IsPost(context.Request.Method)
             ? await HandleCellStoragePost(context, service) : Results.NotFound();
+    }
+    if (path.EndsWith("/_vti_bin/sharedaccess.asmx", StringComparison.OrdinalIgnoreCase))
+    {
+        if (!HttpMethods.IsPost(context.Request.Method)) return Results.NotFound();
+        await SharedAccessEndpoint.HandleAsync(context, service);
+        return Results.Empty;
     }
     // These names belong to protocol discovery and cannot identify a document.
     if (path.Split('/').Any(s => s.Equals("_vti_bin", StringComparison.OrdinalIgnoreCase) ||
@@ -180,6 +194,9 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
     if (HttpMethods.IsPost(context.Request.Method)) return Results.NotFound();
     var actor = CellBridgeActor.FromPrincipal(context.User);
     if (actor is null) return Results.Unauthorized();
+    if (context.Request.Method.Equals("PROPFIND", StringComparison.OrdinalIgnoreCase))
+        return await HandleAdmittedRequest(context, actor,
+            () => OfficeDocumentDiscovery.PropFindAsync(context, service, path, actor));
     return HttpMethods.IsHead(context.Request.Method)
         ? await HandleSharedDownload(context, service, path, actor)
         : await HandleAdmittedRequest(context, actor, () => HandleSharedDownload(context, service, path, actor));
@@ -227,16 +244,34 @@ private static async Task<IResult> HandleSharedDownload(HttpContext context, Cel
 private static string PublicOrigin(HttpContext context) => CellBridgePublicOrigin.Resolve(context)
     ?? throw new InvalidOperationException("Configure PublicOrigin or restrict AllowedHosts before advertising protocol URLs.");
 
-private static IResult Discovery(HttpContext context)
+private static IResult Discovery(HttpContext context, bool serviceEndpoint = false)
 {
     // MS-FSSHTTP 3.1.4.10 requires at least 1.1 for GetVersions.
     // Microsoft 365's observed native history workflow uses discovery 1.5.
     context.Response.Headers["X-MSFSSHTTP"] = "1.5";
+    // Opt-in RTC storage discovery marker observed in native OneDrive traffic.
+    if (context.RequestServices.GetRequiredService<CellBridgeOptions>().EnableOfficeRealTime)
+    {
+        context.Response.Headers["MS-Storage"] = "1";
+        // Native Office uses DAV metadata discovery alongside FSSHTTP authoring.
+        context.Response.Headers["MS-Author-Via"] = "DAV";
+        // Current Office uses this observed server-classification marker before
+        // requesting RTC properties. Identify this host rather than a cloud node.
+        context.Response.Headers["X-MSNSERVER"] = "CellBridge";
+        var rtcMethods = serviceEndpoint ? "OPTIONS,POST" : "OPTIONS,GET,HEAD,POST,PROPFIND";
+        context.Response.Headers["Allow"] = rtcMethods;
+        context.Response.Headers["Public"] = rtcMethods;
+        return Results.Ok();
+    }
     context.Response.Headers["X-MS-AuthDomainSupport"] = "False";
     context.Response.Headers["X-FORMS_BASED_AUTH_ACCEPTED"] = "t";
     context.Response.Headers["X-MSGETWEBURL"] = PublicOrigin(context) + context.Request.PathBase.ToUriComponent() + "/shared/";
     context.Response.Headers["Public-Extension"] = "http://schemas.microsoft.com/repl-2";
-    context.Response.Headers["Allow"] = "OPTIONS,GET,HEAD,POST";
+    var methods = serviceEndpoint ? "OPTIONS,POST"
+        : context.RequestServices.GetRequiredService<CellBridgeOptions>().EnableOfficeRealTime
+            ? "OPTIONS,GET,HEAD,POST,PROPFIND" : "OPTIONS,GET,HEAD,POST";
+    context.Response.Headers["Allow"] = methods;
+    context.Response.Headers["Public"] = methods;
     return Results.Ok();
 }
 
@@ -438,16 +473,16 @@ static async Task<IResult> HandleAdmittedCellStoragePost(HttpContext ctx, CellBr
     if (options.CaptureDirectory is not null)
     {
         await captures.WriteTextAsync(captureId, ".response.bin", envelope, ctx.RequestAborted);
-        await captures.WriteTextAsync(captureId, ".response.content-type.txt", "text/xml; charset=utf-8", ctx.RequestAborted);
+        await captures.WriteTextAsync(captureId, ".response.content-type.txt", response.SoapContentType, ctx.RequestAborted);
     }
-    return new SoapResponseResult(envelope);
+    return new SoapResponseResult(envelope, response.SoapContentType);
 }
 
-private sealed class SoapResponseResult(string envelope) : IResult
+private sealed class SoapResponseResult(string envelope, string contentType) : IResult
 {
     public async Task ExecuteAsync(HttpContext context)
     {
-        context.Response.ContentType = "text/xml; charset=utf-8";
+        context.Response.ContentType = contentType;
         context.Response.ContentLength = Encoding.UTF8.GetByteCount(envelope);
         await context.Response.WriteAsync(envelope, Encoding.UTF8, context.RequestAborted);
     }

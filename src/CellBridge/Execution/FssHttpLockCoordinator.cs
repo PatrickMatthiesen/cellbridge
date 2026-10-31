@@ -15,6 +15,7 @@ public sealed class FssHttpLockCoordinator
     private readonly StoredDocument _document;
     private readonly HashSet<string> _coauthors = new(StringComparer.OrdinalIgnoreCase);
     private bool _transitionPending;
+    private LastDeletedCoauthorSessionState? _lastDeletedCoauthorSession;
 
     private FssHttpLockCoordinator(StoredDocument document) => _document = document;
     private string? _schemaLockId;
@@ -31,6 +32,7 @@ public sealed class FssHttpLockCoordinator
         coordinator._schemaLockId = state.SchemaId;
         coordinator._generation = state.Generation;
         coordinator._hostLock = state.HostLock;
+        coordinator._lastDeletedCoauthorSession = state.LastDeletedCoauthorSession;
         coordinator._authoritativeNow = now;
         coordinator._schemaOwners.Clear();
         foreach (var owner in state.SchemaOwners)
@@ -56,6 +58,7 @@ public sealed class FssHttpLockCoordinator
                 HostLock = _hostLock,
                 CoauthorClients = _coauthors.Order(StringComparer.Ordinal).ToImmutableArray(),
                 CoauthorTransitionPending = _transitionPending,
+                LastDeletedCoauthorSession = _lastDeletedCoauthorSession,
             };
     }
 
@@ -111,6 +114,7 @@ public sealed class FssHttpLockCoordinator
                     var refreshed = _schemaOwners.ContainsKey(client);
                     _schemaOwners[client] = new Lease(schemaId, client,
                         instant.AddSeconds(timeout), LockKind.Schema, OwnerSubject: _actor.Subject) { TimeoutSeconds = timeout };
+                    _lastDeletedCoauthorSession = null;
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return refreshed ? LockOperationResult.Refreshed : LockOperationResult.Granted;
 
@@ -139,11 +143,23 @@ public sealed class FssHttpLockCoordinator
                     return LockOperationResult.Refreshed;
 
                 case "ReleaseLock":
-                    if (client is null || !Same(_schemaLockId, schemaId) || !_schemaOwners.Remove(client))
+                    if (client is null || _exclusive is not null ||
+                        _schemaLockId is not null && !Same(_schemaLockId, schemaId) ||
+                        _schemaLockId is null && _schemaOwners.Count != 0)
                         return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    if (!_schemaOwners.ContainsKey(client))
+                    {
+                        if (_schemaOwners.Count != 0)
+                            return Fail(response, LockOperationResult.Conflict, "InvalidCoauthSession");
+                        return LockOperationResult.Released;
+                    }
+                    _schemaOwners.Remove(client);
                     RemoveCoauthor(client);
                     if (_schemaOwners.Count == 0)
+                    {
+                        _lastDeletedCoauthorSession = new LastDeletedCoauthorSessionState(client, schemaId, _actor.Subject);
                         _schemaLockId = null;
+                    }
                     response.SubResponseDataAttributes["LockType"] = "SchemaLock";
                     return LockOperationResult.Released;
 
@@ -225,6 +241,7 @@ public sealed class FssHttpLockCoordinator
                         _document.GetSession(editorClient) is { } editor && editor.Owner?.Subject != _actor.Subject)
                         return Denied(response);
                     _exclusive = null;
+                    _lastDeletedCoauthorSession = null;
                     _schemaLockId = schemaId;
                     _schemaOwners[client] = new Lease(schemaId, client, instant.AddSeconds(timeout),
                         LockKind.Schema, OwnerSubject: _actor.Subject) { TimeoutSeconds = timeout };
@@ -325,7 +342,7 @@ public sealed class FssHttpLockCoordinator
         var attrs = request.SubRequestDataAttributes;
         if (!TryRead(attrs, "CoauthRequestType", out var operation) ||
             ReadClient(attrs) is not { } clientText ||
-            !TryRead(attrs, "SchemaLockID", out _))
+            !TryRead(attrs, "SchemaLockID", out var schemaId))
             return Fail(response, LockOperationResult.InvalidArgument,
                 "CoauthRequestType, ClientID, and SchemaLockID are required");
 
@@ -374,6 +391,21 @@ public sealed class FssHttpLockCoordinator
                 }
                 case "ExitCoauthoring":
                 {
+                    // MS-FSSHTTP 3.1.4.3.2 accepts an absent client while
+                    // same-schema peers remain and a repeated exit after the
+                    // session was deleted. Keep a different schema or an active
+                    // exclusive lock fenced from this stale request.
+                    if (_exclusive is not null || _schemaLockId is not null && !Same(_schemaLockId, schemaId) ||
+                        _schemaLockId is null && _schemaOwners.Count != 0)
+                        return Fail(response, LockOperationResult.Conflict, "FileAlreadyLockedOnServer");
+                    if (!_schemaOwners.ContainsKey(clientText))
+                    {
+                        if (_schemaOwners.Count != 0 || _lastDeletedCoauthorSession is { } deleted &&
+                            Same(deleted.Client, clientText) && Same(deleted.SchemaId, schemaId) &&
+                            string.Equals(deleted.OwnerSubject, _actor.Subject, StringComparison.Ordinal))
+                            return LockOperationResult.Released;
+                        return Fail(response, LockOperationResult.NotFound, "FileNotLockedOnServer");
+                    }
                     var result = ApplySchemaLock(CopyRequest(request, "SchemaLockRequestType", "ReleaseLock"), response, instant);
                     if (result != LockOperationResult.Released)
                         return result;

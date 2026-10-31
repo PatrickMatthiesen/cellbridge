@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Claims;
 using System.Text;
 using System.Xml.Linq;
 using CellBridge.AspNetCore;
@@ -14,7 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CellBridge.FssHttp.Tests;
 
-public sealed class AuthorizationEndpointTests
+public sealed partial class AuthorizationEndpointTests
 {
     private static readonly XNamespace Protocol = CellStorageRequest.Namespace;
 
@@ -23,6 +24,8 @@ public sealed class AuthorizationEndpointTests
     [InlineData("reader", "/shared")]
     [InlineData("writer", "/")]
     [InlineData("reader", "/")]
+    [InlineData("writer", "/_vti_bin/cellstorage.svc/CellStorageService")]
+    [InlineData("reader", "/shared/secret.bin/_vti_bin/cellstorage.svc/CellStorageService")]
     public async Task AuthenticatedDiscoveryAdvertisesTheSelectedProtocol(string user, string path)
     {
         await using var fixture = await Fixture.Start();
@@ -39,8 +42,12 @@ public sealed class AuthorizationEndpointTests
     [InlineData("HEAD", "/shared/secret.bin")]
     [InlineData("OPTIONS", "/shared")]
     [InlineData("OPTIONS", "/")]
+    [InlineData("OPTIONS", "/_vti_bin/cellstorage.svc/CellStorageService")]
+    [InlineData("OPTIONS", "/shared/secret.bin/_vti_bin/cellstorage.svc/CellStorageService")]
     [InlineData("GET", "/_cellbridge/history/settings")]
     [InlineData("POST", "/_vti_bin/cellstorage.svc")]
+    [InlineData("POST", "/_vti_bin/sharedaccess.asmx")]
+    [InlineData("POST", "/shared/secret.bin/_vti_bin/sharedaccess.asmx")]
     [InlineData("POST", "/shared/secret.bin/_vti_bin/cellstorage.svc")]
     public async Task AnonymousRequestsAreChallengedBeforeBodyParsing(string method, string path)
     {
@@ -245,6 +252,25 @@ public sealed class AuthorizationEndpointTests
         Assert.Equal("test-writer", props["vti_modifiedby"]);
     }
 
+    [Fact]
+    public async Task WhoAmIIncludesOnlyTrustedOptionalEmailAndSipAddress()
+    {
+        await using var fixture = await Fixture.Start();
+        var response = await fixture.SendWithClaims("reader", [
+            new Claim(ClaimTypes.Email, "reader@example.test"),
+            new Claim(CellBridgeActor.SipAddressClaim, "reader@contoso.test"),
+        ], new FssHttpSubRequest { Type = SubRequestType.WhoAmI, SubRequestToken = 1 });
+        var who = response.Descendants(Protocol + "SubResponse").First().Element(Protocol + "SubResponseData")!;
+        Assert.Equal("test-reader", (string?)who.Attribute("UserLogin"));
+        Assert.Equal("reader@example.test", (string?)who.Attribute("UserEmailAddress"));
+        Assert.Equal("reader@contoso.test", (string?)who.Attribute("SIPAddress"));
+
+        var withoutMetadata = await fixture.Send("reader", new FssHttpSubRequest { Type = SubRequestType.WhoAmI, SubRequestToken = 1 });
+        var bareWho = withoutMetadata.Descendants(Protocol + "SubResponse").First().Element(Protocol + "SubResponseData")!;
+        Assert.Null(bareWho.Attribute("UserEmailAddress"));
+        Assert.Null(bareWho.Attribute("SIPAddress"));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -303,6 +329,32 @@ public sealed class AuthorizationEndpointTests
 
     private static string? Error(XDocument xml) => (string?)xml.Descendants(Protocol + "SubResponse").Single().Attribute("ErrorCode");
 
+    [Theory]
+    [InlineData("http://schemas.xmlsoap.org/soap/envelope/", "text/xml")]
+    [InlineData("http://www.w3.org/2003/05/soap-envelope", "application/soap+xml")]
+    public async Task SoapResponsesUseTheRequestedEnvelopeAndDirectProtocolBody(string soapNamespace, string mediaType)
+    {
+        await using var fixture = await Fixture.Start();
+        using var client = fixture.CreateClient("writer");
+        XNamespace soap = soapNamespace;
+        var envelope = new XElement(soap + "Envelope", new XElement(soap + "Body",
+            new XElement(Protocol + "RequestVersion", new XAttribute("Version", 2), new XAttribute("MinorVersion", 3)),
+            new XElement(Protocol + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()),
+                new XElement(Protocol + "Request", new XAttribute("Url", "http://localhost/shared/secret.bin"),
+                    new XAttribute("RequestToken", 1),
+                    new XElement(Protocol + "SubRequest", new XAttribute("Type", "WhoAmI"), new XAttribute("SubRequestToken", 1))))));
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")
+        { Content = new StringContent(envelope.ToString(), Encoding.UTF8, mediaType) };
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(mediaType, response.Content.Headers.ContentType?.MediaType);
+        var xml = XDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(soap + "Envelope", xml.Root!.Name);
+        Assert.Equal(new[] { Protocol + "ResponseVersion", Protocol + "ResponseCollection" },
+            xml.Root.Element(soap + "Body")!.Elements().Select(element => element.Name));
+        Assert.Equal("Success", Error(xml));
+    }
+
     private sealed class Fixture(WebApplication app, StorageProvider provider, DocumentHead state, HttpClient client) : IAsyncDisposable
     {
         public StorageProvider Provider => provider;
@@ -329,6 +381,12 @@ public sealed class AuthorizationEndpointTests
         }
 
         public async Task<XDocument> Send(string user, params FssHttpSubRequest[] requests)
+            => await SendCore(user, [], requests);
+
+        public Task<XDocument> SendWithClaims(string user, Claim[] claims, params FssHttpSubRequest[] requests) =>
+            SendCore(user, claims, requests);
+
+        private async Task<XDocument> SendCore(string user, Claim[] claims, FssHttpSubRequest[] requests)
         {
             XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
             var file = new XElement(Protocol + "Request", new XAttribute("Url", "http://localhost/shared/supplied-only.bin"), new XAttribute("RequestToken", 1),
@@ -356,7 +414,7 @@ public sealed class AuthorizationEndpointTests
                 new XElement(Protocol + "RequestCollection", new XAttribute("CorrelationId", Guid.NewGuid()), file)));
             using var request = new HttpRequestMessage(HttpMethod.Post, "/_vti_bin/cellstorage.svc")
             { Content = new StringContent(envelope.ToString(), Encoding.UTF8, "text/xml") };
-            using var authenticatedClient = CreateClient(user);
+            using var authenticatedClient = TestActor.CreateClient(app.GetTestServer(), user, claims);
             using var result = await authenticatedClient.SendAsync(request);
             Assert.Equal(HttpStatusCode.OK, result.StatusCode);
             return XDocument.Parse(await result.Content.ReadAsStringAsync());

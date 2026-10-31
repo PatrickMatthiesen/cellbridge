@@ -14,13 +14,14 @@ internal static class TestActor
         .AddScheme<AuthenticationSchemeOptions, TestAuthenticationHandler>("test", _ => { });
     public static CellBridgeActor Value { get; } = new(new("tests:writer", "test-writer", "Test writer"), CanCreate: true);
 
-    public static HttpClient CreateClient(TestServer server, string user) => new(server.CreateHandler(context =>
+    public static HttpClient CreateClient(TestServer server, string user, params Claim[] additionalClaims) => new(server.CreateHandler(context =>
     {
         var claims = new List<Claim>
         {
             new(CellBridgeActor.SubjectClaim, "tests:" + user), new(ClaimTypes.Name, "test-" + user),
             new(CellBridgeActor.DisplayNameClaim, "Test " + user),
         };
+        claims.AddRange(additionalClaims);
         if (user == "writer") claims.Add(new(CellBridgeActor.CreateClaim, "true"));
         context.User = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
     })) { BaseAddress = server.BaseAddress };

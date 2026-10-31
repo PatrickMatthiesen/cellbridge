@@ -6,6 +6,11 @@ how Office discovers and uses these protocols. The
 from conditional facilities and the remaining audit. SharePoint lists, search and
 unrelated APIs are outside this project's scope.
 
+The bounded MS-SHDACCWS `IsOnlyClient` operation at
+`/_vti_bin/sharedaccess.asmx` lets an idle Office client detect a coauthor
+transition. It reads the same persisted transition state as MS-FSSHTTP and
+requires current read access to the document identified by its transition GUID.
+
 Authenticated root and document-directory OPTIONS advertise `X-MSFSSHTTP: 1.5`.
 Microsoft 365 16.0.20527 used that discovery version for its native history workflow
 in the observed OneDrive traffic and CellBridge tests. This HTTP discovery value
@@ -116,6 +121,11 @@ including repeated references. The visit budget also bounds zero-byte expansion.
 
 ## Response serialization
 
+SOAP responses place `ResponseVersion` and `ResponseCollection` directly inside
+the SOAP body, as in the MS-FSSHTTP schema and captured OneDrive responses.
+The response preserves the request's SOAP 1.1 or SOAP 1.2 envelope namespace and
+uses the matching XML media type, including the MTOM root-part metadata.
+
 MTOM prepares SOAP/XOP references directly from binary model fields. One prepared
 message supplies exact content length and multipart framing for both capture
 and HTTP streaming. Binary arrays are borrowed until writing finishes. Raw XML
@@ -126,11 +136,14 @@ continue to inline base64.
 
 The [protocol requirements ledger](protocol-requirements.md) records normative
 requirements, selected fallbacks, fixture scope and unresolved acceptance checks.
-OneNote desktop synchronization and two-desktop coauthoring remain unqualified.
+OneNote desktop synchronization and Office RTC collaboration remain unqualified.
+The bounded two-desktop saved-change checks are recorded in
+[client coverage](interoperability.md#client-coverage).
 
 - [MS-OCPROTO](https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-ocproto/)
 - [MS-FSSHTTP](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/)
 - [MS-FSSHTTPB](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/)
+- [MS-SHDACCWS](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-shdaccws/6e4c7e58-ff2b-43c5-9255-50da41fdecef)
 - [OfficeDev Interop-TestSuites](https://github.com/OfficeDev/Interop-TestSuites)
 
 Protocol types stay in the standalone serialization libraries, with unit tests.
