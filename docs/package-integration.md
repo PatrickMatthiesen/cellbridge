@@ -41,6 +41,36 @@ package-only host that maps Documents and Lists from one authenticated principal
 It uses volatile document storage and a preprovisioned PostgreSQL Lists database;
 it is not a document-management application.
 
+## Create blank Office documents
+
+`CellBridge.OfficeDocumentTemplates` in the core package creates blank DOCX,
+XLSX and PPTX files. Each call returns a new `byte[]`. Pass those bytes to the document service with
+the current authenticated actor:
+
+```csharp
+using CellBridge;
+
+var created = await documentService.CreateAsync(
+    "/shared/Notes.docx",
+    OfficeDocumentTemplates.CreateWordDocument(),
+    actor,
+    cancellationToken);
+```
+
+Here `documentService` is a `CellBridgeDocumentService`, and `actor` is the current
+`CellBridgeActor` derived from the host's authenticated identity. A null result
+means creation did not succeed, for example because the path already exists.
+Use `CreateExcelWorkbook()` for one empty worksheet named `Sheet1`, or
+`CreatePowerPointPresentation()` for one blank slide with its master, layout and
+theme. The Word document contains an empty paragraph and linked settings with
+`compatibilityMode=15`, the Word 2013 and later compatibility model.
+This document setting is independent of the Office protocol version
+negotiated with CellBridge.
+
+These methods apply only when a host chooses to create a blank document. Continue
+to pass imported files or custom template bytes to `CreateAsync` unchanged.
+CellBridge does not rewrite their compatibility settings.
+
 ## Use the built-in login pages
 
 `CellBridge.AspNetCore` supplies script-free browser and Office login pages through
