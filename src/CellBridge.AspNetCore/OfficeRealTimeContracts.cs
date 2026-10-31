@@ -1,6 +1,10 @@
 using CellBridge.Storage.Abstractions;
+using Microsoft.AspNetCore.SignalR;
 
 namespace CellBridge.AspNetCore;
+
+internal sealed class OfficeRealTimeBusyException()
+    : HubException("Office collaboration is busy. Retry the request.");
 
 internal sealed record OfficeRealTimeTicket(Guid ResourceId, long LifecycleGeneration,
     CellBridgeActor Actor, Guid ClientId, DateTimeOffset ExpiresUtc);

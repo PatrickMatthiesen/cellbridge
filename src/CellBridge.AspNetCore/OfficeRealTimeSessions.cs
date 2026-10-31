@@ -309,6 +309,7 @@ internal sealed class OfficeRealTimeSessionStore
                 [new Dictionary<string, string>(), new[] { clientKey }], null, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (OfficeRealTimeBusyException) { }
         finally { ExitRoom(connection.Room); }
     }
 

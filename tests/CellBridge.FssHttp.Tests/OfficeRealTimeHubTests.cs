@@ -8,6 +8,32 @@ namespace CellBridge.FssHttp.Tests;
 
 public sealed class OfficeRealTimeHubTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Temporary_overload_preserves_connected_members_and_presence(bool snapshot)
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        var peer = await f.Connect(sender.Ticket.ResourceId, 1, "peer");
+        string payload = $$"""{"A":"{{sender.Ticket.ClientId:B}}"}""";
+        Assert.True(await f.Store.UpdatePresenceAsync(sender.Ticket, sender.Context.ConnectionId,
+            payload, CancellationToken.None));
+        f.Authorizer.BeforeAuthorization = (_, _, _) => throw new OfficeRealTimeBusyException();
+        if (snapshot)
+            await Assert.ThrowsAsync<OfficeRealTimeBusyException>(() => f.Store.GetCompletePresenceStateAsync(
+                peer.Ticket, peer.Context.ConnectionId, CancellationToken.None));
+        else
+            await Assert.ThrowsAsync<OfficeRealTimeBusyException>(() => f.Store.UpdatePresenceAsync(
+                sender.Ticket, sender.Context.ConnectionId, payload, CancellationToken.None));
+        Assert.False(sender.Context.Aborted);
+        Assert.False(peer.Context.Aborted);
+        f.Authorizer.BeforeAuthorization = null;
+        var recovered = await f.Store.GetCompletePresenceStateAsync(peer.Ticket,
+            peer.Context.ConnectionId, CancellationToken.None);
+        Assert.Equal(payload, recovered[ClientKey(sender.Ticket.ClientId)]);
+    }
+
     [Fact]
     public async Task Captured_native_excel_presence_with_empty_cid_uses_lowercase_ticket_key()
     {

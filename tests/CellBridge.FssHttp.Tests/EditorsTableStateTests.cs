@@ -22,7 +22,7 @@ public sealed class EditorsTableStateTests
         document.JoinEditingSession(clientId, 3600, asEditor: true, userName: "Jane Doe");
 
         var editor = Assert.Single(ReadEditorsTable(document).Elements("Editor"));
-        Assert.Equal(clientId.ToString("D"), (string?)editor.Element("CacheID"));
+        Assert.Equal(clientId.ToString("B"), (string?)editor.Element("CacheID"));
         Assert.Equal("Jane Doe", (string?)editor.Element("FriendlyName"));
         Assert.Equal("Jane Doe", (string?)editor.Element("LoginName"));
         Assert.Equal("true", (string?)editor.Element("HasEditorPermission"));
@@ -109,7 +109,7 @@ public sealed class EditorsTableStateTests
         var editor = Assert.Single(XDocument.Parse(System.Text.Encoding.UTF8.GetString(xml.ToArray()))
             .Root!.Elements("Editor"));
 
-        Assert.Equal(clientId.ToString("D"), (string?)editor.Element("CacheID"));
+        Assert.Equal(clientId.ToString("B"), (string?)editor.Element("CacheID"));
         Assert.Equal("sip:editor@example.test", (string?)editor.Element("SIPAddress"));
         Assert.Equal("editor@example.test", (string?)editor.Element("EmailAddress"));
     }

@@ -50,8 +50,21 @@ internal static class OfficeRealTimeEndpoints
             OfficeRealTimeAccess.PublicBase(context) is not { } publicBase) return Results.NotFound();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
-        if (!await authorizer.AuthorizeAsync(ticket, DocumentAccess.Read, true, deadline.Token))
-            return Results.NotFound();
+        try
+        {
+            if (!await authorizer.AuthorizeAsync(ticket, DocumentAccess.Read, true, deadline.Token))
+                return Results.NotFound();
+        }
+        catch (OfficeRealTimeBusyException)
+        {
+            context.Response.Headers.RetryAfter = "1";
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !context.RequestAborted.IsCancellationRequested)
+        {
+            context.Response.Headers.RetryAfter = "1";
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
         var query = QueryString.Create(context.Request.Query.Where(pair =>
             !pair.Key.Equals("clientProtocol", StringComparison.OrdinalIgnoreCase))).Value?.TrimStart('?') ?? "";
         return Results.Json(new

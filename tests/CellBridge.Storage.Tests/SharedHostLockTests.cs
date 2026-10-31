@@ -96,6 +96,76 @@ public sealed class SharedHostLockTests
 
     }
 
+    [Fact]
+    public async Task ReadSnapshotExposesOnlyActiveHostLockAndOfficeLockPresence()
+    {
+        var clock = new ManualClock();
+        var content = new InMemoryContentStore();
+        var provider = new StorageProvider(new InMemoryDocumentRepository(content, clock: clock), content);
+        var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/read-lock-" + Guid.NewGuid().ToString("N") + ".docx",
+            MinimalDocx.Create(), TestActor.Value))!;
+        var locks = new SharedDocumentLocks(service);
+
+        var acquired = await locks.ApplyAsync(state.ResourceId, HostLockOperation.Acquire, "host-secret", TestActor.Value);
+        Assert.True(acquired.Success);
+        var snapshot = await locks.ReadAsync(state.ResourceId, TestActor.Value);
+        Assert.Equal(state.LifecycleGeneration, snapshot.LifecycleGeneration);
+        Assert.False(snapshot.OfficeLockActive);
+        Assert.Equal("host-secret", snapshot.HostLockToken);
+
+        Assert.True((await locks.ApplyAsync(state.ResourceId, HostLockOperation.Release, "host-secret", TestActor.Value)).Success);
+        Assert.Equal("Success", await ApplySchema(provider, state.ResourceId, "GetLock"));
+        snapshot = await locks.ReadAsync(state.ResourceId, TestActor.Value);
+        Assert.True(snapshot.OfficeLockActive);
+        Assert.Null(snapshot.HostLockToken);
+
+        Assert.Equal("Success", await ApplySchema(provider, state.ResourceId, "ReleaseLock"));
+        Assert.Equal("Success", await ApplyFss(provider, state.ResourceId, "GetLock"));
+        snapshot = await locks.ReadAsync(state.ResourceId, TestActor.Value);
+        Assert.True(snapshot.OfficeLockActive);
+        Assert.Null(snapshot.HostLockToken);
+
+        clock.Advance(TimeSpan.FromHours(2));
+        snapshot = await locks.ReadAsync(state.ResourceId, TestActor.Value);
+        Assert.False(snapshot.OfficeLockActive);
+        Assert.Null(snapshot.HostLockToken);
+    }
+
+    [Fact]
+    public async Task ReadSnapshotRequiresExistingDocumentAndCurrentWriteAuthority()
+    {
+        var provider = StorageTestDocuments.Memory();
+        var service = new CellBridgeDocumentService(provider);
+        var state = (await service.CreateAsync("/read-lock-revoked.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var locks = new SharedDocumentLocks(service);
+
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => locks.ReadAsync(Guid.NewGuid(), TestActor.Value).AsTask());
+
+        await TestStorage.SetPermissionsAsync(provider, state.ResourceId, state.Security with { Owner = "different" });
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => locks.ReadAsync(state.ResourceId, TestActor.Value).AsTask());
+    }
+
+    [Fact]
+    public async Task ReadSnapshotRejectsWriteGrantRevokedWhileAuthorizationWaits()
+    {
+        var provider = StorageTestDocuments.Memory();
+        var initialService = new CellBridgeDocumentService(provider);
+        var state = (await initialService.CreateAsync("/read-lock-async-revoked.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var policy = new GatedWritePolicy();
+        var service = new CellBridgeDocumentService(provider, documentAuthorizationProvider: policy);
+        Assert.True(await service.BindExternalAuthorizationAsync(state.ResourceId, state.StateVersion, null,
+            new("lock-test-tenant", "lock-test-workspace")));
+        var locks = new SharedDocumentLocks(service);
+
+        var read = locks.ReadAsync(state.ResourceId, TestActor.Value).AsTask();
+        await policy.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        policy.Allowed = false;
+        policy.Release.TrySetResult();
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => read);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -329,6 +399,29 @@ public sealed class SharedHostLockTests
         private DateTimeOffset _now = DateTimeOffset.UtcNow;
         public override DateTimeOffset GetUtcNow() => _now;
         public void Advance(TimeSpan elapsed) => _now += elapsed;
+    }
+
+    private sealed class GatedWritePolicy : IDocumentAuthorizationProvider
+    {
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _gate = 1;
+        public string PolicyDomain => "tests:shared-host-lock-read";
+        public bool Allowed { get; set; } = true;
+        public TaskCompletionSource Entered => _entered;
+        public TaskCompletionSource Release => _release;
+
+        public async ValueTask<DocumentAuthorizationDecision> AuthorizeAsync(DocumentAuthorizationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            if (request.Action == DocumentAction.Write && Interlocked.Exchange(ref _gate, 0) == 1)
+            {
+                _entered.TrySetResult();
+                await _release.Task.WaitAsync(cancellationToken);
+            }
+            var now = DateTimeOffset.UtcNow;
+            return new(Allowed, now, now.AddMinutes(1));
+        }
     }
 
     private sealed class PausedWrites(IContentStore inner) : IContentStore

@@ -86,10 +86,12 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
         bool requireOwnedClient, CancellationToken cancellationToken)
     {
         if (ticket.ExpiresUtc <= time.GetUtcNow()) return false;
-        using var admission = requests.TryAcquire(ticket.Actor.Identity.Subject, out _);
-        if (admission is null) return false;
-        return await documents.AuthorizeOfficeRealTimeAsync(ticket.ResourceId, ticket.LifecycleGeneration,
-            ticket.Actor, ticket.ClientId, requiredAccess, requireOwnedClient, cancellationToken) is not null;
+        var admitted = await requests.AcquireAsync(ticket.Actor.Identity.Subject, cancellationToken);
+        using var lease = admitted.Lease;
+        if (lease is null) throw new OfficeRealTimeBusyException();
+        var authorized = await documents.AuthorizeOfficeRealTimeAsync(ticket.ResourceId, ticket.LifecycleGeneration,
+            ticket.Actor, ticket.ClientId, requiredAccess, requireOwnedClient, cancellationToken);
+        return authorized is not null && ticket.ExpiresUtc > time.GetUtcNow();
     }
 
     public async ValueTask<bool[]> AuthorizeTogetherAsync(IReadOnlyList<OfficeRealTimeTicketCheck> checks,
@@ -99,8 +101,9 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
         var first = checks[0].Ticket;
         if (checks.Any(check => check.Ticket.ResourceId != first.ResourceId ||
             check.Ticket.LifecycleGeneration != first.LifecycleGeneration)) return new bool[checks.Count];
-        using var admission = requests.TryAcquire(first.Actor.Identity.Subject, out _);
-        if (admission is null) return new bool[checks.Count];
+        var admitted = await requests.AcquireAsync(first.Actor.Identity.Subject, cancellationToken);
+        using var lease = admitted.Lease;
+        if (lease is null) throw new OfficeRealTimeBusyException();
         var allowed = await documents.AuthorizeOfficeRealTimeTogetherAsync(first.ResourceId, first.LifecycleGeneration,
             checks.Select(check => new OfficeRealTimeAccessCheck(check.Ticket.Actor, check.Ticket.ClientId,
                 check.RequiredAccess, check.RequireOwnedClient)).ToArray(), cancellationToken).ConfigureAwait(false);

@@ -59,6 +59,8 @@ public static class CellBridgeEndpoints
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxRequestBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequests);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequestsPerSubject);
+        ArgumentOutOfRangeException.ThrowIfNegative(options.MaxQueuedRequests);
+        ArgumentOutOfRangeException.ThrowIfNegative(options.MaxQueuedRequestsPerSubject);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxCaptureBytes);
         if (options.RequestTimeout <= TimeSpan.Zero || options.RequestTimeout > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(options.RequestTimeout));
@@ -68,7 +70,7 @@ public static class CellBridgeEndpoints
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomParts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxMtomHeaderBytes);
         if (options.MaxRequestBytes > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(options.MaxRequestBytes));
-        services.AddSingleton(new ProtocolRequestAdmission(options));
+        services.AddSingleton<ProtocolRequestAdmission>();
         services.AddSingleton<ProtocolCaptureStore>();
         services.AddSingleton(options);
         services.TryAddSingleton(options.Hashing);
@@ -296,29 +298,39 @@ static async Task<IResult> HandleCellStoragePost(HttpContext ctx, CellBridgeDocu
 static async Task<IResult> HandleAdmittedRequest(HttpContext ctx, CellBridgeActor actor, Func<Task<IResult>> handle)
 {
     var admission = ctx.RequestServices.GetRequiredService<ProtocolRequestAdmission>();
-    var lease = admission.TryAcquire(actor.Identity.Subject, out var rejection);
-    if (lease is null) return Results.StatusCode(rejection);
     var originalToken = ctx.RequestAborted;
     var deadline = CancellationTokenSource.CreateLinkedTokenSource(originalToken);
     deadline.CancelAfter(ctx.RequestServices.GetRequiredService<CellBridgeOptions>().RequestTimeout);
     ctx.RequestAborted = deadline.Token;
+    ProtocolRequestAdmission.Lease? lease = null;
+    bool transferred = false;
     try
     {
-        IResult result;
-        try { result = await handle(); }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !originalToken.IsCancellationRequested)
+        var admitted = await admission.AcquireAsync(actor.Identity.Subject, deadline.Token);
+        lease = admitted.Lease;
+        if (lease is null)
         {
-            if (ctx.Response.HasStarted) { ctx.Abort(); result = Results.Empty; }
-            else { ctx.Response.Clear(); result = Results.StatusCode(408); }
+            ctx.Response.Headers.RetryAfter = "1";
+            return Results.StatusCode(admitted.RejectionStatus);
         }
+        var result = await handle();
+        transferred = true;
         return new AdmittedResult(result, lease, deadline, originalToken);
     }
-    catch
+    catch (OperationCanceledException) when (deadline.IsCancellationRequested && !originalToken.IsCancellationRequested)
     {
-        ctx.RequestAborted = originalToken;
-        deadline.Dispose();
-        lease.Dispose();
-        throw;
+        if (ctx.Response.HasStarted) { ctx.Abort(); return Results.Empty; }
+        ctx.Response.Clear();
+        return Results.StatusCode(408);
+    }
+    finally
+    {
+        if (!transferred)
+        {
+            ctx.RequestAborted = originalToken;
+            deadline.Dispose();
+            lease?.Dispose();
+        }
     }
 }
 
