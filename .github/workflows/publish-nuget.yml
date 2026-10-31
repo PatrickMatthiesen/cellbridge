@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      artifact-run-id:
+        description: 'Optional prior validated publishing run; reuse its exact artifacts without rebuilding'
+        required: false
+        default: ''
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -19,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.artifact-run-id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -74,7 +79,10 @@ jobs:
             artifacts/packages/manifest.json
           if-no-files-found: error
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      always() && github.ref == 'refs/heads/main' &&
+      ((inputs.artifact-run-id == '' && needs.validate.result == 'success') ||
+       (inputs.artifact-run-id != '' && needs.validate.result == 'skipped'))
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -82,8 +90,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
     env:
       RELEASE_VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ github.sha }}
+      ARTIFACT_RUN_ID: ${{ inputs.artifact-run-id }}
       NUGET_USER: ${{ vars.NUGET_USER }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -95,14 +106,30 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+      - name: Verify the retained artifact producer
+        if: inputs.artifact-run-id != ''
+        id: producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact-run-id }}
+        run: python tools/verify_release_run.py --run-id "$ARTIFACT_RUN_ID"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: nuget-release-${{ github.sha }}
+          name: nuget-release-${{ steps.producer.outputs.source_sha || github.sha }}
           path: artifacts/packages
+          run-id: ${{ inputs.artifact-run-id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Validate the exact artifacts before authentication
         run: |
           test -n "$NUGET_USER"
-          python tools/check_release.py --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
+          if [ -n "$ARTIFACT_RUN_ID" ]; then
+            SOURCE_SHA="${{ steps.producer.outputs.source_sha }}"
+          fi
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          python tools/check_release.py --version "$RELEASE_VERSION" --commit "$SOURCE_SHA"
+          if [ -n "$ARTIFACT_RUN_ID" ]; then
+            python tools/publish_packages.py --version "$RELEASE_VERSION" --commit "$SOURCE_SHA" --preflight-resume
+          fi
       - name: Obtain temporary NuGet credentials
         id: login
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
@@ -112,4 +139,7 @@ jobs:
         if: inputs.publish
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
-        run: python tools/publish_packages.py --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
+        run: |
+          args=()
+          if [ -n "$ARTIFACT_RUN_ID" ]; then args+=(--resume); fi
+          python tools/publish_packages.py --version "$RELEASE_VERSION" --commit "$SOURCE_SHA" "${args[@]}"
