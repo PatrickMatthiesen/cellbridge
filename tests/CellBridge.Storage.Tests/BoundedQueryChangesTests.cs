@@ -9,17 +9,26 @@ namespace CellBridge.Storage.Tests;
 public sealed class BoundedQueryChangesTests
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task FollowupsCompleteTheGraphWithoutAdvertisingUndeliveredElements(bool postgreSql)
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task FollowupsCompleteTheGraphWithoutAdvertisingUndeliveredElements(bool postgreSql, bool includeHashes)
     {
         await using var source = ProtocolExecutionTestProvider.Create(postgreSql);
         await using var peer = postgreSql ? ProtocolExecutionTestProvider.Create(true) : null;
         var provider = source.Provider;
-        var service = new CellBridgeDocumentService(provider);
+        var hashing = new ProtocolHashingOptions(new byte[32]);
+        var hashOptions = includeHashes ? new RequestHashOptions(IncludeHashes: true) : null;
+        var service = new CellBridgeDocumentService(provider, hashing: hashing);
         var document = (await service.CreateAsync($"/bounded-{Guid.NewGuid():N}.docx", MinimalDocx.Create(), TestActor.Value))!;
-        var full = await Read(service, document.ResourceId);
+        var full = await Read(service, document.ResourceId, hashOptions: hashOptions);
         var expected = full.DataElementPackage!.DataElements;
+        if (includeHashes)
+        {
+            var group = Assert.Single(expected, e => e.DataElementType == DataElementType.ObjectGroupDataElementData);
+            Assert.Equal(StreamObjectTypeHeaderStart.DataElementHash, StreamObjectHeaderStart.Parse(new(group.Data!)).Type);
+        }
         const ulong maximum = 1;
         var received = new Dictionary<ExGuid, DataElement>();
         ClientKnowledge? knowledge = null;
@@ -29,9 +38,9 @@ public sealed class BoundedQueryChangesTests
         {
             // A new service instance and replay use the same persisted records,
             // rather than a process-local cursor or a retained response package.
-            service = new CellBridgeDocumentService(pages % 2 == 0 ? peer?.Provider ?? provider : provider);
-            var response = await Read(service, document.ResourceId, maximum, knowledge);
-            var replay = await Read(new(provider), document.ResourceId, maximum, knowledge);
+            service = new CellBridgeDocumentService(pages % 2 == 0 ? peer?.Provider ?? provider : provider, hashing: hashing);
+            var response = await Read(service, document.ResourceId, maximum, knowledge, hashOptions: hashOptions);
+            var replay = await Read(new(provider, hashing: hashing), document.ResourceId, maximum, knowledge, hashOptions: hashOptions);
             Assert.Equal(response.ToByteArray(), replay.ToByteArray());
             var inspection = CellBridge.OfficeInspectors.OfficeInspector.ParseResponse(
                 response.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11));
@@ -66,7 +75,7 @@ public sealed class BoundedQueryChangesTests
         Assert.Equal(expected.Count, received.Count);
         foreach (var element in expected)
             Assert.Equal(element.Data, received[element.DataElementExtendedGuid].Data);
-        var unchanged = await Read(new(provider), document.ResourceId, maximum, knowledge);
+        var unchanged = await Read(new(provider, hashing: hashing), document.ResourceId, maximum, knowledge, hashOptions: hashOptions);
         Assert.Empty(unchanged.DataElementPackage!.DataElements);
         Assert.False(Assert.IsType<QueryChangesSubResponseData>(Assert.Single(unchanged.SubResponses).Data).PartialResult);
     }
@@ -252,9 +261,10 @@ public sealed class BoundedQueryChangesTests
     }
 
     private static async Task<FsshttpbResponse> Read(CellBridgeDocumentService service, Guid id,
-        ulong? maximum = null, ClientKnowledge? knowledge = null, bool round = false, bool allowFragments = false)
+        ulong? maximum = null, ClientKnowledge? knowledge = null, bool round = false, bool allowFragments = false,
+        RequestHashOptions? hashOptions = null)
     {
-        var request = new FsshttpbCellRequest { SubRequests = { new(RequestTypes.QueryChanges)
+        var request = new FsshttpbCellRequest { HashOptions = hashOptions, SubRequests = { new(RequestTypes.QueryChanges)
         {
             RequestId = 1,
             Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true,
