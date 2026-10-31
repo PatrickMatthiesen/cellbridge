@@ -221,7 +221,7 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                 else
                 {
                     bool firstLocalMember = room.Connections.Count == 0;
-                    var connection = new LocalConnection(member, context, room);
+                    var connection = new LocalConnection(member, context, room, admitted.Snapshot.Watermark);
                     _connections[context.ConnectionId] = connection;
                     room.Connections[context.ConnectionId] = connection;
                     if (firstLocalMember)
@@ -820,6 +820,9 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
             var eligible = new List<LocalConnection>(candidates.Length);
             foreach (var recipient in candidates)
             {
+                // A fresh incarnation never replays its pre-admission backlog.
+                // Later presence snapshots only change the presence watermark.
+                if (item.Sequence <= recipient.AdmissionWatermark) continue;
                 if (!incarnations.Contains(recipient.Member.Incarnation) || IsExpired(recipient.Member.Ticket))
                 { DetachAndAbort(recipient); continue; }
                 lock (_sync)
@@ -1097,7 +1100,8 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         internal DateTimeOffset LastReapUtc { get; set; } = DateTimeOffset.MinValue;
         internal DateTimeOffset LastSuccessfulBrokerUtc { get; set; } = DateTimeOffset.MinValue;
     }
-    private sealed record LocalConnection(OfficeRealTimeBackplaneMember Member, HubCallerContext Context, LocalRoom Room);
+    private sealed record LocalConnection(OfficeRealTimeBackplaneMember Member, HubCallerContext Context,
+        LocalRoom Room, long AdmissionWatermark);
 }
 
 internal sealed record OfficeRealTimeSchedulerDiagnostics(long AuthorizationSweeps, long HeartbeatCalls,

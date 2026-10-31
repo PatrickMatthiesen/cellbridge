@@ -59,6 +59,9 @@ host identity and a fresh connection incarnation. Events have increasing room
 sequences. Presence snapshots return an atomic sequence watermark. Each recipient
 suppresses older queued presence changes covered by its snapshot, while typing
 events retain their independent delivery behavior.
+Each connection also keeps its admission snapshot's watermark. It skips all
+earlier events, including typing. Later presence snapshots do not advance that
+admission watermark or discard typing sent after admission.
 
 The server serializes snapshots and dispatch within each local room. SignalR can
 write a newer presence callback before it writes a concurrent snapshot invocation
