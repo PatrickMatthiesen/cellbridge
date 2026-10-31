@@ -114,7 +114,7 @@ RTC is enabled by default. Hosts can set `EnableOfficeRealTime = false` to disab
 RTC discovery and endpoints. OCS remains unimplemented and is not advertised.
 
 Remaining modern-collaboration work includes reliable native startup, resolved
-participant identity, token renewal/reconnection, server-generated notifications
+participant identity, token recovery after interruption, server-generated notifications
 after publication, measured delivery latency and any OCS behavior actually
 required by the supported client workflow. The relay currently implements no
 multi-host room coordination. Native discovery must describe capabilities the
