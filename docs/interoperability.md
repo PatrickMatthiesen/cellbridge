@@ -31,6 +31,22 @@ SOAP dependencies determine which subsequent operations execute.
 
 ### Known limitations
 
+- Bounded QueryChanges responses use `MaxDataElements` as a byte threshold for
+  starting partial delivery. A page includes the complete element that crosses
+  the threshold, even when the first element is larger. The independent server
+  response limit still applies. Partial responses return `PartialResult` with
+  knowledge for delivered or already known elements, plus filtered-out knowledge
+  only when requested. Clients continue by sending that knowledge in another query.
+  The final page returns the storage index. Each query selects
+  the current graph; the sequence does not pin one revision. Follow-ups use stored
+  immutable identities and recheck authorization, without a process-local cursor.
+  Whole-cell rounding and knowledge that cannot identify partial progress
+  return explicit errors when a complete response cannot fit the page. Fragmented
+  element downloads remain unsupported. These checks establish protocol/service
+  behavior, not native Office download continuation.
+  The [request specification](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/5b8d1d29-0adf-4b29-b3d1-1a1fe8590642)
+  permits fragments without requiring them. Complete-element continuation does
+  not depend on fragment range acknowledgements.
 - Uploads marked partial, staged uploads spanning multiple requests, alternate coherency
   modes and buffered or coalescing metadata writes are unsupported. Ordinary saves can
   still reuse unchanged file parts. Complete saves accept `MultiRequestPutHint`

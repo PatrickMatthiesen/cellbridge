@@ -110,7 +110,10 @@ public sealed class MixedPartitionQueryTests
             request, new Dictionary<string, string>(), TestActor.Value)).Response;
         Assert.Equal(Enumerable.Range(1, 8).Select(i => (ulong)i), response.SubResponses.Select(s => s.RequestId));
         Assert.All(response.SubResponses.Take(5), s => Assert.False(s.Status));
-        Assert.All(response.SubResponses.Skip(5), s => Assert.True(s.Status));
+        Assert.True(response.SubResponses[5].Status);
+        Assert.False(response.SubResponses[6].Status);
+        Assert.True(Assert.IsType<QueryChangesSubResponseData>(response.SubResponses[6].Data).PartialResult);
+        Assert.True(response.SubResponses[7].Status);
         var elements = response.DataElementPackage!.DataElements;
         Assert.Equal((await provider.Documents.ReadPartitionAsync(state.ResourceId, new(0) { IncludeCatalog = true }))!.Elements.Length + 8, elements.Count);
         Assert.Equal(elements.Count, elements.Select(e => e.DataElementExtendedGuid).Distinct().Count());

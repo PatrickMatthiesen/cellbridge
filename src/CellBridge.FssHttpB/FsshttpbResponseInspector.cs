@@ -221,7 +221,6 @@ internal sealed class Parser
         int offset = reader.Position;
         var start = StreamObjectHeaderStart.Parse(reader);
         int metadataEnd = CheckedEnd(reader.Position, start.Length);
-        int payloadStart = reader.Position;
         var item = new FsshttpbDataElementInspection { Index = _elementIndex++, Offset = offset };
         try
         {
@@ -234,18 +233,16 @@ internal sealed class Parser
                 throw new InvalidDataException("DataElement metadata length mismatch.");
             int dataStart = reader.Position;
             int end = FindEndHeader(dataStart, StreamObjectTypeHeaderEnd.DataElement);
-            item.DataLength = Math.Max(0, end - dataStart);
+            item.DataLength = end - dataStart;
             item.DataSha256 = Sha256(_bytes, dataStart, item.DataLength);
             ParseDataPayload(item, dataStart, end);
             reader.Position = end;
         }
         catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentOutOfRangeException)
         {
-            int end = FindEndHeader(Math.Min(reader.Position, _bytes.Length), StreamObjectTypeHeaderEnd.DataElement);
-            item.DataLength = Math.Max(0, end - Math.Min(reader.Position, end));
-            item.DataSha256 = Sha256(_bytes, payloadStart, Math.Max(0, end - payloadStart));
             _result.Issues.Add($"element[{item.Index}] at {offset}: {ex.Message}");
-            reader.Position = end;
+            _result.DataElements.Add(item);
+            throw;
         }
         _result.DataElements.Add(item);
         if (reader.Remaining > 0) SkipEnd(reader, StreamObjectTypeHeaderEnd.DataElement);
@@ -253,38 +250,80 @@ internal sealed class Parser
 
     private int FindEndHeader(int start, StreamObjectTypeHeaderEnd type)
     {
-        var markers = new List<byte[]>();
-        var shortMarkerWriter = new BinaryWriterEx();
-        new StreamObjectHeaderEnd8Bit(type).Serialize(shortMarkerWriter);
-        markers.Add(shortMarkerWriter.ToArray());
-        var longMarkerWriter = new BinaryWriterEx();
-        new StreamObjectHeaderEnd16Bit(type).Serialize(longMarkerWriter);
-        markers.Add(longMarkerWriter.ToArray());
-        for (int i = start; i < _bytes.Length; i++)
+        var reader = new BinaryReaderEx(_bytes) { Position = start };
+        while (reader.Remaining > 0)
         {
-            foreach (byte[] marker in markers)
+            if (IsEnd(reader))
             {
-                if (i > _bytes.Length - marker.Length || !_bytes.AsSpan(i, marker.Length).SequenceEqual(marker))
-                    continue;
-                int next = i + marker.Length;
-                if (next >= _bytes.Length) return i;
-                try
-                {
-                    var probe = new BinaryReaderEx(_bytes) { Position = next };
-                    int discriminator = _bytes[next] & 3;
-                    if (discriminator is 0 or 2)
-                    {
-                        if (StreamObjectHeaderStart.Parse(probe).Type == StreamObjectTypeHeaderStart.DataElement) return i;
-                    }
-                    else if (discriminator is 1 or 3)
-                    {
-                        if (StreamObjectHeaderEnd.Parse(probe).Type == StreamObjectTypeHeaderEnd.DataElementPackage) return i;
-                    }
-                }
-                catch (InvalidDataException) { }
+                int endOffset = reader.Position;
+                var end = StreamObjectHeaderEnd.Parse(reader);
+                if (end.Type != type)
+                    throw new InvalidDataException($"Expected {type} end header at {endOffset}, got {end.Type}.");
+                return endOffset;
             }
+
+            // DataElementData consists of framed stream objects. Walking each
+            // declared payload skips arbitrary blob bytes, where an end-header
+            // byte pattern has no framing meaning.
+            SkipDataElementObject(reader, _bytes.Length);
         }
         throw new InvalidDataException($"End header {type} was not found after {start}.");
+    }
+
+    private static void SkipDataElementObject(BinaryReaderEx reader, int boundary)
+    {
+        const int maximumCompoundDepth = 4096;
+        var ends = new Stack<(StreamObjectTypeHeaderEnd Type, StreamObjectTypeHeaderStart Start, int Offset)>();
+        ReadObjectHeader(reader, boundary, ends);
+        while (ends.Count > 0)
+        {
+            if (reader.Position >= boundary)
+            {
+                var missing = ends.Peek();
+                throw new InvalidDataException($"compound {missing.Start} at {missing.Offset} has no end header before boundary {boundary}");
+            }
+
+            if (IsEnd(reader))
+            {
+                int endOffset = reader.Position;
+                var end = StreamObjectHeaderEnd.Parse(reader);
+                var expected = ends.Pop();
+                if (end.Type != expected.Type)
+                    throw new InvalidDataException($"Expected {expected.Type} end header for {expected.Start} at {expected.Offset}, got {end.Type} at {endOffset}.");
+            }
+            else
+            {
+                if (ends.Count >= maximumCompoundDepth)
+                    throw new InvalidDataException($"Diagnostic compound nesting limit {maximumCompoundDepth} exceeded.");
+                ReadObjectHeader(reader, boundary, ends);
+            }
+        }
+    }
+
+    private static void ReadObjectHeader(BinaryReaderEx reader, int boundary,
+        Stack<(StreamObjectTypeHeaderEnd Type, StreamObjectTypeHeaderStart Start, int Offset)> ends)
+    {
+        int offset = reader.Position;
+        var header = StreamObjectHeaderStart.Parse(reader);
+        int immediateEnd = CheckedEnd(reader.Position, header.Length);
+        if (immediateEnd > boundary)
+            throw new InvalidDataException($"object {header.Type} at {offset} exceeds payload boundary {boundary}");
+        reader.Position = immediateEnd;
+        if (header.Compound == 1)
+        {
+            ends.Push((MatchingEnd(header.Type), header.Type, offset));
+        }
+    }
+
+    private static StreamObjectTypeHeaderEnd MatchingEnd(StreamObjectTypeHeaderStart type)
+    {
+        if (type == StreamObjectTypeHeaderStart.LeafNodeObject)
+            return StreamObjectTypeHeaderEnd.RootNodeEnd;
+        if (type == StreamObjectTypeHeaderStart.IntermediateNodeObject)
+            return StreamObjectTypeHeaderEnd.IntermediateNodeEnd;
+        if (Enum.IsDefined(typeof(StreamObjectTypeHeaderEnd), (int)type))
+            return (StreamObjectTypeHeaderEnd)(int)type;
+        throw new InvalidDataException($"No end-header mapping is known for compound object {type} ({(int)type}).");
     }
 
     private void ParseDataPayload(FsshttpbDataElementInspection item, int start, int end)

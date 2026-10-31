@@ -113,18 +113,21 @@ public class RepeatedQueryTests
         var request = Query(11, knowledge);
         request.SubRequests.Add(Query(22).SubRequests[0]);
         request.SubRequests.Add(Query(33, maximum: 1).SubRequests[0]);
+        request.SubRequests.Add(Query(44, cell: new(new(1, Guid.NewGuid()), new(1, Guid.NewGuid()))).SubRequests[0]);
         var combined = (await new CellBridgeDocumentService(provider).ExecuteAsync(state.ResourceId, DocumentPartitionKind.FileContents,
             request, new Dictionary<string, string>(), TestActor.Value)).Response;
-        Assert.Equal(new ulong[] { 11, 22, 33 }, combined.SubResponses.Select(s => s.RequestId));
+        Assert.Equal(new ulong[] { 11, 22, 33, 44 }, combined.SubResponses.Select(s => s.RequestId));
         Assert.False(combined.SubResponses[0].Status);
         Assert.False(combined.SubResponses[1].Status);
-        Assert.True(combined.SubResponses[2].Status);
+        Assert.False(combined.SubResponses[2].Status);
+        Assert.True(Assert.IsType<QueryChangesSubResponseData>(combined.SubResponses[2].Data).PartialResult);
+        Assert.True(combined.SubResponses[3].Status);
         Assert.Equal(fullElements.Select(e => e.DataElementExtendedGuid).OrderBy(i => i.Value),
             combined.DataElementPackage!.DataElements.Select(e => e.DataElementExtendedGuid).OrderBy(i => i.Value));
         Assert.Equal(combined.DataElementPackage.DataElements.Count,
             combined.DataElementPackage.DataElements.Select(e => e.DataElementExtendedGuid).Distinct().Count());
         var wire = FsshttpbResponse.Deserialize(new BinaryReaderEx(combined.ToByteArray()));
-        Assert.Equal(3, wire.SubResponses.Count);
+        Assert.Equal(4, wire.SubResponses.Count);
         Assert.NotEmpty(wire.DataElementPackage!.DataElements);
     }
 

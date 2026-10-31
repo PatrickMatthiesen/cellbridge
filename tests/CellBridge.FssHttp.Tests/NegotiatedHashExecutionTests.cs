@@ -48,14 +48,17 @@ public sealed class NegotiatedHashExecutionTests
         Assert.Null(boundedResponse.DataElementPackage);
     }
 
-    [Fact]
-    public void LaterSaveAndSerialUpgradeCannotViolateEarlierProjectedBudget()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LaterSaveAndSerialUpgradeCannotViolateEarlierProjectedBudget(bool tinyThreshold)
     {
         var raw = RawGroup(1024);
         var projected = ObjectGroupWireHash.Project(raw, new(HashesInsteadOfData: true), Configuration);
         var response = new FsshttpbResponse();
         var assembler = new QueryChangesResponseAssembler(response, 10000, new(HashesInsteadOfData: true), Configuration);
-        assembler.Append(Result(raw, RequestTypes.QueryChanges, 1), new() { MaxDataElements = (ulong)Size(projected) });
+        assembler.Append(Result(raw, RequestTypes.QueryChanges, 1), new()
+            { MaxDataElements = tinyThreshold ? 1UL : (ulong)Size(projected) });
         var originalWire = response.ToByteArray();
         Assert.False(assembler.CanAppend(Result(raw, RequestTypes.PutChanges, 2).DataElementPackage));
         Assert.Equal(originalWire, response.ToByteArray());

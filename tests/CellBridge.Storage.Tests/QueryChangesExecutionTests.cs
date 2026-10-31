@@ -76,7 +76,7 @@ public sealed class QueryChangesExecutionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task QueryChangesRejectsAnUnrepresentableByteBudget(bool postgreSql)
+    public async Task QueryChangesReturnsAWholeElementForATinyByteThreshold(bool postgreSql)
     {
         await using var scope = ProtocolExecutionTestProvider.Create(postgreSql);
         var provider = scope.Provider;
@@ -87,7 +87,7 @@ public sealed class QueryChangesExecutionTests
         {
             IncludeStorageManifest = true,
             IncludeCellChanges = true,
-            // One byte cannot contain even the first serialized data element.
+            // Finish the first element even though it exceeds the threshold.
             MaxDataElements = 1,
         };
 
@@ -95,10 +95,9 @@ public sealed class QueryChangesExecutionTests
             new Dictionary<string, string>(), TestActor.Value)).Response;
         var subResponse = Assert.Single(response.SubResponses);
 
-        Assert.Null(response.DataElementPackage);
-        Assert.True(subResponse.Status);
-        Assert.Equal((ulong)ProtocolErrorCode.RequestNotSupported, subResponse.Error!.ErrorCode);
-        Assert.Null(subResponse.Data);
+        Assert.False(subResponse.Status, subResponse.Error?.ErrorMessage);
+        Assert.True(Assert.IsType<QueryChangesSubResponseData>(subResponse.Data).PartialResult);
+        Assert.Single(response.DataElementPackage!.DataElements);
     }
 
     private static FsshttpbCellRequest QueryChanges(bool includeStorageManifest, bool includeCellChanges)

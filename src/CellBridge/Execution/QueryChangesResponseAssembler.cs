@@ -12,9 +12,9 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
     private readonly Dictionary<ExGuid, DataElement> _projections = new();
     private readonly ProtocolHashingOptions _hashing = hashing ?? ProtocolHashingOptions.Default;
 
-    private sealed record QueryBudget(HashSet<ExGuid> Ids, ulong Maximum);
+    private sealed record QueryBudget(HashSet<ExGuid> Ids, ulong Threshold, ulong Maximum);
 
-    // This budget counts serialized data elements, as the query shaper does.
+    // This budget counts serialized data elements, as page selection does.
     // Mandatory save payloads must pass this same check before publication.
     public bool CanAppend(DataElementPackage? package) => TryCombine(package, true, null, out _, out _, out _, out _);
 
@@ -28,8 +28,13 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
 
     public void Append(FsshttpbResponse query, QueryChangesSubRequestData? controls = null)
     {
+        // Selection can finish an element beyond the client threshold. Keep
+        // that admitted page's allowance when checking later index merges or
+        // hashing projections, without relaxing the aggregate server limit.
         var budget = query.DataElementPackage is { } package && controls?.MaxDataElements is > 0
-            ? new QueryBudget(package.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet(), controls.MaxDataElements.Value)
+            ? new QueryBudget(package.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet(),
+                controls.MaxDataElements.Value,
+                Math.Max(controls.MaxDataElements.Value, checked((ulong)package.DataElements.Sum(Size))))
             : null;
         if (!TryCombine(query.DataElementPackage, false, budget, out var proposed, out var projected, out var saveIds, out var error))
         {
@@ -38,7 +43,9 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
             return;
         }
         CommitPackage(query.DataElementPackage, proposed, projected, saveIds);
-        if (budget is not null) _queryBudgets.Add(budget);
+        if (budget is not null)
+            _queryBudgets.Add(budget with { Maximum = Math.Max(budget.Threshold,
+                checked((ulong)budget.Ids.Sum(id => Size(projected[id])))) });
         response.SubResponses.AddRange(query.SubResponses);
     }
 
@@ -114,7 +121,7 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
                 ulong size = (ulong)Size(candidate[id]);
                 if (size > constraint.Maximum - used)
                 {
-                    error = "The projected response exceeds an admitted QueryChanges byte budget.";
+                    error = "The projected response exceeds an admitted QueryChanges page allowance.";
                     return false;
                 }
                 used += size;
