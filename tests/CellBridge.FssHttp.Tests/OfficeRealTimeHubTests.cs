@@ -11,6 +11,37 @@ public sealed class OfficeRealTimeHubTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Unavailable_recipient_is_removed_while_healthy_peers_receive_the_update(bool canceledSend)
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        var stalled = await f.Connect(sender.Ticket.ResourceId, 1, "stalled");
+        var healthy = await f.Connect(sender.Ticket.ResourceId, 1, "healthy");
+        Assert.True(await f.Store.UpdatePresenceAsync(stalled.Ticket, stalled.Context.ConnectionId,
+            "{}", CancellationToken.None));
+        f.Clients.Calls.Clear();
+        f.Clients.BeforeSend = (id, _, _, token) => id != stalled.Context.ConnectionId ? Task.CompletedTask
+            : canceledSend ? Task.FromException(new OperationCanceledException())
+                : Task.Delay(Timeout.InfiniteTimeSpan, token);
+        string payload = $$"""{"A":"{{sender.Ticket.ClientId:B}}","text":"typed"}""";
+
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, payload, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(4)));
+
+        Assert.True(stalled.Context.Aborted);
+        Assert.False(sender.Context.Aborted);
+        Assert.False(healthy.Context.Aborted);
+        Assert.Contains(f.Clients.Calls, call => call.ConnectionId == healthy.Context.ConnectionId &&
+            call.Method == "updateNotification" && (string)call.Arguments[1]! == payload);
+        Assert.DoesNotContain(f.Clients.Calls, call => call.ConnectionId == stalled.Context.ConnectionId);
+        var presence = await f.Store.GetCompletePresenceStateAsync(healthy.Ticket,
+            healthy.Context.ConnectionId, CancellationToken.None);
+        Assert.DoesNotContain(ClientKey(stalled.Ticket.ClientId), presence.Keys);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Temporary_overload_preserves_connected_members_and_presence(bool snapshot)
     {
         Fixture f = new();

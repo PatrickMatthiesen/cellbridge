@@ -31,7 +31,7 @@ internal static class OfficeRealTimeEndpoints
             var hostSchemes = options.Schemes.Where(scheme => scheme.Name != OfficeRealTimeRequest.AuthenticationScheme).Take(2).ToArray();
             if (hostSchemes.Length == 1) options.DefaultScheme = hostSchemes[0].Name;
         });
-        services.AddSignalR(options =>
+        services.AddSignalR().AddHubOptions<OfficeRealTimeHub>(options =>
         {
             options.MaximumReceiveMessageSize = 64 * 1024;
             options.MaximumParallelInvocationsPerClient = 1;

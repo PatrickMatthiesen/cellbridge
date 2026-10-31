@@ -92,9 +92,13 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
         var admitted = await requests.AcquireAsync(ticket.Actor.Identity.Subject, cancellationToken);
         using var lease = admitted.Lease;
         if (lease is null) throw new OfficeRealTimeBusyException();
-        var authorized = await documents.AuthorizeOfficeRealTimeAsync(ticket.ResourceId, ticket.LifecycleGeneration,
-            ticket.Actor, ticket.ClientId, requiredAccess, requireOwnedClient, cancellationToken);
-        return authorized is not null && ticket.ExpiresUtc > time.GetUtcNow();
+        try
+        {
+            var authorized = await documents.AuthorizeOfficeRealTimeAsync(ticket.ResourceId, ticket.LifecycleGeneration,
+                ticket.Actor, ticket.ClientId, requiredAccess, requireOwnedClient, cancellationToken);
+            return authorized is not null && ticket.ExpiresUtc > time.GetUtcNow();
+        }
+        catch (OfficeRealTimeAdmissionBusyException) { throw new OfficeRealTimeBusyException(); }
     }
 
     public async ValueTask<bool[]> AuthorizeTogetherAsync(IReadOnlyList<OfficeRealTimeTicketCheck> checks,
@@ -107,12 +111,16 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
         var admitted = await requests.AcquireAsync(first.Actor.Identity.Subject, cancellationToken);
         using var lease = admitted.Lease;
         if (lease is null) throw new OfficeRealTimeBusyException();
-        var allowed = await documents.AuthorizeOfficeRealTimeTogetherAsync(first.ResourceId, first.LifecycleGeneration,
-            checks.Select(check => new OfficeRealTimeAccessCheck(check.Ticket.Actor, check.Ticket.ClientId,
-                check.RequiredAccess, check.RequireOwnedClient)).ToArray(), cancellationToken).ConfigureAwait(false);
-        var now = time.GetUtcNow();
-        for (int i = 0; i < allowed.Length; i++) allowed[i] &= checks[i].Ticket.ExpiresUtc > now;
-        return allowed;
+        try
+        {
+            var allowed = await documents.AuthorizeOfficeRealTimeTogetherAsync(first.ResourceId, first.LifecycleGeneration,
+                checks.Select(check => new OfficeRealTimeAccessCheck(check.Ticket.Actor, check.Ticket.ClientId,
+                    check.RequiredAccess, check.RequireOwnedClient)).ToArray(), cancellationToken).ConfigureAwait(false);
+            var now = time.GetUtcNow();
+            for (int i = 0; i < allowed.Length; i++) allowed[i] &= checks[i].Ticket.ExpiresUtc > now;
+            return allowed;
+        }
+        catch (OfficeRealTimeAdmissionBusyException) { throw new OfficeRealTimeBusyException(); }
     }
 
     internal static string? PublicBase(HttpContext context)

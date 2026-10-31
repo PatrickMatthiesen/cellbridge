@@ -15,6 +15,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.WebUtilities;
 
 namespace CellBridge.FssHttp.Tests;
@@ -23,6 +25,35 @@ public sealed class OfficeRealTimeEndpointTests
 {
     private const string PublicOrigin = "https://office.example";
     private const string Mount = "/mounted";
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RtcLimitsDoNotReplaceTheHostsOtherHubSettings(bool hostRegisteredFirst)
+    {
+        var builder = WebApplication.CreateBuilder();
+        void RegisterHostHub() => builder.Services.AddSignalR(options =>
+        {
+            options.MaximumReceiveMessageSize = 1024 * 1024;
+            options.MaximumParallelInvocationsPerClient = 8;
+            options.EnableDetailedErrors = true;
+        }).AddHubOptions<UnrelatedHub>(_ => { });
+        if (hostRegisteredFirst) RegisterHostHub();
+        builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false);
+        if (!hostRegisteredFirst) RegisterHostHub();
+        await using var app = builder.Build();
+
+        var other = app.Services.GetRequiredService<IOptions<HubOptions<UnrelatedHub>>>().Value;
+        Assert.Equal(1024 * 1024, other.MaximumReceiveMessageSize);
+        Assert.Equal(8, other.MaximumParallelInvocationsPerClient);
+        Assert.True(other.EnableDetailedErrors);
+        var rtc = app.Services.GetRequiredService<IOptions<HubOptions<OfficeRealTimeHub>>>().Value;
+        Assert.Equal(64 * 1024, rtc.MaximumReceiveMessageSize);
+        Assert.Equal(1, rtc.MaximumParallelInvocationsPerClient);
+        Assert.False(rtc.EnableDetailedErrors);
+    }
+
+    private sealed class UnrelatedHub : Hub { }
 
     [Theory]
     [InlineData(false)]

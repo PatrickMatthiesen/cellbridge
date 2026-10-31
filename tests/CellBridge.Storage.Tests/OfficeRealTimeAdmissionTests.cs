@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
@@ -13,6 +14,40 @@ public sealed class OfficeRealTimeAdmissionTests
 {
     private static readonly CellBridgeActor Other = new(new("rtc:other", "other", "Other"));
     private static readonly DocumentAuthorizationScope Scope = new("rtc-tenant", "rtc-workspace");
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RepeatedDocumentActivityReportsBusyAndCanRetryWithoutPermissionChanges(bool together)
+    {
+        var provider = StorageTestDocuments.Memory();
+        var state = (await new CellBridgeDocumentService(provider).CreateAsync(
+            "/rtc-activity.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var repository = new ChurningControlReadRepository(provider.Documents);
+        var service = new CellBridgeDocumentService(new StorageProvider(repository, provider.Content));
+
+        async Task Authorize()
+        {
+            if (together)
+            {
+                var allowed = await service.AuthorizeOfficeRealTimeTogetherAsync(state.ResourceId,
+                    state.LifecycleGeneration, [new(TestActor.Value, null, DocumentAccess.Read, false)],
+                    CancellationToken.None);
+                Assert.Equal([true], allowed);
+            }
+            else
+                Assert.NotNull(await service.AuthorizeOfficeRealTimeAsync(state.ResourceId,
+                    state.LifecycleGeneration, TestActor.Value, null, DocumentAccess.Read, false,
+                    CancellationToken.None));
+        }
+
+        await Assert.ThrowsAsync<OfficeRealTimeAdmissionBusyException>(Authorize);
+        Assert.Equal(8, repository.ReadCount);
+        var current = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
+        Assert.Equal(state.AuthorityGeneration, current.Head.AuthorityGeneration);
+        repository.Churn = false;
+        await Authorize();
+    }
 
     [Fact]
     public async Task ReadAdmissionUsesCurrentGrantAndHonorsAccessLimit()
@@ -266,6 +301,26 @@ public sealed class OfficeRealTimeAdmissionTests
             }
             var now = DateTimeOffset.UtcNow;
             return new(Allowed, now, now.AddMinutes(1));
+        }
+    }
+
+    private sealed class ChurningControlReadRepository(IDocumentRepository inner) : RepositoryTestProxy(inner)
+    {
+        public bool Churn { get; set; } = true;
+        public int ReadCount { get; private set; }
+
+        public override async ValueTask<DocumentControlRead?> ReadControlAsync(Guid id,
+            CancellationToken ct = default)
+        {
+            ReadCount++;
+            if (Churn && ReadCount % 2 == 0)
+            {
+                var current = (await Inner.ReadControlAsync(id, ct))!;
+                var path = "/rtc-activity-" + ReadCount + ".docx";
+                Assert.True((await Inner.ChangePathAsync(new(id, TestStorage.Admit(current.Head),
+                    path, path.ToUpperInvariant(), ImmutableDictionary<string, string>.Empty), ct)).Changed);
+            }
+            return await base.ReadControlAsync(id, ct);
         }
     }
 

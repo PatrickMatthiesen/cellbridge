@@ -15,6 +15,7 @@ internal sealed class OfficeRealTimeSessionStore
     private const int MaxSubjectConnections = 8;
     private const int MaxPayloadBytes = 64 * 1024;
     private static readonly TimeSpan DispatchTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RecipientSendTimeout = TimeSpan.FromSeconds(1);
     private static readonly HashSet<string> ChangeTokenFields = new(StringComparer.Ordinal)
     {
         "ChangeToken", "ClientId", "CorrelationId", "EventCommitTimestampUtc", "EventReason",
@@ -372,11 +373,17 @@ internal sealed class OfficeRealTimeSessionStore
                 if (sender is not null && (!IsCurrentConnectionLocked(sender) || IsExpired(sender.Ticket))) return false;
             }
 
+            using var sendDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            sendDeadline.CancelAfter(RecipientSendTimeout);
             try
             {
-                await hubContext.Clients.Client(id).SendCoreAsync(method, args, cancellationToken).ConfigureAwait(false);
+                await hubContext.Clients.Client(id).SendCoreAsync(method, args, sendDeadline.Token)
+                    .WaitAsync(sendDeadline.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                await RemoveDeniedAsync(recipient, cancellationToken).ConfigureAwait(false);
+            }
         }
         return true;
     }

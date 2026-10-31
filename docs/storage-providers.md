@@ -46,7 +46,8 @@ builder.Services.AddSingleton(source);
 var content = new PostgreSqlContentStore(source, limits.MaxObjectBytes);
 var documents = new PostgreSqlStateStore(source, limits, content);
 var provider = new StorageProvider(documents, content, limits);
-builder.Services.AddCellBridge(provider, multipleInstances: true);
+builder.Services.AddCellBridge(provider, multipleInstances: true,
+    configure: options => options.EnableOfficeRealTime = false);
 
 // Register authentication and map validated claims to cellbridge:subject.
 var app = builder.Build();

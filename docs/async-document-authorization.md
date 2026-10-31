@@ -22,7 +22,8 @@ sealed class HostPermissions(IHostPermissionStore store) : IDocumentAuthorizatio
     }
 }
 
-services.AddCellBridgeWithExternalAuthorization<HostPermissions>(storageProvider);
+services.AddCellBridgeWithExternalAuthorization<HostPermissions>(storageProvider,
+    configure: options => options.EnableOfficeRealTime = false);
 ```
 
 For a host owning its routes, construct `CellBridgeDocumentService` with the named `documentAuthorizationProvider` argument. `CellBridgeRequestProcessor.ExecuteAsync` uses the same authority without needing the Lists module. Public `CellBridgeActor.AccessLimit` remains a restrictive ceiling; it cannot grant access. Stable subjects come from trusted server authentication, never from a permission result supplied in an HTTP body.

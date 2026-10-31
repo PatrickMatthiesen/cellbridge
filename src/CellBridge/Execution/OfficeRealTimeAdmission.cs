@@ -7,6 +7,9 @@ internal sealed record OfficeRealTimeAdmission(CellBridgeActor Actor, DocumentCo
 internal sealed record OfficeRealTimeAccessCheck(CellBridgeActor Actor, Guid? ClientId,
     DocumentAccess RequiredAccess, bool RequireOwnedClient);
 
+internal sealed class OfficeRealTimeAdmissionBusyException()
+    : InvalidOperationException("Office collaboration authorization could not obtain a stable document state.");
+
 public sealed partial class CellBridgeDocumentService
 {
     internal bool SupportsOfficeRealTimeSnapshots => _externalAuthorization is null && _access is null;
@@ -55,7 +58,7 @@ public sealed partial class CellBridgeDocumentService
             }
             return allowed;
         }
-        return denied;
+        throw new OfficeRealTimeAdmissionBusyException();
     }
 
     internal async ValueTask<OfficeRealTimeAdmission?> AuthorizeOfficeRealTimeAsync(Guid resourceId,
@@ -95,7 +98,7 @@ public sealed partial class CellBridgeDocumentService
             return new(authorized, active);
         }
 
-        return null;
+        throw new OfficeRealTimeAdmissionBusyException();
     }
 
     private static bool SameAuthorizationState(DocumentHead left, DocumentHead right) =>
