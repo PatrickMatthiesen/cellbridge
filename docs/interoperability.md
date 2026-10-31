@@ -42,8 +42,9 @@ SOAP dependencies determine which subsequent operations execute.
   immutable identities and recheck authorization, without a process-local cursor.
   Whole-cell rounding and knowledge that cannot identify partial progress
   return explicit errors when a complete response cannot fit the page. Fragmented
-  element downloads remain unsupported. These checks establish protocol/service
-  behavior, not native Office download continuation.
+  element downloads remain unsupported. Native Word complete-element download
+  continuation has been verified. Native Excel and PowerPoint download
+  continuation remain unverified.
   The [request specification](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpb/5b8d1d29-0adf-4b29-b3d1-1a1fe8590642)
   permits fragments without requiring them. Complete-element continuation does
   not depend on fragment range acknowledgements.
