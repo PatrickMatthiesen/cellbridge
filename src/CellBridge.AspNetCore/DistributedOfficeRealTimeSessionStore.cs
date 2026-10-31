@@ -405,6 +405,10 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
             var envelope = payload;
             var mutation = await _backplane.MutateAsync(sender.Member, sender.Room.Epoch!, Guid.NewGuid().ToString("N"),
                 kind, ClientKey(sender.Member.Ticket.ClientId), method, envelope, cancellationToken).ConfigureAwait(false);
+            // A definitive size/validation rejection did not publish an event.
+            // Preserve healthy peers; epoch changes still require a reconnect.
+            if (mutation.Status == OfficeRealTimeBackplaneStatus.Denied && mutation.Epoch == sender.Room.Epoch)
+                return false;
             if (mutation.Status != OfficeRealTimeBackplaneStatus.Ok || mutation.Epoch != sender.Room.Epoch)
             { InvalidateRoom(sender.Room); return false; }
             // Only the bounded dispatcher workers fetch event batches. Hub calls

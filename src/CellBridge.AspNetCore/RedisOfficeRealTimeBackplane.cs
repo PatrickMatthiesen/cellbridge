@@ -487,10 +487,10 @@ internal sealed class RedisOfficeRealTimeBackplane : IOfficeRealTimeBackplane, I
         if sender.incarnation~=ARGV[2] or tonumber(sender.leaseExpiresUnixMilliseconds or 0)<=now then return {'missing',epoch,'0',tostring(now)} end
         local limit=tonumber(ARGV[8]); local pruned=0; local bytes=tonumber(redis.call('HGET',meta,'bytes') or '0')
         local e=cjson.decode(ARGV[7]); local seq=tonumber(redis.call('HGET',meta,'seq') or '0')+1; e.sequence=seq; e.epoch=epoch; e.redisTimeMilliseconds=now; e.sender=sender; local encoded=cjson.encode(e)
+        if #encoded>81920 then return {'denied',epoch,'0',tostring(now)} end
         while pruned<limit do local old=redis.call('LINDEX',events,0); if not old then break end; local prior=cjson.decode(old); local mustTrim=now-tonumber(prior.redisTimeMilliseconds or 0)>tonumber(ARGV[11]) or redis.call('LLEN',events)>=tonumber(ARGV[9]) or bytes+#encoded>tonumber(ARGV[10]); if not mustTrim then break end; redis.call('LPOP',events); bytes=bytes-#old; pruned=pruned+1 end
         redis.call('HSET',meta,'bytes',bytes); local first=redis.call('LINDEX',events,0); if first and now-tonumber(cjson.decode(first).redisTimeMilliseconds or 0)>tonumber(ARGV[11]) then return {'busy',epoch,'0',tostring(now)} end
         if redis.call('LLEN',events)>=tonumber(ARGV[9]) or bytes+#encoded>tonumber(ARGV[10]) then return {'busy',epoch,'0',tostring(now)} end
-        if #encoded>81920 or bytes+#encoded>tonumber(ARGV[10]) then return {'denied',epoch,'0',tostring(now)} end
         if ARGV[5]=='presence' then redis.call('HSET',presence,ARGV[6],cjson.encode({clientKey=ARGV[6],incarnation=sender.incarnation,payload=e.payloadJson})) end
         redis.call('HSET',meta,'seq',seq); redis.call('RPUSH',events,encoded); redis.call('HINCRBY',meta,'bytes',#encoded); redis.call('PUBLISH',meta..':wake','1'); for i=1,5 do redis.call('PEXPIRE',KEYS[i],tonumber(ARGV[12])) end
         return {'ok',epoch,tostring(seq),tostring(now)}

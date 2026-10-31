@@ -37,6 +37,31 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     private static readonly CellBridgeActor ReaderActor = new(new("tests:reader", "test-reader", "Test reader"));
 
     [Fact]
+    public async Task Oversized_notification_is_rejected_without_disconnecting_healthy_collaborators()
+    {
+        await using var fixture = await Fixture.StartAsync();
+        var file = await fixture.CreateDocumentAsync();
+        Guid senderClient = await fixture.JoinCoauthoringAsync(file.Path);
+        Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
+        await using var sender = await fixture.ConnectAsync(fixture.First,
+            await fixture.GetDocumentTicketAsync(fixture.First, file.Path), senderClient, utf8Json: true);
+        await using var peer = await fixture.ConnectAsync(fixture.First,
+            await fixture.GetDocumentTicketAsync(fixture.First, file.Path), peerClient);
+        await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
+        string oversized = $$"""{"A":"{{senderClient:B}}","text":"{{new string('漢', 14_000)}}"}""";
+        await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(() =>
+            sender.Connection.InvokeAsync("SendUpdateNotification", 3, oversized));
+        Assert.False(sender.Closed.Task.IsCompleted);
+        Assert.False(peer.Closed.Task.IsCompleted);
+        await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
+        var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.Connection.On<int, string>("updateNotification", (_, payload) => received.TrySetResult(payload));
+        string accepted = $$"""{"A":"{{senderClient:B}}","text":"accepted"}""";
+        await sender.Connection.InvokeAsync("SendUpdateNotification", 3, accepted);
+        Assert.Equal(accepted, await received.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public async Task Large_unicode_presence_reaches_the_other_host_without_disconnecting_the_room()
     {
         await using var fixture = await Fixture.StartAsync();
@@ -215,6 +240,10 @@ public sealed partial class OfficeRealTimeMultipleHostTests
         string secondTicket = await fixture.GetDocumentTicketAsync(fixture.Second, file.Path);
         await using var first = await fixture.ConnectAsync(fixture.First, firstTicket, firstClient);
         await using var second = await fixture.ConnectAsync(fixture.Second, secondTicket, secondClient);
+        // SignalR StartAsync can finish before server-side admission. Establish
+        // both admitted memberships before interrupting their broker connections.
+        await first.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
+        await second.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
         long firstGeneration = fixture.First.App.Services.GetRequiredService<IOfficeRealTimeBackplane>().Generation;
         long secondGeneration = fixture.Second.App.Services.GetRequiredService<IOfficeRealTimeBackplane>().Generation;
 

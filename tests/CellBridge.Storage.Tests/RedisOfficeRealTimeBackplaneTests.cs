@@ -112,6 +112,17 @@ public sealed class RedisOfficeRealTimeBackplaneTests
         Assert.False(current.HasGap);
         Assert.Equal(300, Assert.Single(current.Events).Sequence);
         Assert.Equal(256, await f.Database.ListLengthAsync(f.RoomPrefix(member.Room) + ":events"));
+        // A full log would need pruning for another valid append. An invalid
+        // oversized record must be rejected before that pruning changes the log.
+        string prefix = f.RoomPrefix(member.Room);
+        var before = await f.Database.ListRangeAsync(prefix + ":events");
+        var bytesBefore = await f.Database.HashGetAsync(prefix + ":meta", "bytes");
+        var denied = await f.Broker.MutateAsync(member, epoch, "oversized", "notification", ClientKey(member),
+            "updateNotification", new string('x', 80 * 1024), default);
+        Assert.Equal(OfficeRealTimeBackplaneStatus.Denied, denied.Status);
+        Assert.Equal(before, await f.Database.ListRangeAsync(prefix + ":events"));
+        Assert.Equal(bytesBefore, await f.Database.HashGetAsync(prefix + ":meta", "bytes"));
+        Assert.Equal(300, (long)await f.Database.HashGetAsync(prefix + ":meta", "seq"));
     }
 
     [Fact]
