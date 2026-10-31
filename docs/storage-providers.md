@@ -168,7 +168,7 @@ removes its persisted data. See [account setup](authentication.md#first-setup).
 
 Outside Aspire, run `tools/CellBridge.Storage.Setup` with the setup connection
 string before starting the host. PostgreSQL initialization accepts supported
-schemas 3 through 9. SQL Server's current document schema is 4. Initializers
+schemas 3 through 10. SQL Server's current document schema is 5. Initializers
 preserve document data, old recovery snapshots, physical objects and consumer
 business tables. Unknown schemas or migration histories fail without resetting
 the database.
