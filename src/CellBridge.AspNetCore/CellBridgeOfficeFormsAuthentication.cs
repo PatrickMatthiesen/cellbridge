@@ -18,6 +18,10 @@ public sealed class CellBridgeOfficeFormsAuthenticationOptions
 
     /// <summary>Optional external HTTPS origin. Otherwise URLs use the request's scheme and host.</summary>
     public string? PublicOrigin { get; set; }
+
+    /// <summary>Optional host authentication scheme for protocol routes, for example a policy choosing bearer or cookie authentication.</summary>
+    public string? ProtocolAuthenticationScheme { get; set; }
+
 }
 
 /// <summary>Connects the host's cookie login to Office's MS-OFBA challenge and completion flow.</summary>
@@ -37,6 +41,9 @@ public static class CellBridgeOfficeFormsAuthentication
             throw new InvalidOperationException("Configure one Office cookie scheme per CellBridge host.");
         var settings = new CellBridgeOfficeFormsAuthenticationOptions();
         configure?.Invoke(settings);
+        if (settings.ProtocolAuthenticationScheme is { } protocolScheme &&
+            (string.IsNullOrWhiteSpace(protocolScheme) || protocolScheme.Any(char.IsControl) || protocolScheme.Contains(',')))
+            throw new ArgumentException("ProtocolAuthenticationScheme must name one registered authentication scheme.", nameof(configure));
         ValidatePath(settings.CompletionPath, nameof(settings.CompletionPath));
         string? origin = null;
         if (settings.PublicOrigin is not null)
@@ -46,7 +53,8 @@ public static class CellBridgeOfficeFormsAuthentication
                 throw new ArgumentException("PublicOrigin must be an HTTPS origin without a path or credentials.", nameof(configure));
             origin = uri.GetLeftPart(UriPartial.Authority);
         }
-        var registration = new OfficeFormsRegistration(cookieScheme, settings.CompletionPath, origin);
+        var registration = new OfficeFormsRegistration(cookieScheme, settings.CompletionPath, origin,
+            settings.ProtocolAuthenticationScheme ?? cookieScheme);
         services.AddSingleton(registration);
         services.PostConfigure<CookieAuthenticationOptions>(cookieScheme, options =>
         {
@@ -89,7 +97,8 @@ public static class CellBridgeOfficeFormsAuthentication
             throw new ArgumentException("Use a literal local path without query, fragment, backslash, braces or control characters.", name);
     }
 
-    internal sealed record OfficeFormsRegistration(string CookieScheme, PathString CompletionPath, string? PublicOrigin);
+    internal sealed record OfficeFormsRegistration(string CookieScheme, PathString CompletionPath, string? PublicOrigin,
+        string ProtocolAuthenticationScheme);
     internal sealed class OfficeEndpointMetadata { }
 
     private sealed class OfficeCookieSchemeValidator(IAuthenticationSchemeProvider schemes,
@@ -101,6 +110,8 @@ public static class CellBridgeOfficeFormsAuthentication
             if (scheme is null || !typeof(CookieAuthenticationHandler).IsAssignableFrom(scheme.HandlerType))
                 throw new InvalidOperationException("Office forms authentication requires a registered cookie scheme: " + registration.CookieScheme);
             _ = cookies.Get(registration.CookieScheme);
+            if (await schemes.GetSchemeAsync(registration.ProtocolAuthenticationScheme) is null)
+                throw new InvalidOperationException("Office protocol authentication requires a registered protocol scheme.");
         }
 
         public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

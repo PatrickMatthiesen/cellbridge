@@ -9,6 +9,14 @@ public static class CellBridgeLoginPage
     {
         var encode = HtmlEncoder.Default;
         var applicationName = encode.Encode(page.ApplicationName);
+        var externalSignIn = page.ExternalSignIn is { } external && !page.RequiresTwoFactor && !page.IsOffice
+            ? $$"""
+              <div class="external-sign-in">
+                <a class="external-sign-in-action" href="{{encode.Encode(external.Url)}}">{{encode.Encode(external.Label)}}</a>
+              </div>
+              <div class="sign-in-divider"><span>Or use a local account</span></div>
+              """
+            : "";
         var fields = page.RequiresTwoFactor ? $$"""
             <input type="hidden" name="{{CellBridgeLogin.MethodField}}" value="{{(page.UseRecoveryCode ? "recovery" : "authenticator")}}">
             <div class="field">
@@ -72,6 +80,11 @@ public static class CellBridgeLoginPage
                 .error { margin: 0 0 22px; padding: 12px 14px; border-left: 3px solid #b34c2b; background: #fbe9df; color: #7c301a; font-size: 18px; }
                 .alternate { font-size: 18px; margin: 18px 0 0; }
                 a { color: #065f63; }
+                .external-sign-in-action { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 56px; padding: 12px 16px; border: 1px solid #71838a; border-radius: 5px; background: #fff; color: #24353b; font-weight: 600; text-align: center; text-decoration: none; }
+                .external-sign-in-action:hover { background: #f2f6f6; }
+                .external-sign-in-action:focus-visible { outline: 3px solid #087f83; outline-offset: 3px; }
+                .sign-in-divider { display: flex; align-items: center; gap: 12px; margin: 20px 0; color: #52656b; font-size: 16px; text-align: center; }
+                .sign-in-divider::before, .sign-in-divider::after { flex: 1; height: 1px; background: #dce8e7; content: ""; }
                 button.restart { background: #fff; color: #065f63; margin-top: 16px; }
                 @media (max-width: 520px) { .sign-in { width: auto; margin: 18px; padding: 24px; } h1 { font-size: 28px; } }
                 @media (max-height: 680px) { .sign-in { margin-top: 20px; margin-bottom: 20px; padding: 26px; } .field { margin-bottom: 16px; } .error { margin-bottom: 16px; padding: 10px 12px; } }
@@ -83,6 +96,7 @@ public static class CellBridgeLoginPage
               <div class="sign-in" role="main">
                 <h1>{{(page.RequiresTwoFactor ? "Verify your sign-in" : "Sign in to " + applicationName)}}</h1>
                 {{(page.SignInFailed ? "<p class=\"error\" role=\"alert\">Sign-in failed. " + (page.RequiresTwoFactor ? "Check your code or start over." : "Check your credentials or try again later.") + "</p>" : "")}}
+                {{externalSignIn}}
                 <form method="post" action="{{encode.Encode(page.FormAction)}}" novalidate>
                   <input type="hidden" name="{{encode.Encode(page.Antiforgery.FormFieldName)}}" value="{{encode.Encode(page.Antiforgery.RequestToken!)}}">
                   <input type="hidden" name="{{encode.Encode(page.ReturnUrlParameter)}}" value="{{encode.Encode(page.ReturnUrl)}}">

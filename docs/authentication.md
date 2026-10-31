@@ -10,6 +10,70 @@ Desktop Office signs in through the [MS-OFBA challenge](https://learn.microsoft.
 Office displays the host's sign-in form and uses the resulting cookie for
 document requests.
 
+## Microsoft Entra sign-in
+
+WebDemo can also accept delegated Entra access tokens from native Office and use
+OpenID Connect for browser sign-in. Local browser login remains available.
+Enable this explicitly through the AppHost's operator configuration:
+
+```text
+Parameters__PublicOrigin=https://office.example.test
+Parameters__Entra__Enabled=true
+Parameters__Entra__TenantId=TENANT_GUID
+Parameters__Entra__ClientId=APPLICATION_GUID
+Parameters__EntraClientSecret=SECRET_STORE_VALUE
+```
+
+The AppHost treats `EntraClientSecret` as a secret parameter. Outside Aspire,
+configure `Authentication:Entra:Enabled`, `TenantId`, `ClientId`, and
+`ClientSecret`, plus `Authentication:PublicOrigin` and `Protocol:PublicOrigin`.
+Keep the credential outside source control. The browser uses it to redeem its
+authorization code. Native Office obtains its own token; token validation on
+the server does not use the client secret.
+
+Register the reachable HTTPS origin as an Application ID URI in the Entra API
+registration and configure v2 access tokens. The native Office client can request
+that origin as its resource. Expose the delegated `access_as_user` scope and
+authorize the Windows Office client
+`d3590ed6-52b3-4102-aeff-aad2292ab01c` for that scope. Add a **Web** redirect URI
+of `https://office.example.test/signin-oidc` for browser login. Do not add Office's
+broker redirect URI to the server registration. The server validates the API
+application GUID as the v2 token audience, the tenant issuer, expiry, scope and
+native Office client ID.
+
+In Entra mode, unauthenticated HTTP OPTIONS discovery returns a bearer challenge.
+Office must authenticate before receiving protocol capabilities. Downloads,
+PROPFIND, SOAP operations and historical versions also require authentication
+and their existing document permissions.
+
+The challenge advertises a same-origin `cookie_uri` at
+`/_api/SP.OAuth.NativeClient/Authenticate`. A POST with a validated Office token
+and a linked, permitted local account issues the existing application session
+cookie, named `SPOIDCRL` in Entra mode. Its explicit expiry cannot exceed the
+token or configured cookie lifetime, and does not slide. Enabling Entra changes
+the application's cookie name, including browser sessions. An empty-Bearer POST
+returns discovery information without issuing a cookie. Other missing or invalid
+credentials cannot create a session.
+An empty `Authorization: Bearer` probe on a document request permits cookie
+authentication. A nonempty invalid token does not fall back to a cookie.
+
+The operator must link each Entra tenant ID and user object ID to a local account.
+Email addresses and display names do not establish a link. Existing links keep
+the local subject, document ownership and grants:
+
+```sh
+dotnet run --project tools/CellBridge.Admin -- link-entra-user --subject local:USER_ID --tenant-id TENANT_GUID --object-id USER_OBJECT_GUID
+dotnet run --project tools/CellBridge.Admin -- create-entra-user --id editor --login editor --display-name Editor --can-create true --tenant-id TENANT_GUID --object-id USER_OBJECT_GUID
+```
+
+`create-entra-user` creates a passwordless local account for the linked identity.
+It does not create an Entra user. Unknown, disabled, locked-out and locally
+two-factor-enabled accounts cannot use this integration. Local two-factor login
+remains available; Entra sign-in does not substitute for that second-factor flow.
+Bearer requests recheck the linked account on each request. Browser cookies keep
+the existing security-stamp validation interval. Document grants still apply to
+downloads, saves, history, restore and collaboration.
+
 ## First setup
 
 Start the sample through Aspire. Its `storage-init` job initializes storage

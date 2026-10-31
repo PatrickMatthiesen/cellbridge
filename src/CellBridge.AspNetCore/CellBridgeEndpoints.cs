@@ -92,7 +92,7 @@ public static class CellBridgeEndpoints
         routes.AddEndpointFilter(async (context, next) => CellBridgePublicOrigin.Resolve(context.HttpContext) is null
             ? Results.BadRequest() : await next(context));
         if (office is null) routes.RequireAuthorization();
-        else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.CookieScheme });
+        else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.ProtocolAuthenticationScheme });
         routes.MapMethods("/", ["OPTIONS"], (HttpContext context) => Discovery(context));
         routes.MapSharedAccess();
         routes.MapGet("/_cellbridge/history/settings", (HttpContext context, CellBridgeDocumentService service, CellBridgeOptions options) =>

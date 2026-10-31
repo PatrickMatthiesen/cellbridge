@@ -12,7 +12,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
 using Npgsql;
 
-if (args.Length == 0) throw new ArgumentException("Commands: create-user, set-user, grant, set-owner, import-directory, seed-test-user. Pass options as --name value. Operator passwords are read from stdin.");
+if (args.Length == 0) throw new ArgumentException("Commands: create-user, create-entra-user, link-entra-user, set-user, grant, set-owner, import-directory, seed-test-user. Pass options as --name value. Operator passwords are read from stdin.");
 var commandName = args[0];
 var values = new Dictionary<string, string>(StringComparer.Ordinal);
 for (int i = 1; i < args.Length; i += 2)
@@ -82,6 +82,49 @@ else if (commandName == "create-user")
     var password = await Console.In.ReadLineAsync() ?? throw new InvalidOperationException("Supply the password on stdin.");
     Check(await users.CreateAsync(user, password));
     Console.WriteLine($"Created subject {user.Subject}");
+}
+else if (commandName is "create-entra-user" or "link-entra-user")
+{
+    var tenantId = Guid.Parse(Required("tenant-id"));
+    var objectId = Guid.Parse(Required("object-id"));
+    var key = EntraAuthentication.ProviderKey(tenantId, objectId);
+    var database = scope.ServiceProvider.GetRequiredService<AuthenticationDatabase>();
+    await using var transaction = await database.Database.BeginTransactionAsync();
+    // Identity's login key protects an external identity, not the number of
+    // identities linked to one local user. Serialize operator link commands.
+    await database.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(748219353)");
+    CellBridgeUser user;
+    if (commandName == "create-entra-user")
+    {
+        if (await users.FindByLoginAsync(EntraAuthentication.LoginProvider, key) is not null)
+            throw new InvalidOperationException("This Entra identity is already linked.");
+        user = new()
+        {
+            UserName = Required("login"), DisplayName = Required("display-name"),
+            CanCreate = bool.Parse(values.GetValueOrDefault("can-create", "false")),
+        };
+        if (values.TryGetValue("id", out var id)) user.Id = id;
+        Check(await users.CreateAsync(user));
+    }
+    else
+    {
+        var subject = Required("subject");
+        user = subject.StartsWith("local:", StringComparison.Ordinal)
+            ? await users.FindByIdAsync(subject[6..]) ?? throw new KeyNotFoundException("Unknown local user.")
+            : throw new ArgumentException("Supply the local subject to link.");
+        if (!user.Enabled) throw new InvalidOperationException("The account is disabled.");
+    }
+    var existing = await users.FindByLoginAsync(EntraAuthentication.LoginProvider, key);
+    if (existing is not null && existing.Id != user.Id)
+        throw new InvalidOperationException("This Entra identity belongs to a different local account.");
+    var logins = await users.GetLoginsAsync(user);
+    if (logins.Any(login => login.LoginProvider == EntraAuthentication.LoginProvider && login.ProviderKey != key))
+        throw new InvalidOperationException("The local account already has a different Entra identity.");
+    if (existing is null)
+        Check(await users.AddLoginAsync(user, new(EntraAuthentication.LoginProvider, key, "Microsoft Entra")));
+    Check(await users.UpdateSecurityStampAsync(user));
+    await transaction.CommitAsync();
+    Console.WriteLine($"Entra identity linked to subject {user.Subject}.");
 }
 else if (commandName == "set-user")
 {

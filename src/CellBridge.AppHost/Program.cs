@@ -46,6 +46,17 @@ webdemo.WithEnvironment(context =>
             ? origin : webdemo.GetEndpoint("https"));
 webdemo.WithEnvironment("Authentication__ApplicationName", builder.AddParameter("ApplicationName",
     () => builder.Configuration["Parameters:ApplicationName"] ?? "CellBridge"));
+// Optional Entra configuration stays in operator settings or environment, not source.
+foreach (var setting in new[] { "Enabled", "TenantId", "ClientId" })
+    if (builder.Configuration["Parameters:Entra:" + setting] is { Length: > 0 } value)
+        webdemo.WithEnvironment("Authentication__Entra__" + setting, value);
+if (builder.Configuration["Parameters:Entra:Enabled"]?.Equals("true", StringComparison.OrdinalIgnoreCase) == true)
+{
+    var clientSecret = builder.AddParameter("EntraClientSecret", secret: true);
+    webdemo.WithEnvironment("Authentication__Entra__ClientSecret", clientSecret);
+}
+if (builder.Configuration["Parameters:PublicOrigin"] is { Length: > 0 } protocolOrigin)
+    webdemo.WithEnvironment("Protocol__PublicOrigin", protocolOrigin);
 webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.Configuration["Parameters:WireCaptureDirectory"] ?? "");
 webdemo.WithEnvironment("Protocol__EnableOfficeRealTime", builder.Configuration["Parameters:EnableOfficeRealTime"] ?? "true");
 if (builder.Configuration["Parameters:DocumentLibraryId"] is { Length: > 0 } libraryId)
