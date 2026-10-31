@@ -42,6 +42,16 @@ it cannot grant access by itself. Receipts identify committed revisions, but
 do not replace external publication. Opt-in ordered delivery requires a destination
 with atomic revision comparison and stored operation receipts.
 
+The core `CellBridge.OfficeDocumentTemplates` API creates blank Office files:
+`CreateWordDocument()`, `CreateExcelWorkbook()` and
+`CreatePowerPointPresentation()`. Each returns an independently owned `byte[]`
+for `documentService.CreateAsync(path, bytes, actor, cancellationToken)` with the
+current authenticated actor. Word uses an empty paragraph and compatibility mode
+15, the Word 2013+ model supported by current Word. Excel has one empty `Sheet1`;
+PowerPoint has one blank slide with its master, layout and theme. File compatibility
+metadata is independent of negotiated Office protocol versions. Imported files
+and custom templates remain unchanged. See the embedding guide below for usage.
+
 Desktop Word and Excel have been tested for authenticated editing, saving and
 reopening. OneNote desktop synchronization, two-desktop coauthoring and Office
 Online Server integration remain unqualified. True partial and unsupported non-file uploads
