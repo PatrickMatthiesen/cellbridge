@@ -15,12 +15,12 @@ namespace CellBridge.AspNetCore;
 
 internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
     IDataProtectionProvider protection, TimeProvider time, ProtocolRequestAdmission requests,
-    CellBridgeOptions? options = null, ILogger<OfficeRealTimeAccess>? logger = null)
+    ILogger<OfficeRealTimeAccess>? logger = null)
     : IOfficeRealTimePropertiesProvider, IOfficeRealTimeAuthorizer
 {
     private static readonly string[] Names =
         ["RealtimeTypingEndpointUrl", "DocumentAccessToken", "DocumentAccessTokenTtl", "SharedStatus"];
-    private readonly TimeSpan tokenLifetime = (options ?? new CellBridgeOptions()).OfficeRealTimeTokenLifetime;
+    private static readonly TimeSpan TokenLifetime = TimeSpan.FromMinutes(20);
     public IReadOnlyCollection<string> PropertyNames => Names;
 
     public async ValueTask<IReadOnlyDictionary<string, string>> GetPropertiesAsync(Guid resourceId,
@@ -29,7 +29,7 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
         var admission = await documents.AuthorizeOfficeRealTimeAsync(resourceId, null, actor, null,
             DocumentAccess.Read, false, cancellationToken) ?? throw new UnauthorizedAccessException();
         var source = DocumentRequestResolver.CanonicalUrl(admission.Control.Head, publicBase);
-        var expires = time.GetUtcNow().Add(tokenLifetime).ToUnixTimeMilliseconds();
+        var expires = time.GetUtcNow().Add(TokenLifetime).ToUnixTimeMilliseconds();
         var data = new DocumentToken(resourceId, admission.Control.Head.LifecycleGeneration,
             actor.Identity, actor.AccessLimit, expires, source);
         var token = Protector(publicBase).Protect(JsonSerializer.Serialize(data));
@@ -76,7 +76,7 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
                 data.AccessLimit is { } limit && (limit.ResourceId != data.ResourceId ||
                     (limit.Access & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0)) return false;
             var expires = DateTimeOffset.FromUnixTimeMilliseconds(data.ExpiresUnixMilliseconds);
-            if (expires <= time.GetUtcNow() || expires > time.GetUtcNow().Add(tokenLifetime).AddMinutes(1)) return false;
+            if (expires <= time.GetUtcNow() || expires > time.GetUtcNow().Add(TokenLifetime).AddMinutes(1)) return false;
             ticket = new(data.ResourceId, data.LifecycleGeneration,
                 new CellBridgeActor(data.Identity) { AccessLimit = data.AccessLimit }, clientId, expires);
             return true;

@@ -202,17 +202,16 @@ public sealed class OfficeRealTimeEndpointTests
     }
 
     [Fact]
-    public async Task TwoMinuteTicketAdvertisesItsLifetimeExpiresAndCanBeReacquired()
+    public async Task TicketAdvertisesItsLifetimeExpiresAndCanBeReacquired()
     {
-        await using var fixture = await Fixture.Start(configure: options =>
-            options.OfficeRealTimeTokenLifetime = TimeSpan.FromMinutes(2));
+        await using var fixture = await Fixture.Start();
         Guid client = await fixture.CreateCoauthorLease();
         var properties = await fixture.Properties();
-        Assert.Equal(fixture.Clock.GetUtcNow().AddMinutes(2).ToUnixTimeMilliseconds().ToString(),
+        Assert.Equal(fixture.Clock.GetUtcNow().AddMinutes(20).ToUnixTimeMilliseconds().ToString(),
             properties["DocumentAccessTokenTtl"]);
         using (var current = await fixture.GetFindSession(properties["DocumentAccessToken"], client))
             Assert.Equal(HttpStatusCode.OK, current.StatusCode);
-        fixture.Clock.Advance(TimeSpan.FromMinutes(2));
+        fixture.Clock.Advance(TimeSpan.FromMinutes(20));
         using (var expired = await fixture.GetFindSession(properties["DocumentAccessToken"], client))
             Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
         var renewed = await fixture.Properties();

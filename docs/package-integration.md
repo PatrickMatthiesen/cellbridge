@@ -276,11 +276,8 @@ WebDemo uses `Protocol:EnableOfficeRealTime=false`; AppHost uses
 ordinary asynchronous authorization providers. The relay requires a single host
 and stored grants or an immutable versioned authorization policy.
 
-`OfficeRealTimeTokenLifetime` defaults to 20 minutes and accepts one second through
-one hour. WebDemo binds `Protocol:OfficeRealTimeTokenLifetime`; AppHost also accepts
-`Parameters:OfficeRealTimeTokenLifetime`. Use `00:02:00` for a two-minute native
-expiry test. Ticket issuance logs include resource, lifecycle and expiry time,
-without the ticket itself.
+RTC tickets expire after 20 minutes. Ticket issuance logs include resource,
+lifecycle and expiry time, without the ticket itself.
 
 Cookie schemes using `CookieAuthenticationOptions.EventsType` are unsupported here;
 use an `Events` instance. `IsRequestAllowed` gates every packaged GET and POST before
