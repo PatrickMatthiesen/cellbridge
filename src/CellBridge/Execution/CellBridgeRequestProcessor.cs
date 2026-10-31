@@ -719,7 +719,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 if (!string.IsNullOrWhiteSpace(actor.Identity.EmailAddress))
                     subResponse.SubResponseDataAttributes["UserEmailAddress"] = actor.Identity.EmailAddress;
                 if (!string.IsNullOrWhiteSpace(actor.Identity.SipAddress))
-                    subResponse.SubResponseDataAttributes["SIPAddress"] = actor.Identity.SipAddress;
+                    subResponse.SubResponseDataAttributes["UserSIPAddress"] = actor.Identity.SipAddress;
                 break;
 
             case SubRequestType.ServerTime:

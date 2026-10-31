@@ -79,6 +79,58 @@ public sealed class OfficeRealTimeEndpointTests
     }
 
     [Fact]
+    public async Task TemporaryAdmissionPressureDoesNotBecomeAnAuthorizationDenial()
+    {
+        await using var fixture = await Fixture.Start(configure: options =>
+        {
+            options.MaxConcurrentRequests = 1;
+            options.MaxConcurrentRequestsPerSubject = 1;
+            options.MaxQueuedRequests = 0;
+            options.MaxQueuedRequestsPerSubject = 0;
+        });
+        Guid client = await fixture.CreateCoauthorLease();
+        var signature = (await fixture.Properties())["DocumentAccessToken"];
+        var limiter = fixture.App.Services.GetRequiredService<ProtocolRequestAdmission>();
+        using (var held = (await limiter.AcquireAsync(TestActor.Value.Identity.Subject)).Lease!)
+        {
+            using var overloaded = await fixture.GetFindSession(signature, client);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, overloaded.StatusCode);
+            Assert.Equal(TimeSpan.FromSeconds(1), overloaded.Headers.RetryAfter?.Delta);
+            var authorizer = fixture.App.Services.GetRequiredService<IOfficeRealTimeAuthorizer>();
+            var ticket = new OfficeRealTimeTicket(fixture.ResourceId, fixture.Head.LifecycleGeneration,
+                TestActor.Value, client, fixture.Clock.GetUtcNow().AddMinutes(5));
+            await Assert.ThrowsAsync<OfficeRealTimeBusyException>(() =>
+                authorizer.AuthorizeTogetherAsync([new(ticket, DocumentAccess.Read, true)], CancellationToken.None).AsTask());
+        }
+        using var recovered = await fixture.GetFindSession(signature, client);
+        Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
+    }
+
+    [Fact]
+    public async Task RtcAuthorizationWaitsForShortSubjectBursts()
+    {
+        await using var fixture = await Fixture.Start(configure: options =>
+        {
+            options.MaxConcurrentRequests = 1;
+            options.MaxConcurrentRequestsPerSubject = 1;
+        });
+        Guid client = await fixture.CreateCoauthorLease();
+        var limiter = fixture.App.Services.GetRequiredService<ProtocolRequestAdmission>();
+        var held = (await limiter.AcquireAsync(TestActor.Value.Identity.Subject)).Lease!;
+        try
+        {
+            var authorizer = fixture.App.Services.GetRequiredService<IOfficeRealTimeAuthorizer>();
+            var ticket = new OfficeRealTimeTicket(fixture.ResourceId, fixture.Head.LifecycleGeneration,
+                TestActor.Value, client, fixture.Clock.GetUtcNow().AddMinutes(5));
+            var pending = authorizer.AuthorizeAsync(ticket, DocumentAccess.Read, true, CancellationToken.None).AsTask();
+            Assert.False(pending.IsCompleted);
+            held.Dispose();
+            Assert.True(await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally { held.Dispose(); }
+    }
+
+    [Fact]
     public async Task FindSessionRejectsTamperedAndSourceMismatchedSignatures()
     {
         await using var fixture = await Fixture.Start();
@@ -321,7 +373,8 @@ public sealed class OfficeRealTimeEndpointTests
             await app.DisposeAsync();
         }
 
-        internal static async Task<Fixture> Start(bool enabled = true, bool mounted = false)
+        internal static async Task<Fixture> Start(bool enabled = true, bool mounted = false,
+            Action<CellBridgeOptions>? configure = null)
         {
             var clock = new ManualClock();
             var content = new InMemoryContentStore();
@@ -336,6 +389,7 @@ public sealed class OfficeRealTimeEndpointTests
             {
                 options.EnableOfficeRealTime = enabled;
                 options.PublicOrigin = PublicOrigin;
+                configure?.Invoke(options);
             });
             var app = builder.Build();
             if (mounted) app.UsePathBase(Mount);

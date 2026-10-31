@@ -12,10 +12,16 @@ requests require a specific `AllowedHosts` list. A universal `*` does not establ
 trust; only loopback hosts work without a specific list. Keep forwarded headers
 restricted to known proxies.
 
-Cellstorage POSTs and current/historical document GETs share admission limits of
-eight requests per process and two per authenticated subject. A download holds
-its permit through package reconstruction and response delivery. The absolute
-deadline defaults to two minutes and covers both stages. Metadata-only HEAD
+Cellstorage POSTs, PROPFIND and current/historical document GETs share admission
+limits of eight executing requests per process and two per authenticated subject.
+Bounded FIFO queues absorb short native-client bursts, with up to 32 requests
+waiting for one subject and 128 waiting for global capacity. A subject wait does
+not reserve global capacity. Set either queue limit to zero for fail-fast
+admission at that boundary. A full subject queue returns 429; a full global queue
+returns 503. Both responses include `Retry-After: 1`.
+A download holds its permit through package reconstruction and response delivery.
+The absolute deadline defaults to two minutes and covers queuing and execution.
+Metadata-only HEAD
 requests and OPTIONS discovery do not reconstruct packages.
 Large request bodies spool to private temporary files before parsing. SOAP XML
 is limited to 16 Mi characters, so use MTOM attachments for large binary payloads.

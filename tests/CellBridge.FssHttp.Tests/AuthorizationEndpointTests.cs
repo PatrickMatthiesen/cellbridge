@@ -253,7 +253,7 @@ public sealed partial class AuthorizationEndpointTests
     }
 
     [Fact]
-    public async Task WhoAmIIncludesOnlyTrustedOptionalEmailAndSipAddress()
+    public async Task WhoAmIIncludesOnlyTrustedOptionalEmailAndSchemaSipAddress()
     {
         await using var fixture = await Fixture.Start();
         var response = await fixture.SendWithClaims("reader", [
@@ -263,12 +263,13 @@ public sealed partial class AuthorizationEndpointTests
         var who = response.Descendants(Protocol + "SubResponse").First().Element(Protocol + "SubResponseData")!;
         Assert.Equal("test-reader", (string?)who.Attribute("UserLogin"));
         Assert.Equal("reader@example.test", (string?)who.Attribute("UserEmailAddress"));
-        Assert.Equal("reader@contoso.test", (string?)who.Attribute("SIPAddress"));
+        Assert.Equal("reader@contoso.test", (string?)who.Attribute("UserSIPAddress"));
+        Assert.Null(who.Attribute("SIPAddress"));
 
         var withoutMetadata = await fixture.Send("reader", new FssHttpSubRequest { Type = SubRequestType.WhoAmI, SubRequestToken = 1 });
         var bareWho = withoutMetadata.Descendants(Protocol + "SubResponse").First().Element(Protocol + "SubResponseData")!;
         Assert.Null(bareWho.Attribute("UserEmailAddress"));
-        Assert.Null(bareWho.Attribute("SIPAddress"));
+        Assert.Null(bareWho.Attribute("UserSIPAddress"));
     }
 
     [Theory]

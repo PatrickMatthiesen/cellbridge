@@ -44,6 +44,29 @@ It does not identify SharePoint Online's current wire profile. The committed
 [13/11 fixtures](../testdata/sharepoint/fixtures/v13_11/README.md) came from a
 SharePoint reference farm and also cannot establish the current cloud profile.
 
+### Observed OCS envelope
+
+The captured Word client offers WPMv10, WPMv11 and `ocsb2`; the service selects
+WPMv11. These are separate negotiated formats from FSSHTTPB 13/11. The first
+successful Join is followed by Execute requests carrying revision dictionaries,
+client clocks and binary blob frames.
+
+The observed envelope has a 16-byte big-endian header containing frame type,
+UTF-8 name length, a reserved value and payload length. Type 1 ends the message,
+type 2 carries an opaque blob and type 3 carries JSON. A type-2 name contains a
+JSON `BlobId` using padded standard Base64; the dictionary's `BlobReference`
+encodes the same 16-byte identifier. Numeric `BlobSize` values
+match the associated payload lengths in the examined exchanges.
+
+This framing is sufficient for a bounded codec and opaque blob identification.
+It does not define WPM merging or host publication. In an accepted update, the
+service changed one 12,800-byte input blob to a different 12,822-byte result;
+its revision sequence and the client's clock also advanced independently.
+Copying the input dictionary and acknowledging it cannot be claimed equivalent
+to that operation. Initial full state used `RevisionContentFormat=2`; the
+examined updates and poll deltas used format 1. There is no captured format-2
+update establishing its semantics.
+
 ## Native synchronization and modern collaboration
 
 The common synchronization engine remains responsible for document identity,
@@ -66,10 +89,28 @@ produced intermittent client-side busy errors. Matching PowerPoint server
 responses granted read/write access and did not show HTTP 503. Those results
 do not qualify reliable startup, typing latency or complete native presence.
 
+A subsequent cold Excel failure correlated native PROPFIND 429 responses with
+the same server requests and an initial SOAP 429. This demonstrated rejection
+by the host's per-subject admission boundary, after OPTIONS discovery succeeded.
+Admission now uses bounded FIFO waits while retaining the executing-request
+limits. RTC admission pressure raises a transient busy result rather than
+returning an authorization denial and removing a valid participant.
+
+On the queued-admission build, one fresh native Excel process opened the same
+workbook without the busy error, remained editable and automatically saved a
+new cell value. The already-open second machine received that value without
+Save or reopen and showed the first machine's new selection. Both clients
+still displayed `Loading name...`. This verifies that case, rather than
+reliable startup across all three applications or resolved participant names.
+
 Coauthor exit retries retain client/schema/subject keys for the current shared
 session. CellBridge limits that session to 128 active and departed participants
 to bound the retained replay state. A new shared session resets the keys. This
 is a local storage limit, rather than a limit defined by MS-FSSHTTP.
+
+The intended default is modern RTC and OCS collaboration once both services and
+their required host contracts are implemented and qualified. The current option
+remains default-off while OCS is absent and the RTC limitations below remain.
 
 Remaining modern-collaboration work includes reliable native startup, resolved
 participant identity, token renewal/reconnection, server-generated notifications
@@ -120,6 +161,26 @@ CellBridge's base host-lock helper excludes conflicting FSSHTTP locks; it does
 not implement WOPI shared/extended coauthor locks or cross-protocol conversion.
 See [the package boundary](package-integration.md#wopi-integration-boundary) and
 [external host reliability](external-host-reliability.md).
+
+The user's [fork PR #1](https://github.com/PatrickMatthiesen/WopiHost/pull/1)
+already adds coordinated whole-file saves to `implement/cellbridge-host-wrapper`.
+It is merged in that fork feature branch, rather than in upstream WopiHost.
+Its adapter uses shared locks, permission ceilings, conditional external
+publication and verified acknowledgements. It is the appropriate reference for
+the coordinated integration, rather than the older unconditional mirroring path.
+Its code still targets the earlier `Provider.State`/whole-state API. Before
+integrating current packages, port those calls to the indexed repository and
+service APIs and retain its conflict, retry and acknowledgement guarantees.
+The test-only SQLite destination does not establish a production revision-store
+adapter. Its stated OOS/MTOM qualification gaps also remain.
+
+The current core's `SharedDocumentLocks.ReadAsync` replaces the fork's raw-state
+lock observation. Import/binding and publication acknowledgement still need an
+adapter port. A shared publication-prefix helper must preserve the fork's
+verification of content no-ops: an empty outbox alone does not establish that
+the external destination still matches the acknowledged revision. Use indexed
+delivery and revision reads rather than loading complete history to make that
+decision.
 
 ## Support direction
 

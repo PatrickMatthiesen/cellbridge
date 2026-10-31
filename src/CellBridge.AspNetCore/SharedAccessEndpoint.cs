@@ -34,16 +34,24 @@ internal static class SharedAccessEndpoint
         }
 
         var admission = context.RequestServices.GetRequiredService<ProtocolRequestAdmission>();
-        using var lease = admission.TryAcquire(actor.Identity.Subject, out var rejection);
-        if (lease is null)
-        {
-            context.Response.StatusCode = rejection;
-            return;
-        }
-
         var originalToken = context.RequestAborted;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(originalToken);
         deadline.CancelAfter(context.RequestServices.GetRequiredService<CellBridgeOptions>().RequestTimeout);
+        ProtocolRequestAdmission.AdmissionResult admitted;
+        try { admitted = await admission.AcquireAsync(actor.Identity.Subject, deadline.Token); }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !originalToken.IsCancellationRequested)
+        {
+            context.Response.StatusCode = StatusCodes.Status408RequestTimeout;
+            return;
+        }
+        using var lease = admitted.Lease;
+        if (lease is null)
+        {
+            context.Response.Headers.RetryAfter = "1";
+            context.Response.StatusCode = admitted.RejectionStatus;
+            return;
+        }
+
         context.RequestAborted = deadline.Token;
         context.Response.Headers.CacheControl = "private, no-store";
 

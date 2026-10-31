@@ -105,7 +105,7 @@ when client knowledge is complete. Reducing those reads is performance work #33.
 | Two service instances | Automated identity, shared lease and protocol routing checks against one database. |
 | Two Word desktop clients | Distinct accounts exchanged paragraph changes in both directions, including receipt while idle. Concurrent offline paragraph additions survived reconnect; one client needed manual Save to recover. |
 | Two PowerPoint desktop clients | Distinct accounts preserved slide 1 and added slide 2; the first client received the new slide while idle. |
-| Two Excel desktop clients | The first client converted its shared lock to exclusive. The second client received File In Use and opened read-only. Concurrent editing remains unsupported in this observed workflow. |
+| Two Excel desktop clients | With modern discovery enabled, distinct accounts edited concurrently with AutoSave and exchanged cell values and remote selections. Participant names remained unresolved. Earlier discovery profiles converted to exclusive access and blocked the second editor. |
 | Large files and production concurrency | Not qualified. Synthetic benchmarks measure provider behavior. |
 
 The recorded Word trial on 2026-10-03 used Word `16.0.20430`, Tailscale HTTPS
@@ -202,13 +202,29 @@ They advertise only the HTTP methods those routes implement. This does not
 establish which individual discovery field controls native RTC startup.
 Captured Excel presence contains application state without an `A` sender field;
 the relay accepts that shape and uses the authenticated client's presence key.
-These observations do not establish delivery to a second native client or
-visible remote cursors. A fresh Word probe opened in editing mode and saved.
-Excel's native diagnostics showed that it classified the server as lacking cloud
-collaboration, disabled coauthoring and requested conversion to an exclusive lock
-before editing. The discovery and SOAP corrections still require native
-qualification against that failure. The relay does not
-implement OCS or WOPI, and it does not resolve Excel's exclusive-lock behavior.
+The early probes did not establish delivery to a second native client or
+visible remote cursors. Excel's diagnostics then showed that it classified the
+server as lacking cloud collaboration and converted to an exclusive lock.
+Subsequent tests with the complete reference discovery response enabled RTC
+startup and simultaneous Excel editing. The host then replaced the borrowed
+server identity with `CellBridge` and removed unsupported method advertisements.
+On 2026-10-31, distinct accounts on both Windows machines exchanged Word
+paragraphs, Excel cell values and a second PowerPoint slide using that host
+profile. AutoSave completed without manual Save or reopen. Independent server
+downloads retained both editors' markers in each file. The open Excel clients
+displayed the other client's selected cell, including a later selection change.
+Names remained `Loading name...` or `Getting name...`; named presence and typing
+latency remain unqualified. Fresh Excel and PowerPoint opens had also produced
+a client-side busy error before successful subsequent opens. The successful
+retries alone do not establish reliable startup across builds. A later cold
+Excel failure matched native PROPFIND and initial SOAP HTTP 429 responses to
+the host's per-subject admission limit. With bounded admission queues, one
+fresh Excel process opened the same workbook, remained editable and saved a
+new cell automatically. The second machine received it without Save or reopen
+and displayed the first machine's selection. Names still showed
+`Loading name...`; cold Word and PowerPoint startup on that build remain
+unqualified.
+The relay does not implement OCS or WOPI.
 `IsOnlyClient` does not provide the RTC service.
 
 The shared Word test also included an iPhone on the same running service and

@@ -491,7 +491,7 @@ public sealed partial class StoredDocument
         foreach (var session in _sessions)
         {
             var editor = new XElement("Editor",
-                new XElement("CacheID", session.ClientId.ToString("D")));
+                new XElement("CacheID", session.ClientId.ToString("B")));
 
             if (!string.IsNullOrWhiteSpace(session.UserName))
             {

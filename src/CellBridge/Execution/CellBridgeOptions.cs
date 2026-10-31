@@ -18,6 +18,10 @@ public sealed class CellBridgeOptions
     public int MaxConcurrentRequests { get; set; } = 8;
     /// <summary>Maximum admitted requests for one authenticated subject within this process.</summary>
     public int MaxConcurrentRequestsPerSubject { get; set; } = 2;
+    /// <summary>Maximum requests waiting for global execution capacity.</summary>
+    public int MaxQueuedRequests { get; set; } = 128;
+    /// <summary>Maximum requests waiting for one subject's execution capacity.</summary>
+    public int MaxQueuedRequestsPerSubject { get; set; } = 32;
     /// <summary>Absolute deadline covering request reading, download reconstruction and response delivery.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromMinutes(2);
     /// <summary>Fixed external HTTPS origin. Required for remote hosts unless AllowedHosts validates their authority.</summary>

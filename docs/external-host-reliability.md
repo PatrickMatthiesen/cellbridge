@@ -112,6 +112,13 @@ Sharing a token or subject does not allow one protocol to impersonate the other.
 WOPI extended/shared locks and cross-protocol lock conversion are unsupported.
 Existing FSSHTTP schema/exclusive conversions continue within their own domain.
 
+Use `SharedDocumentLocks.ReadAsync(resourceId, actor)` for a writer-authorized
+lock snapshot. It returns the active host token and whether an Office lock is
+active, together with lifecycle and coordination generations. It never returns
+the FSSHTTP schema or exclusive token as a WOPI lock ID. The operation checks
+fresh host authorization and rereads current control state after asynchronous
+authorization. It does not expire locks by mutating their persisted records.
+
 For complete file replacement, use the document service directly:
 
 ```csharp
