@@ -57,6 +57,8 @@ builder.Services.AddCellBridge(provider, requireDurability: !storageKind.Equals(
     multipleInstances: builder.Configuration.GetValue("Storage:MultipleInstances", false), configure: options =>
     {
         options.EnableOfficeRealTime = builder.Configuration.GetValue("Protocol:EnableOfficeRealTime", true);
+        options.OfficeRealTimeRedisConnectionString = builder.Configuration["Protocol:OfficeRealTimeRedisConnectionString"];
+        options.OfficeRealTimeRedisNamespace = builder.Configuration["Protocol:OfficeRealTimeRedisNamespace"];
         options.MaxRequestBytes = builder.Configuration.GetValue("Protocol:MaxRequestBytes", options.MaxRequestBytes);
         options.MaxConcurrentRequests = builder.Configuration.GetValue("Protocol:MaxConcurrentRequests", options.MaxConcurrentRequests);
         options.MaxConcurrentRequestsPerSubject = builder.Configuration.GetValue("Protocol:MaxConcurrentRequestsPerSubject", options.MaxConcurrentRequestsPerSubject);

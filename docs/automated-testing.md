@@ -88,6 +88,62 @@ Record TRX results and qualification reports under ignored `artifacts/`.
 See [recovery environments](supported-environments.md) and
 [bounded protocol validation](bounded-protocol-validation.md).
 
+### Multi-host RTC checks
+
+Run the transport and scheduler regressions without containers:
+
+```sh
+dotnet test tests/CellBridge.FssHttp.Tests --filter FullyQualifiedName~OfficeRealTime
+```
+
+Run shared authorization, Redis coordination, and real Kestrel-instance checks
+with Docker and the pinned Aspire dependencies available:
+
+```sh
+dotnet test tests/CellBridge.Storage.Tests --filter "FullyQualifiedName~OfficeRealTime&FullyQualifiedName!~Bounded_load" --logger trx --results-directory artifacts/multi-host-rtc
+```
+
+The integration fixture owns isolated PostgreSQL and Redis resources through
+Aspire. It uses simulated SOAP and SignalR traffic, actual protocol-issued
+tickets, and current database authorization. The Kestrel hosts are independent
+application instances within one test process. They are not native Office clients.
+Direct adapter tests separately check limits, expiry, event retention, and cleanup
+without claiming to test document authorization.
+
+Run the bounded comparison separately from other test traffic:
+
+```sh
+dotnet test tests/CellBridge.Storage.Tests --filter FullyQualifiedName~Bounded_load_compares_local_and_distributed_hot_and_multiple_rooms --logger trx --results-directory artifacts/multi-host-rtc/performance
+dotnet test tests/CellBridge.Storage.Tests --filter FullyQualifiedName~Bounded_load_rotates_rates_and_exercises_more_rooms_than_dispatch_workers --logger trx --results-directory artifacts/multi-host-rtc/performance
+```
+
+The bounded load test writes a separate JSON artifact for each run, including
+failed measurements. Compare its local, one-host distributed, and multi-host
+scenarios using the recorded traffic and environment. These measurements do not
+establish deployment capacity or absolute latency guarantees. See
+[multi-host RTC](multi-host-rtc.md) for deployment and delivery semantics.
+
+The second test rotates one-host and three-host order across two passes at 10
+and 40 sends per second, then overlaps six rooms on one sender host and two
+receiving hosts. This exercises more local rooms than dispatch workers. It uses
+small fixed workloads and a client loop that awaits each invocation. It does
+not establish an open-loop saturation rate.
+
+`PubSubHintsReceived` counts valid subscription messages received by all test
+hosts, including hosts without a local member in the changed room.
+`PubSubLogicalUtf8Bytes` counts their channel and message UTF-8 bytes. It excludes
+Redis protocol framing and network overhead. A value of -1 marks an unmeasured
+per-room counter in overlapping workloads; their aggregate window includes setup,
+warmup, and disposal.
+
+`DatabaseActivities` counts Npgsql tracing activities, not individual SQL
+statements inside a command. `RedisScripts` counts adapter script evaluations.
+`RedisArgumentBytes` sums UTF-8 script text, keys, and arguments submitted by the
+adapter; it does not measure network traffic. CPU and working set describe the
+whole test process, which contains all Kestrel instances. The combined concurrent
+room backend counters include setup, warmup, measurement, and connection cleanup;
+the individual hot-room counters cover their measurement windows.
+
 Capture and desktop evidence tooling retains its Python dependencies:
 
 ```sh

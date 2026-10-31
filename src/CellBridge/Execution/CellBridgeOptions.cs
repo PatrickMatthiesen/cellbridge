@@ -2,9 +2,15 @@ namespace CellBridge.AspNetCore;
 
 public sealed class CellBridgeOptions
 {
-    /// <summary>Enables Office RTC transport on a single host. Set false to disable RTC discovery and endpoints.</summary>
+    /// <summary>Enables Office RTC transport. Set false to disable RTC discovery and endpoints.</summary>
     /// <remarks>Requires stored grants or an immutable versioned policy, without an ordinary async provider or legacy access evaluator.</remarks>
     public bool EnableOfficeRealTime { get; set; } = true;
+
+    /// <summary>Redis primary connection configuration required for RTC when registering multiple instances.</summary>
+    public string? OfficeRealTimeRedisConnectionString { get; set; }
+
+    /// <summary>Shared, application-specific RTC namespace. Use the same value on every host for this library.</summary>
+    public string? OfficeRealTimeRedisNamespace { get; set; }
 
     /// <summary>Stable identity of the host's single document catalog. Configure the same GUID on every host and restart to enable Office GetVersions.</summary>
     public Guid? DocumentLibraryId { get; set; }

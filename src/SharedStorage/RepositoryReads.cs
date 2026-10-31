@@ -121,9 +121,10 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
         return partition;
     }
     private async Task<DocumentControlRead> ControlAsync(TContext db, DocumentHead head, CancellationToken ct,
-        IReadOnlyList<RepositoryPartitionRow>? knownPartitions = null, DateTime? knownNow = null)
+        IReadOnlyList<RepositoryPartitionRow>? knownPartitions = null, DateTime? knownNow = null,
+        RepositoryControlRow[]? knownRows = null)
     {
-        var rows = await database.ReadControlRowsAsync(db, head.ResourceId, head.LifecycleGeneration,
+        var rows = knownRows ?? await database.ReadControlRowsAsync(db, head.ResourceId, head.LifecycleGeneration,
             includePartitions: knownPartitions is null, includeClock: knownNow is null, ct);
         var coordinationRow = rows.SingleOrDefault(row => row.Kind == 1)
             ?? throw new StorageCorruptionException("Missing normalized coordination record.");
@@ -147,8 +148,20 @@ internal sealed partial class RelationalDocumentRepository<TContext>(IRepository
     private static string ControlJson(RepositoryControlRow row) => row.Json ?? (row.EncodedJson is { } bytes
         ? DocumentEncoding.Decode(bytes) : throw new StorageCorruptionException("Missing control metadata."));
     public ValueTask<DocumentControlRead?> ReadControlAsync(Guid id, CancellationToken cancellationToken = default) =>
-        ReadAsync(async db => await HeadAsync(db, id, cancellationToken) is { IsDeleted: false } head
-            ? await ControlAsync(db, head, cancellationToken) : null, cancellationToken);
+        ReadAsync(async db =>
+        {
+            if (database is IRepositoryControlSnapshotDatabase<TContext> snapshotDatabase)
+            {
+                var snapshot = await snapshotDatabase.ReadControlSnapshotAsync(db, id, cancellationToken);
+                if (snapshot is null) return null;
+                // Validate every normalized identity field even for deleted heads.
+                var snapshotHead = Head(snapshot.Head);
+                return snapshotHead.IsDeleted ? null : await ControlAsync(db, snapshotHead, cancellationToken, knownRows: snapshot.Rows);
+            }
+
+            return await HeadAsync(db, id, cancellationToken) is { IsDeleted: false } head
+                ? await ControlAsync(db, head, cancellationToken) : null;
+        }, cancellationToken);
     public ValueTask<DocumentRevisionPage?> ReadRevisionsAsync(Guid id, int offset, int limit, ulong? beforeRevision = null, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);

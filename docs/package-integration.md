@@ -322,9 +322,10 @@ or set `PublicOrigin` to a fixed HTTPS origin without a path.
 Office RTC is enabled by default. To disable its discovery and endpoints, configure
 `AddCellBridge(..., configure: options => options.EnableOfficeRealTime = false)`.
 WebDemo uses `Protocol:EnableOfficeRealTime=false`; AppHost uses
-`Parameters:EnableOfficeRealTime=false`. Disable RTC for multi-instance hosts or
-ordinary asynchronous authorization providers. The relay requires a single host
-and stored grants or an immutable versioned authorization policy.
+`Parameters:EnableOfficeRealTime=false`. Multiple instances require explicit
+[Redis coordination configuration](multi-host-rtc.md). Disable RTC for ordinary
+asynchronous authorization providers. The relay requires stored grants or an
+immutable versioned authorization policy.
 
 RTC tickets expire after 20 minutes. Ticket issuance logs include resource,
 lifecycle and expiry time, without the ticket itself.
