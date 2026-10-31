@@ -53,6 +53,8 @@ public static class CellBridgeEndpoints
         provider.Require(requireDurability, multipleInstances);
         var options = new CellBridgeOptions();
         configure?.Invoke(options);
+        if (options.OfficeRealTimeTokenLifetime < TimeSpan.FromSeconds(1) || options.OfficeRealTimeTokenLifetime > TimeSpan.FromHours(1))
+            throw new ArgumentOutOfRangeException(nameof(options.OfficeRealTimeTokenLifetime), "RTC ticket lifetime must be between one second and one hour.");
         if (options.EnableOfficeRealTime && multipleInstances)
             throw new NotSupportedException("Office RTC requires a single host. Set EnableOfficeRealTime to false when using multiple instances.");
         ArgumentNullException.ThrowIfNull(options.Hashing);

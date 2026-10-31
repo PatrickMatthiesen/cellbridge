@@ -6,6 +6,9 @@ public sealed class CellBridgeOptions
     /// <remarks>Requires stored grants or an immutable versioned policy, without an ordinary async provider or legacy access evaluator.</remarks>
     public bool EnableOfficeRealTime { get; set; } = true;
 
+    /// <summary>Lifetime of document-scoped RTC tickets. Shorter lifetimes can be used to test native renewal.</summary>
+    public TimeSpan OfficeRealTimeTokenLifetime { get; set; } = TimeSpan.FromMinutes(20);
+
     /// <summary>Stable identity of the host's single document catalog. Configure the same GUID on every host and restart to enable Office GetVersions.</summary>
     public Guid? DocumentLibraryId { get; set; }
 

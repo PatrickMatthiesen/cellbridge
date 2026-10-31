@@ -246,11 +246,11 @@ test coverage. It is not an exhaustive Office conformance audit.
 | OCS | Missing service: the frame codec does not implement session state, WPM merging, revision clocks or saving merged content to the file host. RTC can operate without OCS. |
 | Publication notifications | Missing integration: the RTC hub relays client notifications, but persisted file publication does not generate a server notification. |
 | Multiple RTC hosts | Missing coordination: rooms and presence are process-local. Multi-instance hosts must disable RTC. Shared file storage and locking are separate and support multiple hosts. |
-| Long-running sessions | Test gap: tickets expire after 20 minutes. Native token reacquisition, reconnect and presence recovery across expiry are not qualified. |
+| Long-running sessions | One native Excel window remained open for over 21 minutes, then automatically saved another edit; a server download retained both test cells. This proves continued saving, not RTC renewal. Tickets default to 20 minutes; `OfficeRealTimeTokenLifetime` supports shorter expiry tests. Native token reacquisition, reconnect and presence recovery across expiry remain unqualified. |
 | Startup | Test gap after a concrete fix: admission queuing addressed an observed HTTP 429 opening burst. One fresh Excel startup passed afterward; reliable cold startup in all three apps is not established. |
 | Typing and latency | Test gap: saved edits and selection changes propagated, but character-by-character delivery and measured end-to-end latency are not established for CellBridge. |
 | Conflicting/offline edits | Test gap: separate Word paragraph additions survived one outage/reconnect trial. Same-text, same-cell and same-object conflicts, undo and longer outages need coverage. |
-| Native sharing | Missing Office sharing workflow: stored ownership/grants exist, but native Share/invitation APIs are not implemented. |
+| Native sharing | Owner-only service APIs now read, grant and revoke stored access with lifecycle and authority checks. Native Share endpoints and host recipient resolution are not implemented. OneDrive traffic exposed CSOM sharing reads and `/_vti_bin/DocumentSharing.svc`; see [protocol profiles](office-protocol-profiles.md#native-sharing). Email invitations and anonymous links are not supported. |
 | WOPI integration | Missing adapter work: port the coordinated fork to indexed APIs, provide a production conditional revision destination and qualify OOS framing. CSPP Plus coauthor locks/chunks/sequence operations are not implemented by the RTC hub. |
 
 ## Automated checks

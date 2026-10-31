@@ -276,6 +276,12 @@ WebDemo uses `Protocol:EnableOfficeRealTime=false`; AppHost uses
 ordinary asynchronous authorization providers. The relay requires a single host
 and stored grants or an immutable versioned authorization policy.
 
+`OfficeRealTimeTokenLifetime` defaults to 20 minutes and accepts one second through
+one hour. WebDemo binds `Protocol:OfficeRealTimeTokenLifetime`; AppHost also accepts
+`Parameters:OfficeRealTimeTokenLifetime`. Use `00:02:00` for a two-minute native
+expiry test. Ticket issuance logs include resource, lifecycle and expiry time,
+without the ticket itself.
+
 Cookie schemes using `CookieAuthenticationOptions.EventsType` are unsupported here;
 use an `Events` instance. `IsRequestAllowed` gates every packaged GET and POST before
 credential or token processing. Connect host rate limiting and other admission policy
@@ -284,6 +290,22 @@ request gate; real account policy belongs to the account system.
 
 CellBridge and
 its storage/authentication dependencies have not been qualified under Native AOT.
+
+## Manage named-user document access
+
+For documents using stored grants, `CellBridgeDocumentService.GetSharingAsync`
+returns the current owner's grant snapshot. `SetRecipientGrantAsync` adds,
+changes or revokes one recipient's grant. Both require the current owner and
+current Write access, including any actor access ceiling. Resolve the recipient
+through the host's trusted directory before passing its `SubjectIdentity`.
+
+Pass the snapshot's lifecycle and authority generations to `SetRecipientGrantAsync`.
+Supported grants are `Read`, `Read | Write`, and `None` for revocation. A stale
+snapshot or concurrent document change returns `Conflict`; read a fresh snapshot
+before retrying. The API preserves document ownership and content author metadata.
+External policies and legacy access evaluators must manage sharing through their
+own authority. These APIs do not implement native Office Share endpoints, email
+invitations or anonymous links.
 
 ## Execute parsed SOAP requests
 

@@ -120,6 +120,45 @@ required by the supported client workflow. The relay currently implements no
 multi-host room coordination. Native discovery must describe capabilities the
 host actually provides, with its own identity and endpoints.
 
+## Native sharing
+
+The native Share workflow uses SharePoint sharing contracts outside
+MS-FSSHTTP. Captured personal OneDrive traffic included calls to the REST
+methods `GetObjectSharingSettings` and `GetSharingInformation`, plus requests
+to `/_vti_bin/DocumentSharing.svc` and `/_vti_bin/sharedaccess.asmx`. CellBridge
+implements only `IsOnlyClient` at the latter route; it does not implement the
+document-sharing SOAP service or the CSOM sharing methods.
+
+These contracts cover different operations. MS-CSOMSPT defines
+`GetObjectSharingSettings` as data for rendering sharing information and
+`GetSharingInformation` as a read of a list item's sharing state. Its
+`UpdateDocumentSharingInfo` operation changes recipient roles and requires
+ManagePermission. The operation accepts strict or additive grant semantics,
+and can request email notifications. MS-DOCSWS defines the SOAP
+`DocumentSharing.svc` contract for document sharing and tokenized guest links.
+Its `SetLinks` operation requires tokenized-link support and must fail with
+SOAP error 17 when the server does not support it. These operations do not
+establish that OneDrive and on-premises SharePoint use identical request
+sequences or response shapes.
+
+CellBridge stores grants by stable subject identifier and enforces them during
+document access. It does not provide a host directory that resolves a typed
+email or login to a trusted subject. Its owner-only `GetSharingAsync` and
+`SetRecipientGrantAsync` service APIs read and update stored grants with lifecycle
+and authority-generation checks. Native sharing endpoints must call these APIs
+after resolving a recipient through the host's trusted directory.
+External authorization-policy hosts own their permission decisions and
+cannot be mutated through CellBridge grants. A native sharing implementation
+still needs a host-provided recipient resolver and a protocol adapter around the
+owner-only service API before it can add recipients. Link sharing also needs a
+separate token store and access path. Until those exist, the host must not
+advertise sharing or anonymous-link support.
+
+References: [MS-CSOMSPT `GetObjectSharingSettings`](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-csomspt/a9d2273e-31ad-40c4-a90b-0a9e8d822c22),
+[MS-CSOMSPT `GetSharingInformation`](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-csomspt/e8604c72-262b-490f-933f-ece357258d63),
+[MS-CSOMSPT `UpdateDocumentSharingInfo`](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-csomspt/fad1d6ca-77e9-42fa-93b3-73d7747fce18),
+and [MS-DOCSWS](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-docsws/78d4c36e-0916-4843-88b4-33f965d0ccd5).
+
 ## WOPI integration paths
 
 | Path | Host contract | CellBridge fit |
