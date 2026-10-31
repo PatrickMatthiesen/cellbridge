@@ -96,6 +96,19 @@ tools/capture/.venv/bin/python -m pip install --require-hashes -r tools/capture/
 tools/capture/.venv/bin/python -m pytest tools/capture tools/testing -q
 ```
 
+CI runs the Linux solution checks, SQL Server tests and Linux package consumers
+in independent jobs. The solution job excludes the SQL Server test namespace;
+the SQL Server job runs that complete project. Windows protocol and package
+checks remain separate. NuGet caching covers ordinary restores; package
+verification still uses its isolated local feed and consumer cache.
+
+The build workflow uses path filters for .NET source, tests, examples, package
+tooling and build configuration. Capture and Python tooling checks use a
+separate workflow, so capture-only changes do not start database jobs. Both
+workflows accept manual dispatch. New PR updates cancel superseded runs;
+main-branch runs complete without cancellation. Release validation still runs
+the full solution and tooling checks through the publish workflow.
+
 ## SQL Server engine checks
 
 Run the SQL Server tests with .NET 11, Docker on Linux x86-64 and an Aspire CLI
