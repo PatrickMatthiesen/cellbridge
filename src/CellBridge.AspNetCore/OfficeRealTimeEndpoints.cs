@@ -21,6 +21,16 @@ internal static class OfficeRealTimeEndpoints
         services.AddSingleton<OfficeRealTimeSessionStore>();
         services.AddAuthentication().AddScheme<AuthenticationSchemeOptions, OfficeRealTimeAuthenticationHandler>(
             OfficeRealTimeRequest.AuthenticationScheme, _ => { });
+        services.PostConfigure<AuthenticationOptions>(options =>
+        {
+            // RTC has an explicitly selected scheme. Do not let that internal
+            // scheme prevent ASP.NET Core's sole host scheme from being the default.
+            if (options.DefaultScheme is not null ||
+                (AppContext.TryGetSwitch("Microsoft.AspNetCore.Authentication.SuppressAutoDefaultScheme", out var suppressed) && suppressed))
+                return;
+            var hostSchemes = options.Schemes.Where(scheme => scheme.Name != OfficeRealTimeRequest.AuthenticationScheme).Take(2).ToArray();
+            if (hostSchemes.Length == 1) options.DefaultScheme = hostSchemes[0].Name;
+        });
         services.AddSignalR(options =>
         {
             options.MaximumReceiveMessageSize = 64 * 1024;

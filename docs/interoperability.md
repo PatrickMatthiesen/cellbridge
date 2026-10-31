@@ -235,6 +235,24 @@ desktop documents and a fresh authenticated server download. Desktop activation
 preceded observation. This establishes saved-change propagation, not streaming
 latency or an RTC connection.
 
+## Remaining collaboration work
+
+This inventory separates missing implementation from observed defects and missing
+test coverage. It is not an exhaustive Office conformance audit.
+
+| Area | Current gap |
+| --- | --- |
+| Participant names | Observed defect: remote selections/cursor indicators appear, but names show `Loading name...` or `Getting name...`. The missing identity lookup contract is not established. |
+| OCS | Missing service: the frame codec does not implement session state, WPM merging, revision clocks or saving merged content to the file host. RTC can operate without OCS. |
+| Publication notifications | Missing integration: the RTC hub relays client notifications, but persisted file publication does not generate a server notification. |
+| Multiple RTC hosts | Missing coordination: rooms and presence are process-local. Multi-instance hosts must disable RTC. Shared file storage and locking are separate and support multiple hosts. |
+| Long-running sessions | Test gap: tickets expire after 20 minutes. Native token reacquisition, reconnect and presence recovery across expiry are not qualified. |
+| Startup | Test gap after a concrete fix: admission queuing addressed an observed HTTP 429 opening burst. One fresh Excel startup passed afterward; reliable cold startup in all three apps is not established. |
+| Typing and latency | Test gap: saved edits and selection changes propagated, but character-by-character delivery and measured end-to-end latency are not established for CellBridge. |
+| Conflicting/offline edits | Test gap: separate Word paragraph additions survived one outage/reconnect trial. Same-text, same-cell and same-object conflicts, undo and longer outages need coverage. |
+| Native sharing | Missing Office sharing workflow: stored ownership/grants exist, but native Share/invitation APIs are not implemented. |
+| WOPI integration | Missing adapter work: port the coordinated fork to indexed APIs, provide a production conditional revision destination and qualify OOS framing. CSPP Plus coauthor locks/chunks/sequence operations are not implemented by the RTC hub. |
+
 ## Automated checks
 
 The [integration fixtures](automated-testing.md) reuse `CellBridge.AppHost` with

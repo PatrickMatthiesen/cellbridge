@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authentication;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
 using CellBridge.Storage.Abstractions;
@@ -21,6 +23,38 @@ public sealed class OfficeRealTimeEndpointTests
 {
     private const string PublicOrigin = "https://office.example";
     private const string Mount = "/mounted";
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DefaultRtcPreservesTheHostsImplicitCookieScheme(bool cookieRegisteredFirst)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        if (cookieRegisteredFirst) builder.Services.AddAuthentication().AddCookie("host");
+        builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false);
+        if (!cookieRegisteredFirst) builder.Services.AddAuthentication().AddCookie("host");
+        await using var app = builder.Build();
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.MapCellBridge();
+        app.MapGet("/sign-in", async (HttpContext context) =>
+        {
+            await context.SignInAsync(new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.Name, "host-user")], "host")));
+            return Results.Ok();
+        });
+        app.MapGet("/protected", (HttpContext context) => context.User.Identity!.Name!).RequireAuthorization();
+        await app.StartAsync();
+        var schemes = app.Services.GetRequiredService<IAuthenticationSchemeProvider>();
+        Assert.Equal("host", (await schemes.GetDefaultAuthenticateSchemeAsync())!.Name);
+        Assert.Equal("host", (await schemes.GetDefaultChallengeSchemeAsync())!.Name);
+        using var client = app.GetTestClient();
+        using var signedIn = await client.GetAsync("/sign-in");
+        Assert.Equal(HttpStatusCode.OK, signedIn.StatusCode);
+        client.DefaultRequestHeaders.Add("Cookie", signedIn.Headers.GetValues("Set-Cookie").Single().Split(';')[0]);
+        Assert.Equal("host-user", await client.GetStringAsync("/protected"));
+    }
 
     [Theory]
     [InlineData(false, false)]
