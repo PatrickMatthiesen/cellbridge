@@ -33,13 +33,14 @@ public sealed class MtomStreamingTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task PreparedMessagePreservesXmlPrecedenceAttributesAndMultipleAttachments(bool directBody)
+    [InlineData(CellStorageRequest.Soap11Namespace, "text/xml")]
+    [InlineData(CellStorageRequest.Soap12Namespace, "application/soap+xml")]
+    public async Task PreparedMessagePreservesXmlPrecedenceAttributesAndMultipleAttachments(
+        string soapNamespace, string soapMediaType)
     {
         var response = new CellStorageResponse
         {
-            UsesDirectBody = directBody, WebUrl = "https://example.test/a?b=1&c=2",
+            SoapNamespace = soapNamespace, WebUrl = "https://example.test/a?b=1&c=2",
             Responses = { new() { Url = "https://example.test/a%20b.docx", SubResponses =
             {
                 new() { SubResponseDataBase64 = [0, 1, 255], SubResponseDataAttributes = { ["Test"] = "<&\"" } },
@@ -50,6 +51,7 @@ public sealed class MtomStreamingTests
             } } },
         };
         var message = response.PrepareMtomMessage();
+        Assert.Contains($"start-info=\"{soapMediaType}\"", message.ContentType);
         var expected = message.ToArray();
         response.Responses.Clear();
         using var stream = new NonSeekableDestination();
@@ -59,19 +61,26 @@ public sealed class MtomStreamingTests
         Assert.True(stream.CanWrite);
         var parts = MtomMessageParser.Parse(expected, message.ContentType);
         Assert.Equal(3, parts.Count);
+        Assert.Contains($"type=\"{soapMediaType}\"", parts[0].ContentType);
         Assert.Equal(new byte[] { 0, 1, 255 }, parts[1].Content);
         Assert.Equal(new byte[] { 42 }, parts[2].Content);
         var xml = XDocument.Parse(Encoding.UTF8.GetString(parts[0].Content));
         XNamespace protocol = CellStorageRequest.Namespace;
+        XNamespace soap = soapNamespace;
         XNamespace xop = "http://www.w3.org/2004/08/xop/include";
+        var bodyElements = xml.Root!.Element(soap + "Body")!.Elements().ToArray();
+        Assert.Equal(new[] { protocol + "ResponseVersion", protocol + "ResponseCollection" },
+            bodyElements.Select(element => element.Name));
+        Assert.DoesNotContain(xml.Descendants(), element => element.Name.LocalName == "ExecuteCellStorageResponse");
         var data = xml.Descendants(protocol + "SubResponseData").ToArray();
         Assert.Equal("<&\"", (string?)data[0].Attribute("Test"));
         Assert.Equal("cid:" + parts[1].ContentId!.Trim('<', '>'), (string?)data[0].Element(xop + "Include")!.Attribute("href"));
+        Assert.Equal("cid:" + parts[2].ContentId!.Trim('<', '>'), (string?)data[1].Element(xop + "Include")!.Attribute("href"));
+        Assert.Equal(2, xml.Descendants(xop + "Include").Count());
         Assert.Empty(data[2].Elements());
         Assert.Equal("", data[2].Value);
         Assert.Equal("AQID", data[3].Value);
         Assert.Single(xml.Descendants(), e => e.Name.LocalName == "Results");
-        Assert.Equal(!directBody, xml.Descendants(protocol + "ExecuteCellStorageResponse").Any());
     }
 
     [Fact]

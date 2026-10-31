@@ -19,6 +19,7 @@ operations.
 | Read changes | `QueryChanges` supports repeated and mixed file, metadata and editor queries with independent knowledge/errors and one shared data package. Explicit binary targets override the SOAP default. Mapped file-cell scopes follow current dependencies; manifest/cell-change inclusion, filtered knowledge and whole-cell rounding are supported. |
 | Save changes | `PutChanges` combines changed and retained file parts, reconstructs the document and checks for stale/conflicting updates. Complete application metadata graphs publish atomically with key-level coherency. Requested applied-index entries are returned and preserved in stored receipts. |
 | Editing presence and locks | `Coauth`, `EditorsTable`, `SchemaLock`, `ExclusiveLock`, `LockStatus` and `AmIAlone` manage sessions and locks. |
+| Coauthor transition discovery | MS-SHDACCWS `IsOnlyClient` reports whether a transition is pending, using the persisted tracker and current read authorization. |
 | Document information | `WhoAmI`, `ServerTime`, `GetDocMetaInfo` and `GetFileProps` return identity and current file information. `GetVersions` and `Versioning/GetVersionList` report servable history. |
 
 File content, application metadata and editor presence have separate synchronization
@@ -102,7 +103,9 @@ when client knowledge is complete. Reducing those reads is performance work #33.
 | Native Version History | Word, Excel and PowerPoint 16.0.20527 listed persisted revisions, opened older content and restored it as a new revision. Fresh processes repeated listing and historical open after server restart. |
 | Blank Office file creation | Automated package checks. |
 | Two service instances | Automated identity, shared lease and protocol routing checks against one database. |
-| Two desktop clients coauthoring | Unverified, including simultaneous changes and reconnect/recovery. |
+| Two Word desktop clients | Distinct accounts exchanged paragraph changes in both directions, including receipt while idle. Concurrent offline paragraph additions survived reconnect; one client needed manual Save to recover. |
+| Two PowerPoint desktop clients | Distinct accounts preserved slide 1 and added slide 2; the first client received the new slide while idle. |
+| Two Excel desktop clients | The first client converted its shared lock to exclusive. The second client received File In Use and opened read-only. Concurrent editing remains unsupported in this observed workflow. |
 | Large files and production concurrency | Not qualified. Synthetic benchmarks measure provider behavior. |
 
 The recorded Word trial on 2026-10-03 used Word `16.0.20430`, Tailscale HTTPS
@@ -136,6 +139,83 @@ After stopping and restarting the host, all nine revision downloads retained
 their hashes. Fresh Office processes listed all three revisions and opened the
 second revision with its saved marker. This was a single-user trial on one
 Windows desktop. It does not qualify other Office builds or coauthoring.
+
+A separate 2026-10-30 trial used two Windows machines, one x64 and one ARM64,
+with native Microsoft 365 Office `16.0.20527`, distinct CellBridge accounts and
+a shared PostgreSQL host reached through Tailscale HTTPS. Word initially missed
+idle updates while its `IsOnlyClient` requests returned HTTP 404. After adding
+the authenticated MS-SHDACCWS operation, both open Word clients received the
+other client's saved paragraph without local typing, Save or reopen. Both
+clients then appended paragraphs during a brief outage of the test endpoint.
+One recovered automatically; the other showed Upload Failed and recovered with
+Ctrl+S. Both native windows and an independent server download contained all
+eight test paragraphs afterward.
+
+PowerPoint permitted both editors. The second added a slide, and the first
+received it while idle. The server download retained both slide markers.
+Excel requested `ConvertToExclusive` on the first client and blocked the second
+editor with File In Use. These checks do not qualify character-by-character
+delivery, latency, same-text conflict resolution, participant avatars or other
+Office builds. Rapid polling remains visible in the captures; this trial does
+not establish its cause or a production concurrency limit.
+
+Native Word against OneDrive uses a separate RTC service. A scoped reference
+capture observed `FindSession`, SignalR negotiation, a successful WebSocket
+upgrade and Office messages including `UpdatePresence`, `presenceUpdated` and
+`SendUpdateNotification`. The open Word window received text and displayed a
+remote cursor marker. This is reference-service evidence, not CellBridge support.
+The [SignalR Hub Protocol](https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/docs/specs/HubProtocol.md)
+defines the outer JSON framing; it does not define Office's payloads or document
+authorization. The reference also returned Office Collaboration Service discovery
+properties and completed an OCS session join before the WebSocket connection.
+
+The same reference test also used two native Excel and PowerPoint clients.
+Each new file was saved to an explicit OneDrive HTTPS path, with a captured
+successful upload before the second client opened it. Both Excel clients
+received the other's committed cell value and displayed a remote selection.
+PowerPoint received the second client's title edit and displayed a remote
+selection with an author indicator. Excel requested RTC properties and opened
+a WebSocket without an OCS join. Its coauthoring status changed from `Alone`
+to `Coauthoring` when the second client joined. These clients used existing
+Microsoft sign-in; this does not qualify distinct Microsoft identities.
+
+A controlled Word insertion in one continuous reference capture appeared in an
+outbound RTC typing message. A nearby OCS Execute response accepted a revision.
+The temporary insertion was undone and remained absent after native reopen.
+This correlates the two services with a known edit; it does not decode OCS's
+document blobs or independently verify publication to the file host.
+
+An experimental relay implements the captured SignalR methods and document-scoped
+tickets behind `CellBridgeOptions.EnableOfficeRealTime`, which defaults to false.
+It requires a single host and rejects `multipleInstances: true`. It also requires
+stored grants or an immutable versioned authorization policy so each delivery can
+check all participants against one permission snapshot. Enabling RTC with an
+ordinary asynchronous authorization provider or a legacy access evaluator fails
+at startup. Initial native opens did not request RTC properties. Replaying the
+captured OneDrive OPTIONS response caused Word to request Properties and Excel
+to request RTC properties, negotiate SignalR and open a WebSocket to CellBridge.
+The experiment implements the observed storage and authoring discovery headers
+and authenticated file metadata through `PROPFIND` with `Depth: 0`. Resource IDs,
+replication tags, file sizes, ETags and timestamps come from persisted metadata.
+OPTIONS responses use the same discovery profile on document and SOAP routes.
+They advertise only the HTTP methods those routes implement. This does not
+establish which individual discovery field controls native RTC startup.
+Captured Excel presence contains application state without an `A` sender field;
+the relay accepts that shape and uses the authenticated client's presence key.
+These observations do not establish delivery to a second native client or
+visible remote cursors. A fresh Word probe opened in editing mode and saved.
+Excel's native diagnostics showed that it classified the server as lacking cloud
+collaboration, disabled coauthoring and requested conversion to an exclusive lock
+before editing. The discovery and SOAP corrections still require native
+qualification against that failure. The relay does not
+implement OCS or WOPI, and it does not resolve Excel's exclusive-lock behavior.
+`IsOnlyClient` does not provide the RTC service.
+
+The shared Word test also included an iPhone on the same running service and
+document as both Windows clients. A phone-entered phrase reached both open
+desktop documents and a fresh authenticated server download. Desktop activation
+preceded observation. This establishes saved-change propagation, not streaming
+latency or an RTC connection.
 
 ## Automated checks
 

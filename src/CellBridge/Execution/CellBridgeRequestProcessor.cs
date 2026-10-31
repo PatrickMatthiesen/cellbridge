@@ -18,7 +18,8 @@ public sealed record CellStorageExecution(CellStorageResponse Response, Immutabl
 
 /// <summary>Executes parsed MS-FSSHTTP requests without an HTTP endpoint or transport dependency.</summary>
 public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service,
-    ILogger<CellBridgeRequestProcessor>? logger = null, CellBridgeOptions? options = null)
+    ILogger<CellBridgeRequestProcessor>? logger = null, CellBridgeOptions? options = null,
+    IOfficeRealTimePropertiesProvider? realTimeProperties = null)
 {
     /// <summary>Executes requests against existing documents, checking permissions and dependencies before saving changes.</summary>
     public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, string publicOrigin,
@@ -50,7 +51,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             // revision it supports. The captured editable session uses 2.3.
             Version = request.Version,
             MinorVersion = request.Version == 2 ? 3u : request.MinorVersion,
-            UsesDirectBody = request.UsesDirectBody,
+            SoapNamespace = request.SoapNamespace,
             WebUrl = publicBase,
         };
 
@@ -146,7 +147,7 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         }
                         else if (OuterDocumentOperations.Handles(subRequest.Type))
                             await OuterDocumentOperations.ExecuteAsync(service, doc.ResourceId, subRequest, subResponse,
-                                publicBase, operationActor, cancellationToken, options?.DocumentLibrary(publicBase));
+                                publicBase, operationActor, cancellationToken, options?.DocumentLibrary(publicBase), realTimeProperties);
                         else
                         {
                             var result = await service.ExecuteControlAsync(doc.ResourceId, subRequest, operationActor, cancellationToken);
@@ -715,6 +716,10 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
             case SubRequestType.WhoAmI:
                 subResponse.SubResponseDataAttributes["UserName"] = actor.Identity.DisplayName;
                 subResponse.SubResponseDataAttributes["UserLogin"] = actor.Identity.Login;
+                if (!string.IsNullOrWhiteSpace(actor.Identity.EmailAddress))
+                    subResponse.SubResponseDataAttributes["UserEmailAddress"] = actor.Identity.EmailAddress;
+                if (!string.IsNullOrWhiteSpace(actor.Identity.SipAddress))
+                    subResponse.SubResponseDataAttributes["SIPAddress"] = actor.Identity.SipAddress;
                 break;
 
             case SubRequestType.ServerTime:

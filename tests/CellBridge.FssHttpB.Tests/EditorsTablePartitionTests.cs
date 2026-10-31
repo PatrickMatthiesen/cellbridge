@@ -34,6 +34,25 @@ public sealed class EditorsTablePartitionTests
     }
 
     [Fact]
+    public void BinaryEditorTable_RoundTripsTrustedSipAndEmailFields()
+    {
+        var stream = EditorsTablePartitionBuilder.BuildEditorsTableStream([
+            new EditorsTableEditor("client-a", 638923456000000000, "A User", "a-user",
+                SipAddress: "sip:a-user@example.test", EmailAddress: "a-user@example.test"),
+        ]);
+        using var source = new MemoryStream(stream, EditorsTablePartitionBuilder.ZipStreamHeader.Length,
+            stream.Length - EditorsTablePartitionBuilder.ZipStreamHeader.Length);
+        using var deflate = new DeflateStream(source, CompressionMode.Decompress);
+        using var xml = new MemoryStream();
+        deflate.CopyTo(xml);
+        var editor = Assert.Single(System.Xml.Linq.XDocument.Parse(Encoding.UTF8.GetString(xml.ToArray()))
+            .Root!.Elements("Editor"));
+
+        Assert.Equal("sip:a-user@example.test", (string?)editor.Element("SIPAddress"));
+        Assert.Equal("a-user@example.test", (string?)editor.Element("EmailAddress"));
+    }
+
+    [Fact]
     public void QueryChanges_UsesHeaderThenCompressedObjectData()
     {
         var identity = new EditorsTablePartitionBuilder.EditorsTableIdentity(

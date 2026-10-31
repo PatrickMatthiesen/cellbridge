@@ -44,7 +44,8 @@ provide their own customer lifecycle and user interface.
 | Persistent storage | PostgreSQL document state with PostgreSQL or filesystem file content. |
 | Revision history | Native Word, Excel and PowerPoint version listing, historical open and restore tested on Microsoft 365 16.0.20527. Authorized SOAP and reusable APIs use the same persisted history. |
 | Incremental transfers | Reuse stored file parts and send parts the client does not already have. |
-| Coauthoring | Editor sessions and locks are implemented; two-desktop editing remains unverified. |
+| Coauthoring | Two Windows desktops exchanged saved Word and PowerPoint changes under distinct accounts. Excel's second editor opened read-only. See the bounded [client coverage](docs/interoperability.md#client-coverage). |
+| Real-time collaboration | Experimental single-host RTC endpoints are disabled by default. Native startup, streamed typing and remote cursors remain unqualified. |
 
 Some advanced synchronization options and automatic graph pruning remain
 unimplemented or disabled. See [revision history](docs/revision-history.md),

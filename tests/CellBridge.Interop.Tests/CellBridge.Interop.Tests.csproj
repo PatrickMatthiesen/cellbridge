@@ -29,6 +29,7 @@
     <ProjectReference Include="..\..\src\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />
     <ProjectReference Include="../../src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
+    <ProjectReference Include="../../src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Aspire.Hosting.Dotnet" Version="17.0.0-preview.1.26520.1" />

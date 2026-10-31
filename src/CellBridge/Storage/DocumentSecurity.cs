@@ -2,7 +2,11 @@ using System.Collections.Immutable;
 
 namespace CellBridge.Storage.Abstractions;
 
-public sealed record SubjectIdentity(string Subject, string Login, string DisplayName);
+public sealed record SubjectIdentity(string Subject, string Login, string DisplayName)
+{
+    public string? EmailAddress { get; init; }
+    public string? SipAddress { get; init; }
+}
 
 [Flags]
 public enum DocumentAccess { None = 0, Read = 1, Write = 2 }

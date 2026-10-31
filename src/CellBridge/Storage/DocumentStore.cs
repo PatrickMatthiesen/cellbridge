@@ -499,6 +499,16 @@ public sealed partial class StoredDocument
                 editor.Add(new XElement("LoginName", session.Owner?.Login ?? session.UserName));
             }
 
+            if (session.Owner?.SipAddress is { Length: > 0 } sipAddress)
+            {
+                editor.Add(new XElement("SIPAddress", sipAddress));
+            }
+
+            if (session.Owner?.EmailAddress is { Length: > 0 } emailAddress)
+            {
+                editor.Add(new XElement("EmailAddress", emailAddress));
+            }
+
             editor.Add(new XElement("HasEditorPermission", session.AsEditor ? "true" : "false"));
             editor.Add(new XElement("Timeout", session.ExpiresUtc.Ticks.ToString(CultureInfo.InvariantCulture)));
             if (session.Metadata.Count > 0)

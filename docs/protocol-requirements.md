@@ -197,8 +197,10 @@ An explicit owner-matching RefreshCoauthoring request promotes a legacy schema
 owner into the new tracker. This is migration policy. It avoids silently treating
 readers as coauthors. `AmIAlone` returns false while a transition remains pending;
 this is a compatibility interpretation of notification behavior, not a literal
-extra rule in the [AmIAlone operation][Oalone]. MS-SHDACCWS IsOnlyClient is a
-separate operation and is not implemented here.
+extra rule in the [AmIAlone operation][Oalone]. The separate MS-SHDACCWS
+`IsOnlyClient` operation returns false while the persisted transition is pending
+and true otherwise. It does not infer the result from the editor count.
+The HTTP endpoint checks current read access and hides unknown or denied IDs.
 
 ## Binary operations and request envelope
 
@@ -396,7 +398,7 @@ alone does not implement their semantics or validate their allowed operation.
 | A019 | `Response.ErrorMessage` [2.2.3.5](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/9ab8b773-974b-4cc4-ac5d-85161c354a9e) | MUST when ErrorCode is non-Success | P: Modeled and emitted; unexpected failures use fixed client-safe text while detailed exceptions are logged. | `FssHttpTests`; independent exact-message acceptance #18. |
 | A020 | `Response.SuggestedFileName` [2.2.3.5](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/9ab8b773-974b-4cc4-ac5d-85161c354a9e) | Schema optional | P: Not modeled/emitted. | None for condition; required error detail/name suggestion #18. |
 | A021 | `Response.ResourceID` [2.2.3.5](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/9ab8b773-974b-4cc4-ac5d-85161c354a9e) | Stable nonempty ID MUST; presence SHOULD when UseResourceID true, SHOULD NOT otherwise | I: Stable resource emitted more broadly. | I tests; optional presence reference policy #18/#38. |
-| A022 | `Response.IntervalOverride` [2.2.3.5](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/9ab8b773-974b-4cc4-ac5d-85161c354a9e) | Schema optional | P: Supported by model; builder default 60. | P tests; optional throttling policy #18. |
+| A022 | `Response.IntervalOverride` [2.2.3.5](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/9ab8b773-974b-4cc4-ac5d-85161c354a9e) | Schema optional; a nonzero value offers a request interval override | P: The processor emits 0, which does not offer an override. | P tests; optional throttling policy #18. |
 | A023 | `ResponseCollection.WebUrl` [2.2.3.6](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/a118e36d-0ff5-4407-a3b5-8acee374470e) | Schema required | P: WebUrl emitted from public origin; WebUrlIsEncoded false. | P ordinary fixture/tests; origin encoding edge #18. |
 | A024 | `ResponseCollection.WebUrlIsEncoded` [2.2.3.6](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/a118e36d-0ff5-4407-a3b5-8acee374470e) | Schema required | P: WebUrl emitted from public origin; WebUrlIsEncoded false. | P ordinary fixture/tests; origin encoding edge #18. |
 | A025 | `ResponseVersion.ErrorCode` [2.2.3.7](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttp/2f0374de-3d32-454d-a594-95fa2343d49e) | Schema optional; version-level error restricted to specified conditions | P: ErrorCode used for authorization, ErrorMessage not modeled. | None for complete version-error matrix #18. |

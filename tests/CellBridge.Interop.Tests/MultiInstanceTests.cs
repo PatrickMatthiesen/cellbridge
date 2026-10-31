@@ -27,9 +27,13 @@ public class MultiInstanceTests
         Assert.Equal("Success", converted.Code);
         Assert.Equal("Alone", (string?)converted.Data?.Attribute("CoauthStatus"));
         transition = (string)converted.Data!.Attribute("TransitionID")!;
+        Assert.True(await IsOnlyClient(peer));
         Assert.Equal("Success", (await Send(first, "Coauth", "CoauthRequestType", "JoinCoauthoring", b, lockB)).Code);
+        Assert.False(await IsOnlyClient(first));
+        Assert.False(await IsOnlyClient(peer));
         Assert.Equal("False", (string?)(await Send(peer, "AmIAlone", null, null, a, lockA)).Data?.Attribute("AmIAlone"));
         Assert.Equal("Success", (await Send(first, "Coauth", "CoauthRequestType", "MarkTransitionComplete", a, lockA)).Code);
+        Assert.True(await IsOnlyClient(peer));
         // Both callers request release on failure. One exits; the remaining
         // coauthor can then obtain exclusive access, on either host.
         var competing = await Task.WhenAll(
@@ -40,6 +44,21 @@ public class MultiInstanceTests
         int winner = competing[0].Code == "Success" ? 0 : 1;
         Assert.Equal("Success", (await Send(peer, "ExclusiveLock", "ExclusiveLockRequestType", "ReleaseLock",
             winner == 0 ? a : b, winner == 0 ? lockA : lockB)).Code);
+
+        async Task<bool> IsOnlyClient(Uri endpoint)
+        {
+            XNamespace ns = "http://schemas.microsoft.com/sharepoint/soap/";
+            XNamespace soap = "http://schemas.xmlsoap.org/soap/envelope/";
+            var message = new XElement(soap + "Envelope", new XElement(soap + "Body",
+                new XElement(ns + "IsOnlyClient", new XElement(ns + "id", transition))));
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint, "/_vti_bin/sharedaccess.asmx"))
+            { Content = new StringContent(message.ToString(), Encoding.UTF8, "text/xml") };
+            request.Headers.TryAddWithoutValidation("SOAPAction", "\"http://schemas.microsoft.com/sharepoint/soap/IsOnlyClient\"");
+            using var response = await http.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+            var result = XDocument.Parse(await response.Content.ReadAsStringAsync());
+            return bool.Parse(result.Descendants(ns + "IsOnlyClientResult").Single().Value);
+        }
 
         async Task<(string? Code, XElement? Data)> Send(Uri endpoint, string type, string? key,
             string? operation, string client, string exclusive)

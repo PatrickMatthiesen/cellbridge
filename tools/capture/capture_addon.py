@@ -7,6 +7,7 @@ the evidence written to disk; callbacks always return the original bytes.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import platform
@@ -32,6 +33,39 @@ def _redact_url(value: str) -> str:
     path, query, _ = path.partition("?")
     path = re.sub(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/]*@", r"\1[REDACTED]@", path)
     return path + ("?[REDACTED]" if query else "") + ("#[REDACTED]" if fragment else "")
+
+
+def _query_parameter_names(value: str) -> list[str]:
+    """Return bounded ordinary query names without decoding or retaining values."""
+    path, separator, query = value.partition("?")
+    if not separator:
+        return []
+    query = query.partition("#")[0]
+    if not query or len(query) > 8192:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for segment in query.split("&")[:64]:
+        if "=" not in segment:
+            continue
+        name = segment.split("=", 1)[0]
+        if len(name) > 64 or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", name):
+            continue
+        lower = name.lower()
+        if (re.fullmatch(r"[0-9a-f]{16,}", lower)
+                or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,}", lower)
+                or (len(name) >= 16 and any(c.islower() for c in name)
+                    and any(c.isupper() for c in name) and any(c.isdigit() for c in name)
+                    and "_" not in name and "." not in name and "-" not in name)
+                or (len(name) >= 24 and "_" not in name and "." not in name and "-" not in name)):
+            continue
+        if lower not in seen:
+            names.append(name)
+            seen.add(lower)
+            if len(names) == 32:
+                break
+    return names
 
 
 def _now() -> str:
@@ -181,6 +215,9 @@ class CaptureAddon:
         self.root = Path(output)
         self.hosts = sorted(set(hosts))
         self.reverse_upstream = env.get("CAPTURE_REVERSE_UPSTREAM") or None
+        local_processes = env.get("CAPTURE_LOCAL_PROCESSES") or ""
+        self.local_processes = local_processes.split(",") if local_processes else []
+        self.http2 = env.get("CAPTURE_HTTP2") == "true"
         self.max_body = int(env.get("CAPTURE_MAX_BODY_BYTES", 32 * 1024 * 1024))
         self.max_total = int(env.get("CAPTURE_MAX_TOTAL_BYTES", 512 * 1024 * 1024))
         self.max_flows = int(env.get("CAPTURE_MAX_FLOWS", "10000"))
@@ -200,6 +237,8 @@ class CaptureAddon:
         self.recording_healthy = True
         self.recording_errors: list[str] = []
         self.recording_error_details: list[dict[str, Any]] = []
+        self.transport_error_details: list[dict[str, Any]] = []
+        self.terminal_status: str | None = None
         self.started_at = _now()
         private_directory(self.root)
         private_directory(self.root / "flows")
@@ -240,6 +279,18 @@ class CaptureAddon:
             return "unknown"
 
     def _write_manifest(self, status: str) -> None:
+        if self.terminal_status is not None:
+            # Mitmproxy may dispatch final flow/WebSocket hooks after DoneHook.
+            # Keep shutdown terminal, and only downgrade a provisional complete
+            # result when a late hook reveals an error or incomplete flow.
+            if self.terminal_status == "complete" and (
+                not self.recording_healthy
+                or any(x.get("completeness") != "complete" or
+                       (x.get("websocket_expected") and x.get("websocket", {}).get("completeness") != "complete")
+                       for x in self.exchanges.values())
+            ):
+                self.terminal_status = "incomplete"
+            status = self.terminal_status
         manifest = {
             "schema_version": 2,
             "session_id": self.session_id,
@@ -251,7 +302,9 @@ class CaptureAddon:
             "started_at": self.started_at,
             "updated_at": _now(),
             "allowed_hosts": self.hosts,
-            "proxy_mode": "reverse" if self.reverse_upstream else "forward",
+            "proxy_mode": "local" if self.local_processes else "reverse" if self.reverse_upstream else "forward",
+            "local_processes": self.local_processes,
+            "http2": self.http2,
             "reverse_upstream": self.reverse_upstream,
             "flow_count": len(self.exchanges),
             "pending_count": sum(1 for x in self.exchanges.values() if x.get("completeness") == "pending" or x.get("websocket", {}).get("completeness") == "pending"),
@@ -263,6 +316,7 @@ class CaptureAddon:
             "errors": self.recording_errors,
             "recording_errors": self.recording_errors,
             "recording_error_details": self.recording_error_details,
+            "transport_error_details": self.transport_error_details,
             "captured_body_bytes": self.total_captured,
             "limits": {"max_body_bytes": self.max_body, "max_total_bytes": self.max_total,
                        "max_flows": self.max_flows, "max_websocket_message_bytes": self.max_ws_message,
@@ -287,11 +341,107 @@ class CaptureAddon:
 
     def _allowed(self, flow: Any) -> bool:
         host = self._host(flow)
+        if self.local_processes:
+            # With transparent interception mitmproxy may set request.host to
+            # the resolved server IP. The decoded authority/Host and client
+            # SNI carry the DNS identity selected by the Office process.
+            names = self._local_dns_names(flow)
+            return bool(names) and len(set(names)) == 1 and all(name in self.hosts for name in names)
         return host in self.hosts
+
+    @staticmethod
+    def _dns_name(value: str) -> str:
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("idna", "strict")
+            except UnicodeError:
+                return ""
+        value = value.strip()
+        if not value or "://" in value:
+            return ""
+        try:
+            parsed = urlsplit("//" + value)
+            if parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment:
+                return ""
+            _ = parsed.port  # Reject malformed ports even though matching is host-only.
+            host = (parsed.hostname or "").rstrip(".").lower()
+        except ValueError:
+            return ""
+        if not host:
+            return ""
+        try:
+            ipaddress.ip_address(host)
+            return ""
+        except ValueError:
+            pass
+        return host if re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host) else ""
+
+    @classmethod
+    def _local_dns_names(cls, flow: Any) -> list[str]:
+        request = flow.request
+        values = [
+            getattr(getattr(flow, "client_conn", None), "sni", "") or "",
+            getattr(request, "authority", "") or "",
+            getattr(request, "host_header", "") or "",
+            getattr(request, "host", "") or "",
+        ]
+        names = []
+        for value in values:
+            if not value:
+                continue
+            name = cls._dns_name(str(value))
+            if not name:
+                try:
+                    ipaddress.ip_address(str(value).strip("[]"))
+                    continue
+                except ValueError:
+                    pass
+                return []
+            names.append(name)
+        return names
+
+    def _capture_host(self, flow: Any) -> str:
+        if self.local_processes:
+            names = self._local_dns_names(flow)
+            if names and len(set(names)) == 1:
+                return names[0]
+        return self._host(flow)
+
+    def _destination_ip(self, flow: Any) -> str | None:
+        if not self.local_processes:
+            return None
+        try:
+            return str(ipaddress.ip_address(self._host(flow)))
+        except ValueError:
+            return None
+
+    def _transport_detail(self, category: str, host: str = "", port: Any = None,
+                          sni: str = "", authority: str = "", host_header: str = "",
+                          cause: str = "") -> None:
+        """Record only the failed network destination, never TLS or request contents."""
+        safe_host = host.rstrip(".").lower()
+        if safe_host and not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", safe_host):
+            safe_host = "[unavailable]"
+        if not isinstance(port, int) or not 0 < port <= 65535:
+            port = None
+        detail = {"error": category, "host": safe_host or "[unavailable]", "port": port}
+        for key, value in (("sni", sni), ("authority", authority), ("host_header", host_header)):
+            if value:
+                detail[key] = self._dns_name(value) or "[unavailable]"
+        if cause:
+            detail["cause"] = cause
+        with self.lock:
+            if detail not in self.transport_error_details and len(self.transport_error_details) < 32:
+                self.transport_error_details.append(detail)
 
     def requestheaders(self, flow: Any) -> None:
         if not self._allowed(flow):
             self._recording_error("destination_not_allowlisted")
+            request = flow.request
+            self._transport_detail(
+                "destination_not_allowlisted", self._host(flow), getattr(request, "port", None),
+                getattr(getattr(flow, "client_conn", None), "sni", "") or "",
+                getattr(request, "authority", "") or "", getattr(request, "host_header", "") or "")
             self._write_manifest("running")
             flow.kill()
             return
@@ -327,13 +477,17 @@ class CaptureAddon:
             "completeness": "pending",
             "request": {
                 "timestamp": _now(), "method": str(getattr(req, "method", "")),
-                "scheme": str(getattr(req, "scheme", "")), "host": self._host(flow),
+                "scheme": str(getattr(req, "scheme", "")), "host": self._capture_host(flow),
                 "port": getattr(req, "port", None), "path": _redact_url(str(getattr(req, "path", ""))),
+                "query_parameter_names": _query_parameter_names(str(getattr(req, "path", ""))),
                 "http_version": str(getattr(req, "http_version", "")), "headers": _headers(req.headers),
                 "original_host_header": original_host_header,
                 "client_connection_id": str(getattr(conn, "id", "")),
             },
         }
+        destination_ip = self._destination_ip(flow)
+        if destination_ip:
+            self.exchanges[fid]["request"]["destination_ip"] = destination_ip
         self.next_sequence += 1
         sink = BodySink(self, fid, "request")
         self.sinks[(fid, "request")] = sink
@@ -345,6 +499,7 @@ class CaptureAddon:
         """Reject disallowed CONNECT targets before mitmproxy opens upstream."""
         if not self._allowed(flow):
             self._recording_error("destination_not_allowlisted")
+            self._transport_detail("destination_not_allowlisted", self._host(flow), getattr(flow.request, "port", None))
             self._write_manifest("running")
             flow.kill()
 
@@ -354,16 +509,55 @@ class CaptureAddon:
             # HTTP Host selects the SharePoint zone; TLS verifies the real server.
             data.server.sni = urlsplit(self.reverse_upstream).hostname
 
-    def _transport_failure(self, category: str) -> None:
+    @staticmethod
+    def _tls_failure_cause(error: Any, *, upstream: bool) -> str:
+        """Map engine errors to fixed labels; never persist raw TLS exception text."""
+        message = str(error or "").lower()
+        # mitmproxy wraps a plain disconnect in text that mentions certificate
+        # trust. Match transport closure before considering certificate alerts.
+        if any(token in message for token in ("connection closed", "disconnected during the handshake",
+                                               "unexpected eof", "eof occurred", "connection reset",
+                                               "broken pipe", "forcibly closed")):
+            return "connection_closed"
+        if any(token in message for token in ("unknown ca", "unknown_ca", "bad certificate",
+                                               "certificate unknown")):
+            return "upstream_certificate_rejected" if upstream else "client_unknown_ca"
+        if any(token in message for token in ("certificate verify failed", "certificate verification failed",
+                                               "verify error", "alert certificate")):
+            return "upstream_certificate_rejected" if upstream else "client_certificate_rejected"
+        if any(token in message for token in ("timed out", "timeout")):
+            return "timeout"
+        if any(token in message for token in ("eof", "closed", "reset", "broken pipe")):
+            return "connection_closed"
+        if any(token in message for token in ("handshake", "alert", "protocol version", "wrong version")):
+            return "handshake_failure"
+        return "other"
+
+    def _transport_failure(self, category: str, host: str = "", port: Any = None, cause: str = "") -> None:
         # Handshake failures can occur before requestheaders creates a flow.
         self._recording_error(category)
+        self._transport_detail(category, host, port, cause=cause)
         self._write_manifest("running")
 
     def tls_failed_client(self, data: Any) -> None:
-        self._transport_failure("tls_failed_client")
+        context = getattr(data, "context", None)
+        client = getattr(context, "client", None)
+        server = getattr(context, "server", None)
+        address = getattr(server, "address", None)
+        conn = getattr(data, "conn", None)
+        self._transport_failure("tls_failed_client", getattr(client, "sni", "") or "",
+                                address[1] if isinstance(address, tuple) and len(address) > 1 else None,
+                                self._tls_failure_cause(getattr(conn, "error", None) or getattr(data, "error", None),
+                                                        upstream=False))
 
     def tls_failed_server(self, data: Any) -> None:
-        self._transport_failure("tls_failed_server")
+        conn = getattr(data, "conn", None)
+        address = getattr(conn, "address", None)
+        self._transport_failure("tls_failed_server",
+                                address[0] if isinstance(address, tuple) and address else "",
+                                address[1] if isinstance(address, tuple) and len(address) > 1 else None,
+                                self._tls_failure_cause(getattr(conn, "error", None) or getattr(data, "error", None),
+                                                        upstream=True))
 
     def server_connect_error(self, data: Any) -> None:
         self._transport_failure("server_connect_error")
@@ -550,6 +744,7 @@ class CaptureAddon:
                          (x.get("websocket_expected") and x.get("websocket", {}).get("completeness") != "complete")
                          for x in self.exchanges.values())
         status = "complete" if not pending and not incomplete and self.recording_healthy else "incomplete"
+        self.terminal_status = status
         self._write_manifest(status)
 
     async def running(self) -> None:

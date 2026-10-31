@@ -19,7 +19,7 @@ dotnet test tests/CellBridge.Interop.Tests
 
 The HTTP collection reuses `src/CellBridge.AppHost` through Hosting.Testing.
 Its fixture removes the persistent PostgreSQL mount and capture resources, runs
-the current schema initialization, seeds a temporary Identity account, and starts
+the current schema initialization, seeds two temporary Identity accounts, and starts
 two local WebDemo processes against that same database. Both run on the machine
 running `dotnet test`; no second machine or manually started server is needed.
 The fixture uses real login and antiforgery flows and creates its
@@ -54,5 +54,10 @@ Live HTTP tests require `CELLBRIDGE_INTEROP_COOKIE` and `CELLBRIDGE_INTEROP_CSRF
 from an ordinary signed-in creator account. Cookies must include the paired
 antiforgery cookie; the token must be issued after sign-in. Keep these values
 out of logs and captures. The default Hosting.Testing fixture supplies both
-privately after signing into its temporary account. A shared account across hosts tests cookie and storage
-sharing, not distinct authenticated desktop coauthoring.
+privately after signing into its first temporary account. Most tests share that
+account across hosts to check cookie and storage sharing. A separate test signs
+in both accounts independently, grants both write access to one document, and
+checks concurrent coauthor joins, persisted subject ownership, session hijack
+rejection and independent departure. That test requires the disposable fixture
+and skips an external endpoint override. These HTTP tests do not qualify native
+desktop coauthoring or edit propagation.
