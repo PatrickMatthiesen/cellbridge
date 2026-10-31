@@ -108,7 +108,12 @@ public sealed partial class CellBridgeDocumentService
         { [index.DataElementExtendedGuid] = mappings.Where(mapping => mapping.Serial.Guid != Guid.Empty)
             .Select(mapping => new SerialNumber(mapping.Serial.Guid, mapping.Serial.Value)).ToArray() };
         var selection = FileQueryResponseBuilder.Select(metadata, index.DataElementExtendedGuid, cell, partition.Knowledge,
-            request, mappingSerials, required, StorageIds.Restore(partition.Identity.CellShort));
+            request, mappingSerials, required, StorageIds.Restore(partition.Identity.CellShort),
+            request?.MaxDataElements is > 0
+                ? read.Elements.ToDictionary(element => StorageIds.Restore(element.Id), element => element.Payload.Length)
+                : null);
+        if (selection.Error is { } selectionError)
+            return new(FileQueryResponseBuilder.Unsupported(operation.RequestId, selectionError), read.Current);
         var handles = read.Elements.Where(element => selection.PayloadIds.Contains(StorageIds.Restore(element.Id)) && !loaded.ContainsKey(element.Id)).ToArray();
         var bytes = await provider.Content.ReadManyVerifiedAsync(handles.Select(element => element.Payload), provider.Limits.MaxObjectBytes, cancellationToken);
         foreach (var element in handles)

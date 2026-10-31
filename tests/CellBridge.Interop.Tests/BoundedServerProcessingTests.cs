@@ -95,7 +95,7 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
     [InlineData("continuation")]
     [InlineData("hierarchy-ignored")]
     [InlineData("hierarchy-fail")]
-    public async Task MicrosoftWrittenUnsupportedControlsLeaveStateUnchangedAndFollowingQuerySucceeds(string control)
+    public async Task MicrosoftWrittenControlsLeaveStateUnchangedAndFollowingQuerySucceeds(string control)
     {
         var provider = Memory();
         var service = new CellBridgeDocumentService(provider);
@@ -139,7 +139,7 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
         Assert.Equal(new ulong[] { 1, 2, 3 }, response.CellSubResponses.Select(s => s.RequestID.DecodedValue));
         Assert.False(response.CellSubResponses[0].Status); Assert.False(response.CellSubResponses[2].Status);
         var middle = response.CellSubResponses[1];
-        Assert.Equal(control != "hierarchy-ignored", middle.Status);
+        Assert.Equal(control is not ("hierarchy-ignored" or "continuation"), middle.Status);
         if (middle.Status)
         {
             Assert.Equal(Guid.Parse(Reference.ResponseError.CellErrorGuid), middle.ResponseError.ErrorTypeGUID);
@@ -147,7 +147,12 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
         }
         var expectedIndex = file.StorageIndex;
         foreach (var sub in response.CellSubResponses.Where(s => !s.Status))
-            Equal(StorageIds.Capture(expectedIndex), sub.GetSubResponseData<Reference.QueryChangesSubResponseData>().StorageIndexExtendedGUID);
+        {
+            var data = sub.GetSubResponseData<Reference.QueryChangesSubResponseData>();
+            bool partial = control == "continuation" && sub.RequestID.DecodedValue == 2;
+            Assert.Equal(partial, data.PartialResult);
+            Equal(StorageIds.Capture(partial ? ExGuid.Null : expectedIndex), data.StorageIndexExtendedGUID);
+        }
         await Unchanged(provider, initial.ResourceId, unchanged, content);
         if (control == "hierarchy-ignored")
         {
@@ -182,6 +187,58 @@ public sealed class BoundedServerProcessingTests(ITestOutputHelper output)
             Assert.Equal(0,accepted.State.Counters.SaveReceipts);
         }
         output.WriteLine($"seed={Seed} bytes={wire.Length} mutation={control} rejected={middle.Status}");
+    }
+
+    [Fact]
+    public async Task MicrosoftWrittenFollowupsAssembleCompleteElementsThroughTheFinalIndex()
+    {
+        var provider = Memory();
+        var service = new CellBridgeDocumentService(provider);
+        byte[] content = DocumentBytes();
+        var initial = await service.CreateAsync("/continuation.docx", content, Actor);
+        Assert.NotNull(initial);
+        string unchanged = JsonSerializer.Serialize(initial);
+        var file = await GraphAsync(service, initial);
+        var received = new Dictionary<ExGuid, DataElement>();
+        Reference.Knowledge knowledge = null;
+        bool completed = false;
+        for (int page = 0; page < file.Elements.Count(); page++)
+        {
+            var query = Query((ulong)page + 1);
+            query.MaxDataElements = new(1);
+            query.Knowledge = knowledge;
+            var executed = await new CellBridgeDocumentService(provider).ExecuteAsync(initial.ResourceId,
+                DocumentPartitionKind.FileContents, Decode(Request([query]).SerializeToByteList().ToArray()),
+                new Dictionary<string, string>(), Actor);
+            Assert.Empty(executed.AcceptedSaves);
+            var parsed = Reference.FsshttpbResponse.DeserializeResponseFromByteArray(
+                executed.Response.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11), 0);
+            var sub = Assert.Single(parsed.CellSubResponses);
+            Assert.False(sub.Status);
+            Assert.Equal(query.RequestID, sub.RequestID.DecodedValue);
+            var data = sub.GetSubResponseData<Reference.QueryChangesSubResponseData>();
+            var element = Assert.Single(executed.Response.DataElementPackage!.DataElements);
+            var referenceElement = Assert.Single(parsed.DataElementPackage.DataElements);
+            Equal(StorageIds.Capture(element.DataElementExtendedGuid), referenceElement.DataElementExtendedGUID);
+            Assert.True(received.TryAdd(element.DataElementExtendedGuid, element));
+            knowledge = data.Knowledge;
+            var possession = ClientKnowledge.Deserialize(new(knowledge.SerializeToByteList().ToArray()));
+            foreach (var expected in file.Elements)
+                Assert.Equal(received.ContainsKey(expected.DataElementExtendedGuid), possession.Contains(expected.SerialNumber));
+            if (data.PartialResult)
+            {
+                Equal(StorageIds.Capture(ExGuid.Null), data.StorageIndexExtendedGUID);
+                Assert.NotEqual(DataElementType.StorageIndexDataElementData, element.DataElementType);
+                continue;
+            }
+            Equal(StorageIds.Capture(file.StorageIndex), data.StorageIndexExtendedGUID);
+            completed = true;
+            break;
+        }
+        Assert.True(completed);
+        Assert.Equal(file.Elements.Count(), received.Count);
+        Assert.Equal(content, PartitionGraphSnapshot.Create(received.Values, file.StorageIndex).Materialize());
+        await Unchanged(provider, initial.ResourceId, unchanged, content);
     }
 
     private static Reference.DataElementPackage StoredPackage(PartitionGraphSnapshot file)

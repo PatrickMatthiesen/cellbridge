@@ -52,8 +52,15 @@ signature is `0x9B069439F329CF9D`. The standalone library defaults to binary
 protocol version 12 with minimum version 11. The HTTP endpoint uses the
 `SharePoint13_11` compatibility profile and writes version 13 with minimum 11.
 
-A successful QueryChanges response includes the storage index and complete
-Knowledge structures as well as its data-element package. Each partition retains
+A complete QueryChanges response includes the storage index and a Knowledge
+structure as well as its data-element package. Bounded complete-element pages
+set `PartialResult` and withhold knowledge for omitted elements and the final
+waterline. The final page returns the storage index. Clients continue using
+returned knowledge; each page selects the
+current graph rather than a pinned revision. `MaxDataElements` starts partial
+delivery at a byte threshold; the last complete element can exceed it. The
+server's independent response limit remains a hard bound. Fragmented element
+downloads are not implemented. Each partition retains
 its own identities and serials. File-partition PutChanges applies graph changes
 and validates coherency before publication. Unsupported upload modes return
 explicit protocol errors.

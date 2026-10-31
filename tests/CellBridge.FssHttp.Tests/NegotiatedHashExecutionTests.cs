@@ -27,7 +27,7 @@ public sealed class NegotiatedHashExecutionTests
 
     [Theory]
     [InlineData(true)] [InlineData(false)]
-    public void ProjectionOverheadRejectsOnlyLaterQueryAndHonorsServerAndQueryBudgets(bool instead)
+    public void ProjectionOverheadFitsCrossingElementButCannotExceedServerBudget(bool instead)
     {
         var raw = RawGroup(1);
         ulong rawSize = (ulong)Size(raw);
@@ -37,10 +37,12 @@ public sealed class NegotiatedHashExecutionTests
         assembler.AppendSave(Result(prior, RequestTypes.PutChanges, 1));
         assembler.Append(Result(raw, RequestTypes.QueryChanges, 2), new() { MaxDataElements = rawSize });
         Assert.False(response.SubResponses[0].Status);
-        Assert.True(response.SubResponses[1].Status);
-        Assert.Equal(ErrorType.Cell, response.SubResponses[1].Error!.Type);
-        Assert.Equal((ulong)CellErrorCode.RequestNotSupported, response.SubResponses[1].Error!.ErrorCode);
-        Assert.Same(prior, Assert.Single(response.DataElementPackage!.DataElements));
+        Assert.False(response.SubResponses[1].Status);
+        Assert.Contains(prior, response.DataElementPackage!.DataElements);
+        var projected = Assert.Single(response.DataElementPackage.DataElements,
+            e => e.DataElementExtendedGuid.Equals(raw.DataElementExtendedGuid));
+        Assert.True(IsHash(projected));
+        Assert.True((ulong)Size(projected) > rawSize);
         var boundedResponse = new FsshttpbResponse();
         var bounded = new QueryChangesResponseAssembler(boundedResponse, (long)rawSize, new(1, instead, true), Configuration);
         bounded.Append(Result(raw, RequestTypes.QueryChanges, 3));
@@ -48,14 +50,17 @@ public sealed class NegotiatedHashExecutionTests
         Assert.Null(boundedResponse.DataElementPackage);
     }
 
-    [Fact]
-    public void LaterSaveAndSerialUpgradeCannotViolateEarlierProjectedBudget()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LaterSaveAndSerialUpgradeCannotViolateEarlierProjectedBudget(bool tinyThreshold)
     {
         var raw = RawGroup(1024);
         var projected = ObjectGroupWireHash.Project(raw, new(HashesInsteadOfData: true), Configuration);
         var response = new FsshttpbResponse();
         var assembler = new QueryChangesResponseAssembler(response, 10000, new(HashesInsteadOfData: true), Configuration);
-        assembler.Append(Result(raw, RequestTypes.QueryChanges, 1), new() { MaxDataElements = (ulong)Size(projected) });
+        assembler.Append(Result(raw, RequestTypes.QueryChanges, 1), new()
+            { MaxDataElements = tinyThreshold ? 1UL : (ulong)Size(projected) });
         var originalWire = response.ToByteArray();
         Assert.False(assembler.CanAppend(Result(raw, RequestTypes.PutChanges, 2).DataElementPackage));
         Assert.Equal(originalWire, response.ToByteArray());

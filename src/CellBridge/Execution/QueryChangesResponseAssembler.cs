@@ -14,13 +14,13 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
 
     private sealed record QueryBudget(HashSet<ExGuid> Ids, ulong Maximum);
 
-    // This budget counts serialized data elements, as the query shaper does.
+    // This budget counts serialized data elements, as page selection does.
     // Mandatory save payloads must pass this same check before publication.
-    public bool CanAppend(DataElementPackage? package) => TryCombine(package, true, null, out _, out _, out _, out _);
+    public bool CanAppend(DataElementPackage? package) => TryCombine(package, true, out _, out _, out _, out _);
 
     public void AppendSave(FsshttpbResponse save)
     {
-        if (!TryCombine(save.DataElementPackage, true, null, out var proposed, out var projected, out var saveIds, out var error))
+        if (!TryCombine(save.DataElementPackage, true, out var proposed, out var projected, out var saveIds, out var error))
             throw new InvalidOperationException($"A published save response failed its preflight: {error}");
         CommitPackage(save.DataElementPackage, proposed, projected, saveIds);
         response.SubResponses.AddRange(save.SubResponses);
@@ -28,21 +28,27 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
 
     public void Append(FsshttpbResponse query, QueryChangesSubRequestData? controls = null)
     {
-        var budget = query.DataElementPackage is { } package && controls?.MaxDataElements is > 0
-            ? new QueryBudget(package.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet(), controls.MaxDataElements.Value)
-            : null;
-        if (!TryCombine(query.DataElementPackage, false, budget, out var proposed, out var projected, out var saveIds, out var error))
+        if (!TryCombine(query.DataElementPackage, false, out var proposed, out var projected, out var saveIds, out var error))
         {
             Reject(query, error!);
             response.SubResponses.AddRange(query.SubResponses);
             return;
         }
         CommitPackage(query.DataElementPackage, proposed, projected, saveIds);
-        if (budget is not null) _queryBudgets.Add(budget);
+        // Selection can finish an element beyond the client threshold, and
+        // hashing can enlarge it. Freeze the admitted projected page's allowance
+        // for later merges and save preflight. TryCombine enforces previous
+        // allowances and the independent aggregate server limit first.
+        if (query.DataElementPackage is { } package && controls?.MaxDataElements is > 0)
+        {
+            var ids = package.DataElements.Select(e => e.DataElementExtendedGuid).ToHashSet();
+            _queryBudgets.Add(new(ids, Math.Max(controls.MaxDataElements.Value,
+                checked((ulong)ids.Sum(id => Size(projected[id]))))));
+        }
         response.SubResponses.AddRange(query.SubResponses);
     }
 
-    private bool TryCombine(DataElementPackage? package, bool save, QueryBudget? budget,
+    private bool TryCombine(DataElementPackage? package, bool save,
         out Dictionary<ExGuid, DataElement> proposed, out Dictionary<ExGuid, DataElement> projected,
         out HashSet<ExGuid> saveIds, out string? error)
     {
@@ -106,7 +112,7 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
             return false;
         }
         var candidate = projected;
-        foreach (var constraint in budget is null ? _queryBudgets : _queryBudgets.Append(budget))
+        foreach (var constraint in _queryBudgets)
         {
             ulong used = 0;
             foreach (var id in constraint.Ids)
@@ -114,7 +120,7 @@ internal sealed class QueryChangesResponseAssembler(FsshttpbResponse response, l
                 ulong size = (ulong)Size(candidate[id]);
                 if (size > constraint.Maximum - used)
                 {
-                    error = "The projected response exceeds an admitted QueryChanges byte budget.";
+                    error = "The projected response exceeds an admitted QueryChanges page allowance.";
                     return false;
                 }
                 used += size;

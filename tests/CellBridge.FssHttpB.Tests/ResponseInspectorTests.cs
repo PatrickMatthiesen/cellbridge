@@ -91,6 +91,72 @@ public sealed class ResponseInspectorTests
     }
 
     [Fact]
+    public void QueryChanges_DoesNotTreatElementMarkersInsideBlobAsFraming()
+    {
+        static byte[] Serialize(Action<BinaryWriterEx> write)
+        {
+            var writer = new BinaryWriterEx();
+            write(writer);
+            return writer.ToArray();
+        }
+
+        var embeddedFollowingElement = new DataElement(DataElementType.ObjectDataBLOBDataElementData,
+            new ExGuid(7, Guid.Parse("20000000-0000-0000-0000-000000000007")), SerialNumber.Null);
+        byte[] embeddedElementBytes = Serialize(w => embeddedFollowingElement.Serialize(w));
+
+        // Image payloads are arbitrary bytes. This sequence resembles a real
+        // element boundary, including a valid following DataElement header.
+        byte[] blobPayload = Serialize(w =>
+        {
+            new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.DataElement).Serialize(w);
+            w.WriteBytes(embeddedElementBytes);
+        });
+        byte[] blobObject = Serialize(w =>
+        {
+            new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.ObjectDataBLOB, blobPayload.Length).Serialize(w);
+            w.WriteBytes(blobPayload);
+        });
+        var first = new DataElement(DataElementType.ObjectDataBLOBDataElementData,
+            new ExGuid(1, Guid.Parse("20000000-0000-0000-0000-000000000001")), SerialNumber.Null)
+        { Data = blobObject };
+        var second = new DataElement(DataElementType.ObjectDataBLOBDataElementData,
+            new ExGuid(2, Guid.Parse("20000000-0000-0000-0000-000000000002")), SerialNumber.Null)
+        { Data = Serialize(w =>
+        {
+            byte[] payload = [0x10, 0x20, 0x30, 0x40];
+            new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.ObjectDataBLOB, payload.Length).Serialize(w);
+            w.WriteBytes(payload);
+        }) };
+        var response = new FsshttpbResponse
+        {
+            DataElementPackage = new DataElementPackage { DataElements = { first, second } },
+            SubResponses =
+            {
+                new FsshttpbSubResponse
+                {
+                    RequestId = 1,
+                    RequestType = RequestTypes.QueryChanges,
+                    Data = new QueryChangesSubResponseData { PartialResult = true },
+                },
+            },
+        };
+
+        var inspection = FsshttpbResponseInspector.Inspect(response.ToByteArray());
+
+        Assert.Equal(2, inspection.DataElements.Count);
+        Assert.Equal(first.Data!.Length, inspection.DataElements[0].DataLength);
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(first.Data)).ToLowerInvariant(),
+            inspection.DataElements[0].DataSha256);
+        Assert.Equal(first.DataElementType, inspection.DataElements[0].DataElementType);
+        Assert.Equal("1:20000000-0000-0000-0000-000000000001", inspection.DataElements[0].ExtendedGuid);
+        Assert.Equal(second.Data!.Length, inspection.DataElements[1].DataLength);
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(second.Data)).ToLowerInvariant(),
+            inspection.DataElements[1].DataSha256);
+        Assert.Equal("2:20000000-0000-0000-0000-000000000002", inspection.DataElements[1].ExtendedGuid);
+        Assert.Contains("partial=True", inspection.ToCanonicalText());
+    }
+
+    [Fact]
     public void QueryChanges_UsesSharePointManifestSchemaAndRootIdentities()
     {
         var response = StorageManifestBuilder.BuildQueryChangesResponse(8, [1, 2, 3]);
@@ -126,7 +192,7 @@ public sealed class ResponseInspectorTests
     }
 
     [Fact]
-    public void UnknownDataElementPayload_IsRetainedAsDiagnostic()
+    public void MalformedUnknownDataElementPayload_StopsWithoutGuessingItsBoundary()
     {
         var package = new DataElementPackage
         {
@@ -157,7 +223,7 @@ public sealed class ResponseInspectorTests
         Assert.Single(inspection.DataElements);
         Assert.Equal((DataElementType)99, inspection.DataElements[0].DataElementType);
         Assert.NotEmpty(inspection.Issues);
-        Assert.Contains("element[0] object", inspection.ToCanonicalText());
+        Assert.Contains("response parse stopped:", inspection.ToCanonicalText());
     }
 
     [Fact]
