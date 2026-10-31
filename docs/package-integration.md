@@ -155,10 +155,10 @@ Office applications may share their cookie store, so signing into one can sign
 the others in too. Identity's two-factor checks still run before issuing an
 application cookie; this option does not remember a two-factor device.
 
-The helper does not select a default authentication scheme. ASP.NET Core can use
-a sole scheme as its implicit default, but adding another scheme removes that
-implicit choice. Mixed-scheme applications must explicitly select defaults or
-name schemes in their authorization policies. An existing explicit bearer or
+The login helper does not select a default authentication scheme. ASP.NET Core
+can use a sole scheme as its implicit default; RTC registration preserves that
+choice for a single host scheme. Mixed-scheme applications must explicitly select
+defaults or name schemes in their authorization policies. An existing explicit bearer or
 cookie default stays unchanged; CellBridge's Office endpoints select the login
 cookie explicitly. Keep `AddCellBridgeLogin<TAuthenticator>("Cookies")` when the
 host already registers that cookie. Do not register the same scheme twice.

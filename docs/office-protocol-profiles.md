@@ -1,6 +1,6 @@
 # Office protocol profiles
 
-CellBridge should keep one MS-FSSHTTP/MS-FSSHTTPB execution engine and support
+CellBridge uses one MS-FSSHTTP/MS-FSSHTTPB execution engine with
 different transports and optional collaboration capabilities around it. Personal
 OneDrive, SharePoint Server and WOPI Cobalt do not require separate file graph,
 history or publication implementations.
@@ -22,14 +22,9 @@ SharePoint Online tenant or Office Online Server.
 | OCS | Maintains and merges an active collaboration session and periodically saves to the host. | Observed in the Word reference flow. CellBridge does not implement OCS. |
 | WOPI | Connects an Office client/service to a host's file, identity and lock operations. | CellBridge supplies execution and shared-authority integration APIs, rather than WOPI HTTP endpoints. |
 
-On 2026-10-31, a scan of 1,103 captured personal OneDrive HTTP exchanges found
-90 FSSHTTP POSTs, 897 OCS POSTs and separate RTC discovery/transport exchanges.
-All 90 captured FSSHTTP requests and responses used SOAP 1.1. Extracted binary
-headers contained 86 request occurrences of **14/11** and 86 response occurrences
-of **13/11**. The body hashes were checked before extraction. These are header
-occurrences, not a count of independent edits or a performance measurement.
-The continuing capture has an abnormal WebSocket-end health flag, so these
-completed exchanges do not establish capture completeness.
+Examined personal OneDrive exchanges used SOAP 1.1, binary requests with
+version 14/11 and binary responses with version 13/11. This is a reference
+sample, not an exhaustive inventory of OneDrive protocol behavior.
 
 The observed OneDrive response version therefore agrees with CellBridge's
 13/11 response profile. Advertising or serializing 14/11 is not a prerequisite
@@ -76,34 +71,25 @@ permissions, schema/exclusive locks, file and metadata graphs, editor tables,
 saved revisions and atomic publication. A WebSocket cannot replace these rules.
 
 RTC adds immediate communication between clients. Microsoft documents its use
-for typing, presence, cursor positions and the coauthor gallery. OCS performs
+for typing, presence, cursor positions and the coauthor gallery. The
+[SignalR Hub Protocol](https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/docs/specs/HubProtocol.md)
+defines the outer message framing, not Office's payloads or document authorization.
+OCS performs
 different work: it holds active document state, merges edits and accumulates
 changes before writing them to the host. Microsoft explicitly permits
 coauthoring without OCS and describes transitions between OCS and direct host
 collaboration. See [CSPP supporting services](https://learn.microsoft.com/en-us/microsoft-365/cloud-storage-partner-program/plus/services).
 
-The current native evidence is mixed. Two-editor Excel and PowerPoint cases
-worked with a replayed reference discovery profile. With CellBridge's own
-discovery identity, two fresh Word clients exchanged saved edits in both
-directions, and a separate server download retained both markers. Peer cursors
-appeared, but names remained unresolved. Fresh Excel and PowerPoint opens also
-produced intermittent client-side busy errors. Matching PowerPoint server
-responses granted read/write access and did not show HTTP 503. Those results
-do not qualify reliable startup, typing latency or complete native presence.
+Native Word, Excel and PowerPoint tests exchanged saved changes between two
+authenticated editors. Word cursor indicators and Excel remote selections
+appeared, but participant names remained unresolved. See
+[client coverage and remaining work](interoperability.md#client-coverage) for
+the tested scope and limits.
 
-A subsequent cold Excel failure correlated native PROPFIND 429 responses with
-the same server requests and an initial SOAP 429. This demonstrated rejection
-by the host's per-subject admission boundary, after OPTIONS discovery succeeded.
-Admission now uses bounded FIFO waits while retaining the executing-request
-limits. RTC admission pressure raises a transient busy result rather than
-returning an authorization denial and removing a valid participant.
-
-On the queued-admission build, one fresh native Excel process opened the same
-workbook without the busy error, remained editable and automatically saved a
-new cell value. The already-open second machine received that value without
-Save or reopen and showed the first machine's new selection. Both clients
-still displayed `Loading name...`. This verifies that case, rather than
-reliable startup across all three applications or resolved participant names.
+Protocol admission uses bounded FIFO waits to absorb native opening bursts
+while retaining executing-request limits. RTC admission pressure returns a
+transient busy result rather than an authorization denial that would remove
+a valid participant. See [host request limits](package-integration.md).
 
 Coauthor exit retries retain client/schema/subject keys for the current shared
 session. CellBridge limits that session to 128 active and departed participants
@@ -181,12 +167,10 @@ test succeeds.
 
 ### WopiHost
 
-[WopiHost PR #735](https://github.com/petrsvihlik/WopiHost/pull/735), verified open
-and draft on 2026-10-31, integrates CellBridge behind `ICobaltProcessor` as an
-alternative to `Microsoft.CobaltCore`. Its stated target is MS-FSSHTTP carried
-by WOPI for Office Online Server. It parses raw binary or SOAP bodies and does
-not yet establish real OOS editing compatibility. This makes the common
-FSSHTTP engine the appropriate integration point.
+WopiHost's proposed [CellBridge integration](https://github.com/petrsvihlik/WopiHost/pull/735)
+uses `ICobaltProcessor` for MS-FSSHTTP carried by WOPI for Office Online Server.
+The common FSSHTTP engine is the integration point; package compatibility alone
+does not establish Office Online Server editing compatibility.
 
 Native URL discovery headers, forms authentication and the optional RTC hub
 should not become prerequisites for that processor. A processor-only host can disable RTC.
@@ -202,25 +186,15 @@ not implement WOPI shared/extended coauthor locks or cross-protocol conversion.
 See [the package boundary](package-integration.md#wopi-integration-boundary) and
 [external host reliability](external-host-reliability.md).
 
-The user's [fork PR #1](https://github.com/PatrickMatthiesen/WopiHost/pull/1)
-already adds coordinated whole-file saves to `implement/cellbridge-host-wrapper`.
-It is merged in that fork feature branch, rather than in upstream WopiHost.
-Its adapter uses shared locks, permission ceilings, conditional external
-publication and verified acknowledgements. It is the appropriate reference for
-the coordinated integration, rather than the older unconditional mirroring path.
-Its code still targets the earlier `Provider.State`/whole-state API. Before
-integrating current packages, port those calls to the indexed repository and
-service APIs and retain its conflict, retry and acknowledgement guarantees.
-The test-only SQLite destination does not establish a production revision-store
-adapter. Its stated OOS/MTOM qualification gaps also remain.
+An adapter must use shared locks, permission ceilings, conditional external
+publication and verified acknowledgements. Use the indexed repository and
+service APIs rather than loading complete document state or history.
+`SharedDocumentLocks.ReadAsync` provides authorized lock observation.
 
-The current core's `SharedDocumentLocks.ReadAsync` replaces the fork's raw-state
-lock observation. Import/binding and publication acknowledgement still need an
-adapter port. A shared publication-prefix helper must preserve the fork's
-verification of content no-ops: an empty outbox alone does not establish that
-the external destination still matches the acknowledged revision. Use indexed
-delivery and revision reads rather than loading complete history to make that
-decision.
+Content no-ops also require destination verification. An empty outbox alone
+does not establish that the external destination still matches the acknowledged
+revision. Use indexed delivery and revision reads for that decision. A test
+destination does not establish a production revision-store adapter.
 
 ## Support direction
 

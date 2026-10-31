@@ -114,17 +114,13 @@ Both unsafe controls produced counterexamples:
   whole-candidate replacement safe.
 
 These are counterexamples to omitted checks in this algorithm, not a claim that
-every correct algorithm needs the same fields or locks. The raw logs, exact
-configuration variants, source snapshot, tool URLs and hashes are retained in the
-ignored `artifacts/office-rewrite/model/` directory for this rewrite. Only the
-model, default configuration and this guide belong in Git.
+every correct algorithm needs the same fields or locks. Generated TLC logs and
+temporary configuration variants are not part of the source tree.
 
 ## Reproduce
 
 Download the [official TLC release](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4)
-and use a Java 11 or newer runtime. The verification used a private JRE from the
-[official Adoptium API](https://adoptium.net/installation/ci-scripts); its SHA-256
-matched the release metadata. Set `JAVA_BIN` and `TLC_JAR` to absolute paths.
+and use a Java 11 or newer runtime. Set `JAVA_BIN` and `TLC_JAR` to absolute paths.
 From the repository root:
 
 ```sh

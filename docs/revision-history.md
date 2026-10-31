@@ -157,12 +157,10 @@ reservation, clean replacement history and recreated SOAP mutation fencing.
 `CombinedPublicationTests` checks metadata and file publication with queued external publication,
 restoration, exact retries, atomic quota rejection and recreated resources on both providers.
 Native Word, Excel and PowerPoint `16.0.20527` listed persisted revisions, opened
-older content and restored it through their Version History controls on
-2026-10-30. Each restore created revision 3 with the original revision's SHA-256;
-revision 2 retained its saved marker. After a server restart, all nine retained
-downloads kept their hashes. Fresh Office processes listed the three revisions
-and opened revision 2 with its marker. See [client coverage](interoperability.md#client-coverage)
-for the trial's scope.
+older content and restored it through their Version History controls. Independent
+downloads verified the restored content and retained history after a server
+restart. Fresh Office processes repeated listing and historical open. See
+[client coverage](interoperability.md#client-coverage) for the tested scope.
 
 Independent decoded SharePoint version/rename/property reference traces and
 qualification on other Office builds remain open in [#7][history-issue] and
