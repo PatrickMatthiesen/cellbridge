@@ -21,7 +21,8 @@ public sealed class AsyncAuthorizationEndpointTests
         builder.WebHost.UseTestServer();
         TestActor.Register(builder.Services);
         builder.Services.AddSingleton<IDocumentAuthorizationProvider>(authority);
-        builder.Services.AddCellBridge(provider, requireDurability: false);
+        builder.Services.AddCellBridge(provider, requireDurability: false,
+            configure: options => options.EnableOfficeRealTime = false);
         var app = builder.Build();
         app.UseAuthentication(); app.UseAuthorization(); app.MapCellBridge();
         var service = app.Services.GetRequiredService<CellBridgeDocumentService>();

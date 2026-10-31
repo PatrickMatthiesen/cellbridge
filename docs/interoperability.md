@@ -185,8 +185,10 @@ The temporary insertion was undone and remained absent after native reopen.
 This correlates the two services with a known edit; it does not decode OCS's
 document blobs or independently verify publication to the file host.
 
-An experimental relay implements the captured SignalR methods and document-scoped
-tickets behind `CellBridgeOptions.EnableOfficeRealTime`, which defaults to false.
+The relay implements the captured SignalR methods and document-scoped tickets.
+`CellBridgeOptions.EnableOfficeRealTime` defaults to true; set it to false to
+disable RTC discovery and endpoints. WebDemo accepts `Protocol:EnableOfficeRealTime=false`,
+and AppHost accepts `Parameters:EnableOfficeRealTime=false`.
 It requires a single host and rejects `multipleInstances: true`. It also requires
 stored grants or an immutable versioned authorization policy so each delivery can
 check all participants against one permission snapshot. Enabling RTC with an
@@ -194,7 +196,7 @@ ordinary asynchronous authorization provider or a legacy access evaluator fails
 at startup. Initial native opens did not request RTC properties. Replaying the
 captured OneDrive OPTIONS response caused Word to request Properties and Excel
 to request RTC properties, negotiate SignalR and open a WebSocket to CellBridge.
-The experiment implements the observed storage and authoring discovery headers
+The relay implements the observed storage and authoring discovery headers
 and authenticated file metadata through `PROPFIND` with `Depth: 0`. Resource IDs,
 replication tags, file sizes, ETags and timestamps come from persisted metadata.
 OPTIONS responses use the same discovery profile on document and SOAP routes.

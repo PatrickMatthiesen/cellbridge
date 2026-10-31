@@ -269,6 +269,13 @@ before routing; prefixed route groups are rejected. Office must reach the extern
 HTTPS origin. Configure trusted forwarded headers before authentication behind a proxy,
 or set `PublicOrigin` to a fixed HTTPS origin without a path.
 
+Office RTC is enabled by default. To disable its discovery and endpoints, configure
+`AddCellBridge(..., configure: options => options.EnableOfficeRealTime = false)`.
+WebDemo uses `Protocol:EnableOfficeRealTime=false`; AppHost uses
+`Parameters:EnableOfficeRealTime=false`. Disable RTC for multi-instance hosts or
+ordinary asynchronous authorization providers. The relay requires a single host
+and stored grants or an immutable versioned authorization policy.
+
 Cookie schemes using `CookieAuthenticationOptions.EventsType` are unsupported here;
 use an `Events` instance. `IsRequestAllowed` gates every packaged GET and POST before
 credential or token processing. Connect host rate limiting and other admission policy

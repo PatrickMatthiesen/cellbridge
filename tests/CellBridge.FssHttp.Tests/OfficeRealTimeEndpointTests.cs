@@ -27,7 +27,7 @@ public sealed class OfficeRealTimeEndpointTests
     [InlineData(false, true)]
     [InlineData(true, false)]
     [InlineData(true, true)]
-    public async Task AuthoringDiscoveryIsScopedToTheRtcExperiment(bool enabled, bool mounted)
+    public async Task AuthoringDiscoveryFollowsRtcOption(bool enabled, bool mounted)
     {
         await using var fixture = await Fixture.Start(enabled, mounted);
         using var client = TestActor.CreateClient(fixture.Server, "writer");
@@ -373,7 +373,7 @@ public sealed class OfficeRealTimeEndpointTests
             await app.DisposeAsync();
         }
 
-        internal static async Task<Fixture> Start(bool enabled = true, bool mounted = false,
+        internal static async Task<Fixture> Start(bool? enabled = null, bool mounted = false,
             Action<CellBridgeOptions>? configure = null)
         {
             var clock = new ManualClock();
@@ -387,7 +387,7 @@ public sealed class OfficeRealTimeEndpointTests
             builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
             builder.Services.AddCellBridge(provider, requireDurability: false, configure: options =>
             {
-                options.EnableOfficeRealTime = enabled;
+                if (enabled is { } rtcEnabled) options.EnableOfficeRealTime = rtcEnabled;
                 options.PublicOrigin = PublicOrigin;
                 configure?.Invoke(options);
             });

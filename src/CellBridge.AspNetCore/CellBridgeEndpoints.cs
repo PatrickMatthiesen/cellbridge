@@ -54,7 +54,7 @@ public static class CellBridgeEndpoints
         var options = new CellBridgeOptions();
         configure?.Invoke(options);
         if (options.EnableOfficeRealTime && multipleInstances)
-            throw new NotSupportedException("The experimental Office RTC channel currently requires a single host.");
+            throw new NotSupportedException("Office RTC requires a single host. Set EnableOfficeRealTime to false when using multiple instances.");
         ArgumentNullException.ThrowIfNull(options.Hashing);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxRequestBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxConcurrentRequests);

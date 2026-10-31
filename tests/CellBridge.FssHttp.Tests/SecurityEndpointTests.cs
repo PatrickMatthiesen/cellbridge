@@ -92,7 +92,11 @@ public sealed class SecurityEndpointTests
     [Fact]
     public async Task DiscoveryUsesFixedOriginInsteadOfUntrustedHost()
     {
-        await using var fixture = await Fixture.Start(options => options.PublicOrigin = "https://office.example:8443");
+        await using var fixture = await Fixture.Start(options =>
+        {
+            options.PublicOrigin = "https://office.example:8443";
+            options.EnableOfficeRealTime = false;
+        });
         using var client = fixture.Client("writer");
         using var request = new HttpRequestMessage(HttpMethod.Options, "/shared");
         request.Headers.Host = "attacker.example";

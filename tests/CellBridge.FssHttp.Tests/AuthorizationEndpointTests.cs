@@ -34,7 +34,8 @@ public sealed partial class AuthorizationEndpointTests
         using var result = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.OK, result.StatusCode);
         Assert.Equal("1.5", Assert.Single(result.Headers.GetValues("X-MSFSSHTTP")));
-        Assert.Equal("http://localhost/shared/", Assert.Single(result.Headers.GetValues("X-MSGETWEBURL")));
+        Assert.Equal("1", Assert.Single(result.Headers.GetValues("MS-Storage")));
+        Assert.Equal("CellBridge", Assert.Single(result.Headers.GetValues("X-MSNSERVER")));
     }
 
     [Theory]

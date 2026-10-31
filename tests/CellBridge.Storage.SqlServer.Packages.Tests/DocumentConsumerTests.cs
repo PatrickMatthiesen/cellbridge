@@ -25,7 +25,7 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
     {
         var provider = Provider(Options("Server=unused.invalid;Database=unused;User ID=unused;Password=unused"));
         var services = new ServiceCollection();
-        services.AddCellBridge(provider, multipleInstances: true);
+        services.AddCellBridge(provider, multipleInstances: true, configure: options => options.EnableOfficeRealTime = false);
         using var host = services.BuildServiceProvider();
         Assert.NotNull(host.GetRequiredService<CellBridgeDocumentService>());
         provider.Require(durable: true, multipleInstances: true);
@@ -39,7 +39,7 @@ public sealed class DocumentConsumerTests(ITestOutputHelper output)
         var actor = new CellBridgeActor(new("package:writer", "writer", "Package writer"), CanCreate: true);
         var adminOptions = Options(database.Admin);
         var services = new ServiceCollection();
-        services.AddCellBridge(Provider(adminOptions), multipleInstances: true);
+        services.AddCellBridge(Provider(adminOptions), multipleInstances: true, configure: options => options.EnableOfficeRealTime = false);
         using (var host = services.BuildServiceProvider())
         {
             Assert.NotNull(host.GetRequiredService<CellBridgeDocumentService>());

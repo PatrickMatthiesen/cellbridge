@@ -79,8 +79,7 @@ public sealed class OfficeFormsAuthenticationTests
         Assert.Empty(await complete.Content.ReadAsByteArrayAsync());
         using var discovery = await fixture.Client.SendAsync(new(HttpMethod.Options, "/mount/shared/deep/"));
         Assert.Equal(HttpStatusCode.OK, discovery.StatusCode);
-        Assert.Equal("https://office.example:8446/mount/shared/",
-            discovery.Headers.GetValues("X-MSGETWEBURL").Single());
+        Assert.Equal("1", discovery.Headers.GetValues("MS-Storage").Single());
         using var post = await fixture.Client.SendAsync(new HttpRequestMessage(HttpMethod.Post,
             "/mount/shared/deep/file.docx/_vti_bin/cellstorage.svc")
         { Content = new StringContent("bad XML", System.Text.Encoding.UTF8, "text/xml") });

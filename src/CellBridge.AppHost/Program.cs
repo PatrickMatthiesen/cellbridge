@@ -47,7 +47,7 @@ webdemo.WithEnvironment(context =>
 webdemo.WithEnvironment("Authentication__ApplicationName", builder.AddParameter("ApplicationName",
     () => builder.Configuration["Parameters:ApplicationName"] ?? "CellBridge"));
 webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.Configuration["Parameters:WireCaptureDirectory"] ?? "");
-webdemo.WithEnvironment("Protocol__EnableOfficeRealTime", builder.Configuration["Parameters:EnableOfficeRealTime"] ?? "false");
+webdemo.WithEnvironment("Protocol__EnableOfficeRealTime", builder.Configuration["Parameters:EnableOfficeRealTime"] ?? "true");
 if (builder.Configuration["Parameters:DocumentLibraryId"] is { Length: > 0 } libraryId)
     webdemo.WithEnvironment("Protocol__DocumentLibraryId", libraryId);
 

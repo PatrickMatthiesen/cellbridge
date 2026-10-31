@@ -2,9 +2,9 @@ namespace CellBridge.AspNetCore;
 
 public sealed class CellBridgeOptions
 {
-    /// <summary>Enables the experimental Office RTC transport on a single host. Native discovery and streaming remain unqualified.</summary>
+    /// <summary>Enables Office RTC transport on a single host. Set false to disable RTC discovery and endpoints.</summary>
     /// <remarks>Requires stored grants or an immutable versioned policy, without an ordinary async provider or legacy access evaluator.</remarks>
-    public bool EnableOfficeRealTime { get; set; }
+    public bool EnableOfficeRealTime { get; set; } = true;
 
     /// <summary>Stable identity of the host's single document catalog. Configure the same GUID on every host and restart to enable Office GetVersions.</summary>
     public Guid? DocumentLibraryId { get; set; }

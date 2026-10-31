@@ -33,7 +33,7 @@ internal static class OfficeRealTimeEndpoints
     {
         if (!app.ServiceProvider.GetRequiredService<CellBridgeOptions>().EnableOfficeRealTime) return;
         if (!app.ServiceProvider.GetRequiredService<CellBridgeDocumentService>().SupportsOfficeRealTimeSnapshots)
-            throw new NotSupportedException("Office RTC requires stored grants or an immutable versioned authorization policy without a legacy access evaluator.");
+            throw new NotSupportedException("Office RTC requires stored grants or an immutable versioned authorization policy without a legacy access evaluator. Set EnableOfficeRealTime to false to use other authorization providers.");
         var authorization = new AuthorizeAttribute { AuthenticationSchemes = OfficeRealTimeRequest.AuthenticationScheme };
         var routes = app.MapGroup("/_cellbridge/rtc").RequireAuthorization(authorization);
         routes.MapGet("/FindSession", FindSession);
