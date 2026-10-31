@@ -6,6 +6,10 @@ how Office discovers and uses these protocols. The
 from conditional facilities and the remaining audit. SharePoint lists, search and
 unrelated APIs are outside this project's scope.
 
+See [Office protocol profiles](office-protocol-profiles.md) for the comparison
+of native OneDrive behavior, SharePoint synchronization, WOPI Cobalt and optional
+modern collaboration services.
+
 The bounded MS-SHDACCWS `IsOnlyClient` operation at
 `/_vti_bin/sharedaccess.asmx` lets an idle Office client detect a coauthor
 transition. It reads the same persisted transition state as MS-FSSHTTP and

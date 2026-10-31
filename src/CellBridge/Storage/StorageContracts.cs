@@ -29,10 +29,12 @@ public sealed record LastDeletedCoauthorSessionState(string Client, string Schem
 public sealed record CoordinationState(string? SchemaId, ImmutableArray<LeaseState> SchemaOwners,
     LeaseState? Exclusive, long Generation)
 {
+    public const int MaxCoauthorSessionParticipants = 128;
     public HostLease? HostLock { get; init; }
     public ImmutableArray<string> CoauthorClients { get; init; } = [];
     public bool CoauthorTransitionPending { get; init; }
     public LastDeletedCoauthorSessionState? LastDeletedCoauthorSession { get; init; }
+    public ImmutableArray<LastDeletedCoauthorSessionState> DeletedCoauthorParticipants { get; init; } = [];
     public static CoordinationState Empty { get; } = new(null, [], null, 0);
 }
 public sealed record SaveReceipt(string OperationKey, string Digest, uint ContentVersion,
