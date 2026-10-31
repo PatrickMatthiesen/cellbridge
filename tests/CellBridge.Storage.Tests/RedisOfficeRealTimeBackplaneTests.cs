@@ -15,6 +15,38 @@ namespace CellBridge.Storage.Tests;
 public sealed class RedisOfficeRealTimeBackplaneTests
 {
     [Fact]
+    public async Task Event_byte_counts_match_the_stored_unicode_and_escaped_json()
+    {
+        await using var f = await Fixture.Start();
+        var member = Member(new(Guid.NewGuid(), 1), "writer");
+        string epoch = (await f.Broker.ConnectAsync(member, default)).Snapshot!.Epoch;
+        string[] payloads =
+        [
+            $$"""{"text":"{{new string('漢', 14_000)}}"}""",
+            $$"""{"text":"{{new string('ش', 14_000)}}"}""",
+            $$"""{"text":"{{string.Concat(Enumerable.Repeat("😀", 7_000))}}"}""",
+            "{\"text\":\"quoted \\\"text\\\" and backslash \\\\ and newline\\n\"}"
+        ];
+        foreach (int index in Enumerable.Range(0, payloads.Length))
+            Assert.Equal(OfficeRealTimeBackplaneStatus.Ok,
+                (await f.Broker.MutateAsync(member, epoch, "encoding-" + index, "presence", ClientKey(member),
+                    "presenceUpdated", payloads[index], default)).Status);
+
+        var stored = await f.Database.ListRangeAsync(f.RoomPrefix(member.Room) + ":events");
+        var read = await f.Broker.ReadEventsAsync(member.Room, epoch, 0, 32, 256 * 1024, default);
+        Assert.Equal(OfficeRealTimeBackplaneStatus.Ok, read.Status);
+        Assert.Equal(payloads.Length, read.Events.Count);
+        for (int index = 0; index < read.Events.Count; index++)
+        {
+            Assert.Equal(payloads[index], read.Events[index].PayloadJson);
+            Assert.Equal(Encoding.UTF8.GetByteCount(stored[index].ToString()), read.Events[index].EncodedBytes);
+            Assert.InRange(read.Events[index].EncodedBytes, 1, 80 * 1024);
+        }
+        Assert.True(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(read.Events[0]).Length > 80 * 1024);
+        Assert.True(read.Events.Sum(item => item.EncodedBytes) < 256 * 1024);
+    }
+
+    [Fact]
     public async Task Room_admission_and_replacement_preserve_limits_and_fence_stale_cleanup()
     {
         await using var f = await Fixture.Start();

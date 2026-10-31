@@ -762,9 +762,10 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         if (epoch is null) return false;
         var read = await _backplane.ReadEventsAsync(room.Key, epoch, cursor, MaxEventsPerPoll, MaxBytesPerPoll, cancellationToken)
             .ConfigureAwait(false);
-        var sizedEvents = read.Events.Select(item => (Item: item, Bytes: EventBytes(item))).ToArray();
+        var sizedEvents = read.Events.Select(item => (Item: item, Bytes: item.EncodedBytes)).ToArray();
         if (read.Status != OfficeRealTimeBackplaneStatus.Ok || read.NeedsCleanup || read.HasGap || read.Epoch != epoch ||
-            read.Events.Count > MaxEventsPerPoll || sizedEvents.Sum(item => (long)item.Bytes) > MaxBytesPerPoll ||
+            read.Events.Count > MaxEventsPerPoll || sizedEvents.Any(item => item.Bytes is <= 0 or > MaxEventBytes) ||
+            sizedEvents.Sum(item => (long)item.Bytes) > MaxBytesPerPoll ||
             (read.Events.Count == 0 && read.Watermark > cursor) ||
             (read.Events.Count > 0 && read.Events[0].Sequence > cursor + 1))
         { InvalidateRoom(room); return false; }
@@ -1016,8 +1017,6 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         cts.CancelAfter(OperationTimeout);
         return cts;
     }
-
-    private static int EventBytes(OfficeRealTimeBackplaneEvent e) => JsonSerializer.SerializeToUtf8Bytes(e).Length;
 
     private static string ClientKey(Guid clientId) => clientId.ToString("B").ToLowerInvariant();
     private static bool IsClientChannel(int channel) => channel is 1 or 3 or 8 or 14 or 18;

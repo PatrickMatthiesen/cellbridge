@@ -31,7 +31,13 @@ internal sealed record OfficeRealTimeBackplaneSnapshotResult(OfficeRealTimeBackp
 
 internal sealed record OfficeRealTimeBackplaneEvent(long Sequence, string EventId,
     string Epoch, DateTimeOffset CreatedUtc, long RedisTimeMilliseconds, string Kind, string ClientKey, OfficeRealTimeBackplaneMember Sender,
-    string Method, string PayloadJson);
+    string Method, string PayloadJson)
+{
+    // Out-of-band size of the exact stored UTF-8 JSON, including identity metadata.
+    // It must never be taken from a serialized event field or recomputed with a different encoder.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int EncodedBytes { get; init; }
+}
 
 internal sealed record OfficeRealTimeBackplaneEventsResult(OfficeRealTimeBackplaneStatus Status,
     string? Epoch, long Watermark, long RedisTimeMilliseconds,

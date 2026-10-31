@@ -313,7 +313,13 @@ public sealed partial class DistributedOfficeRealTimeSessionTests
         {
             if (Interlocked.Increment(ref _readCalls) >= 4) FourReadsStarted.TrySetResult();
             if (HoldEventReads is { } hold) await hold.Task;
-            var events = _events.Where(x => x.Sequence > afterSequence).Take(maxEvents).ToArray();
+            var events = _events.Where(x => x.Sequence > afterSequence).Take(maxEvents).Select(item => item with
+            {
+                EncodedBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(item, new System.Text.Json.JsonSerializerOptions
+                {
+                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                }).Length
+            }).ToArray();
             return new OfficeRealTimeBackplaneEventsResult(OfficeRealTimeBackplaneStatus.Ok, Epoch,
                 _sequence, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), events, false, false);
         }

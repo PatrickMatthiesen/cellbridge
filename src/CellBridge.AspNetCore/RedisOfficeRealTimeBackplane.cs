@@ -293,8 +293,19 @@ internal sealed class RedisOfficeRealTimeBackplane : IOfficeRealTimeBackplane, I
         var status = ParseStatus(array[0].ToString());
         return new(status, NullIfEmpty(array[1].ToString()), Number(array[2]), Number(array[3]),
             status == OfficeRealTimeBackplaneStatus.Ok
-                ? JsonSerializer.Deserialize<OfficeRealTimeBackplaneEvent[]>(array[4].ToString(), Json) ?? [] : [],
+                ? ParseEncodedEvents(array[4].ToString()) : [],
             array[5].ToString() == "1", array[6].ToString() == "1");
+    }
+
+    private static OfficeRealTimeBackplaneEvent[] ParseEncodedEvents(string json)
+    {
+        // ReadEventsScript concatenates the stored records without re-encoding.
+        // GetRawText preserves each record's spelling and escaping, so this
+        // count matches Lua's #raw and the room log's byte accounting.
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.EnumerateArray().Select(element =>
+            element.Deserialize<OfficeRealTimeBackplaneEvent>(Json)!
+                with { EncodedBytes = Encoding.UTF8.GetByteCount(element.GetRawText()) }).ToArray();
     }
 
     private static OfficeRealTimeBackplaneMembersResult ParseMembers(RedisResult result)

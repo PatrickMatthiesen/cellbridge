@@ -37,6 +37,38 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     private static readonly CellBridgeActor ReaderActor = new(new("tests:reader", "test-reader", "Test reader"));
 
     [Fact]
+    public async Task Large_unicode_presence_reaches_the_other_host_without_disconnecting_the_room()
+    {
+        await using var fixture = await Fixture.StartAsync();
+        var file = await fixture.CreateDocumentAsync();
+        Guid senderClient = await fixture.JoinCoauthoringAsync(file.Path);
+        Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
+        await using var sender = await fixture.ConnectAsync(fixture.First,
+            await fixture.GetDocumentTicketAsync(fixture.First, file.Path), senderClient, utf8Json: true);
+        await using var peer = await fixture.ConnectAsync(fixture.Second,
+            await fixture.GetDocumentTicketAsync(fixture.Second, file.Path), peerClient);
+        await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
+        var received = System.Threading.Channels.Channel.CreateUnbounded<string>();
+        string senderKey = senderClient.ToString("B").ToLowerInvariant();
+        peer.Connection.On<Dictionary<string, string>, string[]>("presenceUpdated", (values, _) =>
+        {
+            if (values.TryGetValue(senderKey, out var value)) received.Writer.TryWrite(value);
+        });
+        string[] texts = [new string('漢', 14_000), new string('ش', 14_000), string.Concat(Enumerable.Repeat("😀", 5_000)), "still connected"];
+        foreach (string text in texts)
+        {
+            string presence = $$"""{"A":"{{senderClient:B}}","text":"{{text}}"}""";
+            Assert.True(Encoding.UTF8.GetByteCount(presence) < 64 * 1024);
+            await sender.Connection.InvokeAsync("UpdatePresence", presence).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(presence, await received.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(sender.Closed.Task.IsCompleted);
+            Assert.False(peer.Closed.Task.IsCompleted);
+        }
+        var snapshot = await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
+        Assert.Contains("still connected", snapshot[senderKey]);
+    }
+
+    [Fact]
     public async Task Two_kestrel_instances_relay_authorized_signalr_traffic_and_reconnect()
     {
         await using var fixture = await Fixture.StartAsync();
@@ -960,14 +992,19 @@ public sealed partial class OfficeRealTimeMultipleHostTests
             return xml;
         }
 
-        internal async Task<SignalRPeer> ConnectAsync(Host host, string ticket, Guid clientId)
+        internal async Task<SignalRPeer> ConnectAsync(Host host, string ticket, Guid clientId, bool utf8Json = false)
         {
             using var find = await host.Http.GetAsync("/_cellbridge/rtc/FindSession?qs=" + Uri.EscapeDataString(ticket) +
                 "&ClientId=" + clientId.ToString("D"));
             find.EnsureSuccessStatusCode();
             string path = $"/_cellbridge/rtc/rtchub?qs={Uri.EscapeDataString(ticket)}&ClientId={clientId:D}";
             var uriBuilder = new UriBuilder(new Uri(host.Http.BaseAddress!, path)) { Scheme = "ws" };
-            var connection = new HubConnectionBuilder().WithUrl(uriBuilder.Uri).Build();
+            var connectionBuilder = new HubConnectionBuilder().WithUrl(uriBuilder.Uri);
+            // Keep the Unicode regression's invocation within the existing
+            // 64 KiB wire-message limit. Production transport limits stay unchanged.
+            if (utf8Json) connectionBuilder.AddJsonProtocol(options => options.PayloadSerializerOptions.Encoder =
+                System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping);
+            var connection = connectionBuilder.Build();
             var closed = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
             connection.Closed += error => { closed.TrySetResult(error?.GetType().Name); return Task.CompletedTask; };
             await connection.StartAsync().WaitAsync(TimeSpan.FromSeconds(15));
