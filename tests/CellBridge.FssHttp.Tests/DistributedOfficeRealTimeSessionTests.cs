@@ -10,6 +10,44 @@ namespace CellBridge.FssHttp.Tests;
 public sealed partial class DistributedOfficeRealTimeSessionTests
 {
     [Fact]
+    public async Task Classic_connection_shares_redis_fanout_with_core_signalr_peers()
+    {
+        var broker = new FakeBackplane();
+        var clients = new FakeClients();
+        await using var store = new DistributedOfficeRealTimeSessionStore(new AllowAllAuthorizer(),
+            new FakeHubContext(clients), broker);
+        Guid resource = Guid.NewGuid();
+        Guid nativeClient = Guid.NewGuid();
+        string nativeConnectionId = "classic-" + Guid.NewGuid().ToString("N");
+        var nativeTicket = new OfficeRealTimeTicket(resource, 1,
+            new CellBridgeActor(new SubjectIdentity("native", "native", "Native")), nativeClient,
+            DateTimeOffset.UtcNow.AddMinutes(2));
+        var nativeCalls = new List<(string Method, object?[] Arguments)>();
+        var native = new OfficeRealTimeConnection(nativeConnectionId, CancellationToken.None,
+            (method, arguments, _) => { nativeCalls.Add((method, arguments)); return Task.CompletedTask; }, () => { });
+        Assert.True(await store.ConnectAsync(nativeTicket, native, CancellationToken.None));
+        var desktop = await Connect(store, resource, "desktop");
+        Assert.True(await store.SendUpdateNotificationAsync(nativeTicket, nativeConnectionId,
+            2, "{}", CancellationToken.None));
+        await PollRoom(store, resource);
+        Assert.Empty(clients.Calls);
+
+        string desktopPayload = $$"""{"A":"{{desktop.Ticket.ClientId:B}}","text":"desktop"}""";
+        Assert.True(await store.SendUpdateNotificationAsync(desktop.Ticket, desktop.Context.ConnectionId,
+            3, desktopPayload, CancellationToken.None));
+        await PollRoom(store, resource);
+        var toNative = Assert.Single(nativeCalls, call => call.Method == "updateNotification");
+        Assert.Equal(desktopPayload, toNative.Arguments[1]);
+
+        string nativePayload = $$"""{"A":"{{nativeClient:B}}","text":"phone"}""";
+        Assert.True(await store.SendUpdateNotificationAsync(nativeTicket, nativeConnectionId,
+            3, nativePayload, CancellationToken.None));
+        await PollRoom(store, resource);
+        Assert.Contains(clients.Calls, call => call.ConnectionId == desktop.Context.ConnectionId &&
+            call.Method == "updateNotification" && (string)call.Arguments[1]! == nativePayload);
+    }
+
+    [Fact]
     public async Task Joining_recipient_skips_presence_covered_by_its_admission_snapshot_without_skipping_existing_peers()
     {
         var broker = new FakeBackplane();

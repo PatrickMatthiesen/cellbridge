@@ -41,6 +41,11 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     }
 
     public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
+        CancellationToken cancellationToken) =>
+        await ConnectAsync(ticket, OfficeRealTimeConnection.FromSignalR(context, hubContext), cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, OfficeRealTimeConnection context,
         CancellationToken cancellationToken)
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
@@ -216,6 +221,23 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
         using (document)
         {
             JsonElement root = document.RootElement;
+            // The captured native iPhone sends an empty channel-2 message as part
+            // of its connection lifecycle. Accept it after a read check without
+            // relaying it as document state.
+            if (channel == 2)
+            {
+                if (root.EnumerateObject().Any()) return false;
+                if (!await AuthorizeAsync(ticket, DocumentAccess.Read, true, cancellationToken).ConfigureAwait(false))
+                {
+                    Connection? denied;
+                    lock (_sync) _connections.TryGetValue(connectionId, out denied);
+                    if (denied is not null) await RemoveDeniedAsync(denied, cancellationToken).ConfigureAwait(false);
+                    return false;
+                }
+                lock (_sync)
+                    return !IsExpired(ticket) && _connections.TryGetValue(connectionId, out var connection) &&
+                        connection.Ticket == ticket;
+            }
             // Native Excel reports receive latency on channel 4. This is local
             // telemetry, not a server-change notification to relay to peers.
             if (channel == 4)
@@ -382,7 +404,7 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             sendDeadline.CancelAfter(RecipientSendTimeout);
             try
             {
-                await hubContext.Clients.Client(id).SendCoreAsync(method, args, sendDeadline.Token)
+                await recipient.Context.SendAsync(method, args, sendDeadline.Token)
                     .WaitAsync(sendDeadline.Token).ConfigureAwait(false);
                 await CaptureDeliveryAsync(sender, recipient, method, args, cancellationToken).ConfigureAwait(false);
             }
@@ -562,7 +584,7 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
         return source;
     }
 
-    private static bool IsClientChannel(int channel) => channel is 1 or 3 or 8 or 14 or 18;
+    private static bool IsClientChannel(int channel) => channel is 1 or 2 or 3 or 8 or 14 or 18;
 
     private static bool IsValidChannelOne(JsonElement root)
     {
@@ -629,7 +651,7 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     }
 
     private readonly record struct RoomKey(Guid ResourceId, long Generation);
-    private sealed record Connection(OfficeRealTimeTicket Ticket, HubCallerContext Context, Room Room, RoomKey Key);
+    private sealed record Connection(OfficeRealTimeTicket Ticket, OfficeRealTimeConnection Context, Room Room, RoomKey Key);
     private sealed record Presence(string ConnectionId, string Payload);
     private sealed record Departure(Connection Connection, bool RemovedPresence);
 }

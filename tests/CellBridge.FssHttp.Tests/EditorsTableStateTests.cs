@@ -101,14 +101,12 @@ public sealed class EditorsTableStateTests
                 TargetPartitionId = StoredDocument.EditorsTablePartitionId,
                 Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true },
             } } }, new Dictionary<string, string>(), owner)).Response;
-        var groups = response.DataElementPackage!.DataElements
-            .Where(element => element.DataElementType == DataElementType.ObjectGroupDataElementData)
-            .Select(ObjectGroupDataElement.ParseOpaque).ToArray();
-        var objects = Assert.Single(groups, group => group.Objects.Any(item =>
-            item.Content.SequenceEqual(EditorsTablePartitionBuilder.ZipStreamHeader))).Objects;
-        Assert.True(objects.Count >= 2);
-        Assert.Equal(EditorsTablePartitionBuilder.ZipStreamHeader, objects[0].Content);
-        using var compressed = new MemoryStream(objects[1].Content, writable: false);
+        var query = Assert.IsType<QueryChangesSubResponseData>(Assert.Single(response.SubResponses).Data);
+        var stream = PartitionGraphSnapshot.Create(response.DataElementPackage!.DataElements,
+            query.StorageIndexExtendedGuid).Materialize();
+        var headerLength = EditorsTablePartitionBuilder.ZipStreamHeader.Length;
+        Assert.Equal(EditorsTablePartitionBuilder.ZipStreamHeader, stream[..headerLength]);
+        using var compressed = new MemoryStream(stream, headerLength, stream.Length - headerLength, writable: false);
         using var inflater = new DeflateStream(compressed, CompressionMode.Decompress);
         using var xml = new MemoryStream();
         inflater.CopyTo(xml);

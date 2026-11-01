@@ -35,7 +35,7 @@ the server does not use the client secret.
 Register the reachable HTTPS origin as an Application ID URI in the Entra API
 registration and configure v2 access tokens. The native Office client can request
 that origin as its resource. Expose the delegated `access_as_user` scope and
-authorize the Windows Office client
+authorize the Microsoft Office client
 `d3590ed6-52b3-4102-aeff-aad2292ab01c` for that scope. Add a **Web** redirect URI
 of `https://office.example.test/signin-oidc` for browser login. Do not add Office's
 broker redirect URI to the server registration. The server validates the API
@@ -43,8 +43,10 @@ application GUID as the v2 token audience, the tenant issuer, expiry, scope and
 native Office client ID.
 
 In Entra mode, HTTP OPTIONS on the marked protocol discovery routes returns
-generic protocol capabilities without a cookie. Office can use this response to
-discover the protocol before its native sign-in finishes. Document downloads,
+generic protocol capabilities without a cookie. An explicit native-cookie probe
+with `X-MS-CookieUri-Requested: t` instead receives a 401 OAuth challenge with the
+configured `cookie_uri`. This keeps authentication discovery separate from
+anonymous capability discovery. Document downloads,
 PROPFIND, SOAP operations, RTC and historical versions still require
 authentication and their existing document permissions.
 
@@ -66,7 +68,7 @@ requests or empty Bearer probes. Invalid nonempty credentials still receive the
 OAuth failure, and the native cookie-exchange endpoint never uses forms fallback.
 
 The implemented native integration is restricted to the configured Entra tenant,
-its registered API resource and the Windows Office client ID above. Browser OIDC
+its registered API resource and the Microsoft Office client ID above. Browser OIDC
 sign-in and server-side acceptance of a host-validated token do not establish that
 stock Office can discover another provider or acquire and renew its credentials.
 Other native providers, including personal Microsoft accounts, need their own

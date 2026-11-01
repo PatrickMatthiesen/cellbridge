@@ -29,7 +29,11 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
     {
         if (await Context.TryCellBridgeOfficeFormsFallbackAsync(properties)) return;
         var category = CredentialCategory(Request);
-        if ((category is "absent" or "empty-bearer") &&
+        // An explicit native-cookie discovery probe must receive the OAuth
+        // challenge, rather than only anonymous authoring capabilities.
+        var nativeCookieProbe = Request.Headers.TryGetValue("X-MS-CookieUri-Requested", out var cookieUriRequested) &&
+            cookieUriRequested.Count == 1 && string.Equals(cookieUriRequested[0]?.Trim(), "t", StringComparison.OrdinalIgnoreCase);
+        if ((category is "absent" or "empty-bearer") && !nativeCookieProbe &&
             await Context.TryHandleCellBridgeOfficeDiscoveryAsync()) return;
         await Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
     }

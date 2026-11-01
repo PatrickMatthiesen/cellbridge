@@ -144,7 +144,11 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         _workers.Dispose();
     }
 
-    public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
+    public Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
+        CancellationToken cancellationToken) =>
+        ConnectAsync(ticket, OfficeRealTimeConnection.FromSignalR(context, _hub), cancellationToken);
+
+    public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, OfficeRealTimeConnection context,
         CancellationToken cancellationToken)
     {
         if (IsStopping) return false;
@@ -363,6 +367,19 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         using (document)
         {
             var root = document.RootElement;
+            // The captured iPhone sends an empty channel-2 lifecycle message.
+            // Acknowledge it after the read check, without publishing an event.
+            if (channel == 2)
+            {
+                if (root.EnumerateObject().Any() || !TryGet(connectionId, ticket, out var requester)) return false;
+                using var checkDeadline = CreateDeadline(cancellationToken);
+                if (!await AuthorizeAsync(ticket, DocumentAccess.Read, true, checkDeadline.Token).ConfigureAwait(false))
+                {
+                    await DenyAsync(requester, checkDeadline.Token).ConfigureAwait(false);
+                    return false;
+                }
+                return TryGet(connectionId, ticket, out _);
+            }
             if (channel == 4)
             {
                 if (root.EnumerateObject().Count() != 2 || !root.TryGetProperty("Id", out var id) ||
@@ -869,7 +886,7 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                 deadline.CancelAfter(SendTimeout);
                 try
                 {
-                    var pending = _hub.Clients.Client(recipient.Context.ConnectionId).SendCoreAsync(item.Method, arguments, deadline.Token);
+                    var pending = recipient.Context.SendAsync(item.Method, arguments, deadline.Token);
                     sends.Add((recipient, pending, deadline));
                 }
                 catch { deadline.Dispose(); DetachAndAbort(recipient); }
@@ -1027,7 +1044,7 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
     }
 
     private static string ClientKey(Guid clientId) => clientId.ToString("B").ToLowerInvariant();
-    private static bool IsClientChannel(int channel) => channel is 1 or 3 or 8 or 14 or 18;
+    private static bool IsClientChannel(int channel) => channel is 1 or 2 or 3 or 8 or 14 or 18;
     private static bool IsValidChannelOne(JsonElement root)
     {
         HashSet<string> allowed = new(StringComparer.Ordinal) { "HQ", "Id", "NT", "WEB" };
@@ -1096,7 +1113,7 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         internal DateTimeOffset LastReapUtc { get; set; } = DateTimeOffset.MinValue;
         internal DateTimeOffset LastSuccessfulBrokerUtc { get; set; } = DateTimeOffset.MinValue;
     }
-    private sealed record LocalConnection(OfficeRealTimeBackplaneMember Member, HubCallerContext Context,
+    private sealed record LocalConnection(OfficeRealTimeBackplaneMember Member, OfficeRealTimeConnection Context,
         LocalRoom Room, long AdmissionWatermark);
 }
 

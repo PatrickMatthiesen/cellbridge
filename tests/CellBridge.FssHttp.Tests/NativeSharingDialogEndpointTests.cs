@@ -128,8 +128,8 @@ public sealed class NativeSharingDialogEndpointTests
         var policy = response.Headers.GetValues("Content-Security-Policy").Single();
         var nonceSource = policy.Split(';').Single(part => part.TrimStart().StartsWith("script-src ", StringComparison.Ordinal)).Trim();
         var nonce = nonceSource["script-src 'nonce-".Length..^1];
-        Assert.Contains("<script nonce=\"" + nonce + "\">", html);
-        Assert.Contains("<style nonce=\"" + nonce + "\">", html);
+        Assert.Contains("<script nonce=\"" + nonce + "\">", WebUtility.HtmlDecode(html));
+        Assert.Contains("<style nonce=\"" + nonce + "\">", WebUtility.HtmlDecode(html));
         Assert.DoesNotContain("unsafe-inline", policy);
         Assert.Contains("width:100%", html);
         Assert.Contains("overflow-wrap:anywhere", html);

@@ -155,16 +155,32 @@ production concurrency. See the remaining work below.
 
 ## Real-time collaboration
 
-The single-host RTC relay implements the observed SignalR methods for typing,
-presence and client notifications. `CellBridgeOptions.EnableOfficeRealTime`
-defaults to true. Set it to false to disable discovery and endpoints. WebDemo
-accepts `Protocol:EnableOfficeRealTime=false`; AppHost accepts
+The RTC service keeps the desktop ASP.NET Core SignalR endpoint and implements
+the captured Office iPhone SignalR 1.4 WebSocket subset on the same session
+store. Both transports share ticket checks, participant permissions, presence,
+notifications, revocation and Redis fanout. The classic adapter supports the
+observed negotiate, connect, start, reconnect and abort requests. It returns an
+explicit error for unsupported invocations and does not implement long polling
+or server-sent events. `CellBridgeOptions.EnableOfficeRealTime` defaults to
+true. Set it to false to disable discovery and endpoints. WebDemo accepts
+`Protocol:EnableOfficeRealTime=false`; AppHost accepts
 `Parameters:EnableOfficeRealTime=false`.
 
 RTC requires stored grants or an immutable versioned authorization policy so
 that each delivery can check participants against one permission snapshot.
-Enabling it with an ordinary asynchronous authorization provider, a legacy
-access evaluator or `multipleInstances: true` fails at startup.
+An ordinary asynchronous authorization provider and a legacy access evaluator
+cannot supply those snapshots. Multi-host RTC requires Redis configuration for
+the shared session store.
+
+Automated tests cover classic WebSocket negotiation and messages, replacement
+connections, host shutdown, and delivery through both session-store implementations.
+Native iPhone sign-in, saving and collaboration with this adapter still need a
+fresh device test. The OneDrive reference capture establishes the wire format;
+it does not qualify the CellBridge implementation.
+
+Classic negotiation permits two outstanding entries per participant and sixteen
+per account on each host. Unused entries and disconnected reconnect tokens expire
+after 30 seconds; active connections remain bound to their document-ticket expiry.
 
 Discovery exposes storage and authoring headers and authenticated file metadata
 through `PROPFIND` with `Depth: 0`. Resource IDs, replication tags, file sizes,

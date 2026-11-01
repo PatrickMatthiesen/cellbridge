@@ -321,6 +321,90 @@ public sealed class EntraAuthenticationTests
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         Assert.False(response.Headers.Contains("Set-Cookie"));
         Assert.Contains(response.Headers.WwwAuthenticate, value => value.ToString().Contains("cookie_uri=\"https://office.example.test/_api/SP.OAuth.NativeClient/Authenticate\"", StringComparison.Ordinal));
+        AssertNativeChallenge(response);
+    }
+
+    [Fact]
+    public async Task DocumentChallengeAdvertisesTheNativeExchange()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx",
+            authorization: "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertNativeChallenge(response);
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+    }
+
+    private static void AssertNativeChallenge(HttpResponseMessage response)
+    {
+        var challenge = Assert.Single(response.Headers.WwwAuthenticate).ToString();
+        Assert.Contains($"realm=\"{TenantId:D}\"", challenge, StringComparison.Ordinal);
+        Assert.Contains($"client_id=\"{ClientId:D}\"", challenge, StringComparison.Ordinal);
+        Assert.Contains($"authorization_uri=\"https://login.microsoftonline.com/{TenantId:D}/oauth2/authorize\"",
+            challenge, StringComparison.Ordinal);
+        Assert.Contains("cookie_uri=\"https://office.example.test/_api/SP.OAuth.NativeClient/Authenticate\"",
+            challenge, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/", null)]
+    [InlineData("/shared/", "Bearer")]
+    [InlineData("/shared/example.docx", "  bEaReR   ")]
+    [InlineData("/_vti_bin/cellstorage.svc", "Bearer")]
+    public async Task ExplicitNativeCookieDiscoveryRequiresAuthenticationBeforeAdvertisingCapabilities(string path, string? authorization)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Options, path);
+        request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        if (authorization is not null) request.Headers.TryAddWithoutValidation("Authorization", authorization);
+        using var response = await fixture.Client.SendAsync(request);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertNativeChallenge(response);
+        Assert.False(response.Headers.Contains("X-MSFSSHTTP"));
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+
+        using var authenticated = new HttpRequestMessage(HttpMethod.Options, path);
+        authenticated.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        authenticated.Headers.Authorization = new("Bearer", fixture.CreateToken());
+        using var success = await fixture.Client.SendAsync(authenticated);
+        Assert.Equal(System.Net.HttpStatusCode.OK, success.StatusCode);
+        Assert.Equal("1.5", Assert.Single(success.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Empty(success.Headers.WwwAuthenticate);
+    }
+
+    [Fact]
+    public async Task NativeDiscoveryExchangeAndDocumentAccessKeepTheLinkedAccountsPermissions()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var documents = fixture.Services.GetRequiredService<CellBridgeDocumentService>();
+        var document = (await documents.CreateAsync("/shared/native-phone.bin", [1, 2, 3], TestActor.Value))!;
+        await TestStorage.SetPermissionsAsync(documents.Provider, document.ResourceId, document.Security with
+        {
+            Grants = document.Security.Grants.Add("local:" + fixture.User.Id, DocumentAccess.Read),
+        });
+
+        using var request = new HttpRequestMessage(HttpMethod.Options, "/shared/");
+        request.Headers.TryAddWithoutValidation("Authorization", "Bearer");
+        request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        using var capabilities = await fixture.Client.SendAsync(request);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, capabilities.StatusCode);
+        AssertNativeChallenge(capabilities);
+        using var probe = await fixture.ExchangeCookieAsync(null, "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.OK, probe.StatusCode);
+        AssertNativeChallenge(probe);
+        Assert.False(probe.Headers.Contains("Set-Cookie"));
+
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookie = CookieValue(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+        using var opened = await fixture.SendOfficeRequestAsync(HttpMethod.Get, document.Path, cookie, "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.OK, opened.StatusCode);
+        Assert.Equal(new byte[] { 1, 2, 3 }, await opened.Content.ReadAsByteArrayAsync());
+
+        await TestStorage.SetPermissionsAsync(documents.Provider, document.ResourceId, document.Security);
+        using var revoked = await fixture.SendOfficeRequestAsync(HttpMethod.Get, document.Path, cookie, "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, revoked.StatusCode);
+        Assert.False(revoked.Headers.Contains("Set-Cookie"));
     }
 
     [Theory]

@@ -9,6 +9,46 @@ namespace CellBridge.FssHttp.Tests;
 public sealed class OfficeRealTimeHubTests
 {
     [Fact]
+    public async Task Classic_and_core_transports_share_authorized_presence_and_notifications()
+    {
+        Fixture f = new();
+        Guid resource = Guid.NewGuid();
+        Guid nativeClientId = Guid.NewGuid();
+        string nativeConnectionId = "classic-" + Guid.NewGuid().ToString("N");
+        var nativeTicket = new OfficeRealTimeTicket(resource, 1,
+            new CellBridgeActor(new SubjectIdentity("native-user", "native-user", "Native")), nativeClientId,
+            f.Clock.GetUtcNow().AddMinutes(5));
+        var nativeMessages = new List<(string Method, object?[] Arguments)>();
+        bool nativeAborted = false;
+        var nativeConnection = new OfficeRealTimeConnection(nativeConnectionId, CancellationToken.None,
+            (method, arguments, _) => { nativeMessages.Add((method, arguments)); return Task.CompletedTask; },
+            () => nativeAborted = true);
+        Assert.True(await f.Store.ConnectAsync(nativeTicket, nativeConnection, CancellationToken.None));
+        var desktop = await f.Connect(resource, 1, "desktop-user");
+
+        Assert.True(await f.Store.UpdatePresenceAsync(nativeTicket, nativeConnectionId, "{}", CancellationToken.None));
+        var desktopPresence = Assert.Single(f.Clients.Calls, call => call.ConnectionId == desktop.Context.ConnectionId);
+        Assert.Equal("presenceUpdated", desktopPresence.Method);
+        var presence = await f.Store.GetCompletePresenceStateAsync(desktop.Ticket,
+            desktop.Context.ConnectionId, CancellationToken.None);
+        Assert.Equal("{}", presence[ClientKey(nativeClientId)]);
+
+        f.Clients.Calls.Clear();
+        string notification = $$"""{"A":"{{desktop.Ticket.ClientId:D}}","text":"change"}""";
+        Assert.True(await f.Store.SendUpdateNotificationAsync(desktop.Ticket, desktop.Context.ConnectionId,
+            3, notification, CancellationToken.None));
+        var nativeDelivery = Assert.Single(nativeMessages, message => message.Method == "updateNotification");
+        Assert.Equal(notification, nativeDelivery.Arguments[1]);
+
+        f.Authorizer.DeniedWriteSubjects.Add("native-user");
+        Assert.False(await f.Store.SendUpdateNotificationAsync(nativeTicket, nativeConnectionId,
+            3, $$"""{"A":"{{nativeClientId:D}}","text":"denied"}""", CancellationToken.None));
+        Assert.True(nativeAborted);
+        Assert.DoesNotContain(f.Clients.Calls, call => call.ConnectionId == desktop.Context.ConnectionId &&
+            call.Method == "updateNotification");
+    }
+
+    [Fact]
     public async Task Delivery_capture_correlates_sender_and_recipient_without_changing_repeated_notifications()
     {
         var directory = Path.Combine(Path.GetTempPath(), "cellbridge-rtc-capture-" + Guid.NewGuid().ToString("N"));
