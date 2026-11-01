@@ -104,7 +104,11 @@ public sealed class IndexModel(
             Math.Max(0, document.ActiveEditors),
             application,
             hasSafeUri ? DocumentLinks.BuildDownloadUri(documentUri) : null,
-            officeLaunchUrl);
+            officeLaunchUrl)
+        {
+            ResourceId = document.ResourceId,
+            CanDelete = document.CanDelete,
+        };
     }
 
     private static string FormatSize(long size) => size switch

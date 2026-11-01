@@ -13,7 +13,12 @@ public sealed class DocumentWorkspace(CellBridgeDocumentService service)
         var page = await AuthorizedDocumentCatalog.ReadAsync(service, actor, offset, limit, cancellationToken);
         return new(page.Documents.Select(document => new DocumentListing(document.Path,
             Path.GetFileName(document.Path), DocumentLibrary.ContentType(document.Path), document.Length,
-            document.ContentVersion, document.ModifiedUtc, document.ActiveEditors)).ToArray(), page.NextOffset);
+            document.ContentVersion, document.ModifiedUtc, document.ActiveEditors)
+            {
+                ResourceId = document.ResourceId,
+                CanDelete = document.Security.Owner == actor.Identity.Subject &&
+                    document.Security.AccessFor(actor.Identity.Subject).HasFlag(DocumentAccess.Write),
+            }).ToArray(), page.NextOffset);
     }
 
     public async Task<DocumentWorkspaceCreation> CreateAsync(string? name, string? type, CellBridgeActor actor,

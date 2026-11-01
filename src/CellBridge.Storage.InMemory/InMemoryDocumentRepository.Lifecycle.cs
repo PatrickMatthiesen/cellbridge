@@ -59,8 +59,12 @@ public sealed partial class InMemoryDocumentRepository
             if (head.LifecycleGeneration != command.ExpectedGeneration) return new(false, head);
             if (command is DocumentLifecycleCommand.Delete)
             {
+                var delete = (DocumentLifecycleCommand.Delete)command;
                 if (head.IsDeleted) return new(head.DeletedFromStateVersion == command.ExpectedStateVersion, head);
-                if (head.StateVersion != command.ExpectedStateVersion || entry.Deliveries.Count != 0) return new(false, head);
+                if (head.StateVersion != command.ExpectedStateVersion || entry.Deliveries.Count != 0 ||
+                    delete.ExpectedAuthorityGeneration is { } authority && head.AuthorityGeneration != authority ||
+                    delete.ExpectedCoordinationGeneration is { } coordination && entry.Coordination.Generation != coordination)
+                    return new(false, head);
                 var deleted = head with { IsDeleted = true, DeletedFromStateVersion = head.StateVersion,
                     StateVersion = checked(head.StateVersion + 1) };
                 deleted = AccountedHead(entry, deleted);

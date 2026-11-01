@@ -100,6 +100,7 @@ public static class CellBridgeEndpoints
             .WithMetadata(new OfficeDiscoveryEndpointMetadata(ServiceEndpoint: false));
         routes.MapSharedAccess();
         routes.MapNativeSharing();
+        routes.MapNativeSharingDialog();
         routes.MapGet("/_cellbridge/history/settings", (HttpContext context, CellBridgeDocumentService service, CellBridgeOptions options) =>
         {
             if (options.DocumentLibraryId is null) return Results.NotFound();

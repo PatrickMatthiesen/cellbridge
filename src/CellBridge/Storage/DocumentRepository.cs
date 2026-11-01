@@ -218,7 +218,14 @@ public sealed record PathChangeResult(DocumentHead Current, bool Changed, string
 public abstract record DocumentLifecycleCommand(Guid ResourceId, long ExpectedGeneration, long ExpectedStateVersion)
 {
     public sealed record Delete(Guid Id, long Generation, long Version)
-        : DocumentLifecycleCommand(Id, Generation, Version);
+        : DocumentLifecycleCommand(Id, Generation, Version)
+    {
+        /// <summary>When supplied, deletion also compare-and-swaps document authorization state.</summary>
+        public long? ExpectedAuthorityGeneration { get; init; }
+
+        /// <summary>When supplied, deletion also compare-and-swaps the active editor and lock state.</summary>
+        public long? ExpectedCoordinationGeneration { get; init; }
+    }
     public sealed record Recreate(Guid Id, long Generation, long Version, PreparedDocumentCreate Replacement)
         : DocumentLifecycleCommand(Id, Generation, Version);
 }
