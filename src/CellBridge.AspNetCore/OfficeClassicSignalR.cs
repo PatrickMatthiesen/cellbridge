@@ -274,8 +274,12 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             using JsonDocument data = JsonDocument.Parse(connectionData[0]!);
             if (data.RootElement.ValueKind != JsonValueKind.Array || data.RootElement.GetArrayLength() != 1) return false;
             JsonElement hub = data.RootElement[0];
-            if (hub.ValueKind != JsonValueKind.Object || !hub.TryGetProperty("name", out var name) ||
-                name.ValueKind != JsonValueKind.String || !StringComparer.OrdinalIgnoreCase.Equals(name.GetString(), "realtimechannelhub"))
+            if (hub.ValueKind != JsonValueKind.Object) return false;
+            var names = hub.EnumerateObject().Where(property =>
+                property.Name.Equals("name", StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (names.Length != 1) return false;
+            JsonElement name = names[0].Value;
+            if (name.ValueKind != JsonValueKind.String || !StringComparer.OrdinalIgnoreCase.Equals(name.GetString(), "realtimechannelhub"))
                 return false;
             hubName = name.GetString()!.ToLowerInvariant();
             return true;

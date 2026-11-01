@@ -148,8 +148,10 @@ public sealed class OfficeRealTimeEndpointTests
         Assert.Contains(Mount + "/_cellbridge/rtc/", properties["RealtimeTypingEndpointUrl"]);
     }
 
-    [Fact]
-    public async Task ClassicSignalRNegotiatesAndRunsTheObservedOfficeWebSocketMethods()
+    [Theory]
+    [InlineData("Name")]
+    [InlineData("name")]
+    public async Task ClassicSignalRNegotiatesAndRunsTheObservedOfficeWebSocketMethods(string nameProperty)
     {
         await using var fixture = await Fixture.Start();
         Guid clientId = await fixture.CreateCoauthorLease();
@@ -157,7 +159,7 @@ public sealed class OfficeRealTimeEndpointTests
         var negotiationQuery = new Dictionary<string, string?>
         {
             ["clientProtocol"] = "1.4",
-            ["connectionData"] = "[{\"name\":\"realtimechannelhub\"}]",
+            ["connectionData"] = "[{\"" + nameProperty + "\":\"RealtimeChannelHub\"}]",
             ["qs"] = signature,
             ["ClientId"] = clientId.ToString("D"),
         };
@@ -258,7 +260,7 @@ public sealed class OfficeRealTimeEndpointTests
             .GetPropertiesAsync(head.ResourceId, TestActor.Value, origin, CancellationToken.None);
         var query = new Dictionary<string, string?>
         {
-            ["clientProtocol"] = "1.4", ["connectionData"] = "[{\"name\":\"realtimechannelhub\"}]",
+            ["clientProtocol"] = "1.4", ["connectionData"] = "[{\"Name\":\"RealtimeChannelHub\"}]",
             ["qs"] = properties["DocumentAccessToken"], ["ClientId"] = clientId.ToString("D"),
         };
         using var http = new HttpClient { BaseAddress = new Uri(origin) };
