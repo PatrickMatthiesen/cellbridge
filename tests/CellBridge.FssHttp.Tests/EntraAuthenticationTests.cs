@@ -539,6 +539,31 @@ public sealed class EntraAuthenticationTests
     }
 
     [Fact]
+    public async Task NativeCookieUsesNoneAndSecureWithoutChangingBrowserCookiePolicy()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        AssertCookieAttributes(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+
+        var options = fixture.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
+            .Get(IdentityConstants.ApplicationScheme);
+        Assert.Equal(SameSiteMode.Lax, options.Cookie.SameSite);
+        using var scope = fixture.Services.CreateScope();
+        var principal = await scope.ServiceProvider.GetRequiredService<SignInManager<CellBridgeUser>>()
+            .CreateUserPrincipalAsync(fixture.User);
+        var context = new DefaultHttpContext { RequestServices = scope.ServiceProvider };
+        context.Request.Scheme = "https";
+        await context.SignInAsync(IdentityConstants.ApplicationScheme, principal,
+            new AuthenticationProperties { IsPersistent = true });
+        var browserCookie = Assert.Single(context.Response.Headers.SetCookie);
+        Assert.Contains("; samesite=lax", browserCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("; samesite=none", browserCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("; secure", browserCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("; httponly", browserCookie, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task InvalidExchangeDoesNotRenewAnExistingCookieWhenHostRequestsRenewal()
     {
         await using var fixture = await Fixture.CreateAsync(forceCookieRenewal: true);
@@ -558,6 +583,7 @@ public sealed class EntraAuthenticationTests
         Assert.Contains("; httponly", setCookie, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("; domain=", setCookie, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("; expires=", setCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("; samesite=none", setCookie, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string CookieValue(string setCookie) =>

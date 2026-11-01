@@ -55,7 +55,9 @@ The challenge advertises a same-origin `cookie_uri` at
 and a linked, permitted local account issues the existing application session
 cookie, named `SPOIDCRL` in Entra mode. Its explicit expiry cannot exceed the
 token or configured cookie lifetime, and does not slide. Enabling Entra changes
-the application's cookie name, including browser sessions. An empty-Bearer POST
+the application's cookie name, including browser sessions. Token-derived native
+cookies use `SameSite=None; Secure; HttpOnly`, matching the native Office reference
+exchange. Browser sign-in cookies retain `SameSite=Lax`. An empty-Bearer POST
 returns discovery information without issuing a cookie. Other missing or invalid
 credentials cannot create a session.
 An empty `Authorization: Bearer` probe on a document request permits cookie

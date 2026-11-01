@@ -157,6 +157,19 @@ public static class EntraAuthentication
             cookie.Cookie.Name = SessionCookieName;
             var validate = cookie.Events.OnValidatePrincipal;
             var sliding = cookie.Events.OnCheckSlidingExpiration;
+            var signingIn = cookie.Events.OnSigningIn;
+            cookie.Events.OnSigningIn = async context =>
+            {
+                await signingIn(context);
+                if (context.Properties.Items.ContainsKey(NativeCookieMarker))
+                {
+                    // Match the native Office reference cookie policy. Its
+                    // embedded and native requests must be able to reuse the
+                    // token-derived session outside browser top-level navigation.
+                    context.CookieOptions.SameSite = SameSiteMode.None;
+                    context.CookieOptions.Secure = true;
+                }
+            };
             cookie.Events.OnValidatePrincipal = async context =>
             {
                 await validate(context);

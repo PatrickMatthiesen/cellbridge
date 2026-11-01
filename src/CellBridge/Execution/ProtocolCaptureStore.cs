@@ -9,6 +9,7 @@ internal sealed class ProtocolCaptureStore(CellBridgeOptions options, ILogger<Pr
     internal bool IsEnabled => options.CaptureDirectory is not null;
     private readonly object _sync = new();
     private long? _used;
+    private bool _byteBudgetWarningLogged;
 
     public Task WriteTextAsync(string id, string suffix, string value, CancellationToken token) =>
         WriteAsync(id, suffix, Encoding.UTF8.GetBytes(value), token);
@@ -34,7 +35,11 @@ internal sealed class ProtocolCaptureStore(CellBridgeOptions options, ILogger<Pr
                 }
                 if (length < 0 || length > options.MaxCaptureBytes - _used.Value)
                 {
-                    logger.LogWarning("Raw protocol capture skipped because its byte budget is exhausted.");
+                    if (!_byteBudgetWarningLogged)
+                    {
+                        logger.LogWarning("Raw protocol capture skipped because its byte budget is exhausted.");
+                        _byteBudgetWarningLogged = true;
+                    }
                     return;
                 }
                 _used += length;

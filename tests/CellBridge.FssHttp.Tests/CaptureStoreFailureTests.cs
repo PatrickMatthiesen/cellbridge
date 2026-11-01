@@ -1,4 +1,5 @@
 using CellBridge.AspNetCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CellBridge.FssHttp.Tests;
@@ -122,6 +123,26 @@ public sealed class CaptureStoreFailureTests
         Assert.Equal(2, Directory.GetFiles(capture.Root).Length);
     }
 
+    [Fact]
+    public async Task RejectedWritesWarnOnceAndDoNotBlockSmallerCapture()
+    {
+        using var capture = new CaptureDirectory();
+        await File.WriteAllBytesAsync(capture.Path("existing.bin"), new byte[] { 9 });
+        var logger = new RecordingLogger();
+        var store = capture.Store(5, logger);
+
+        await store.WriteAsync("too-large-one", ".bin", new byte[5], CancellationToken.None);
+        await store.WriteAsync("too-large-two", ".bin", new byte[5], CancellationToken.None);
+        await store.WriteAsync("remaining", ".bin", new byte[4], CancellationToken.None);
+
+        Assert.Equal(1, logger.WarningCount);
+        Assert.False(File.Exists(capture.Path("too-large-one.bin")));
+        Assert.False(File.Exists(capture.Path("too-large-two.bin")));
+        Assert.Equal(new byte[] { 0, 0, 0, 0 }, await File.ReadAllBytesAsync(capture.Path("remaining.bin")));
+        Assert.Equal(5, capture.RetainedBytes());
+        AssertPrivate(capture.Path("remaining.bin"));
+    }
+
     private static void AssertPrivate(string path)
     {
         if (!OperatingSystem.IsWindows())
@@ -134,8 +155,21 @@ public sealed class CaptureStoreFailureTests
         public CaptureDirectory() => Directory.CreateDirectory(Root);
         public string Path(string name) => System.IO.Path.Combine(Root, name);
         public long RetainedBytes() => Directory.GetFiles(Root).Sum(path => new FileInfo(path).Length);
-        public ProtocolCaptureStore Store(long budget) => new(new() { CaptureDirectory = Root, MaxCaptureBytes = budget },
-            NullLogger<ProtocolCaptureStore>.Instance);
+        public ProtocolCaptureStore Store(long budget, ILogger<ProtocolCaptureStore>? logger = null) => new(
+            new() { CaptureDirectory = Root, MaxCaptureBytes = budget }, logger ?? NullLogger<ProtocolCaptureStore>.Instance);
         public void Dispose() => Directory.Delete(Root, recursive: true);
+    }
+
+    private sealed class RecordingLogger : ILogger<ProtocolCaptureStore>
+    {
+        public int WarningCount { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning) WarningCount++;
+        }
     }
 }
