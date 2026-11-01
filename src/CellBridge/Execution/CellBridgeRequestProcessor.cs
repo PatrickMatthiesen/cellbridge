@@ -173,6 +173,14 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                         };
                     }
 
+                    if (subRequest.Type == SubRequestType.FileOperation)
+                    {
+                        log.LogInformation("File operation {Operation} completed with {ErrorCode}; exclusive lock ID supplied {ExclusiveLockIdSupplied}",
+                            subRequest.SubRequestDataAttributes.GetValueOrDefault("FileOperation") ?? "missing",
+                            subResponse.ErrorCode,
+                            subRequest.SubRequestDataAttributes.ContainsKey("ExclusiveLockID"));
+                    }
+
                     fileResponse.SubResponses.Add(subResponse);
                     cancellationToken.ThrowIfCancellationRequested();
                 }

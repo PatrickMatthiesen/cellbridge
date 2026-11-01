@@ -55,10 +55,40 @@ public static class DocumentControlReducer
         IReadOnlyDictionary<string, string> lockAttributes)
     {
         if (!Access(current, admission).HasFlag(DocumentAccess.Write)) return "FileUnauthorizedAccess";
+        if (TryGetSoleOwnerRenameSchemaLock(current, admission, lockAttributes, out var schemaLockId))
+        {
+            var normalized = lockAttributes.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            normalized["SchemaLockID"] = schemaLockId;
+            lockAttributes = normalized;
+        }
         var document = StoredDocument.RestoreControl(current);
         var coordinator = FssHttpLockCoordinator.Restore(document, current.Coordination, current.UtcNow, admission.Actor);
         return coordinator.ExecuteCellWrite(lockAttributes, static () => true, out _, out var error, current.UtcNow)
             ? null : error;
+    }
+
+    private static bool TryGetSoleOwnerRenameSchemaLock(DocumentControlRead current,
+        DocumentActorAdmission admission, IReadOnlyDictionary<string, string> attributes, out string schemaLockId)
+    {
+        schemaLockId = "";
+        if (attributes.GetValueOrDefault("FileOperation") != "Rename" ||
+            !attributes.TryGetValue("LockID", out var lockId) || string.IsNullOrWhiteSpace(lockId) ||
+            attributes.ContainsKey("SchemaLockID") || attributes.ContainsKey("ExclusiveLockID"))
+            return false;
+
+        var owners = current.Coordination.SchemaOwners.Where(owner => owner.ExpiresUtc > current.UtcNow).ToArray();
+        var editors = current.Editors.IsDefault
+            ? []
+            : current.Editors.Where(editor => editor.ExpiresUtc > current.UtcNow).ToArray();
+        if (owners.Length != 1 || editors.Length != 1 ||
+            !string.Equals(owners[0].Id, lockId, StringComparison.OrdinalIgnoreCase) ||
+            !Guid.TryParse(owners[0].Client, out var ownerClient) || editors[0].ClientId != ownerClient ||
+            !string.Equals(owners[0].OwnerSubject, admission.Actor.Subject, StringComparison.Ordinal) ||
+            !string.Equals(editors[0].Owner?.Subject, admission.Actor.Subject, StringComparison.Ordinal))
+            return false;
+
+        schemaLockId = lockId;
+        return true;
     }
 
     public static string? ValidateWholeFile(DocumentControlRead current, DocumentActorAdmission admission, string? token)

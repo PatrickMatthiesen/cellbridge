@@ -195,6 +195,80 @@ public sealed class OuterDocumentOperationTests
     [Fact]
     public Task RenameUniquenessAndCaseOnlyNames() => CheckRename(Memory());
 
+    [Fact]
+    public async Task OfficeRenameLockIdWorksOnlyForTheSoleMatchingEditorSession()
+    {
+        var provider = Memory();
+        var service = new CellBridgeDocumentService(provider);
+        var created = (await service.CreateAsync("/office-rename.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var schemaLockId = Guid.NewGuid().ToString("D");
+        var clientId = Guid.NewGuid();
+        await JoinEditorAsync(provider, created.ResourceId, clientId);
+        await GetSchemaLockAsync(provider, created.ResourceId, clientId, schemaLockId);
+
+        var renameAttributes = new Dictionary<string, string>
+        {
+            ["FileOperation"] = "Rename",
+            ["LockID"] = schemaLockId,
+            ["NewFileName"] = "renamed.docx",
+        };
+        var renamed = await service.RenameDocumentAsync(created.ResourceId, "renamed.docx", TestActor.Value, renameAttributes);
+        Assert.Equal("/renamed.docx", renamed.Path);
+
+        var peerDocument = (await service.CreateAsync("/office-rename-peer.docx", MinimalDocx.Create(), TestActor.Value))!;
+        var peerSchemaLockId = Guid.NewGuid().ToString("D");
+        var firstClient = Guid.NewGuid();
+        var secondClient = Guid.NewGuid();
+        await JoinEditorAsync(provider, peerDocument.ResourceId, firstClient);
+        await GetSchemaLockAsync(provider, peerDocument.ResourceId, firstClient, peerSchemaLockId);
+        await JoinEditorAsync(provider, peerDocument.ResourceId, secondClient);
+
+        var blocked = await Assert.ThrowsAsync<DocumentOperationLockException>(() => service.RenameDocumentAsync(
+            peerDocument.ResourceId, "blocked.docx", TestActor.Value, new Dictionary<string, string>
+            {
+                ["FileOperation"] = "Rename",
+                ["LockID"] = peerSchemaLockId,
+                ["NewFileName"] = "blocked.docx",
+            }).AsTask());
+        Assert.Equal("FileAlreadyLockedOnServer", blocked.ErrorCode);
+    }
+
+    private static async Task JoinEditorAsync(StorageProvider provider, Guid resourceId, Guid clientId)
+    {
+        var head = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(resourceId)))!;
+        var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(resourceId,
+            StorageTestDocuments.Admission(head), new FssHttpSubRequest
+            {
+                Type = SubRequestType.EditorsTable,
+                SubRequestDataAttributes =
+                {
+                    ["EditorsTableRequestType"] = "JoinEditingSession",
+                    ["ClientID"] = clientId.ToString("D"),
+                    ["Timeout"] = "3600",
+                    ["AsEditor"] = "true",
+                },
+            }));
+        Assert.Null(result.ErrorCode);
+    }
+
+    private static async Task GetSchemaLockAsync(StorageProvider provider, Guid resourceId, Guid clientId, string schemaLockId)
+    {
+        var head = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(resourceId)))!;
+        var result = await provider.Documents.ExecuteControlAsync(new DocumentControlCommand.Office(resourceId,
+            StorageTestDocuments.Admission(head), new FssHttpSubRequest
+            {
+                Type = SubRequestType.SchemaLock,
+                SubRequestDataAttributes =
+                {
+                    ["SchemaLockRequestType"] = "GetLock",
+                    ["SchemaLockID"] = schemaLockId,
+                    ["ClientID"] = clientId.ToString("D"),
+                    ["Timeout"] = "3600",
+                },
+            }));
+        Assert.Null(result.ErrorCode);
+    }
+
     [PostgreSqlFact]
     public async Task PostgreSqlRenameUniquenessAndCaseOnlyNames()
     {
