@@ -138,6 +138,7 @@ public sealed class OfficeRealTimeEndpointTests
         Assert.Contains("no-store", response.Headers.CacheControl?.ToString());
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.True(json.RootElement.GetProperty("enabled").GetBoolean());
+        Assert.True(json.RootElement.GetProperty("netcore").GetBoolean());
         Assert.Equal(PublicOrigin + Mount + "/_cellbridge/rtc/signalr", json.RootElement.GetProperty("url").GetString());
         Assert.Equal("environment=CellBridge", json.RootElement.GetProperty("connectionString").GetString());
         Assert.Contains(Mount + "/_cellbridge/rtc/", properties["RealtimeTypingEndpointUrl"]);

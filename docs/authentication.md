@@ -42,10 +42,11 @@ broker redirect URI to the server registration. The server validates the API
 application GUID as the v2 token audience, the tenant issuer, expiry, scope and
 native Office client ID.
 
-In Entra mode, unauthenticated HTTP OPTIONS discovery returns a bearer challenge.
-Office must authenticate before receiving protocol capabilities. Downloads,
-PROPFIND, SOAP operations and historical versions also require authentication
-and their existing document permissions.
+In Entra mode, HTTP OPTIONS on the marked protocol discovery routes returns
+generic protocol capabilities without a cookie. Office can use this response to
+discover the protocol before its native sign-in finishes. Document downloads,
+PROPFIND, SOAP operations, RTC and historical versions still require
+authentication and their existing document permissions.
 
 The challenge advertises a same-origin `cookie_uri` at
 `/_api/SP.OAuth.NativeClient/Authenticate`. A POST with a validated Office token

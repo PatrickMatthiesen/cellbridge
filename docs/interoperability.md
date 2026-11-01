@@ -185,7 +185,7 @@ test coverage. It is not an exhaustive Office conformance audit.
 
 | Area | Current gap |
 | --- | --- |
-| Participant names | Observed defect: remote selections/cursor indicators appear, but names show `Loading name...` or `Getting name...`. The missing identity lookup contract is not established. |
+| Participant names | Native Windows Excel cursor labels and the Word coauthor gallery resolved names in a same-account, two-desktop test after fixing EditorsTable storage-index mappings. Distinct-account labels and mobile clients remain unqualified. |
 | OCS | Missing service: the frame codec does not implement session state, WPM merging, revision clocks or saving merged content to the file host. RTC can operate without OCS. |
 | Publication notifications | Missing integration: the RTC hub relays client notifications, but persisted file publication does not generate a server notification. |
 | Multiple RTC hosts | Missing coordination: rooms and presence are process-local. Multi-instance hosts must disable RTC. Shared file storage and locking are separate and support multiple hosts. |

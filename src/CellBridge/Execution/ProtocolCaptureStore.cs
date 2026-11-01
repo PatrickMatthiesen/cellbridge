@@ -6,6 +6,7 @@ namespace CellBridge.AspNetCore;
 
 internal sealed class ProtocolCaptureStore(CellBridgeOptions options, ILogger<ProtocolCaptureStore> logger)
 {
+    internal bool IsEnabled => options.CaptureDirectory is not null;
     private readonly object _sync = new();
     private long? _used;
 

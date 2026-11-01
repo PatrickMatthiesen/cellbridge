@@ -374,9 +374,9 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                     TryGet(connectionId, ticket, out _);
             }
             if (channel == 1 && !IsValidChannelOne(root)) return false;
-            if (channel != 1 && root.TryGetProperty("A", out var senderValue) &&
+            if (channel != 1 && channel != 3 && root.TryGetProperty("A", out var senderValue) &&
                 (senderValue.ValueKind != JsonValueKind.String || !Guid.TryParse(senderValue.GetString(), out var suppliedId) || suppliedId != ticket.ClientId)) return false;
-            if (channel == 3 && (!TryGetSender(root, out var senderId) || senderId != ticket.ClientId)) return false;
+            if (channel == 3 && !OfficeRealTimeChannel3Validator.IsValid(root, ticket.ClientId)) return false;
             if (channel == 8 && !root.TryGetProperty("SL2", out _)) return false;
         }
         if (!TryGet(connectionId, ticket, out var connection)) return false;
@@ -1034,11 +1034,6 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         foreach (var property in root.EnumerateObject())
             if (ChangeTokenFields.Contains(property.Name) || !allowed.Contains(property.Name)) return false;
         return root.EnumerateObject().Any();
-    }
-    private static bool TryGetSender(JsonElement root, out Guid sender)
-    {
-        sender = default;
-        return root.TryGetProperty("A", out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out sender);
     }
     private static bool IdentityMatches(JsonElement root, string name, Guid client, bool allowEmpty = false)
     {

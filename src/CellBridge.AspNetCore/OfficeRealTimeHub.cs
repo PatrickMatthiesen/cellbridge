@@ -66,6 +66,11 @@ internal sealed class OfficeRealTimeHub : Hub
             Encoding.UTF8.GetByteCount(payload) > MaximumCapturedRequestBytes) return;
         byte[] content = JsonSerializer.SerializeToUtf8Bytes(new
         {
+            capturedUtc = DateTimeOffset.UtcNow,
+            connectionId = Context.ConnectionId,
+            resourceId = GetRequiredTicket().ResourceId,
+            lifecycleGeneration = GetRequiredTicket().LifecycleGeneration,
+            clientId = GetRequiredTicket().ClientId,
             operation,
             channel,
             payload,

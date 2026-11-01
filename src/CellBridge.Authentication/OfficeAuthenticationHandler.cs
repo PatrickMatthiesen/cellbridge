@@ -27,8 +27,11 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
 
     protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
     {
-        if (!await Context.TryCellBridgeOfficeFormsFallbackAsync(properties))
-            await Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
+        if (await Context.TryCellBridgeOfficeFormsFallbackAsync(properties)) return;
+        var category = CredentialCategory(Request);
+        if ((category is "absent" or "empty-bearer") &&
+            await Context.TryHandleCellBridgeOfficeDiscoveryAsync()) return;
+        await Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
     }
 
     protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>

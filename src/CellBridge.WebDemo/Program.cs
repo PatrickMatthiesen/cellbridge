@@ -8,6 +8,7 @@ using CellBridge.Storage.FileSystem;
 using CellBridge.WebDemo;
 using Npgsql;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.HttpLogging;
 using CellBridge.Lists;
 using CellBridge.Lists.AspNetCore;
 using CellBridge.Lists.PostgreSql;
@@ -17,6 +18,20 @@ using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
+var rtcHttpLoggingEnabled = !string.IsNullOrWhiteSpace(builder.Configuration["Protocol:CaptureDirectory"]);
+if (rtcHttpLoggingEnabled)
+{
+    builder.Services.AddHttpLogging(options =>
+    {
+        options.LoggingFields = HttpLoggingFields.RequestMethod |
+            HttpLoggingFields.RequestPath |
+            HttpLoggingFields.ResponseStatusCode |
+            HttpLoggingFields.RequestHeaders;
+        options.RequestHeaders.Clear();
+        options.RequestHeaders.Add("User-Agent");
+        options.CombineLogs = true;
+    });
+}
 var storageKind = builder.Configuration["Storage:Provider"] ?? "InMemory";
 var limits = builder.Configuration.GetSection("Storage").Get<StorageLimits>() ?? new StorageLimits();
 limits.Validate();
@@ -73,6 +88,7 @@ builder.Services.AddCellBridge(provider, requireDurability: !storageKind.Equals(
         options.CaptureDirectory = builder.Configuration["Protocol:CaptureDirectory"];
     });
 builder.Services.AddCellBridgeAuthentication(builder.Configuration);
+builder.Services.AddWebDemoSharingRecipients();
 var listsConnection = builder.Configuration.GetConnectionString("lists");
 Func<IServiceProvider, Task>? checkListsHealth = null;
 if (!string.IsNullOrWhiteSpace(listsConnection))
@@ -105,6 +121,12 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost,
 });
+if (rtcHttpLoggingEnabled)
+{
+    app.UseWhen(
+        context => context.Request.Path.StartsWithSegments("/_cellbridge/rtc", StringComparison.OrdinalIgnoreCase),
+        branch => branch.UseHttpLogging());
+}
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/library/error");

@@ -45,7 +45,7 @@ public sealed class EntraAuthenticationTests
         string? authorization, bool expectedForms)
     {
         await using var fixture = await Fixture.CreateAsync(forms: forms, allowFallback: allowFallback);
-        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", authorization: authorization);
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx", authorization: authorization);
         Assert.Equal(expectedForms ? System.Net.HttpStatusCode.Forbidden : System.Net.HttpStatusCode.Unauthorized,
             response.StatusCode);
         Assert.Equal(expectedForms, response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
@@ -61,7 +61,7 @@ public sealed class EntraAuthenticationTests
     {
         await using var fixture = await Fixture.CreateAsync(allowFallback: true);
         var cookie = await fixture.CreateCookieAsync();
-        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", cookie, authorization);
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx", cookie, authorization);
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
         Assert.Contains(response.Headers.WwwAuthenticate, value => value.Scheme == "Bearer");
@@ -131,26 +131,60 @@ public sealed class EntraAuthenticationTests
     [Theory]
     [InlineData(null)]
     [InlineData("Bearer")]
-    public async Task ProtocolDiscoveryChallengesUntilOfficeSuppliesAToken(string? authorization)
+    public async Task ProtocolDiscoveryIsAvailableBeforeOfficeSuppliesAToken(string? authorization)
     {
         await using var fixture = await Fixture.CreateAsync();
         foreach (var path in new[] { "/", "/shared/", "/_vti_bin/cellstorage.svc" })
         {
             using var request = new HttpRequestMessage(HttpMethod.Options, path);
             if (authorization is not null) request.Headers.TryAddWithoutValidation("Authorization", authorization);
-            using var challenge = await fixture.Client.SendAsync(request);
-            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, challenge.StatusCode);
-            Assert.Contains("Bearer realm=", challenge.Headers.WwwAuthenticate.Single().ToString(), StringComparison.Ordinal);
-            Assert.Contains("cookie_uri=\"https://office.example.test/_api/SP.OAuth.NativeClient/Authenticate\"",
-                challenge.Headers.WwwAuthenticate.Single().ToString(), StringComparison.Ordinal);
-            Assert.False(challenge.Headers.Contains("X-MSFSSHTTP"));
+            using var discovery = await fixture.Client.SendAsync(request);
+            Assert.Equal(System.Net.HttpStatusCode.OK, discovery.StatusCode);
+            Assert.Equal("1.5", discovery.Headers.GetValues("X-MSFSSHTTP").Single());
+            Assert.Contains("OPTIONS", discovery.Content.Headers.Allow);
+            Assert.Empty(discovery.Headers.WwwAuthenticate);
+            Assert.False(discovery.Headers.Contains("Set-Cookie"));
 
             using var authenticated = new HttpRequestMessage(HttpMethod.Options, path);
             authenticated.Headers.Authorization = new("Bearer", fixture.CreateToken());
-            using var discovery = await fixture.Client.SendAsync(authenticated);
-            Assert.Equal(System.Net.HttpStatusCode.OK, discovery.StatusCode);
-            Assert.Equal("1.5", discovery.Headers.GetValues("X-MSFSSHTTP").Single());
+            using var authenticatedDiscovery = await fixture.Client.SendAsync(authenticated);
+            Assert.Equal(System.Net.HttpStatusCode.OK, authenticatedDiscovery.StatusCode);
+            Assert.Equal("1.5", authenticatedDiscovery.Headers.GetValues("X-MSFSSHTTP").Single());
         }
+    }
+
+    [Theory]
+    [InlineData("Bearer invalid-token")]
+    [InlineData("Basic credentials")]
+    [InlineData("Bearer\tinvalid-token")]
+    public async Task ProtocolDiscoveryDoesNotDowngradeSuppliedCredentialsEvenWithValidCookie(string authorization)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var cookie = await fixture.CreateCookieAsync();
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", cookie, authorization);
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Contains(response.Headers.WwwAuthenticate, value => value.Scheme == "Bearer");
+        Assert.False(response.Headers.Contains("X-MSFSSHTTP"));
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+    }
+
+    [Theory]
+    [InlineData("HEAD", "/shared/example.docx")]
+    [InlineData("GET", "/shared/example.docx")]
+    [InlineData("PROPFIND", "/shared/example.docx")]
+    [InlineData("POST", "/_vti_bin/cellstorage.svc")]
+    [InlineData("POST", "/_cellbridge/rtc/rtchub/negotiate?negotiateVersion=1")]
+    public async Task DocumentSoapAndRtcRequestsStillRequireAuthentication(string method, string path)
+    {
+        await using var fixture = await Fixture.CreateAsync(enableOfficeRealTime:
+            method == "PROPFIND" || path.StartsWith("/_cellbridge/rtc/", StringComparison.Ordinal));
+        using var response = await fixture.SendOfficeRequestAsync(new HttpMethod(method), path);
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        if (!path.StartsWith("/_cellbridge/rtc/", StringComparison.Ordinal))
+            Assert.Contains(response.Headers.WwwAuthenticate, value => value.Scheme == "Bearer");
+        Assert.False(response.Headers.Contains("X-MSFSSHTTP"));
     }
 
     [Theory]
@@ -164,7 +198,7 @@ public sealed class EntraAuthenticationTests
     public async Task BearerRejectsInvalidTokenProperties(string change)
     {
         await using var fixture = await Fixture.CreateAsync(allowFallback: true);
-        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/",
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx",
             authorization: "Bearer " + fixture.CreateToken(change));
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
@@ -501,7 +535,7 @@ public sealed class EntraAuthenticationTests
         }
 
         public static async Task<Fixture> CreateAsync(TimeSpan? cookieSpan = null, string? pathBase = null,
-            bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true)
+            bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true, bool enableOfficeRealTime = false)
         {
             var key = RSA.Create(2048);
             var otherKey = RSA.Create(2048);
@@ -561,7 +595,7 @@ public sealed class EntraAuthenticationTests
                     if (!forms) services.Configure<AuthenticationOptions>(options =>
                         options.DefaultScheme = EntraAuthentication.OfficeScheme);
                     services.AddCellBridge(TestStorage.Memory(), requireDurability: false,
-                        configure: options => options.EnableOfficeRealTime = false);
+                        configure: options => options.EnableOfficeRealTime = enableOfficeRealTime);
                     if (forms) services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
                         options =>
                         {

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.SignalR;
 
@@ -10,6 +11,8 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     private readonly IOfficeRealTimeAuthorizer authorizer;
     private readonly IHubContext<OfficeRealTimeHub> hubContext;
     private readonly TimeProvider time;
+    private readonly ProtocolCaptureStore? captures;
+    private long captureSequence;
     private const int MaxConnections = 128;
     private const int MaxDocumentConnections = 32;
     private const int MaxSubjectConnections = 8;
@@ -28,11 +31,13 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     private readonly Dictionary<string, Connection> _connections = new(StringComparer.Ordinal);
 
     public OfficeRealTimeSessionStore(IOfficeRealTimeAuthorizer authorizer,
-        IHubContext<OfficeRealTimeHub> hubContext, TimeProvider? timeProvider = null)
+        IHubContext<OfficeRealTimeHub> hubContext, TimeProvider? timeProvider = null,
+        ProtocolCaptureStore? captures = null)
     {
         this.authorizer = authorizer;
         this.hubContext = hubContext;
         time = timeProvider ?? TimeProvider.System;
+        this.captures = captures;
     }
 
     public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
@@ -231,12 +236,12 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             {
                 if (!IsValidChannelOne(root)) return false;
             }
-            else if (root.TryGetProperty("A", out JsonElement senderValue))
+            else if (channel != 3 && root.TryGetProperty("A", out JsonElement senderValue))
             {
                 if (senderValue.ValueKind != JsonValueKind.String ||
                     !Guid.TryParse(senderValue.GetString(), out Guid populatedSender) || populatedSender != ticket.ClientId) return false;
             }
-            if (channel == 3 && (!TryGetSender(root, out Guid sender) || sender != ticket.ClientId)) return false;
+            if (channel == 3 && !OfficeRealTimeChannel3Validator.IsValid(root, ticket.ClientId)) return false;
             if (channel == 8 && !root.TryGetProperty("SL2", out _)) return false;
         }
 
@@ -379,6 +384,7 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             {
                 await hubContext.Clients.Client(id).SendCoreAsync(method, args, sendDeadline.Token)
                     .WaitAsync(sendDeadline.Token).ConfigureAwait(false);
+                await CaptureDeliveryAsync(sender, recipient, method, args, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -386,6 +392,38 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             }
         }
         return true;
+    }
+
+    private async Task CaptureDeliveryAsync(Connection? sender, Connection recipient, string method,
+        object?[] args, CancellationToken cancellationToken)
+    {
+        if (captures?.IsEnabled != true) return;
+        byte[] payload = method == "updateNotification" && args.Length == 2 && args[1] is string notification
+            ? Encoding.UTF8.GetBytes(notification) : JsonSerializer.SerializeToUtf8Bytes(args);
+        byte[] metadata = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            capturedUtc = time.GetUtcNow(),
+            sequence = Interlocked.Increment(ref captureSequence),
+            resourceId = recipient.Ticket.ResourceId,
+            lifecycleGeneration = recipient.Ticket.LifecycleGeneration,
+            senderClientId = sender?.Ticket.ClientId,
+            senderConnectionId = sender?.Context.ConnectionId,
+            recipientClientId = recipient.Ticket.ClientId,
+            recipientConnectionId = recipient.Context.ConnectionId,
+            operation = method,
+            channel = method == "updateNotification" ? args[0] : null,
+            payloadBytes = payload.Length,
+            payloadSha256 = Convert.ToHexString(SHA256.HashData(payload)),
+        });
+        try
+        {
+            await captures.WriteAsync(Guid.NewGuid().ToString("N"), ".rtc.delivery.json", metadata,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A diagnostic write cannot change the result of an already completed delivery.
+        }
     }
 
     private async Task RemoveDeniedAsync(Connection connection, CancellationToken cancellationToken)
@@ -534,13 +572,6 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             if (ChangeTokenFields.Contains(property.Name) || !allowed.Contains(property.Name)) return false;
         }
         return root.EnumerateObject().Any();
-    }
-
-    private static bool TryGetSender(JsonElement root, out Guid sender)
-    {
-        sender = default;
-        return root.TryGetProperty("A", out JsonElement value) && value.ValueKind == JsonValueKind.String &&
-               Guid.TryParse(value.GetString(), out sender);
     }
 
     private static bool IdentityFieldMatches(JsonElement root, string fieldName, Guid clientId, bool allowEmpty = false)

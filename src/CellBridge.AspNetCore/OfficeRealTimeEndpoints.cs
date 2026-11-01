@@ -93,6 +93,9 @@ internal static class OfficeRealTimeEndpoints
             connectionString = "environment=CellBridge",
             enabled = true,
             errorMessage = "",
+            // This endpoint hosts ASP.NET Core SignalR. Native Office reference
+            // discovery advertises that transport with the netcore response flag.
+            netcore = true,
             protocolVersion = "1.0",
             querySignature = context.Request.Query["qs"].ToString(),
             queryString = query,
