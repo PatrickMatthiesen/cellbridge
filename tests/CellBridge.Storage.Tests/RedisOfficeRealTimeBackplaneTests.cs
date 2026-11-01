@@ -12,12 +12,53 @@ namespace CellBridge.Storage.Tests;
 
 // These test the trusted coordination adapter directly. They do not qualify
 // ticket issuance or document authorization; the Kestrel tests exercise those.
-public sealed class RedisOfficeRealTimeBackplaneTests
+public sealed class RedisOfficeRealTimeBackplaneTests(RedisOfficeRealTimeBackplaneTests.SharedBackendFixture backend)
+    : IClassFixture<RedisOfficeRealTimeBackplaneTests.SharedBackendFixture>
 {
+    public sealed class SharedBackendFixture : IAsyncLifetime
+    {
+        private IDistributedApplicationTestingBuilder? builder;
+        private DistributedApplication? application;
+        internal string RedisConnection { get; private set; } = null!;
+
+        public async Task InitializeAsync()
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            builder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
+            try
+            {
+                builder.Resources.Clear();
+                builder.AddContainer("rtc-coordination", "redis", "7.4-alpine")
+                    .WithArgs("--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction")
+                    .WithEndpoint(targetPort: 6379, name: "tcp", scheme: "tcp");
+                application = await builder.BuildAsync(timeout.Token);
+                await application.StartAsync(timeout.Token);
+                await application.ResourceNotifications.WaitForResourceAsync("rtc-coordination", KnownResourceStates.Running, timeout.Token);
+                var endpoint = application.GetEndpoint("rtc-coordination", "tcp");
+                RedisConnection = $"{endpoint.Host}:{endpoint.Port}";
+            }
+            catch
+            {
+                await DisposeAsync();
+                throw;
+            }
+        }
+
+        public async Task DisposeAsync()
+        {
+            var app = application;
+            var appBuilder = builder;
+            application = null;
+            builder = null;
+            try { if (app is not null) await app.DisposeAsync(); }
+            finally { if (appBuilder is not null) await appBuilder.DisposeAsync(); }
+        }
+    }
+
     [Fact]
     public async Task Event_byte_counts_match_the_stored_unicode_and_escaped_json()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var member = Member(new(Guid.NewGuid(), 1), "writer");
         string epoch = (await f.Broker.ConnectAsync(member, default)).Snapshot!.Epoch;
         string[] payloads =
@@ -49,7 +90,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Room_admission_and_replacement_preserve_limits_and_fence_stale_cleanup()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var room = new OfficeRealTimeRoomKey(Guid.NewGuid(), 1);
         var members = Enumerable.Range(0, 32).Select(i => Member(room, "subject-" + i)).ToArray();
         foreach (var member in members)
@@ -75,7 +116,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Subject_limit_spans_rooms_and_abandoned_memberships_cannot_be_renewed_after_expiry()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var members = Enumerable.Range(0, 8).Select(_ => Member(new(Guid.NewGuid(), 1), "same-subject")).ToArray();
         foreach (var member in members)
             Assert.Equal(OfficeRealTimeBackplaneStatus.Ok, (await f.Broker.ConnectAsync(member, default)).Status);
@@ -93,7 +134,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Rolling_log_stays_bounded_and_detects_a_lagging_cursor()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var member = Member(new(Guid.NewGuid(), 1), "writer");
         var admitted = await f.Broker.ConnectAsync(member, default);
         string epoch = admitted.Snapshot!.Epoch;
@@ -128,7 +169,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Cleanup_budget_preserves_epoch_and_membership_until_departure_can_be_appended()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var member = Member(new(Guid.NewGuid(), 1), "writer");
         string epoch = (await f.Broker.ConnectAsync(member, default)).Snapshot!.Epoch;
         for (int i = 0; i < 40; i++)
@@ -153,7 +194,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Rolling_log_accounts_for_serialized_bytes_before_reaching_the_event_count_limit()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var member = Member(new(Guid.NewGuid(), 1), "writer");
         string epoch = (await f.Broker.ConnectAsync(member, default)).Snapshot!.Epoch;
         string payload = "{\"channel\":3,\"payload\":\"" + new string('x', 32 * 1024) + "\"}";
@@ -176,7 +217,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Missing_room_metadata_requires_a_fresh_epoch_and_does_not_adopt_old_members()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var member = Member(new(Guid.NewGuid(), 1), "writer");
         string epoch = (await f.Broker.ConnectAsync(member, default)).Snapshot!.Epoch;
         await f.Database.KeyDeleteAsync(f.RoomPrefix(member.Room) + ":meta");
@@ -193,7 +234,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Room_wake_hints_follow_committed_presence_and_departure_events()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var room = new OfficeRealTimeRoomKey(Guid.NewGuid(), 1);
         var member = Member(room, "writer");
         var hints = new System.Collections.Concurrent.ConcurrentQueue<OfficeRealTimeRoomKey>();
@@ -221,7 +262,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Lease_pruning_emits_advisory_wake_after_it_appends_a_departure()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var room = new OfficeRealTimeRoomKey(Guid.NewGuid(), 1);
         var member = Member(room, "writer");
         var arrived = new TaskCompletionSource<OfficeRealTimeRoomKey>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -242,7 +283,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Wake_subscription_ignores_other_namespaces_and_noncanonical_channels()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var received = new TaskCompletionSource<OfficeRealTimeRoomKey>(TaskCreationOptions.RunContinuationsAsynchronously);
         f.Broker.RoomChanged += room => received.TrySetResult(room);
         var invalidResource = Guid.Parse("abcdefab-cdef-abcd-efab-cdefabcdefab");
@@ -266,7 +307,7 @@ public sealed class RedisOfficeRealTimeBackplaneTests
     [Fact]
     public async Task Losing_only_the_pubsub_connection_advances_the_broker_generation()
     {
-        await using var f = await Fixture.Start();
+        await using var f = await Fixture.Start(backend);
         var baseline = f.Broker.Generation;
         await f.Database.ExecuteAsync("CLIENT", "KILL", "TYPE", "pubsub");
         await EventuallyAsync(() => f.Broker.Generation > baseline, TimeSpan.FromSeconds(5));
@@ -286,8 +327,8 @@ public sealed class RedisOfficeRealTimeBackplaneTests
             new(room.ResourceId, room.LifecycleGeneration, new(new(subject, subject, subject)), Guid.NewGuid(), DateTimeOffset.UtcNow.AddMinutes(20)));
     private static string ClientKey(OfficeRealTimeBackplaneMember member) => member.Ticket.ClientId.ToString("B").ToLowerInvariant();
 
-    private sealed class Fixture(IDistributedApplicationTestingBuilder builder, DistributedApplication application,
-        IConnectionMultiplexer connection, RedisOfficeRealTimeBackplane broker, string roomNamespace) : IAsyncDisposable
+    private sealed class Fixture(IConnectionMultiplexer connection, RedisOfficeRealTimeBackplane broker,
+        string roomNamespace) : IAsyncDisposable
     {
         internal RedisOfficeRealTimeBackplane Broker => broker;
         internal IDatabase Database => connection.GetDatabase();
@@ -297,35 +338,23 @@ public sealed class RedisOfficeRealTimeBackplaneTests
             return $"cellbridge:rtc:{{{tag}}}:room:{room.ResourceId:N}:{room.LifecycleGeneration}";
         }
 
-        internal static async Task<Fixture> Start()
+        internal static async Task<Fixture> Start(SharedBackendFixture backend)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-            var builder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
-            builder.Resources.Clear();
-            builder.AddContainer("rtc-coordination", "redis", "7.4-alpine")
-                .WithArgs("--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction")
-                .WithEndpoint(targetPort: 6379, name: "tcp", scheme: "tcp");
-            DistributedApplication? application = null;
             IConnectionMultiplexer? connection = null;
             RedisOfficeRealTimeBackplane? broker = null;
             try
             {
-                application = await builder.BuildAsync(timeout.Token);
-                await application.StartAsync(timeout.Token);
-                await application.ResourceNotifications.WaitForResourceAsync("rtc-coordination", KnownResourceStates.Running, timeout.Token);
-                var endpoint = application.GetEndpoint("rtc-coordination", "tcp");
-                string configuration = $"{endpoint.Host}:{endpoint.Port}";
+                string configuration = backend.RedisConnection;
                 connection = await ConnectionMultiplexer.ConnectAsync(configuration + ",allowAdmin=true");
                 string roomNamespace = "adapter-tests-" + Guid.NewGuid().ToString("N");
                 broker = new(new CellBridgeOptions { OfficeRealTimeRedisConnectionString = configuration, OfficeRealTimeRedisNamespace = roomNamespace });
-                return new(builder, application, connection, broker, roomNamespace);
+                return new(connection, broker, roomNamespace);
             }
             catch
             {
                 if (broker is not null) await broker.DisposeAsync();
                 connection?.Dispose();
-                if (application is not null) await application.DisposeAsync();
-                await builder.DisposeAsync();
                 throw;
             }
         }
@@ -334,8 +363,6 @@ public sealed class RedisOfficeRealTimeBackplaneTests
         {
             await broker.DisposeAsync();
             connection.Dispose();
-            await application.DisposeAsync();
-            await builder.DisposeAsync();
         }
     }
 }

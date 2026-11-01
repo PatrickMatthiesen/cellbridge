@@ -30,16 +30,67 @@ using Npgsql;
 namespace CellBridge.Storage.Tests;
 
 /// <summary>Real Kestrel instances, protocol ticket issuance, PostgreSQL state and Redis RTC.</summary>
-public sealed partial class OfficeRealTimeMultipleHostTests
+public sealed partial class OfficeRealTimeMultipleHostTests(OfficeRealTimeMultipleHostTests.SharedBackendFixture backend)
+    : IClassFixture<OfficeRealTimeMultipleHostTests.SharedBackendFixture>
 {
     private const string PublicOrigin = "https://rtc.integration.test";
     private static readonly XNamespace Protocol = "http://schemas.microsoft.com/sharepoint/soap/";
     private static readonly CellBridgeActor ReaderActor = new(new("tests:reader", "test-reader", "Test reader"));
 
+    public sealed class SharedBackendFixture : IAsyncLifetime
+    {
+        private IDistributedApplicationTestingBuilder? builder;
+        private DistributedApplication? application;
+
+        internal string PostgresConnection { get; private set; } = null!;
+        internal string RedisConnection { get; private set; } = null!;
+
+        public async Task InitializeAsync()
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            builder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
+            try
+            {
+                builder.Resources.Remove(builder.Resources.Single(resource => resource.Name == "webdemo"));
+                builder.AddContainer("rtc-redis", "redis", "7.4-alpine")
+                    .WithArgs("--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction")
+                    .WithEndpoint(targetPort: 6379, name: "tcp", scheme: "tcp");
+                application = await builder.BuildAsync(timeout.Token);
+                await application.StartAsync(timeout.Token);
+                await application.ResourceNotifications.WaitForResourceAsync("storage-init", KnownResourceStates.Finished, timeout.Token);
+                if (!application.ResourceNotifications.TryGetCurrentState("storage-init", out var initialized) ||
+                    initialized.Snapshot.ExitCode != 0)
+                    throw new InvalidOperationException("The isolated PostgreSQL schema initialization failed.");
+                await application.ResourceNotifications.WaitForResourceAsync("rtc-redis", KnownResourceStates.Running, timeout.Token);
+                PostgresConnection = await application.GetConnectionStringAsync("cellbridge", timeout.Token)
+                    ?? throw new InvalidOperationException("Aspire did not provide the isolated document database.");
+                var endpoint = application.GetEndpoint("rtc-redis", "tcp");
+                RedisConnection = $"{endpoint.Host}:{endpoint.Port},abortConnect=false,allowAdmin=true";
+                using var redisProbe = await StackExchange.Redis.ConnectionMultiplexer.ConnectAsync(RedisConnection);
+                await redisProbe.GetDatabase().PingAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch
+            {
+                await DisposeAsync();
+                throw;
+            }
+        }
+
+        public async Task DisposeAsync()
+        {
+            var app = application;
+            var appBuilder = builder;
+            application = null;
+            builder = null;
+            try { if (app is not null) await app.DisposeAsync(); }
+            finally { if (appBuilder is not null) await appBuilder.DisposeAsync(); }
+        }
+    }
+
     [Fact]
     public async Task Reconnect_without_new_presence_removes_the_original_presence_from_existing_peers()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid originalClient = await fixture.JoinCoauthoringAsync(file.Path);
         Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
@@ -70,7 +121,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Oversized_notification_is_rejected_without_disconnecting_healthy_collaborators()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid senderClient = await fixture.JoinCoauthoringAsync(file.Path);
         Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
@@ -95,7 +146,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Large_unicode_presence_reaches_the_other_host_without_disconnecting_the_room()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid senderClient = await fixture.JoinCoauthoringAsync(file.Path);
         Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
@@ -127,7 +178,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Two_kestrel_instances_relay_authorized_signalr_traffic_and_reconnect()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         await Task.Delay(250);
         Assert.Equal(0, fixture.First.Scheduler.Diagnostics.PollCalls);
         Assert.Equal(0, fixture.First.Scheduler.Diagnostics.AuthorizationSweeps);
@@ -218,7 +269,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Ticket_expiry_closes_the_socket_and_protocol_renewal_reconnects()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid client = await fixture.JoinCoauthoringAsync(file.Path);
         string ticket = await fixture.GetDocumentTicketAsync(fixture.First, file.Path);
@@ -239,7 +290,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Missing_redis_room_state_aborts_existing_sockets_without_replaying_old_events()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid senderClient = await fixture.JoinCoauthoringAsync(file.Path);
         Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
@@ -263,7 +314,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Redis_connection_interruption_aborts_sessions_and_allows_fresh_reconnect_after_recovery()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid firstClient = await fixture.JoinCoauthoringAsync(file.Path);
         Guid secondClient = await fixture.JoinCoauthoringAsync(file.Path);
@@ -302,7 +353,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Stopped_host_with_lost_cleanup_is_reaped_after_membership_lease_expires()
     {
-        await using var fixture = await Fixture.StartAsync(distributedHosts: 2, faultableFirstHost: true);
+        await using var fixture = await Fixture.StartAsync(backend, distributedHosts: 2, faultableFirstHost: true);
         var file = await fixture.CreateDocumentAsync();
         Guid abandonedClient = await fixture.JoinCoauthoringAsync(file.Path);
         Guid firstSurvivorClient = await fixture.JoinCoauthoringAsync(file.Path);
@@ -334,7 +385,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Authorization_denies_connect_rejects_write_and_closes_revoked_sessions()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var file = await fixture.CreateDocumentAsync();
         Guid senderClient = await fixture.JoinCoauthoringAsync(file.Path);
         Guid readerClient = Guid.NewGuid();
@@ -397,7 +448,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Subject_connection_limit_applies_across_rooms_and_hosts()
     {
-        await using var fixture = await Fixture.StartAsync();
+        await using var fixture = await Fixture.StartAsync(backend);
         var firstFile = await fixture.CreateDocumentAsync("/shared/subject-a.docx");
         var secondFile = await fixture.CreateDocumentAsync("/shared/subject-b.docx");
         var connections = new List<SignalRPeer>();
@@ -433,7 +484,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Bounded_load_compares_local_and_distributed_hot_and_multiple_rooms()
     {
-        await using var fixture = await Fixture.StartAsync(distributedHosts: 3, includeLocalHost: true);
+        await using var fixture = await Fixture.StartAsync(backend, distributedHosts: 3, includeLocalHost: true);
         var localHot = await fixture.CreateDocumentAsync("/shared/hot-local.docx");
         var oneHostHot = await fixture.CreateDocumentAsync("/shared/hot-one-distributed.docx");
         var twoHostHot = await fixture.CreateDocumentAsync("/shared/hot-two-distributed.docx");
@@ -489,7 +540,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
             framework = RuntimeInformation.FrameworkDescription,
             operatingSystem = RuntimeInformation.OSDescription,
             processorCount = Environment.ProcessorCount,
-            environment = "Windows Kestrel instances in one test process; isolated Aspire PostgreSQL and Redis",
+            environment = "Kestrel instances in one test process; class-scoped Aspire PostgreSQL and Redis",
             office = "not launched; simulated SignalR protocol traffic",
             warmupOperationsPerScenario = 5,
             measuredOperationsPerScenario = 80,
@@ -527,7 +578,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
     [Fact]
     public async Task Bounded_load_rotates_rates_and_exercises_more_rooms_than_dispatch_workers()
     {
-        await using var fixture = await Fixture.StartAsync(distributedHosts: 3);
+        await using var fixture = await Fixture.StartAsync(backend, distributedHosts: 3);
         using var databaseActivities = new DatabaseActivityCounter();
         var runs = new List<LoadResult>();
         string? runFailure = null;
@@ -552,7 +603,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
                 string[] topologies = pass == 0 ? ["one-host", "three-host"] : ["three-host", "one-host"];
                 foreach (string topology in topologies)
                 {
-                    string path = $"/shared/rotated-{pass}-{rate}-{topology}.docx";
+                    string path = fixture.IsolatePath($"/shared/rotated-{pass}-{rate}-{topology}.docx");
                     await fixture.CreateDocumentAsync(path, readerAccess: true);
                     Host[] recipients = topology == "one-host" ? [fixture.First, fixture.First] : [fixture.Second, fixture.Third];
                     string name = $"rotated-{pass}-{rate}hz-{topology}";
@@ -568,7 +619,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
         var rooms = new List<(string Path, Host Sender, Host Recipient)>();
         for (int index = 0; index < 6; index++)
         {
-            string path = $"/shared/fairness-{index}.docx";
+            string path = fixture.IsolatePath($"/shared/fairness-{index}.docx");
             await fixture.CreateDocumentAsync(path, readerAccess: true);
             rooms.Add((path, fixture.First, index % 2 == 0 ? fixture.Second : fixture.Third));
         }
@@ -605,7 +656,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
             framework = RuntimeInformation.FrameworkDescription,
             operatingSystem = RuntimeInformation.OSDescription,
             processorCount = Environment.ProcessorCount,
-            environment = "Windows Kestrel instances in one test process; isolated Aspire PostgreSQL and Redis",
+            environment = "Kestrel instances in one test process; class-scoped Aspire PostgreSQL and Redis",
             office = "not launched; simulated SOAP ticket issuance and SignalR traffic",
             design = "two rotated passes at 10Hz and 40Hz, then six concurrent rooms on three Kestrel instances",
             perScenarioWarmupOperations = 5,
@@ -798,19 +849,19 @@ public sealed partial class OfficeRealTimeMultipleHostTests
 
     private sealed class Fixture : IAsyncDisposable
     {
-        private readonly IDistributedApplicationTestingBuilder builder;
-        private readonly DistributedApplication application;
         private readonly string postgresConnection;
         private readonly string redisConnection;
         private readonly IDataProtectionProvider protection = DataProtectionProvider.Create("cellbridge-rtc-multi-host-tests");
         private readonly List<Host> hosts = [];
         private Host? local;
         private readonly MutableClock clock = new();
+        private readonly string documentNamespace = Guid.NewGuid().ToString("N");
         private readonly string roomNamespace = "rtc-tests-" + Guid.NewGuid().ToString("N");
         private readonly ConcurrentDictionary<string, string> coauthorSchemas = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim coauthorGate = new(1, 1);
         private Guid resourceId;
-        private string path = "/shared/multihost.docx";
+        private string path;
+        private string DocumentPathPrefix => $"/shared/{documentNamespace}/";
 
         internal Host First => hosts[0];
         internal Host Second => hosts[1];
@@ -824,41 +875,19 @@ public sealed partial class OfficeRealTimeMultipleHostTests
              hosts.Sum(host => host.Scheduler.Diagnostics.PubSubHintsReceived),
              hosts.Sum(host => host.Scheduler.Diagnostics.PubSubHintBytesReceived));
 
-        private Fixture(IDistributedApplicationTestingBuilder builder, DistributedApplication application,
-            string postgresConnection, string redisConnection)
+        private Fixture(string postgresConnection, string redisConnection)
         {
-            this.builder = builder;
-            this.application = application;
             this.postgresConnection = postgresConnection;
             this.redisConnection = redisConnection;
+            path = DocumentPathPrefix + "multihost.docx";
         }
 
-        internal static async Task<Fixture> StartAsync(int distributedHosts = 2, bool includeLocalHost = false,
-            bool faultableFirstHost = false)
+        internal static async Task<Fixture> StartAsync(SharedBackendFixture backend, int distributedHosts = 2,
+            bool includeLocalHost = false, bool faultableFirstHost = false)
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-            var builder = await PostgreSqlEnvironment.CreateBuilderAsync(timeout.Token);
-            DistributedApplication? application = null;
+            var result = new Fixture(backend.PostgresConnection, backend.RedisConnection);
             try
             {
-                builder.Resources.Remove(builder.Resources.Single(resource => resource.Name == "webdemo"));
-                builder.AddContainer("rtc-redis", "redis", "7.4-alpine")
-                    .WithArgs("--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction")
-                    .WithEndpoint(targetPort: 6379, name: "tcp", scheme: "tcp");
-                application = await builder.BuildAsync(timeout.Token);
-                await application.StartAsync(timeout.Token);
-                await application.ResourceNotifications.WaitForResourceAsync("storage-init", KnownResourceStates.Finished, timeout.Token);
-                if (!application.ResourceNotifications.TryGetCurrentState("storage-init", out var initialized) ||
-                    initialized.Snapshot.ExitCode != 0)
-                    throw new InvalidOperationException("The isolated PostgreSQL schema initialization failed.");
-                await application.ResourceNotifications.WaitForResourceAsync("rtc-redis", KnownResourceStates.Running, timeout.Token);
-                string database = await application.GetConnectionStringAsync("cellbridge", timeout.Token)
-                    ?? throw new InvalidOperationException("Aspire did not provide the isolated document database.");
-                var endpoint = application.GetEndpoint("rtc-redis", "tcp");
-                var redis = $"{endpoint.Host}:{endpoint.Port},abortConnect=false,allowAdmin=true";
-                using (var redisProbe = await StackExchange.Redis.ConnectionMultiplexer.ConnectAsync(redis))
-                    await redisProbe.GetDatabase().PingAsync().WaitAsync(TimeSpan.FromSeconds(10));
-                var result = new Fixture(builder, application, database, redis);
                 for (int i = 0; i < distributedHosts; i++)
                     await result.StartHostAsync(distributed: true, faultable: faultableFirstHost && i == 0);
                 if (includeLocalHost) result.local = await result.StartHostAsync(distributed: false);
@@ -866,8 +895,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
             }
             catch
             {
-                try { if (application is not null) await application.DisposeAsync(); }
-                finally { await builder.DisposeAsync(); }
+                await result.DisposeAsync();
                 throw;
             }
         }
@@ -957,7 +985,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests
 
         internal async Task<(Guid ResourceId, string Path)> CreateDocumentAsync(string? documentPath = null, bool readerAccess = false)
         {
-            path = documentPath ?? path;
+            path = documentPath is null ? path : IsolatePath(documentPath);
             var service = First.App.Services.GetRequiredService<CellBridgeDocumentService>();
             var head = await service.CreateAsync(path, MinimalDocx.Create(), TestActor.Value)
                 ?? throw new InvalidOperationException("Could not create isolated test document.");
@@ -969,6 +997,10 @@ public sealed partial class OfficeRealTimeMultipleHostTests
             resourceId = head.ResourceId;
             return (resourceId, path);
         }
+
+        internal string IsolatePath(string documentPath) => documentPath.StartsWith(DocumentPathPrefix, StringComparison.Ordinal)
+            ? documentPath
+            : DocumentPathPrefix + documentPath.TrimStart('/');
 
         internal async Task<Guid> JoinCoauthoringAsync(string documentPath)
         {
@@ -1082,8 +1114,6 @@ public sealed partial class OfficeRealTimeMultipleHostTests
         {
             if (local is not null) await local.DisposeAsync();
             foreach (var host in hosts) await host.DisposeAsync();
-            await application.DisposeAsync();
-            await builder.DisposeAsync();
         }
     }
 

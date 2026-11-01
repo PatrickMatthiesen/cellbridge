@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Keep LF bytes for the historical migration fixture's SHA-256 check.
+/testdata/lists/postgresql-schema3.sql text eol=lf
