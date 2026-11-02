@@ -16,7 +16,7 @@ namespace CellBridge.AspNetCore;
 /// <summary>Implements the Office-used ASP.NET SignalR 1.4 WebSocket subset over the shared RTC sessions.</summary>
 internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
     IOfficeRealTimeAuthorizer authorizer, TimeProvider time, IHostApplicationLifetime lifetime,
-    ILogger<OfficeClassicSignalR>? logger = null)
+    ILogger<OfficeClassicSignalR>? logger = null, ProtocolCaptureStore? captures = null)
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DisconnectTimeout = TimeSpan.FromSeconds(30);
@@ -206,6 +206,22 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             throw new InvalidDataException("Unsupported Office collaboration invocation.");
         string method = methodValue.GetString()!;
         string loggedMethod = method.Length <= 64 && method.All(char.IsAsciiLetter) ? method : "<invalid>";
+        int? loggedChannel = arguments.GetArrayLength() == 2 && arguments[0].ValueKind == JsonValueKind.Number &&
+            arguments[0].TryGetInt32(out int channelValue) ? channelValue : null;
+        if (captures?.IsEnabled == true)
+        {
+            byte[] capture = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                capturedUtc = time.GetUtcNow(), ticket.ResourceId, ticket.ClientId, connectionId,
+                method = loggedMethod, channel = loggedChannel, request = root,
+            });
+            try
+            {
+                await captures.WriteAsync(Guid.NewGuid().ToString("N"), ".rtc.classic.request.json", capture,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        }
         long started = Stopwatch.GetTimestamp();
         object? result;
         try
@@ -224,20 +240,20 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             if (result is null) await sender.SendVoidResultAsync(invocationId, cancellationToken).ConfigureAwait(false);
             else await sender.SendResultAsync(invocationId, result, cancellationToken).ConfigureAwait(false);
             logger?.LogDebug(
-                "Office classic RTC {Method} completed for client {ClientId}; presence entries {PresenceEntries}; elapsed {ElapsedMilliseconds} ms.",
-                loggedMethod, ticket.ClientId, result is Dictionary<string, string> presence ? presence.Count : (int?)null,
+                "Office classic RTC {Method} completed for client {ClientId}; channel {Channel}; presence entries {PresenceEntries}; elapsed {ElapsedMilliseconds} ms.",
+                loggedMethod, ticket.ClientId, loggedChannel, result is Dictionary<string, string> presence ? presence.Count : (int?)null,
                 Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         }
         catch (InvalidDataException)
         {
-            logger?.LogWarning("Office classic RTC {Method} rejected for client {ClientId}; invalid invocation data.",
-                loggedMethod, ticket.ClientId);
+            logger?.LogWarning("Office classic RTC {Method} rejected for client {ClientId}; channel {Channel}; invalid invocation data.",
+                loggedMethod, ticket.ClientId, loggedChannel);
             await sender.SendFailureAsync(invocationId, "The collaboration request was rejected.", cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) when (error is OfficeRealTimeBusyException or HubException)
         {
-            logger?.LogWarning("Office classic RTC {Method} failed for client {ClientId}; failure {FailureType}.",
-                loggedMethod, ticket.ClientId, error.GetType().Name);
+            logger?.LogWarning("Office classic RTC {Method} failed for client {ClientId}; channel {Channel}; failure {FailureType}.",
+                loggedMethod, ticket.ClientId, loggedChannel, error.GetType().Name);
             await sender.SendFailureAsync(invocationId, "The collaboration request could not be completed.", cancellationToken).ConfigureAwait(false);
         }
     }
