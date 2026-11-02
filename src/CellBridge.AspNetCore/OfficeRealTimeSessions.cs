@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
+using System.Net.WebSockets;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.SignalR;
 
@@ -448,6 +449,10 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
                 await CaptureDeliveryAsync(sender, recipient, method, args, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                await RemoveDeniedAsync(recipient, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception error) when (error is WebSocketException or IOException or ObjectDisposedException)
             {
                 await RemoveDeniedAsync(recipient, cancellationToken).ConfigureAwait(false);
             }

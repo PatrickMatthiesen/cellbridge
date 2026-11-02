@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Net.WebSockets;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Http.Features;
@@ -8,6 +9,49 @@ namespace CellBridge.FssHttp.Tests;
 
 public sealed class OfficeRealTimeHubTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task Failed_classic_recipient_does_not_disconnect_sender_or_skip_healthy_peers(int failure)
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        var nativeTicket = new OfficeRealTimeTicket(sender.Ticket.ResourceId, 1,
+            new CellBridgeActor(new SubjectIdentity("phone", "phone", "Phone")), Guid.NewGuid(),
+            f.Clock.GetUtcNow().AddMinutes(5));
+        bool nativeAborted = false;
+        Exception fault = failure switch
+        {
+            0 => new WebSocketException("The recipient socket closed."),
+            1 => new IOException("The recipient transport failed."),
+            _ => new ObjectDisposedException("recipient socket"),
+        };
+        var native = new OfficeRealTimeConnection("failed-classic", CancellationToken.None,
+            (_, _, _) => Task.FromException(fault), () => nativeAborted = true);
+        Assert.True(await f.Store.ConnectAsync(nativeTicket, native, CancellationToken.None));
+        Assert.True(await f.Store.UpdatePresenceAsync(nativeTicket, native.ConnectionId, "{}", CancellationToken.None));
+        var firstPeer = await f.Connect(sender.Ticket.ResourceId, 1, "first-peer");
+        var secondPeer = await f.Connect(sender.Ticket.ResourceId, 1, "second-peer");
+        f.Clients.Calls.Clear();
+        string payload = $$"""{"A":"{{sender.Ticket.ClientId:B}}","text":"typed"}""";
+
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, payload, CancellationToken.None));
+        Assert.True(nativeAborted);
+        Assert.False(sender.Context.Aborted);
+        Assert.False(firstPeer.Context.Aborted);
+        Assert.False(secondPeer.Context.Aborted);
+        foreach (var peer in new[] { firstPeer, secondPeer })
+            Assert.Contains(f.Clients.Calls, call => call.ConnectionId == peer.Context.ConnectionId &&
+                call.Method == "updateNotification" && (string)call.Arguments[1]! == payload);
+        var presence = await f.Store.GetCompletePresenceStateAsync(sender.Ticket,
+            sender.Context.ConnectionId, CancellationToken.None);
+        Assert.DoesNotContain(ClientKey(nativeTicket.ClientId), presence.Keys);
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, payload, CancellationToken.None));
+    }
+
     [Fact]
     public async Task Empty_channel_one_signal_reaches_peers_and_retains_write_authorization()
     {
