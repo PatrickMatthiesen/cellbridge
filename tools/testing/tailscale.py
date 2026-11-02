@@ -39,7 +39,7 @@ def main():
     web = next(r for r in description["resources"] if r["displayName"] == "webdemo")
     if web["environment"].get("Authentication__PublicOrigin", "").rstrip("/") != origin:
         parser.error(f"Start this AppHost with Parameters__PublicOrigin={origin} first.")
-    endpoint = next(u["url"] for u in web["urls"] if u["name"] == "http" and u.get("isInternal"))
+    endpoint = next(u["url"] for u in web["urls"] if u["name"] == "http")
     port = urllib.parse.urlsplit(endpoint).port
     target = f"http://127.0.0.1:{port}"
     # Isolated Aspire uses new ports after restart. Remember the route we own so
