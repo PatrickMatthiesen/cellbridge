@@ -200,7 +200,9 @@ public static class NativeSharingDialogEndpoint
     {
         var origin = CellBridgePublicOrigin.Resolve(context);
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var baseUri)) return null;
-        return new UriBuilder(baseUri) { Path = (context.Request.PathBase.Value ?? "") + document.Path }.Uri;
+        var escapedPath = string.Join('/', ((context.Request.PathBase.Value ?? "") + document.Path)
+            .Split('/').Select(Uri.EscapeDataString));
+        return new UriBuilder(baseUri) { Path = escapedPath }.Uri;
     }
 
     private static bool IsSafeUrl(Uri? url) => url is { IsAbsoluteUri: true } &&

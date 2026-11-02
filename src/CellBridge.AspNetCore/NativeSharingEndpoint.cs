@@ -210,8 +210,11 @@ public static class NativeSharingEndpoint
         string.Equals(left.Scheme, right.Scheme, StringComparison.OrdinalIgnoreCase) &&
         string.Equals(left.Host, right.Host, StringComparison.OrdinalIgnoreCase) && left.Port == right.Port;
 
-    private static string BuildPublicDocumentUrl(Uri origin, string pathBase, string documentPath) =>
-        new UriBuilder(origin) { Path = pathBase + documentPath }.Uri.AbsoluteUri;
+    private static string BuildPublicDocumentUrl(Uri origin, string pathBase, string documentPath)
+    {
+        var escapedPath = string.Join('/', (pathBase + documentPath).Split('/').Select(Uri.EscapeDataString));
+        return new UriBuilder(origin) { Path = escapedPath }.Uri.AbsoluteUri;
+    }
 
     private static async ValueTask<bool> HasEmptyBodyAsync(HttpRequest request, CancellationToken cancellationToken)
     {

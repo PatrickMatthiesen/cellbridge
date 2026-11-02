@@ -88,6 +88,20 @@ public sealed class NativeSharingEndpointTests
         Assert.Equal(HttpStatusCode.NotImplemented, unsupported.StatusCode);
     }
 
+    [Theory]
+    [InlineData("/shared/Budget%2520plan.docx", "/shared/Budget%20plan.docx")]
+    [InlineData("/shared/nested%252Ffolder/Budget%252Fplan.docx", "/shared/nested%2Ffolder/Budget%2Fplan.docx")]
+    public async Task DirectUrlPreservesLiteralEscapeText(string escapedPath, string storedPath)
+    {
+        await using var fixture = await Fixture.Start(filePath: escapedPath);
+        Assert.Equal(storedPath, fixture.State.Path);
+        using var response = await fixture.Client.SendAsync(SharingReadRequest(storedPath));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(PublicOrigin + escapedPath, json.RootElement.GetProperty("d").GetProperty("directUrl").GetString());
+    }
+
     private static HttpRequestMessage SharingReadRequest(string path, string? absoluteUrl = null, string? body = null)
     {
         var encodedPath = "/" + string.Join('/', path.Split('/').Skip(1).Select(Uri.EscapeDataString));
@@ -107,7 +121,7 @@ public sealed class NativeSharingEndpointTests
         public DocumentHead State => state;
         public HttpClient Client => client;
 
-        public static async Task<Fixture> Start(bool registerResolver = false)
+        public static async Task<Fixture> Start(bool registerResolver = false, string filePath = FilePath)
         {
             var provider = TestStorage.Memory();
             var builder = WebApplication.CreateBuilder();
@@ -122,7 +136,7 @@ public sealed class NativeSharingEndpointTests
             app.UseAuthorization();
             app.MapGroup("").RequireAuthorization().MapNativeSharing();
             var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
-            var state = (await service.CreateAsync(FilePath, [1, 2, 3], TestActor.Value))!;
+            var state = (await service.CreateAsync(filePath, [1, 2, 3], TestActor.Value))!;
             var server = app.GetTestServer();
             await app.StartAsync();
             return new(app, server, provider, state, TestActor.CreateClient(server, "writer"));

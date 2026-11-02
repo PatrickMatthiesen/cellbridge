@@ -57,7 +57,7 @@ public sealed class NativeSharingDialogEndpointTests
         var current = await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(document.ResourceId));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("https://office.example/shared/copy%20&amp;%20review.docx", html);
+        Assert.Contains("https://office.example/shared/copy%20%26%20review.docx", html);
         Assert.Contains("Link copied.", html);
         Assert.Contains("Test writer", html);
         Assert.Contains("Test reader", html);
@@ -133,6 +133,22 @@ public sealed class NativeSharingDialogEndpointTests
         Assert.DoesNotContain("unsafe-inline", policy);
         Assert.Contains("width:100%", html);
         Assert.Contains("overflow-wrap:anywhere", html);
+    }
+
+    [Theory]
+    [InlineData("/shared/Budget%2520plan.docx", "/shared/Budget%20plan.docx")]
+    [InlineData("/shared/nested%252Ffolder/Budget%252Fplan.docx", "/shared/nested%2Ffolder/Budget%2Fplan.docx")]
+    public async Task CanonicalLinkPreservesLiteralEscapeText(string escapedPath, string storedPath)
+    {
+        await using var fixture = await Fixture.Start();
+        var document = await fixture.CreateDocumentAsync(escapedPath, "tests:writer");
+        Assert.Equal(storedPath, document.Path);
+
+        using var response = await fixture.Client.GetAsync(Route + "?resourceId=" + document.ResourceId.ToString("D"));
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains(Origin + escapedPath, html);
     }
 
     [Fact]
