@@ -29,6 +29,8 @@ internal sealed class OfficeRealTimeConnection(string connectionId, Cancellation
 internal interface IOfficeRealTimeSessionStore
 {
     Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, OfficeRealTimeConnection connection, CancellationToken cancellationToken);
+    Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket, OfficeRealTimeTicket renewedTicket,
+        string connectionId, CancellationToken cancellationToken);
     Task DisconnectAsync(string connectionId, CancellationToken cancellationToken);
     Task<Dictionary<string, string>> GetCompletePresenceStateAsync(OfficeRealTimeTicket ticket, string connectionId,
         CancellationToken cancellationToken);

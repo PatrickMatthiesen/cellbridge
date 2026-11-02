@@ -112,6 +112,42 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
         }
     }
 
+    public async Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket,
+        OfficeRealTimeTicket renewedTicket, string connectionId, CancellationToken cancellationToken)
+    {
+        if (!CanRenew(currentTicket, renewedTicket) || IsExpired(currentTicket) || IsExpired(renewedTicket) ||
+            string.IsNullOrEmpty(connectionId))
+            return false;
+        using var deadline = CreateDeadline(cancellationToken);
+        cancellationToken = deadline.Token;
+        if (!await authorizer.AuthorizeAsync(renewedTicket, DocumentAccess.Read, true, cancellationToken).ConfigureAwait(false))
+            return false;
+
+        Connection? current;
+        lock (_sync)
+        {
+            if (!_connections.TryGetValue(connectionId, out current) || current.Ticket != currentTicket ||
+                !IsCurrentConnectionLocked(current) || IsExpired(currentTicket)) return false;
+        }
+
+        Room room = current.Room;
+        try { await room.Gate.WaitAsync(cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { return false; }
+        try
+        {
+            lock (_sync)
+            {
+                if (!_connections.TryGetValue(connectionId, out var latest) || !ReferenceEquals(latest, current) ||
+                    latest.Ticket != currentTicket || !IsCurrentConnectionLocked(latest) ||
+                    IsExpired(currentTicket) || IsExpired(renewedTicket))
+                    return false;
+                latest.Ticket = renewedTicket;
+                return true;
+            }
+        }
+        finally { room.Gate.Release(); }
+    }
+
     public async Task<Dictionary<string, string>> GetCompletePresenceStateAsync(
         OfficeRealTimeTicket ticket, string connectionId, CancellationToken cancellationToken)
     {
@@ -216,7 +252,10 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
         cancellationToken = operationDeadline.Token;
-        if ((!IsClientChannel(channel) && channel != 4) || !TryValidatePayload(payload, out JsonDocument? document) || document is null)
+        // Native Office also sends channel 1 as a signal with no JSON body.
+        // Validate that shape separately and relay the original empty string.
+        var validationPayload = channel == 1 && payload == string.Empty ? "{}" : payload;
+        if ((!IsClientChannel(channel) && channel != 4) || !TryValidatePayload(validationPayload, out JsonDocument? document) || document is null)
             return false;
         using (document)
         {
@@ -256,7 +295,7 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             }
             if (channel == 1)
             {
-                if (!IsValidChannelOne(root)) return false;
+                if (payload != string.Empty && !IsValidChannelOne(root)) return false;
             }
             else if (channel != 3 && root.TryGetProperty("A", out JsonElement senderValue))
             {
@@ -576,6 +615,13 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
         _connections.TryGetValue(connection.Context.ConnectionId, out var current) && ReferenceEquals(current, connection);
 
     private bool IsExpired(OfficeRealTimeTicket ticket) => ticket.ExpiresUtc <= time.GetUtcNow();
+    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
+        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
+        current.ClientId == renewed.ClientId &&
+        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
+        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
+    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
+        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
     private static string ClientKey(Guid clientId) => clientId.ToString("B").ToLowerInvariant();
     private static CancellationTokenSource CreateDeadline(CancellationToken token)
     {
@@ -651,7 +697,13 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     }
 
     private readonly record struct RoomKey(Guid ResourceId, long Generation);
-    private sealed record Connection(OfficeRealTimeTicket Ticket, OfficeRealTimeConnection Context, Room Room, RoomKey Key);
+    private sealed class Connection(OfficeRealTimeTicket ticket, OfficeRealTimeConnection context, Room room, RoomKey key)
+    {
+        internal OfficeRealTimeTicket Ticket { get; set; } = ticket;
+        internal OfficeRealTimeConnection Context { get; } = context;
+        internal Room Room { get; } = room;
+        internal RoomKey Key { get; } = key;
+    }
     private sealed record Presence(string ConnectionId, string Payload);
     private sealed record Departure(Connection Connection, bool RemovedPresence);
 }

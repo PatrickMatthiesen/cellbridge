@@ -56,6 +56,41 @@ public sealed class RedisOfficeRealTimeBackplaneTests(RedisOfficeRealTimeBackpla
     }
 
     [Fact]
+    public async Task Ticket_renewal_preserves_membership_presence_and_watermark_and_fences_stale_updates()
+    {
+        await using var f = await Fixture.Start(backend);
+        var member = Member(new(Guid.NewGuid(), 1), "writer");
+        string epoch = (await f.Broker.ConnectAsync(member, default)).Snapshot!.Epoch;
+        Assert.Equal(OfficeRealTimeBackplaneStatus.Ok,
+            (await f.Broker.MutateAsync(member, epoch, "before-renewal", "presence", ClientKey(member),
+                "presenceUpdated", "{}", default)).Status);
+        var before = (await f.Broker.ReadSnapshotAsync(member.Room, default)).Snapshot!;
+        var renewed = member with { Ticket = member.Ticket with { ExpiresUtc = member.Ticket.ExpiresUtc.AddMinutes(1) } };
+
+        Assert.Equal(OfficeRealTimeBackplaneStatus.Ok,
+            (await f.Broker.RenewTicketAsync(member, renewed, default)).Status);
+        var after = (await f.Broker.ReadSnapshotAsync(member.Room, default)).Snapshot!;
+        Assert.Equal(before.Epoch, after.Epoch);
+        Assert.Equal(before.Watermark, after.Watermark);
+        Assert.Equal(before.Presence, after.Presence);
+        var stored = Assert.Single(after.Members);
+        Assert.Equal(member.Incarnation, stored.Incarnation);
+        Assert.Equal(member.ConnectionId, stored.ConnectionId);
+        Assert.Equal(renewed.Ticket.ExpiresUtc, stored.Ticket.ExpiresUtc);
+        Assert.Equal(Assert.Single(before.Members).LeaseExpiresUnixMilliseconds, stored.LeaseExpiresUnixMilliseconds);
+        Assert.Equal(OfficeRealTimeBackplaneStatus.Denied,
+            (await f.Broker.RenewTicketAsync(member, renewed, default)).Status);
+        Assert.Equal(OfficeRealTimeBackplaneStatus.Denied,
+            (await f.Broker.RenewTicketAsync(renewed,
+                renewed with { Ticket = renewed.Ticket with { ClientId = Guid.NewGuid() } }, default)).Status);
+
+        await f.Broker.RemoveAsync(renewed, ClientKey(renewed), "removed", default);
+        Assert.Equal(OfficeRealTimeBackplaneStatus.Missing,
+            (await f.Broker.RenewTicketAsync(renewed,
+                renewed with { Ticket = renewed.Ticket with { ExpiresUtc = renewed.Ticket.ExpiresUtc.AddMinutes(1) } }, default)).Status);
+    }
+
+    [Fact]
     public async Task Event_byte_counts_match_the_stored_unicode_and_escaped_json()
     {
         await using var f = await Fixture.Start(backend);

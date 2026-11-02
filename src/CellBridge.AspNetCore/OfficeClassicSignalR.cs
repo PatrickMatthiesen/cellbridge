@@ -15,7 +15,7 @@ namespace CellBridge.AspNetCore;
 
 /// <summary>Implements the Office-used ASP.NET SignalR 1.4 WebSocket subset over the shared RTC sessions.</summary>
 internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
-    IOfficeRealTimeAuthorizer authorizer, TimeProvider time, IHostApplicationLifetime lifetime,
+    IOfficeRealTimeAuthorizer authorizer, OfficeRealTimeAccess access, TimeProvider time, IHostApplicationLifetime lifetime,
     ILogger<OfficeClassicSignalR>? logger = null, ProtocolCaptureStore? captures = null)
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(5);
@@ -49,7 +49,7 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
                 return Results.StatusCode(StatusCodes.Status429TooManyRequests);
             }
             if (_pending.Count >= 2048) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-            var pending = new PendingConnection(ticket!, hubName!, connectionId, sessions, time);
+            var pending = new PendingConnection(ticket!, hubName!, connectionId, publicBase, sessions, time);
             if (!_pending.TryAdd(connectionToken, pending)) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
         return Results.Text(JsonSerializer.Serialize(new
@@ -107,7 +107,7 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
         bool gateHeld = true;
         try
         {
-            if (pending.ExpiresUtc <= time.GetUtcNow() ||
+            if (pending.ExpiresUtc <= time.GetUtcNow() || !SameTicket(pending.Ticket, ticket!) ||
                 !_pending.TryGetValue(token!, out var registered) || !ReferenceEquals(registered, pending))
                 return Results.NotFound();
             using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
@@ -141,7 +141,7 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
                 pending.Gate.Release();
                 gateHeld = false;
                 keepAlive = SendKeepAlivesAsync(sender, stopping.Token);
-                await ReadMessagesAsync(socket, pending.Ticket, connection.ConnectionId, sender, stopping.Token).ConfigureAwait(false);
+                await ReadMessagesAsync(socket, pending, connection.ConnectionId, sender, stopping.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
             catch (WebSocketException) { }
@@ -175,7 +175,7 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
         finally { if (gateHeld) pending.Gate.Release(); }
     }
 
-    private async Task ReadMessagesAsync(WebSocket socket, OfficeRealTimeTicket ticket, string connectionId,
+    private async Task ReadMessagesAsync(WebSocket socket, PendingConnection pending, string connectionId,
         ClassicSocketSender sender, CancellationToken cancellationToken)
     {
         byte[] chunk = new byte[8192];
@@ -194,13 +194,14 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             }
             if (!receive.EndOfMessage) continue;
             if (buffered.WrittenCount == 0) throw new InvalidDataException("Empty SignalR WebSocket messages are not supported.");
-            await InvokeAsync(buffered.WrittenMemory.ToArray(), ticket, connectionId, sender, cancellationToken).ConfigureAwait(false);
+            await InvokeAsync(buffered.WrittenMemory.ToArray(), pending.Ticket, pending, connectionId, sender,
+                cancellationToken).ConfigureAwait(false);
             buffered = new ArrayBufferWriter<byte>();
         }
     }
 
-    private async Task InvokeAsync(byte[] bytes, OfficeRealTimeTicket ticket, string connectionId,
-        ClassicSocketSender sender, CancellationToken cancellationToken)
+    private async Task InvokeAsync(byte[] bytes, OfficeRealTimeTicket ticket, PendingConnection pending,
+        string connectionId, ClassicSocketSender sender, CancellationToken cancellationToken)
     {
         if (bytes.Length == 0) return;
         using JsonDocument message = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 16 });
@@ -220,10 +221,13 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             arguments[0].TryGetInt32(out int channelValue) ? channelValue : null;
         if (captures?.IsEnabled == true)
         {
+            object capturedRequest = method == "UpdateClientInfo"
+                ? new { method = loggedMethod, argumentCount = arguments.GetArrayLength(), argumentTypes = new[] { "string" }, payload = "<redacted>" }
+                : root;
             byte[] capture = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 capturedUtc = time.GetUtcNow(), ticket.ResourceId, ticket.ClientId, connectionId,
-                method = loggedMethod, channel = loggedChannel, request = root,
+                method = loggedMethod, channel = loggedChannel, request = capturedRequest,
             });
             try
             {
@@ -240,6 +244,9 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             {
                 "GetCompletePresenceState" when arguments.GetArrayLength() == 0 =>
                     await sessions.GetCompletePresenceStateAsync(ticket, connectionId, cancellationToken).ConfigureAwait(false),
+                "UpdateClientInfo" when arguments.GetArrayLength() == 1 && arguments[0].ValueKind == JsonValueKind.String =>
+                    await UpdateClientInfoAsync(ticket, pending, connectionId, arguments[0].GetString()!,
+                        cancellationToken).ConfigureAwait(false),
                 "UpdatePresence" when arguments.GetArrayLength() == 1 && arguments[0].ValueKind == JsonValueKind.String =>
                     await UpdatePresenceAsync(ticket, connectionId, arguments[0].GetString()!, cancellationToken).ConfigureAwait(false),
                 "SendUpdateNotification" when arguments.GetArrayLength() == 2 && arguments[0].TryGetInt32(out int channel) &&
@@ -275,6 +282,53 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             throw new InvalidDataException("Invalid presence update.");
         return null;
     }
+
+    private async Task<object?> UpdateClientInfoAsync(OfficeRealTimeTicket ticket, PendingConnection pending,
+        string connectionId, string payload, CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(DisconnectTimeout);
+        try { await pending.Gate.WaitAsync(deadline.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        { throw new InvalidDataException("The collaboration ticket renewal was not accepted."); }
+        try
+        {
+            OfficeRealTimeTicket current = pending.Ticket;
+            if (!SameTicket(current, ticket))
+                throw new InvalidDataException("The collaboration ticket renewal is stale.");
+
+            string signature;
+            try
+            {
+                using JsonDocument info = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 4 });
+                JsonElement root = info.RootElement;
+                if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != 1 ||
+                    !root.TryGetProperty("qs", out JsonElement query) || query.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(query.GetString()) || query.GetString()!.Length > 16 * 1024)
+                    throw new InvalidDataException("The collaboration ticket metadata is invalid.");
+                signature = query.GetString()!;
+            }
+            catch (JsonException)
+            { throw new InvalidDataException("The collaboration ticket metadata is invalid."); }
+
+            if (!access.TryReadRenewalTicket(pending.PublicBase, signature, current.ClientId, out var renewed) ||
+                renewed is null || !CanRenew(current, renewed) ||
+                !await sessions.RenewTicketAsync(current, renewed, connectionId, deadline.Token).ConfigureAwait(false) ||
+                !pending.TryUpdateTicket(current, renewed))
+                throw new InvalidDataException("The collaboration ticket renewal was rejected.");
+            return null;
+        }
+        finally { pending.Gate.Release(); }
+    }
+
+    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
+        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
+        current.ClientId == renewed.ClientId &&
+        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
+        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
+
+    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
+        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
 
     private async Task<object?> SendNotificationAsync(OfficeRealTimeTicket ticket, string connectionId,
         int channel, string payload, CancellationToken cancellationToken)
@@ -360,21 +414,23 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
     }
 
     private sealed class PendingConnection(OfficeRealTimeTicket ticket, string hubName,
-        string connectionId, IOfficeRealTimeSessionStore sessions, TimeProvider time)
+        string connectionId, string publicBase, IOfficeRealTimeSessionStore sessions, TimeProvider time)
     {
         internal readonly SemaphoreSlim Gate = new(1, 1);
         private readonly object _sync = new();
         private OfficeRealTimeConnection? _active;
+        private OfficeRealTimeTicket _ticket = ticket;
         private DateTimeOffset _inactiveExpiresUtc = time.GetUtcNow() + DisconnectTimeout;
-        internal OfficeRealTimeTicket Ticket { get; } = ticket;
+        internal OfficeRealTimeTicket Ticket { get { lock (_sync) return _ticket; } }
+        internal string PublicBase { get; } = publicBase;
         internal string HubName { get; } = hubName;
         internal string ConnectionId { get; } = connectionId;
         internal DateTimeOffset ExpiresUtc
         {
             get
             {
-                lock (_sync) return _active is null && _inactiveExpiresUtc < Ticket.ExpiresUtc
-                    ? _inactiveExpiresUtc : Ticket.ExpiresUtc;
+                lock (_sync) return _active is null && _inactiveExpiresUtc < _ticket.ExpiresUtc
+                    ? _inactiveExpiresUtc : _ticket.ExpiresUtc;
             }
         }
 
@@ -386,6 +442,16 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
         internal void Activate(OfficeRealTimeConnection connection)
         {
             lock (_sync) { _active = connection; }
+        }
+
+        internal bool TryUpdateTicket(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed)
+        {
+            lock (_sync)
+            {
+                if (_ticket != current) return false;
+                _ticket = renewed;
+                return true;
+            }
         }
 
         internal async Task DeactivateAsync(OfficeRealTimeConnection connection)

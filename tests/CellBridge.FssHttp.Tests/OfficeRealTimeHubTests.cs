@@ -9,6 +9,30 @@ namespace CellBridge.FssHttp.Tests;
 public sealed class OfficeRealTimeHubTests
 {
     [Fact]
+    public async Task Empty_channel_one_signal_reaches_peers_and_retains_write_authorization()
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "phone");
+        var peer = await f.Connect(sender.Ticket.ResourceId, 1, "desktop");
+
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            1, "", CancellationToken.None));
+        var delivery = Assert.Single(f.Clients.Calls);
+        Assert.Equal(peer.Context.ConnectionId, delivery.ConnectionId);
+        Assert.Equal("updateNotification", delivery.Method);
+        Assert.Equal(1, delivery.Arguments[0]);
+        Assert.Equal("", delivery.Arguments[1]);
+
+        f.Clients.Calls.Clear();
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, "", CancellationToken.None));
+        f.Authorizer.DeniedWriteSubjects.Add("phone");
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            1, "", CancellationToken.None));
+        Assert.Empty(f.Clients.Calls);
+    }
+
+    [Fact]
     public async Task Classic_and_core_transports_share_authorized_presence_and_notifications()
     {
         Fixture f = new();

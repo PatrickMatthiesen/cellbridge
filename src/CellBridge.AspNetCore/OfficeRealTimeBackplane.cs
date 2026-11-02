@@ -64,6 +64,9 @@ internal interface IOfficeRealTimeBackplane : IAsyncDisposable
     Task<OfficeRealTimeBackplaneConnectResult> ConnectAsync(OfficeRealTimeBackplaneMember member,
         CancellationToken cancellationToken);
 
+    Task<OfficeRealTimeBackplaneMutationResult> RenewTicketAsync(OfficeRealTimeBackplaneMember currentMember,
+        OfficeRealTimeBackplaneMember renewedMember, CancellationToken cancellationToken);
+
     Task<OfficeRealTimeBackplaneSnapshotResult> ReadSnapshotAsync(OfficeRealTimeRoomKey room,
         CancellationToken cancellationToken);
 

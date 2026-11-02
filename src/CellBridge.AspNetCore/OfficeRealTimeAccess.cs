@@ -61,11 +61,33 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
             !Single(context.Request.Query, "ClientId", 38, out var clientText) ||
             !Guid.TryParse(clientText, out var clientId) || clientId == Guid.Empty)
             return false;
+        return TryReadTicket(publicBase, signature, clientId, validateMetadataTtl: false, out ticket);
+    }
+
+    internal bool TryReadRenewalTicket(string publicBase, string signature, Guid clientId,
+        out OfficeRealTimeTicket? ticket)
+    {
+        ticket = null;
+        if (string.IsNullOrWhiteSpace(publicBase) || publicBase.Length > 4096 || clientId == Guid.Empty ||
+            string.IsNullOrWhiteSpace(signature) || signature.Length > 16 * 1024)
+            return false;
+        return TryReadTicket(publicBase, signature, clientId, validateMetadataTtl: true, out ticket);
+    }
+
+    private bool TryReadTicket(string publicBase, string signature, Guid clientId,
+        bool validateMetadataTtl, out OfficeRealTimeTicket? ticket)
+    {
+        ticket = null;
         try
         {
             var fields = QueryHelpers.ParseQuery(signature);
+            long metadataTtl = 0;
             if (!Single(fields, "access_token", 12 * 1024, out var token) ||
                 !Single(fields, "WopiSrc", 4096, out var source)) return false;
+            if (validateMetadataTtl && (fields.Count != 3 ||
+                !fields.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(["WopiSrc", "access_token", "access_token_ttl"]) ||
+                !Single(fields, "access_token_ttl", 32, out var ttlText) ||
+                !long.TryParse(ttlText, NumberStyles.None, CultureInfo.InvariantCulture, out metadataTtl))) return false;
             var data = JsonSerializer.Deserialize<DocumentToken>(Protector(publicBase).Unprotect(token));
             if (data is null || data.Identity is null || data.ResourceId == Guid.Empty || data.LifecycleGeneration <= 0 ||
                 data.Source != source || string.IsNullOrWhiteSpace(data.Identity.Subject) ||
@@ -75,6 +97,7 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
                 data.Identity.SipAddress is { Length: > 1024 } ||
                 data.AccessLimit is { } limit && (limit.ResourceId != data.ResourceId ||
                     (limit.Access & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0)) return false;
+            if (validateMetadataTtl && metadataTtl != data.ExpiresUnixMilliseconds) return false;
             var expires = DateTimeOffset.FromUnixTimeMilliseconds(data.ExpiresUnixMilliseconds);
             if (expires <= time.GetUtcNow() || expires > time.GetUtcNow().Add(TokenLifetime).AddMinutes(1)) return false;
             ticket = new(data.ResourceId, data.LifecycleGeneration,

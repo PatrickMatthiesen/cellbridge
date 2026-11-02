@@ -107,6 +107,25 @@ internal sealed class RedisOfficeRealTimeBackplane : IOfficeRealTimeBackplane, I
         return ParseConnect(result);
     }
 
+    public async Task<OfficeRealTimeBackplaneMutationResult> RenewTicketAsync(
+        OfficeRealTimeBackplaneMember currentMember, OfficeRealTimeBackplaneMember renewedMember,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(currentMember);
+        ArgumentNullException.ThrowIfNull(renewedMember);
+        if (currentMember.Incarnation == Guid.Empty || currentMember.Room != renewedMember.Room ||
+            currentMember.ConnectionId != renewedMember.ConnectionId || currentMember.HostId != renewedMember.HostId ||
+            !CanRenew(currentMember.Ticket, renewedMember.Ticket))
+            return new(OfficeRealTimeBackplaneStatus.Denied, null, 0, 0);
+        currentMember = Enrich(currentMember);
+        renewedMember = Enrich(renewedMember);
+        RedisResult result = await EvalAsync(RenewTicketScript, RoomKeys(currentMember.Room),
+            [Serialize(currentMember), Serialize(renewedMember),
+                currentMember.Ticket.ExpiresUtc.ToUnixTimeMilliseconds(),
+                renewedMember.Ticket.ExpiresUtc.ToUnixTimeMilliseconds(), RoomTtlMs], cancellationToken).ConfigureAwait(false);
+        return ParseMutation(result);
+    }
+
     public async Task<OfficeRealTimeBackplaneSnapshotResult> ReadSnapshotAsync(OfficeRealTimeRoomKey room,
         CancellationToken cancellationToken)
     {
@@ -268,6 +287,13 @@ internal sealed class RedisOfficeRealTimeBackplane : IOfficeRealTimeBackplane, I
     };
     private static string IndexMember(OfficeRealTimeBackplaneMember member) =>
         $"{member.Room.ResourceId:N}:{member.Room.LifecycleGeneration}:{member.ConnectionId}:{member.Incarnation:N}";
+    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
+        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
+        current.ClientId == renewed.ClientId &&
+        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
+        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
+    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
+        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Json);
 
     private static OfficeRealTimeBackplaneConnectResult ParseConnect(RedisResult result)
@@ -505,6 +531,51 @@ internal sealed class RedisOfficeRealTimeBackplane : IOfficeRealTimeBackplane, I
         if #current~=#wanted then return {'ok',currentJson,tostring(now)} end
         for i=1,5 do redis.call('PEXPIRE',KEYS[i],tonumber(ARGV[3])) end
         return {'ok',currentJson,tostring(now)}
+        """;
+    private const string RenewTicketScript = """
+        local meta=KEYS[1]; local members=KEYS[2]; local expiry=KEYS[3]
+        local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
+        local epoch=redis.call('HGET',meta,'epoch'); if not epoch then return {'missing','','0',tostring(now)} end
+        if tonumber(ARGV[3])<=now or tonumber(ARGV[4])<=now or tonumber(ARGV[4])<tonumber(ARGV[3]) then
+          return {'missing',epoch,'0',tostring(now)}
+        end
+        local expected=cjson.decode(ARGV[1]); local renewed=cjson.decode(ARGV[2])
+        local raw=redis.call('HGET',members,expected.connectionId); if not raw then return {'missing',epoch,'0',tostring(now)} end
+        local current=cjson.decode(raw)
+        local function sameLimit(a,b)
+          local aMissing=a==nil or a==cjson.null; local bMissing=b==nil or b==cjson.null
+          if aMissing and bMissing then return true end
+          if aMissing or bMissing then return false end
+          return a.resourceId==b.resourceId and a.access==b.access
+        end
+        if current.incarnation~=expected.incarnation or current.connectionId~=expected.connectionId or
+          current.hostId~=expected.hostId or current.room.resourceId~=expected.room.resourceId or
+          current.room.lifecycleGeneration~=expected.room.lifecycleGeneration or
+          current.clientKey~=expected.clientKey or current.subjectIndexKey~=expected.subjectIndexKey or
+          current.subjectIndexMember~=expected.subjectIndexMember or
+          tonumber(current.leaseExpiresUnixMilliseconds or 0)<=now or
+          current.ticket.resourceId~=expected.ticket.resourceId or
+          current.ticket.lifecycleGeneration~=expected.ticket.lifecycleGeneration or
+          current.ticket.clientId~=expected.ticket.clientId or
+          current.ticket.expiresUtc~=expected.ticket.expiresUtc or
+          current.ticket.actor.identity.subject~=expected.ticket.actor.identity.subject or
+          not sameLimit(current.ticket.actor.accessLimit,expected.ticket.actor.accessLimit) or
+          renewed.incarnation~=current.incarnation or renewed.connectionId~=current.connectionId or
+          renewed.hostId~=current.hostId or renewed.room.resourceId~=current.room.resourceId or
+          renewed.room.lifecycleGeneration~=current.room.lifecycleGeneration or
+          renewed.ticket.resourceId~=current.ticket.resourceId or
+          renewed.ticket.lifecycleGeneration~=current.ticket.lifecycleGeneration or
+          renewed.ticket.clientId~=current.ticket.clientId or
+          renewed.ticket.actor.identity.subject~=current.ticket.actor.identity.subject or
+          not sameLimit(current.ticket.actor.accessLimit,renewed.ticket.actor.accessLimit) then
+          return {'denied',epoch,'0',tostring(now)}
+        end
+        renewed.leaseExpiresUnixMilliseconds=current.leaseExpiresUnixMilliseconds
+        renewed.clientKey=current.clientKey; renewed.subjectIndexKey=current.subjectIndexKey
+        renewed.subjectIndexMember=current.subjectIndexMember
+        redis.call('HSET',members,current.connectionId,cjson.encode(renewed))
+        for i=1,5 do redis.call('PEXPIRE',KEYS[i],tonumber(ARGV[5])) end
+        return {'ok',epoch,'0',tostring(now)}
         """;
     private const string RemoveScript = """
         local meta=KEYS[1]; local members=KEYS[2]; local expiry=KEYS[3]; local presence=KEYS[4]; local events=KEYS[5]

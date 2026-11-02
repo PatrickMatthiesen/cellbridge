@@ -6,6 +6,7 @@ using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -115,6 +116,93 @@ public sealed class OfficeClassicSignalRLifecycleTests
             Assert.Equal(HttpStatusCode.NotFound, expiredStart.StatusCode);
     }
 
+    [Fact]
+    public async Task Update_client_info_renews_the_ticket_without_replacing_the_socket()
+    {
+        var sessions = new FakeSessionStore();
+        await using var fixture = await Fixture.Start(sessions);
+        OfficeRealTimeTicket current = fixture.CreateTicket("ticket-renewal");
+        string connectionToken = await fixture.NegotiateAsync(current);
+        using WebSocket socket = await fixture.ConnectAsync("/connect", fixture.TransportQuery(current, connectionToken));
+        Assert.Equal(1, (await ReceiveJsonAsync(socket)).GetProperty("S").GetInt32());
+
+        fixture.Clock.Advance(TimeSpan.FromMinutes(1));
+        OfficeRealTimeTicket renewed = current with { ExpiresUtc = fixture.Clock.GetUtcNow().AddMinutes(20) };
+        string querySignature = fixture.CreateRenewalSignature(renewed);
+        string invocation = JsonSerializer.Serialize(new
+        {
+            H = "RealtimeChannelHub", M = "UpdateClientInfo", A = new[] { JsonSerializer.Serialize(new { qs = querySignature }) }, I = "renew-ticket",
+        });
+        await socket.SendAsync(Encoding.UTF8.GetBytes(invocation), WebSocketMessageType.Text, true, CancellationToken.None);
+        JsonElement response = await ReceiveJsonAsync(socket);
+
+        Assert.Equal("renew-ticket", response.GetProperty("I").GetString());
+        Assert.False(response.TryGetProperty("E", out _));
+        var renewal = Assert.Single(sessions.Renewals);
+        Assert.Equal(current, renewal.Current);
+        Assert.Equal(renewed, renewal.Renewed);
+        Assert.Equal(Assert.Single(sessions.Connections).ConnectionId, renewal.ConnectionId);
+        Assert.Empty(sessions.DisconnectedIds);
+        Assert.Equal(WebSocketState.Open, socket.State);
+
+        fixture.RegisterTicket(renewed);
+        using var renewedStart = await fixture.StartResponseAsync(renewed, connectionToken);
+        Assert.Equal(HttpStatusCode.OK, renewedStart.StatusCode);
+        using var staleStart = await fixture.StartResponseAsync(current, connectionToken);
+        Assert.Equal(HttpStatusCode.NotFound, staleStart.StatusCode);
+
+        await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "finished", CancellationToken.None);
+        await sessions.Disconnected.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Contains(Assert.Single(sessions.Connections).ConnectionId, sessions.DisconnectedIds);
+    }
+
+    [Fact]
+    public async Task Update_client_info_rejects_a_ticket_for_another_scope_or_expiry()
+    {
+        var sessions = new FakeSessionStore();
+        await using var fixture = await Fixture.Start(sessions);
+        OfficeRealTimeTicket current = fixture.CreateTicket("ticket-renewal-rejected");
+        string connectionToken = await fixture.NegotiateAsync(current);
+        using WebSocket socket = await fixture.ConnectAsync("/connect", fixture.TransportQuery(current, connectionToken));
+        Assert.Equal(1, (await ReceiveJsonAsync(socket)).GetProperty("S").GetInt32());
+        fixture.Clock.Advance(TimeSpan.FromMinutes(1));
+        OfficeRealTimeTicket renewed = current with { ExpiresUtc = fixture.Clock.GetUtcNow().AddMinutes(20) };
+
+        var wrongSubject = renewed with
+        {
+            Actor = renewed.Actor with
+            {
+                Identity = new SubjectIdentity("other-subject", renewed.Actor.Identity.Login, renewed.Actor.Identity.DisplayName),
+            },
+        };
+        var wrongAccessLimit = renewed with
+        {
+            Actor = renewed.Actor with { AccessLimit = new DocumentAccessLimit(renewed.ResourceId, DocumentAccess.Read) },
+        };
+        var wrongTickets = new[]
+        {
+            renewed with { ResourceId = Guid.NewGuid() },
+            renewed with { LifecycleGeneration = renewed.LifecycleGeneration + 1 },
+            wrongSubject,
+            wrongAccessLimit,
+        };
+        foreach (OfficeRealTimeTicket wrongTicket in wrongTickets)
+        {
+            await SendUpdateClientInfoAsync(socket, fixture.CreateRenewalSignature(wrongTicket), "reject-scope");
+            JsonElement rejected = await ReceiveJsonAsync(socket);
+            Assert.Equal("reject-scope", rejected.GetProperty("I").GetString());
+            Assert.True(rejected.TryGetProperty("E", out _));
+        }
+
+        await SendUpdateClientInfoAsync(socket,
+            fixture.CreateRenewalSignature(renewed, renewed.ExpiresUtc.ToUnixTimeMilliseconds() - 1), "reject-ttl");
+        JsonElement badTtl = await ReceiveJsonAsync(socket);
+        Assert.Equal("reject-ttl", badTtl.GetProperty("I").GetString());
+        Assert.True(badTtl.TryGetProperty("E", out _));
+        Assert.Empty(sessions.Renewals);
+        Assert.Empty(sessions.DisconnectedIds);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -187,6 +275,15 @@ public sealed class OfficeClassicSignalRLifecycleTests
         return json.RootElement.Clone();
     }
 
+    private static Task SendUpdateClientInfoAsync(WebSocket socket, string signature, string invocationId)
+    {
+        string invocation = JsonSerializer.Serialize(new
+        {
+            H = "RealtimeChannelHub", M = "UpdateClientInfo", A = new[] { JsonSerializer.Serialize(new { qs = signature }) }, I = invocationId,
+        });
+        return socket.SendAsync(Encoding.UTF8.GetBytes(invocation), WebSocketMessageType.Text, true, CancellationToken.None);
+    }
+
     private static async Task<(WebSocketReceiveResult Result, byte[] Buffer)> ReceiveAsync(WebSocket socket)
     {
         byte[] buffer = new byte[4096];
@@ -228,12 +325,15 @@ public sealed class OfficeClassicSignalRLifecycleTests
             builder.WebHost.UseTestServer();
             builder.Services.AddSingleton<TimeProvider>(new ManualClock());
             builder.Services.AddSingleton(new CellBridgeOptions());
+            builder.Services.AddDataProtection();
             builder.Services.AddSingleton<IOfficeRealTimeAuthorizer>(new AllowAllAuthorizer());
             var app = builder.Build();
             var clock = (ManualClock)app.Services.GetRequiredService<TimeProvider>();
             var fixture = new Fixture(app, sessions, clock);
+            OfficeRealTimeAccess access = new(null!, app.Services.GetRequiredService<IDataProtectionProvider>(),
+                clock, null!);
             OfficeClassicSignalR classic = new(sessions, app.Services.GetRequiredService<IOfficeRealTimeAuthorizer>(),
-                clock, app.Services.GetRequiredService<Microsoft.Extensions.Hosting.IHostApplicationLifetime>());
+                access, clock, app.Services.GetRequiredService<Microsoft.Extensions.Hosting.IHostApplicationLifetime>());
             fixture._classic = classic;
             app.UseWebSockets();
             app.MapGet("/negotiate", async context =>
@@ -271,6 +371,33 @@ public sealed class OfficeClassicSignalRLifecycleTests
                 Clock.GetUtcNow().AddMinutes(20));
             _tickets[Signature(ticket)] = ticket;
             return ticket;
+        }
+
+        internal void RegisterTicket(OfficeRealTimeTicket ticket) => _tickets[Signature(ticket)] = ticket;
+
+        internal string CreateRenewalSignature(OfficeRealTimeTicket ticket, long? ttlOverride = null)
+        {
+            const string publicBase = "http://localhost";
+            string source = $"{publicBase}/shared/renewal-{ticket.ResourceId:N}.docx";
+            var data = new
+            {
+                ResourceId = ticket.ResourceId,
+                LifecycleGeneration = ticket.LifecycleGeneration,
+                Identity = ticket.Actor.Identity,
+                AccessLimit = ticket.Actor.AccessLimit,
+                ExpiresUnixMilliseconds = ticket.ExpiresUtc.ToUnixTimeMilliseconds(),
+                Source = source,
+            };
+            string protectedToken = _app.Services.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("CellBridge.OfficeRealTime.DocumentAccess.v1", publicBase)
+                .Protect(JsonSerializer.Serialize(data));
+            return QueryString.Create(new Dictionary<string, string?>
+            {
+                ["WopiSrc"] = source,
+                ["access_token"] = protectedToken,
+                ["access_token_ttl"] = (ttlOverride ?? ticket.ExpiresUtc.ToUnixTimeMilliseconds())
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture),
+            }).Value![1..];
         }
 
         internal async Task<string> NegotiateAsync(OfficeRealTimeTicket ticket)
@@ -335,7 +462,7 @@ public sealed class OfficeClassicSignalRLifecycleTests
         }
 
         private static string Signature(OfficeRealTimeTicket ticket) =>
-            $"{ticket.ResourceId:N}:{ticket.LifecycleGeneration}:{ticket.Actor.Identity.Subject}:{ticket.ClientId:N}";
+            $"{ticket.ResourceId:N}:{ticket.LifecycleGeneration}:{ticket.Actor.Identity.Subject}:{ticket.ClientId:N}:{ticket.ExpiresUtc.ToUnixTimeMilliseconds()}";
 
         public async ValueTask DisposeAsync()
         {
@@ -384,6 +511,7 @@ public sealed class OfficeClassicSignalRLifecycleTests
         internal ConcurrentQueue<ConnectResult> ConnectResults { get; } = new();
         internal ConcurrentQueue<OfficeRealTimeConnection> Connections { get; } = new();
         internal ConcurrentQueue<string> DisconnectedIds { get; } = new();
+        internal ConcurrentQueue<(OfficeRealTimeTicket Current, OfficeRealTimeTicket Renewed, string ConnectionId)> Renewals { get; } = new();
         internal TaskCompletionSource Disconnected { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Dictionary<string, string> Presence { get; } = [];
 
@@ -406,6 +534,13 @@ public sealed class OfficeClassicSignalRLifecycleTests
             DisconnectedIds.Enqueue(connectionId);
             Disconnected.TrySetResult();
             return Task.CompletedTask;
+        }
+
+        public Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket, OfficeRealTimeTicket renewedTicket,
+            string connectionId, CancellationToken cancellationToken)
+        {
+            Renewals.Enqueue((currentTicket, renewedTicket, connectionId));
+            return Task.FromResult(true);
         }
 
         public Task<Dictionary<string, string>> GetCompletePresenceStateAsync(OfficeRealTimeTicket ticket,
