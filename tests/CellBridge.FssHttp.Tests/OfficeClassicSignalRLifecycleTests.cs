@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
+using System.Text;
 using System.Text.Json;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
@@ -143,6 +144,41 @@ public sealed class OfficeClassicSignalRLifecycleTests
             Assert.Equal(HttpStatusCode.NotFound, expired.StatusCode);
     }
 
+    [Theory]
+    [InlineData(2, 40 * 1024, false)]
+    [InlineData(32, 64 * 1024, true)]
+    public async Task Complete_presence_snapshot_can_exceed_the_incoming_message_limit(
+        int participants, int payloadBytes, bool escapeHeavy)
+    {
+        var sessions = new FakeSessionStore();
+        await using var fixture = await Fixture.Start(sessions);
+        OfficeRealTimeTicket ticket = fixture.CreateTicket("presence-snapshot");
+        string payload = "{\"text\":\"" + new string(escapeHeavy ? '<' : 'x', payloadBytes - 11) + "\"}";
+        for (int index = 0; index < participants; index++)
+            sessions.Presence[(index == 0 ? ticket.ClientId : Guid.NewGuid()).ToString("B")] = payload;
+        string token = await fixture.NegotiateAsync(ticket);
+        using WebSocket socket = await fixture.ConnectAsync("/connect", fixture.TransportQuery(ticket, token));
+        Assert.Equal(1, (await ReceiveJsonAsync(socket)).GetProperty("S").GetInt32());
+
+        await socket.SendAsync(Encoding.UTF8.GetBytes(
+            """{"H":"RealtimeChannelHub","M":"GetCompletePresenceState","A":[],"I":"snapshot"}"""),
+            WebSocketMessageType.Text, true, CancellationToken.None);
+        JsonElement result = await ReceiveJsonAsync(socket);
+
+        Assert.Equal("snapshot", result.GetProperty("I").GetString());
+        var presence = result.GetProperty("R");
+        Assert.Equal(participants, presence.EnumerateObject().Count());
+        foreach (var entry in sessions.Presence)
+            Assert.Equal(entry.Value, presence.GetProperty(entry.Key).GetString());
+
+        await socket.SendAsync(Encoding.UTF8.GetBytes(
+            """{"H":"RealtimeChannelHub","M":"UpdatePresence","A":["{}"],"I":"still-connected"}"""),
+            WebSocketMessageType.Text, true, CancellationToken.None);
+        Assert.Equal("still-connected", (await ReceiveJsonAsync(socket)).GetProperty("I").GetString());
+        await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "test complete", CancellationToken.None);
+        await sessions.Disconnected.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
     private static async Task<JsonElement> ReceiveJsonAsync(WebSocket socket)
     {
         var (result, buffer) = await ReceiveAsync(socket);
@@ -154,8 +190,15 @@ public sealed class OfficeClassicSignalRLifecycleTests
     private static async Task<(WebSocketReceiveResult Result, byte[] Buffer)> ReceiveAsync(WebSocket socket)
     {
         byte[] buffer = new byte[4096];
-        WebSocketReceiveResult result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-        return (result, buffer.AsMemory(0, result.Count).ToArray());
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var message = new MemoryStream();
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), timeout.Token);
+            message.Write(buffer, 0, result.Count);
+        } while (!result.EndOfMessage);
+        return (result, message.ToArray());
     }
 
     private static async Task<string> ReadConnectionTokenAsync(HttpResponseMessage response)
@@ -342,6 +385,7 @@ public sealed class OfficeClassicSignalRLifecycleTests
         internal ConcurrentQueue<OfficeRealTimeConnection> Connections { get; } = new();
         internal ConcurrentQueue<string> DisconnectedIds { get; } = new();
         internal TaskCompletionSource Disconnected { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal Dictionary<string, string> Presence { get; } = [];
 
         public Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, OfficeRealTimeConnection connection,
             CancellationToken cancellationToken)
@@ -365,7 +409,7 @@ public sealed class OfficeClassicSignalRLifecycleTests
         }
 
         public Task<Dictionary<string, string>> GetCompletePresenceStateAsync(OfficeRealTimeTicket ticket,
-            string connectionId, CancellationToken cancellationToken) => Task.FromResult(new Dictionary<string, string>());
+            string connectionId, CancellationToken cancellationToken) => Task.FromResult(new Dictionary<string, string>(Presence));
 
         public Task<bool> UpdatePresenceAsync(OfficeRealTimeTicket ticket, string connectionId, string payload,
             CancellationToken cancellationToken) => Task.FromResult(true);

@@ -20,7 +20,10 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DisconnectTimeout = TimeSpan.FromSeconds(30);
-    private const int MaximumMessageBytes = 64 * 1024;
+    private const int MaximumIncomingMessageBytes = 64 * 1024;
+    // A snapshot can contain 32 states of 64 KiB each. JSON string escaping
+    // can expand each state sixfold; leave room for the invocation envelope.
+    private const int MaximumOutgoingMessageBytes = 16 * 1024 * 1024;
     private const int MaximumNegotiationsPerParticipant = 2;
     private const int MaximumNegotiationsPerSubject = 16;
     private readonly object _negotiationLock = new();
@@ -184,7 +187,7 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             if (receive.MessageType != WebSocketMessageType.Text) throw new InvalidDataException("SignalR messages must use text frames.");
             for (int index = 0; index < receive.Count; index++)
             {
-                if (buffered.WrittenCount >= MaximumMessageBytes)
+                if (buffered.WrittenCount >= MaximumIncomingMessageBytes)
                     throw new InvalidDataException("SignalR message exceeds the configured limit.");
                 buffered.GetSpan(1)[0] = chunk[index];
                 buffered.Advance(1);
@@ -449,7 +452,7 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
         {
             if (socket.State != WebSocketState.Open) throw new WebSocketException("The collaboration socket is closed.");
             byte[] json = JsonSerializer.SerializeToUtf8Bytes(message);
-            if (json.Length > MaximumMessageBytes) throw new WebSocketException("The collaboration message exceeds the configured limit.");
+            if (json.Length > MaximumOutgoingMessageBytes) throw new WebSocketException("The collaboration message exceeds the configured limit.");
             await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try { await socket.SendAsync(json, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false); }
             finally { _sendLock.Release(); }
