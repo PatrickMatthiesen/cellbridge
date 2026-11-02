@@ -177,9 +177,13 @@ the shared session store.
 
 Automated tests cover classic WebSocket negotiation and messages, replacement
 connections, host shutdown, and delivery through both session-store implementations.
-Native iPhone sign-in, saving and collaboration with this adapter still need a
-fresh device test. The OneDrive reference capture establishes the wire format;
-it does not qualify the CellBridge implementation.
+A bounded native iPhone Excel run opened a workbook, saved edits to persisted
+revisions and exchanged presence with desktop Core SignalR clients. That run
+also showed loading and upload warnings, unresolved mobile participant names,
+and desktop authentication failures that blocked RTC credential renewal.
+Error-free synchronization and recovery after session expiry remain unqualified.
+The OneDrive reference capture establishes the wire format; it does not qualify
+the CellBridge implementation.
 
 Classic negotiation permits two outstanding entries per participant and sixteen
 per account on each host. Unused entries and disconnected reconnect tokens expire
@@ -207,7 +211,7 @@ test coverage. It is not an exhaustive Office conformance audit.
 | Participant names | Native Windows Excel cursor labels and the Word coauthor gallery resolved names in a same-account, two-desktop test after fixing EditorsTable storage-index mappings. Distinct-account labels and mobile clients remain unqualified. |
 | OCS | Missing service: the frame codec does not implement session state, WPM merging, revision clocks or saving merged content to the file host. RTC can operate without OCS. |
 | Publication notifications | Missing integration: the RTC hub relays client notifications, but persisted file publication does not generate a server notification. |
-| Multiple RTC hosts | Missing coordination: rooms and presence are process-local. Multi-instance hosts must disable RTC. Shared file storage and locking are separate and support multiple hosts. |
+| Multiple RTC hosts | Redis coordinates rooms and presence across hosts. Native Office behavior across multiple hosts remains unqualified; see [multi-host RTC](multi-host-rtc.md). |
 | Ticket renewal and reconnect | RTC tickets last 20 minutes. Native Word proactively renewed tickets in a short-lifetime test. Recovery after missed renewal, disconnect and presence loss needs coverage. |
 | Startup | Bounded admission queues absorb opening bursts. Reliable cold startup across all three apps needs broader coverage. |
 | Typing and latency | Test gap: saved edits and selection changes propagated, but character-by-character delivery and measured end-to-end latency are not established for CellBridge. |
