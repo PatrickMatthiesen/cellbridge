@@ -351,15 +351,16 @@ public sealed class EntraAuthenticationTests
     [InlineData("/shared/", "Bearer")]
     [InlineData("/shared/example.docx", "  bEaReR   ")]
     [InlineData("/_vti_bin/cellstorage.svc", "Bearer")]
-    public async Task ExplicitNativeCookieDiscoveryRequiresAuthenticationBeforeCapabilities(string path, string? authorization)
+    public async Task NativeCookieMetadataProbeAdvertisesCapabilitiesWithoutForcingAuthentication(string path, string? authorization)
     {
         await using var fixture = await Fixture.CreateAsync();
         using var request = new HttpRequestMessage(HttpMethod.Options, path);
         request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
         if (authorization is not null) request.Headers.TryAddWithoutValidation("Authorization", authorization);
         using var response = await fixture.Client.SendAsync(request);
-        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         AssertNativeChallenge(response);
+        Assert.Equal("1.5", Assert.Single(response.Headers.GetValues("X-MSFSSHTTP")));
         Assert.False(response.Headers.Contains("Set-Cookie"));
 
         using var authenticated = new HttpRequestMessage(HttpMethod.Options, path);
@@ -385,7 +386,7 @@ public sealed class EntraAuthenticationTests
             probe.Headers.TryAddWithoutValidation("Authorization", "Bearer");
             probe.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
             using var capabilities = await fixture.Client.SendAsync(probe);
-            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, capabilities.StatusCode);
+            Assert.Equal(System.Net.HttpStatusCode.OK, capabilities.StatusCode);
             AssertNativeChallenge(capabilities);
             Assert.False(capabilities.Headers.Contains("Set-Cookie"));
         }
@@ -450,7 +451,7 @@ public sealed class EntraAuthenticationTests
         request.Headers.TryAddWithoutValidation("Authorization", "Bearer");
         request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
         using var capabilities = await fixture.Client.SendAsync(request);
-        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, capabilities.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.OK, capabilities.StatusCode);
         AssertNativeChallenge(capabilities);
         using var probe = await fixture.ExchangeCookieAsync(null, "Bearer");
         Assert.Equal(System.Net.HttpStatusCode.OK, probe.StatusCode);

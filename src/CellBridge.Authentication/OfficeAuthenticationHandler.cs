@@ -23,7 +23,7 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
         // Office can explicitly probe authentication without reusing its cookie.
         // This changes challenge negotiation only; it never grants access.
         var ignoreCookie = scheme == IdentityConstants.ApplicationScheme &&
-            IsNativeAuthenticationProbe() && HeaderIs("IgnoreCookieAuthentication", "t");
+            IsForcedAuthenticationProbe() && HeaderIs("IgnoreCookieAuthentication", "t");
         var result = ignoreCookie ? AuthenticateResult.NoResult() : await Context.AuthenticateAsync(scheme);
         OfficeAuthenticationDiagnostics.Authentication(Context, scheme, result);
         return result;
@@ -35,12 +35,23 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
         var category = CredentialCategory(Request);
         if (category is "absent" or "empty-bearer")
         {
-            // A native authentication probe differs from public capability discovery.
-            // Return a challenge rather than metadata on a successful response.
-            if (IsNativeAuthenticationProbe())
+            if (IsForcedAuthenticationProbe())
             {
                 await Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
                 return;
+            }
+            // Office also requests cookie-uri metadata on ordinary, repeated
+            // capability probes. Challenging every such probe restarts native
+            // authentication and document queries even after cookie acquisition.
+            if (HttpMethods.IsOptions(Request.Method) && HeaderIs("X-MS-CookieUri-Requested", "t"))
+            {
+                Response.OnStarting(() =>
+                {
+                    if (Response.StatusCode == StatusCodes.Status200OK)
+                        EntraAuthentication.WriteChallenge(Context,
+                            Context.RequestServices.GetRequiredService<EntraAuthenticationOptions>(), StatusCodes.Status200OK);
+                    return Task.CompletedTask;
+                });
             }
             if (await Context.TryHandleCellBridgeOfficeDiscoveryAsync()) return;
         }
@@ -50,8 +61,8 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
     protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>
         Context.ForbidAsync(EntraAuthentication.BearerScheme, properties);
 
-    private bool IsNativeAuthenticationProbe() => HttpMethods.IsOptions(Request.Method) &&
-        (HeaderIs("X-MS-CookieUri-Requested", "t") || HeaderIs("X-IDCRL_OPTIONS", "force-auth-challenge"));
+    private bool IsForcedAuthenticationProbe() => HttpMethods.IsOptions(Request.Method) &&
+        HeaderIs("X-IDCRL_OPTIONS", "force-auth-challenge");
 
     private bool HeaderIs(string name, string value) => Request.Headers.TryGetValue(name, out var values) &&
         values.Count == 1 && string.Equals(values[0]?.Trim(), value, StringComparison.OrdinalIgnoreCase);
