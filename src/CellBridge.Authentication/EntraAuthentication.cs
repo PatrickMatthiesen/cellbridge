@@ -237,7 +237,7 @@ public static class EntraAuthentication
         }).AllowAnonymous().WithMetadata(new NativeCookieExchangeMetadata()).WithRequestTimeout(TimeSpan.FromSeconds(30));
     }
 
-    private static void WriteChallenge(HttpContext context, EntraAuthenticationOptions settings, int status)
+    internal static void WriteChallenge(HttpContext context, EntraAuthenticationOptions settings, int status)
     {
         var tenant = Guid.Parse(settings.TenantId!).ToString("D");
         var client = Guid.Parse(settings.ClientId!).ToString("D");

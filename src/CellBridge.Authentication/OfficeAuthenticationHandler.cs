@@ -29,12 +29,25 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
     {
         if (await Context.TryCellBridgeOfficeFormsFallbackAsync(properties)) return;
         var category = CredentialCategory(Request);
-        // An explicit native-cookie discovery probe must receive the OAuth
-        // challenge, rather than only anonymous authoring capabilities.
+        // Office repeats cookie-less OPTIONS even after its native exchange
+        // succeeds. Advertise authentication without rejecting that public
+        // capability request and forcing another sign-in exchange.
         var nativeCookieProbe = Request.Headers.TryGetValue("X-MS-CookieUri-Requested", out var cookieUriRequested) &&
             cookieUriRequested.Count == 1 && string.Equals(cookieUriRequested[0]?.Trim(), "t", StringComparison.OrdinalIgnoreCase);
-        if ((category is "absent" or "empty-bearer") && !nativeCookieProbe &&
-            await Context.TryHandleCellBridgeOfficeDiscoveryAsync()) return;
+        if (category is "absent" or "empty-bearer")
+        {
+            if (nativeCookieProbe && HttpMethods.IsOptions(Request.Method))
+            {
+                Response.OnStarting(() =>
+                {
+                    if (Response.StatusCode == StatusCodes.Status200OK)
+                        EntraAuthentication.WriteChallenge(Context,
+                            Context.RequestServices.GetRequiredService<EntraAuthenticationOptions>(), StatusCodes.Status200OK);
+                    return Task.CompletedTask;
+                });
+            }
+            if (await Context.TryHandleCellBridgeOfficeDiscoveryAsync()) return;
+        }
         await Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
     }
 

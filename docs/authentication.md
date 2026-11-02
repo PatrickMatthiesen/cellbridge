@@ -44,9 +44,10 @@ native Office client ID.
 
 In Entra mode, HTTP OPTIONS on the marked protocol discovery routes returns
 generic protocol capabilities without a cookie. An explicit native-cookie probe
-with `X-MS-CookieUri-Requested: t` instead receives a 401 OAuth challenge with the
-configured `cookie_uri`. This keeps authentication discovery separate from
-anonymous capability discovery. Document downloads,
+with `X-MS-CookieUri-Requested: t` also receives the OAuth authentication header
+with the configured `cookie_uri`, while keeping the capability response at 200.
+Office repeats these cookie-less probes after signing in; they must not force
+another failed-authentication round. Document downloads,
 PROPFIND, SOAP operations, RTC and historical versions still require
 authentication and their existing document permissions.
 
