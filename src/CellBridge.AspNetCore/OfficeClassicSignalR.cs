@@ -154,11 +154,18 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             }
             finally
             {
-                stopping.Cancel();
-                try { if (keepAlive is not null) await keepAlive.ConfigureAwait(false); }
-                catch (OperationCanceledException) { }
-                if (gateHeld) { pending.Gate.Release(); gateHeld = false; }
-                await pending.DeactivateAsync(connection).ConfigureAwait(false);
+                try
+                {
+                    stopping.Cancel();
+                    try { if (keepAlive is not null) await keepAlive.ConfigureAwait(false); }
+                    catch (OperationCanceledException) { }
+                    catch (WebSocketException) { }
+                }
+                finally
+                {
+                    if (gateHeld) { pending.Gate.Release(); gateHeld = false; }
+                    await pending.DeactivateAsync(connection).ConfigureAwait(false);
+                }
             }
             return Results.Empty;
         }

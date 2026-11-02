@@ -7,6 +7,7 @@ using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.DependencyInjection;
@@ -113,6 +114,35 @@ public sealed class OfficeClassicSignalRLifecycleTests
             Assert.Equal(HttpStatusCode.NotFound, expiredStart.StatusCode);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Failed_keepalive_removes_session_and_starts_negotiation_expiry(bool unexpectedFailure)
+    {
+        var sessions = new FakeSessionStore();
+        await using var fixture = await Fixture.Start(sessions);
+        OfficeRealTimeTicket ticket = fixture.CreateTicket("failed-keepalive");
+        string token = await fixture.NegotiateAsync(ticket);
+        using var socket = new FailedKeepAliveSocket(unexpectedFailure);
+        Task<IResult> connection = fixture.RunSocketAsync(ticket, token, socket);
+
+        await socket.KeepAliveFailed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Exception? failure = await Record.ExceptionAsync(async () =>
+        {
+            await connection.WaitAsync(TimeSpan.FromSeconds(3));
+        });
+
+        Assert.Equal(Assert.Single(sessions.Connections).ConnectionId, Assert.Single(sessions.DisconnectedIds));
+        if (unexpectedFailure) Assert.IsType<IOException>(failure);
+        else Assert.Null(failure);
+
+        using (var reconnectWindow = await fixture.StartResponseAsync(ticket, token))
+            Assert.Equal(HttpStatusCode.OK, reconnectWindow.StatusCode);
+        fixture.Clock.Advance(TimeSpan.FromSeconds(31));
+        using (var expired = await fixture.StartResponseAsync(ticket, token))
+            Assert.Equal(HttpStatusCode.NotFound, expired.StatusCode);
+    }
+
     private static async Task<JsonElement> ReceiveJsonAsync(WebSocket socket)
     {
         var (result, buffer) = await ReceiveAsync(socket);
@@ -139,6 +169,7 @@ public sealed class OfficeClassicSignalRLifecycleTests
         private readonly WebApplication _app;
         private readonly ConcurrentDictionary<string, OfficeRealTimeTicket> _tickets = new(StringComparer.Ordinal);
         private HttpClient? _client;
+        private OfficeClassicSignalR _classic = null!;
 
         private Fixture(WebApplication app, FakeSessionStore sessions, ManualClock clock)
         {
@@ -160,6 +191,7 @@ public sealed class OfficeClassicSignalRLifecycleTests
             var fixture = new Fixture(app, sessions, clock);
             OfficeClassicSignalR classic = new(sessions, app.Services.GetRequiredService<IOfficeRealTimeAuthorizer>(),
                 clock, app.Services.GetRequiredService<Microsoft.Extensions.Hosting.IHostApplicationLifetime>());
+            fixture._classic = classic;
             app.UseWebSockets();
             app.MapGet("/negotiate", async context =>
             {
@@ -232,6 +264,17 @@ public sealed class OfficeClassicSignalRLifecycleTests
                 CancellationToken.None);
         }
 
+        internal Task<IResult> RunSocketAsync(OfficeRealTimeTicket ticket, string token, WebSocket socket)
+        {
+            var context = new DefaultHttpContext { RequestServices = _app.Services };
+            context.Request.Scheme = "https";
+            context.Request.Host = new HostString("localhost");
+            context.Request.QueryString = new QueryString(QueryHelpers.AddQueryString("", TransportQuery(ticket, token)));
+            context.Items[OfficeRealTimeRequest.TicketKey] = ticket;
+            context.Features.Set<IHttpWebSocketFeature>(new SocketFeature(socket));
+            return _classic.ConnectAsync(context);
+        }
+
         private Dictionary<string, string?> TicketQuery(OfficeRealTimeTicket ticket) => new()
         {
             ["clientProtocol"] = "1.4",
@@ -260,6 +303,38 @@ public sealed class OfficeClassicSignalRLifecycleTests
     }
 
     private enum ConnectResult { Accepted, Rejected, Busy }
+
+    private sealed class SocketFeature(WebSocket socket) : IHttpWebSocketFeature
+    {
+        public bool IsWebSocketRequest => true;
+        public Task<WebSocket> AcceptAsync(WebSocketAcceptContext context) => Task.FromResult(socket);
+    }
+
+    private sealed class FailedKeepAliveSocket(bool unexpectedFailure) : WebSocket
+    {
+        private readonly TaskCompletionSource<WebSocketReceiveResult> _receive = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource KeepAliveFailed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override WebSocketCloseStatus? CloseStatus => null;
+        public override string? CloseStatusDescription => null;
+        public override WebSocketState State => WebSocketState.Open;
+        public override string? SubProtocol => null;
+        public override void Abort() => _receive.TrySetResult(new(0, WebSocketMessageType.Close, true));
+        public override void Dispose() => Abort();
+        public override Task CloseAsync(WebSocketCloseStatus status, string? description, CancellationToken cancellationToken) => Task.CompletedTask;
+        public override Task CloseOutputAsync(WebSocketCloseStatus status, string? description, CancellationToken cancellationToken) => Task.CompletedTask;
+        public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken) =>
+            _receive.Task.WaitAsync(cancellationToken);
+        public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType,
+            bool endOfMessage, CancellationToken cancellationToken)
+        {
+            if (!buffer.AsSpan().SequenceEqual("{}"u8)) return Task.CompletedTask;
+            _receive.TrySetResult(new(0, WebSocketMessageType.Close, true));
+            KeepAliveFailed.TrySetResult();
+            return Task.FromException(unexpectedFailure
+                ? new IOException("Injected unexpected keepalive failure.")
+                : new WebSocketException("Injected keepalive transport failure."));
+        }
+    }
 
     private sealed class FakeSessionStore : IOfficeRealTimeSessionStore
     {
