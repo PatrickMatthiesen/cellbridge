@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -8,12 +9,14 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace CellBridge.AspNetCore;
 
 /// <summary>Implements the Office-used ASP.NET SignalR 1.4 WebSocket subset over the shared RTC sessions.</summary>
 internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
-    IOfficeRealTimeAuthorizer authorizer, TimeProvider time, IHostApplicationLifetime lifetime)
+    IOfficeRealTimeAuthorizer authorizer, TimeProvider time, IHostApplicationLifetime lifetime,
+    ILogger<OfficeClassicSignalR>? logger = null)
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DisconnectTimeout = TimeSpan.FromSeconds(30);
@@ -141,10 +144,12 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             catch (WebSocketException) { }
             catch (JsonException)
             {
+                logger?.LogWarning("Office classic RTC connection rejected malformed JSON for client {ClientId}.", ticket.ClientId);
                 await socket.CloseOutputAsync(WebSocketCloseStatus.InvalidPayloadData, "Invalid SignalR message", CancellationToken.None).ConfigureAwait(false);
             }
             catch (InvalidDataException)
             {
+                logger?.LogWarning("Office classic RTC connection rejected an unsupported invocation for client {ClientId}.", ticket.ClientId);
                 await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Unsupported SignalR message", CancellationToken.None).ConfigureAwait(false);
             }
             finally
@@ -200,6 +205,8 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             (invocationId.ValueKind == JsonValueKind.String && string.IsNullOrEmpty(invocationId.GetString())))
             throw new InvalidDataException("Unsupported Office collaboration invocation.");
         string method = methodValue.GetString()!;
+        string loggedMethod = method.Length <= 64 && method.All(char.IsAsciiLetter) ? method : "<invalid>";
+        long started = Stopwatch.GetTimestamp();
         object? result;
         try
         {
@@ -216,13 +223,21 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             };
             if (result is null) await sender.SendVoidResultAsync(invocationId, cancellationToken).ConfigureAwait(false);
             else await sender.SendResultAsync(invocationId, result, cancellationToken).ConfigureAwait(false);
+            logger?.LogDebug(
+                "Office classic RTC {Method} completed for client {ClientId}; presence entries {PresenceEntries}; elapsed {ElapsedMilliseconds} ms.",
+                loggedMethod, ticket.ClientId, result is Dictionary<string, string> presence ? presence.Count : (int?)null,
+                Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         }
         catch (InvalidDataException)
         {
+            logger?.LogWarning("Office classic RTC {Method} rejected for client {ClientId}; invalid invocation data.",
+                loggedMethod, ticket.ClientId);
             await sender.SendFailureAsync(invocationId, "The collaboration request was rejected.", cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) when (error is OfficeRealTimeBusyException or HubException)
         {
+            logger?.LogWarning("Office classic RTC {Method} failed for client {ClientId}; failure {FailureType}.",
+                loggedMethod, ticket.ClientId, error.GetType().Name);
             await sender.SendFailureAsync(invocationId, "The collaboration request could not be completed.", cancellationToken).ConfigureAwait(false);
         }
     }
