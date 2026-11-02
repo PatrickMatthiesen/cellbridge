@@ -144,12 +144,12 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             catch (WebSocketException) { }
             catch (JsonException)
             {
-                logger?.LogWarning("Office classic RTC connection rejected malformed JSON for client {ClientId}.", ticket.ClientId);
+                logger?.LogWarning("Office classic RTC connection rejected malformed JSON for client {ClientId}.", ticket!.ClientId);
                 await socket.CloseOutputAsync(WebSocketCloseStatus.InvalidPayloadData, "Invalid SignalR message", CancellationToken.None).ConfigureAwait(false);
             }
             catch (InvalidDataException)
             {
-                logger?.LogWarning("Office classic RTC connection rejected an unsupported invocation for client {ClientId}.", ticket.ClientId);
+                logger?.LogWarning("Office classic RTC connection rejected an unsupported invocation for client {ClientId}.", ticket!.ClientId);
                 await socket.CloseOutputAsync(WebSocketCloseStatus.PolicyViolation, "Unsupported SignalR message", CancellationToken.None).ConfigureAwait(false);
             }
             finally

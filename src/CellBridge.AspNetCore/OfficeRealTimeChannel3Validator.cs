@@ -27,7 +27,8 @@ internal static class OfficeRealTimeChannel3Validator
     {
         int expectedPropertyCount = requireCollabMode ? 6 : 4;
         if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != expectedPropertyCount ||
-            !HasInt32(root, "Version", 2) || !HasInt32(root, "ClientType", 0) ||
+            !HasInt32(root, "Version", 2) ||
+            (!HasInt32(root, "ClientType", 0) && !HasInt32(root, "ClientType", 2)) ||
             !HasGuid(root, guidField))
             return false;
 

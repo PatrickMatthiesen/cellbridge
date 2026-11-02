@@ -222,8 +222,10 @@ public sealed class OfficeRealTimeHubTests
         Assert.DoesNotContain(f.Clients.Calls, x => x.ConnectionId == sender.Context.ConnectionId);
     }
 
-    [Fact]
-    public async Task Channel_three_relays_the_two_captured_excel_payload_shapes_unchanged()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public async Task Channel_three_relays_excel_notifications_for_desktop_and_iphone_client_types(int clientType)
     {
         Fixture f = new();
         var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
@@ -232,8 +234,8 @@ public sealed class OfficeRealTimeHubTests
         string fullSaveId = Guid.NewGuid().ToString("D");
         string[] payloads =
         [
-            $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{generatedXluid}}","CollabMode":0,"OcsCapable":true}""",
-            $$"""{"Version":2,"ClientType":0,"PresenceType":5,"FullSaveId":"{{fullSaveId}}"}"""
+            $$"""{"Version":2,"ClientType":{{clientType}},"PresenceType":2,"GeneratedXluid":"{{generatedXluid}}","CollabMode":0,"OcsCapable":true}""",
+            $$"""{"Version":2,"ClientType":{{clientType}},"PresenceType":5,"FullSaveId":"{{fullSaveId}}"}"""
         ];
 
         foreach (string payload in payloads)
@@ -263,7 +265,7 @@ public sealed class OfficeRealTimeHubTests
             $$"""{"Version":2,"ClientType":0,"PresenceType":"2","GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
             $$"""{"Version":1,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
             $$"""{"Version":2,"ClientType":1,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
-            $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true,"A":"{{otherId}}"}""",
+            $$"""{"Version":2,"ClientType":2,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true,"A":"{{otherId}}"}""",
             $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true,"unexpected":true}""",
             $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"00000000-0000-0000-0000-000000000000","CollabMode":0,"OcsCapable":true}""",
             $$"""{"Version":2,"ClientType":0,"PresenceType":5,"FullSaveId":"{{validGuid}}","clientId":"{{otherId}}"}""",

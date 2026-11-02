@@ -158,8 +158,11 @@ production concurrency. See the remaining work below.
 The RTC service keeps the desktop ASP.NET Core SignalR endpoint and implements
 the captured Office iPhone SignalR 1.4 WebSocket subset on the same session
 store. Both transports share ticket checks, participant permissions, presence,
-notifications, revocation and Redis fanout. The classic adapter supports the
-observed negotiate, connect, start, reconnect and abort requests. It returns an
+notifications, revocation and Redis fanout. Both transports accept the
+captured Excel channel-3 client classifications: desktop `0` and iPhone `2`.
+Notifications require write access and retain their field and sender checks.
+The classic adapter supports the observed negotiate, connect, start, reconnect
+and abort requests. It returns an
 explicit error for unsupported invocations and does not implement long polling
 or server-sent events. `CellBridgeOptions.EnableOfficeRealTime` defaults to
 true. Set it to false to disable discovery and endpoints. WebDemo accepts
