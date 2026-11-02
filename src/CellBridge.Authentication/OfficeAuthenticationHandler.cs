@@ -20,7 +20,11 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
         var scheme = category is "absent" or "empty-bearer"
             ? IdentityConstants.ApplicationScheme : EntraAuthentication.BearerScheme;
         OfficeAuthenticationDiagnostics.ObserveResponse(Context);
-        var result = await Context.AuthenticateAsync(scheme);
+        // Office can explicitly probe authentication without reusing its cookie.
+        // This changes challenge negotiation only; it never grants access.
+        var ignoreCookie = scheme == IdentityConstants.ApplicationScheme &&
+            IsNativeAuthenticationProbe() && HeaderIs("IgnoreCookieAuthentication", "t");
+        var result = ignoreCookie ? AuthenticateResult.NoResult() : await Context.AuthenticateAsync(scheme);
         OfficeAuthenticationDiagnostics.Authentication(Context, scheme, result);
         return result;
     }
@@ -29,22 +33,14 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
     {
         if (await Context.TryCellBridgeOfficeFormsFallbackAsync(properties)) return;
         var category = CredentialCategory(Request);
-        // Office repeats cookie-less OPTIONS even after its native exchange
-        // succeeds. Advertise authentication without rejecting that public
-        // capability request and forcing another sign-in exchange.
-        var nativeCookieProbe = Request.Headers.TryGetValue("X-MS-CookieUri-Requested", out var cookieUriRequested) &&
-            cookieUriRequested.Count == 1 && string.Equals(cookieUriRequested[0]?.Trim(), "t", StringComparison.OrdinalIgnoreCase);
         if (category is "absent" or "empty-bearer")
         {
-            if (nativeCookieProbe && HttpMethods.IsOptions(Request.Method))
+            // A native authentication probe differs from public capability discovery.
+            // Return a challenge rather than metadata on a successful response.
+            if (IsNativeAuthenticationProbe())
             {
-                Response.OnStarting(() =>
-                {
-                    if (Response.StatusCode == StatusCodes.Status200OK)
-                        EntraAuthentication.WriteChallenge(Context,
-                            Context.RequestServices.GetRequiredService<EntraAuthenticationOptions>(), StatusCodes.Status200OK);
-                    return Task.CompletedTask;
-                });
+                await Context.ChallengeAsync(EntraAuthentication.BearerScheme, properties);
+                return;
             }
             if (await Context.TryHandleCellBridgeOfficeDiscoveryAsync()) return;
         }
@@ -53,6 +49,12 @@ internal sealed class OfficeAuthenticationHandler(IOptionsMonitor<Authentication
 
     protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>
         Context.ForbidAsync(EntraAuthentication.BearerScheme, properties);
+
+    private bool IsNativeAuthenticationProbe() => HttpMethods.IsOptions(Request.Method) &&
+        (HeaderIs("X-MS-CookieUri-Requested", "t") || HeaderIs("X-IDCRL_OPTIONS", "force-auth-challenge"));
+
+    private bool HeaderIs(string name, string value) => Request.Headers.TryGetValue(name, out var values) &&
+        values.Count == 1 && string.Equals(values[0]?.Trim(), value, StringComparison.OrdinalIgnoreCase);
 
     internal static string CredentialCategory(HttpRequest request)
     {

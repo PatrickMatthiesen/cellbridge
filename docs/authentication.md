@@ -43,11 +43,14 @@ application GUID as the v2 token audience, the tenant issuer, expiry, scope and
 native Office client ID.
 
 In Entra mode, HTTP OPTIONS on the marked protocol discovery routes returns
-generic protocol capabilities without a cookie. An explicit native-cookie probe
-with `X-MS-CookieUri-Requested: t` also receives the OAuth authentication header
-with the configured `cookie_uri`, while keeping the capability response at 200.
-Office repeats these cookie-less probes after signing in; they must not force
-another failed-authentication round. Document downloads,
+generic protocol capabilities without a cookie when no authentication probe is
+requested. An unauthenticated OPTIONS probe with `X-MS-CookieUri-Requested: t`
+or `X-IDCRL_OPTIONS: force-auth-challenge` instead receives 401 with the OAuth
+challenge and configured `cookie_uri`. On these probes,
+`IgnoreCookieAuthentication: t` prevents cookie reuse for authentication
+negotiation. Authenticated probes return 200 capabilities unless they explicitly
+request cookie authentication to be ignored. The same rules apply to desktop
+and mobile clients; user-agent text does not select the challenge. Document downloads,
 PROPFIND, SOAP operations, RTC and historical versions still require
 authentication and their existing document permissions.
 

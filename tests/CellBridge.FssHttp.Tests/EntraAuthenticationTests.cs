@@ -351,16 +351,15 @@ public sealed class EntraAuthenticationTests
     [InlineData("/shared/", "Bearer")]
     [InlineData("/shared/example.docx", "  bEaReR   ")]
     [InlineData("/_vti_bin/cellstorage.svc", "Bearer")]
-    public async Task ExplicitNativeCookieDiscoveryAdvertisesCapabilitiesAndAuthenticationWithoutRejectingOptions(string path, string? authorization)
+    public async Task ExplicitNativeCookieDiscoveryRequiresAuthenticationBeforeCapabilities(string path, string? authorization)
     {
         await using var fixture = await Fixture.CreateAsync();
         using var request = new HttpRequestMessage(HttpMethod.Options, path);
         request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
         if (authorization is not null) request.Headers.TryAddWithoutValidation("Authorization", authorization);
         using var response = await fixture.Client.SendAsync(request);
-        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
         AssertNativeChallenge(response);
-        Assert.Equal("1.5", Assert.Single(response.Headers.GetValues("X-MSFSSHTTP")));
         Assert.False(response.Headers.Contains("Set-Cookie"));
 
         using var authenticated = new HttpRequestMessage(HttpMethod.Options, path);
@@ -373,7 +372,7 @@ public sealed class EntraAuthenticationTests
     }
 
     [Fact]
-    public async Task RepeatedCookieLessOptionsAfterNativeSignInDoesNotRejectCapabilitiesOrAuthorizeDocumentReads()
+    public async Task RepeatedCookieLessNativeProbesRemainUnauthenticatedAfterAnotherRequestSignedIn()
     {
         await using var fixture = await Fixture.CreateAsync();
         using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
@@ -386,8 +385,7 @@ public sealed class EntraAuthenticationTests
             probe.Headers.TryAddWithoutValidation("Authorization", "Bearer");
             probe.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
             using var capabilities = await fixture.Client.SendAsync(probe);
-            Assert.Equal(System.Net.HttpStatusCode.OK, capabilities.StatusCode);
-            Assert.Equal("1.5", Assert.Single(capabilities.Headers.GetValues("X-MSFSSHTTP")));
+            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, capabilities.StatusCode);
             AssertNativeChallenge(capabilities);
             Assert.False(capabilities.Headers.Contains("Set-Cookie"));
         }
@@ -396,6 +394,45 @@ public sealed class EntraAuthenticationTests
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, anonymous.StatusCode);
         using var authenticated = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie, "Bearer");
         Assert.Equal(System.Net.HttpStatusCode.OK, authenticated.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CapturedForcedAuthenticationProbeDoesNotReuseCookie(bool hasCookie)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var probe = new HttpRequestMessage(HttpMethod.Options, "/shared/");
+        probe.Headers.TryAddWithoutValidation("User-Agent", "Microsoft Office Excel");
+        probe.Headers.TryAddWithoutValidation("Authorization", "Bearer");
+        probe.Headers.TryAddWithoutValidation("X-IDCRL_OPTIONS", "force-auth-challenge");
+        probe.Headers.TryAddWithoutValidation("IgnoreCookieAuthentication", "t");
+        if (hasCookie)
+            probe.Headers.TryAddWithoutValidation("Cookie", EntraAuthentication.SessionCookieName + "=" + await fixture.CreateCookieAsync());
+        using var response = await fixture.Client.SendAsync(probe);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertNativeChallenge(response);
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+        Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+    }
+
+    [Fact]
+    public async Task OrdinaryDiscoveryAndAuthenticatedNativeProbesStillReturnCapabilities()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var ordinary = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", authorization: "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.OK, ordinary.StatusCode);
+        Assert.Equal("1.5", Assert.Single(ordinary.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Empty(ordinary.Headers.WwwAuthenticate);
+
+        using var authenticated = new HttpRequestMessage(HttpMethod.Options, "/shared/");
+        authenticated.Headers.TryAddWithoutValidation("Authorization", "Bearer");
+        authenticated.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        authenticated.Headers.TryAddWithoutValidation("Cookie", EntraAuthentication.SessionCookieName + "=" + await fixture.CreateCookieAsync());
+        using var success = await fixture.Client.SendAsync(authenticated);
+        Assert.Equal(System.Net.HttpStatusCode.OK, success.StatusCode);
+        Assert.Equal("1.5", Assert.Single(success.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Empty(success.Headers.WwwAuthenticate);
     }
 
     [Fact]
@@ -413,7 +450,7 @@ public sealed class EntraAuthenticationTests
         request.Headers.TryAddWithoutValidation("Authorization", "Bearer");
         request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
         using var capabilities = await fixture.Client.SendAsync(request);
-        Assert.Equal(System.Net.HttpStatusCode.OK, capabilities.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, capabilities.StatusCode);
         AssertNativeChallenge(capabilities);
         using var probe = await fixture.ExchangeCookieAsync(null, "Bearer");
         Assert.Equal(System.Net.HttpStatusCode.OK, probe.StatusCode);
