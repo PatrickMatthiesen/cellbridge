@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Globalization;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text;
 using CellBridge.AspNetCore;
 using CellBridge.Authentication;
 using CellBridge.Storage.Abstractions;
@@ -45,7 +46,7 @@ public sealed class EntraAuthenticationTests
         string? authorization, bool expectedForms)
     {
         await using var fixture = await Fixture.CreateAsync(forms: forms, allowFallback: allowFallback);
-        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", authorization: authorization);
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx", authorization: authorization);
         Assert.Equal(expectedForms ? System.Net.HttpStatusCode.Forbidden : System.Net.HttpStatusCode.Unauthorized,
             response.StatusCode);
         Assert.Equal(expectedForms, response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
@@ -61,7 +62,7 @@ public sealed class EntraAuthenticationTests
     {
         await using var fixture = await Fixture.CreateAsync(allowFallback: true);
         var cookie = await fixture.CreateCookieAsync();
-        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", cookie, authorization);
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx", cookie, authorization);
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
         Assert.Contains(response.Headers.WwwAuthenticate, value => value.Scheme == "Bearer");
@@ -131,26 +132,60 @@ public sealed class EntraAuthenticationTests
     [Theory]
     [InlineData(null)]
     [InlineData("Bearer")]
-    public async Task ProtocolDiscoveryChallengesUntilOfficeSuppliesAToken(string? authorization)
+    public async Task ProtocolDiscoveryIsAvailableBeforeOfficeSuppliesAToken(string? authorization)
     {
         await using var fixture = await Fixture.CreateAsync();
         foreach (var path in new[] { "/", "/shared/", "/_vti_bin/cellstorage.svc" })
         {
             using var request = new HttpRequestMessage(HttpMethod.Options, path);
             if (authorization is not null) request.Headers.TryAddWithoutValidation("Authorization", authorization);
-            using var challenge = await fixture.Client.SendAsync(request);
-            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, challenge.StatusCode);
-            Assert.Contains("Bearer realm=", challenge.Headers.WwwAuthenticate.Single().ToString(), StringComparison.Ordinal);
-            Assert.Contains("cookie_uri=\"https://office.example.test/_api/SP.OAuth.NativeClient/Authenticate\"",
-                challenge.Headers.WwwAuthenticate.Single().ToString(), StringComparison.Ordinal);
-            Assert.False(challenge.Headers.Contains("X-MSFSSHTTP"));
+            using var discovery = await fixture.Client.SendAsync(request);
+            Assert.Equal(System.Net.HttpStatusCode.OK, discovery.StatusCode);
+            Assert.Equal("1.5", discovery.Headers.GetValues("X-MSFSSHTTP").Single());
+            Assert.Contains("OPTIONS", discovery.Content.Headers.Allow);
+            Assert.Empty(discovery.Headers.WwwAuthenticate);
+            Assert.False(discovery.Headers.Contains("Set-Cookie"));
 
             using var authenticated = new HttpRequestMessage(HttpMethod.Options, path);
             authenticated.Headers.Authorization = new("Bearer", fixture.CreateToken());
-            using var discovery = await fixture.Client.SendAsync(authenticated);
-            Assert.Equal(System.Net.HttpStatusCode.OK, discovery.StatusCode);
-            Assert.Equal("1.5", discovery.Headers.GetValues("X-MSFSSHTTP").Single());
+            using var authenticatedDiscovery = await fixture.Client.SendAsync(authenticated);
+            Assert.Equal(System.Net.HttpStatusCode.OK, authenticatedDiscovery.StatusCode);
+            Assert.Equal("1.5", authenticatedDiscovery.Headers.GetValues("X-MSFSSHTTP").Single());
         }
+    }
+
+    [Theory]
+    [InlineData("Bearer invalid-token")]
+    [InlineData("Basic credentials")]
+    [InlineData("Bearer\tinvalid-token")]
+    public async Task ProtocolDiscoveryDoesNotDowngradeSuppliedCredentialsEvenWithValidCookie(string authorization)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var cookie = await fixture.CreateCookieAsync();
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", cookie, authorization);
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Contains(response.Headers.WwwAuthenticate, value => value.Scheme == "Bearer");
+        Assert.False(response.Headers.Contains("X-MSFSSHTTP"));
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+    }
+
+    [Theory]
+    [InlineData("HEAD", "/shared/example.docx")]
+    [InlineData("GET", "/shared/example.docx")]
+    [InlineData("PROPFIND", "/shared/example.docx")]
+    [InlineData("POST", "/_vti_bin/cellstorage.svc")]
+    [InlineData("POST", "/_cellbridge/rtc/rtchub/negotiate?negotiateVersion=1")]
+    public async Task DocumentSoapAndRtcRequestsStillRequireAuthentication(string method, string path)
+    {
+        await using var fixture = await Fixture.CreateAsync(enableOfficeRealTime:
+            method == "PROPFIND" || path.StartsWith("/_cellbridge/rtc/", StringComparison.Ordinal));
+        using var response = await fixture.SendOfficeRequestAsync(new HttpMethod(method), path);
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        if (!path.StartsWith("/_cellbridge/rtc/", StringComparison.Ordinal))
+            Assert.Contains(response.Headers.WwwAuthenticate, value => value.Scheme == "Bearer");
+        Assert.False(response.Headers.Contains("X-MSFSSHTTP"));
     }
 
     [Theory]
@@ -164,7 +199,7 @@ public sealed class EntraAuthenticationTests
     public async Task BearerRejectsInvalidTokenProperties(string change)
     {
         await using var fixture = await Fixture.CreateAsync(allowFallback: true);
-        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/",
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx",
             authorization: "Bearer " + fixture.CreateToken(change));
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
@@ -287,6 +322,154 @@ public sealed class EntraAuthenticationTests
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         Assert.False(response.Headers.Contains("Set-Cookie"));
         Assert.Contains(response.Headers.WwwAuthenticate, value => value.ToString().Contains("cookie_uri=\"https://office.example.test/_api/SP.OAuth.NativeClient/Authenticate\"", StringComparison.Ordinal));
+        AssertNativeChallenge(response);
+    }
+
+    [Fact]
+    public async Task DocumentChallengeAdvertisesTheNativeExchange()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Head, "/shared/example.docx",
+            authorization: "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertNativeChallenge(response);
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+    }
+
+    private static void AssertNativeChallenge(HttpResponseMessage response)
+    {
+        var challenge = Assert.Single(response.Headers.WwwAuthenticate).ToString();
+        Assert.Contains($"realm=\"{TenantId:D}\"", challenge, StringComparison.Ordinal);
+        Assert.Contains($"client_id=\"{ClientId:D}\"", challenge, StringComparison.Ordinal);
+        Assert.Contains($"authorization_uri=\"https://login.microsoftonline.com/{TenantId:D}/oauth2/authorize\"",
+            challenge, StringComparison.Ordinal);
+        Assert.Contains("cookie_uri=\"https://office.example.test/_api/SP.OAuth.NativeClient/Authenticate\"",
+            challenge, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/", null)]
+    [InlineData("/shared/", "Bearer")]
+    [InlineData("/shared/example.docx", "  bEaReR   ")]
+    [InlineData("/_vti_bin/cellstorage.svc", "Bearer")]
+    public async Task NativeCookieMetadataProbeAdvertisesCapabilitiesWithoutForcingAuthentication(string path, string? authorization)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Options, path);
+        request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        if (authorization is not null) request.Headers.TryAddWithoutValidation("Authorization", authorization);
+        using var response = await fixture.Client.SendAsync(request);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        AssertNativeChallenge(response);
+        Assert.Equal("1.5", Assert.Single(response.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+
+        using var authenticated = new HttpRequestMessage(HttpMethod.Options, path);
+        authenticated.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        authenticated.Headers.Authorization = new("Bearer", fixture.CreateToken());
+        using var success = await fixture.Client.SendAsync(authenticated);
+        Assert.Equal(System.Net.HttpStatusCode.OK, success.StatusCode);
+        Assert.Equal("1.5", Assert.Single(success.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Empty(success.Headers.WwwAuthenticate);
+    }
+
+    [Fact]
+    public async Task RepeatedCookieLessNativeProbesRemainUnauthenticatedAfterAnotherRequestSignedIn()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookie = CookieValue(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var probe = new HttpRequestMessage(HttpMethod.Options, "/shared/");
+            probe.Headers.TryAddWithoutValidation("Authorization", "Bearer");
+            probe.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+            using var capabilities = await fixture.Client.SendAsync(probe);
+            Assert.Equal(System.Net.HttpStatusCode.OK, capabilities.StatusCode);
+            AssertNativeChallenge(capabilities);
+            Assert.False(capabilities.Headers.Contains("Set-Cookie"));
+        }
+
+        using var anonymous = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", authorization: "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        using var authenticated = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie, "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.OK, authenticated.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CapturedForcedAuthenticationProbeDoesNotReuseCookie(bool hasCookie)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var probe = new HttpRequestMessage(HttpMethod.Options, "/shared/");
+        probe.Headers.TryAddWithoutValidation("User-Agent", "Microsoft Office Excel");
+        probe.Headers.TryAddWithoutValidation("Authorization", "Bearer");
+        probe.Headers.TryAddWithoutValidation("X-IDCRL_OPTIONS", "force-auth-challenge");
+        probe.Headers.TryAddWithoutValidation("IgnoreCookieAuthentication", "t");
+        if (hasCookie)
+            probe.Headers.TryAddWithoutValidation("Cookie", EntraAuthentication.SessionCookieName + "=" + await fixture.CreateCookieAsync());
+        using var response = await fixture.Client.SendAsync(probe);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        AssertNativeChallenge(response);
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+        Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+    }
+
+    [Fact]
+    public async Task OrdinaryDiscoveryAndAuthenticatedNativeProbesStillReturnCapabilities()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var ordinary = await fixture.SendOfficeRequestAsync(HttpMethod.Options, "/shared/", authorization: "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.OK, ordinary.StatusCode);
+        Assert.Equal("1.5", Assert.Single(ordinary.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Empty(ordinary.Headers.WwwAuthenticate);
+
+        using var authenticated = new HttpRequestMessage(HttpMethod.Options, "/shared/");
+        authenticated.Headers.TryAddWithoutValidation("Authorization", "Bearer");
+        authenticated.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        authenticated.Headers.TryAddWithoutValidation("Cookie", EntraAuthentication.SessionCookieName + "=" + await fixture.CreateCookieAsync());
+        using var success = await fixture.Client.SendAsync(authenticated);
+        Assert.Equal(System.Net.HttpStatusCode.OK, success.StatusCode);
+        Assert.Equal("1.5", Assert.Single(success.Headers.GetValues("X-MSFSSHTTP")));
+        Assert.Empty(success.Headers.WwwAuthenticate);
+    }
+
+    [Fact]
+    public async Task NativeDiscoveryExchangeAndDocumentAccessKeepTheLinkedAccountsPermissions()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var documents = fixture.Services.GetRequiredService<CellBridgeDocumentService>();
+        var document = (await documents.CreateAsync("/shared/native-phone.bin", [1, 2, 3], TestActor.Value))!;
+        await TestStorage.SetPermissionsAsync(documents.Provider, document.ResourceId, document.Security with
+        {
+            Grants = document.Security.Grants.Add("local:" + fixture.User.Id, DocumentAccess.Read),
+        });
+
+        using var request = new HttpRequestMessage(HttpMethod.Options, "/shared/");
+        request.Headers.TryAddWithoutValidation("Authorization", "Bearer");
+        request.Headers.TryAddWithoutValidation("X-MS-CookieUri-Requested", "t");
+        using var capabilities = await fixture.Client.SendAsync(request);
+        Assert.Equal(System.Net.HttpStatusCode.OK, capabilities.StatusCode);
+        AssertNativeChallenge(capabilities);
+        using var probe = await fixture.ExchangeCookieAsync(null, "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.OK, probe.StatusCode);
+        AssertNativeChallenge(probe);
+        Assert.False(probe.Headers.Contains("Set-Cookie"));
+
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookie = CookieValue(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+        using var opened = await fixture.SendOfficeRequestAsync(HttpMethod.Get, document.Path, cookie, "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.OK, opened.StatusCode);
+        Assert.Equal(new byte[] { 1, 2, 3 }, await opened.Content.ReadAsByteArrayAsync());
+
+        await TestStorage.SetPermissionsAsync(documents.Provider, document.ResourceId, document.Security);
+        using var revoked = await fixture.SendOfficeRequestAsync(HttpMethod.Get, document.Path, cookie, "Bearer");
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, revoked.StatusCode);
+        Assert.False(revoked.Headers.Contains("Set-Cookie"));
     }
 
     [Theory]
@@ -386,6 +569,10 @@ public sealed class EntraAuthenticationTests
 
         using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(cookie)));
+        Assert.Contains(fixture.LogMessages, message => message.Contains("scheme Identity.Application", StringComparison.Ordinal) &&
+            message.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
+            message.Contains("ticket expiry UTC (null)", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -396,14 +583,59 @@ public sealed class EntraAuthenticationTests
         using var response = await fixture.ExchangeCookieAsync(token);
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         var cookie = CookieValue(Assert.Single(response.Headers.GetValues("Set-Cookie")));
+        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(cookie)));
+        using var opened = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
+        Assert.Equal(System.Net.HttpStatusCode.OK, opened.StatusCode);
 
         Assert.Contains(fixture.LogMessages, value => value.Contains("credential bearer", StringComparison.OrdinalIgnoreCase) &&
             value.Contains("session cookie present False", StringComparison.OrdinalIgnoreCase) &&
             value.Contains("scheme CellBridge.Entra.Bearer", StringComparison.Ordinal) &&
             value.Contains("outcome succeeded", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(fixture.LogMessages, value => value.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(fixture.LogMessages, value => value.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase) &&
+            value.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
+            value.Contains("cookie length " + cookie.Length, StringComparison.Ordinal) &&
+            value.Contains("cookie Expires UTC " + CookieExpiry(Assert.Single(response.Headers.GetValues("Set-Cookie")))
+                .ToString("O", CultureInfo.InvariantCulture), StringComparison.Ordinal));
+        Assert.Contains(fixture.LogMessages, value => value.Contains("scheme Identity.Application", StringComparison.Ordinal) &&
+            value.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
+            !value.Contains("ticket expiry UTC (null)", StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.LogMessages, value => value.Contains(token, StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.LogMessages, value => value.Contains(cookie, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CookieFingerprintMatchesAcrossChunkedIssuanceAndRequest()
+    {
+        await using var fixture = await Fixture.CreateAsync(cookieChunkSize: 300);
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookies = exchange.Headers.GetValues("Set-Cookie").Select(header => header.Split(';', 2)[0]).ToArray();
+        Assert.True(cookies.Length > 2);
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/office");
+        request.Headers.TryAddWithoutValidation("Cookie", string.Join("; ", cookies));
+        using var response = await fixture.Client.SendAsync(request);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        var issuance = Assert.Single(fixture.LogMessages, message => message.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase));
+        var requestLog = Assert.Single(fixture.LogMessages, message => message.Contains("session cookie present True", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("scheme Identity.Application", StringComparison.Ordinal));
+        var issuanceHash = issuance.Split("cookie SHA256 ", StringSplitOptions.None)[1].Split(';')[0];
+        Assert.Equal(64, issuanceHash.Length);
+        Assert.Contains("cookie SHA256 " + issuanceHash, requestLog, StringComparison.Ordinal);
+        foreach (var cookie in cookies.Skip(1))
+            Assert.DoesNotContain(fixture.LogMessages, message => message.Contains(CookieValue(cookie), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CookieFingerprintsAreNotLoggedOutsideDiagnosticMode()
+    {
+        await using var fixture = await Fixture.CreateAsync(diagnosticLogging: false);
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookie = CookieValue(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("cookie SHA256", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -418,6 +650,31 @@ public sealed class EntraAuthenticationTests
 
         Assert.Equal(System.Net.HttpStatusCode.OK, validation.StatusCode);
         Assert.False(validation.Headers.Contains("Set-Cookie"));
+    }
+
+    [Fact]
+    public async Task NativeCookieUsesNoneAndSecureWithoutChangingBrowserCookiePolicy()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        AssertCookieAttributes(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+
+        var options = fixture.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>()
+            .Get(IdentityConstants.ApplicationScheme);
+        Assert.Equal(SameSiteMode.Lax, options.Cookie.SameSite);
+        using var scope = fixture.Services.CreateScope();
+        var principal = await scope.ServiceProvider.GetRequiredService<SignInManager<CellBridgeUser>>()
+            .CreateUserPrincipalAsync(fixture.User);
+        var context = new DefaultHttpContext { RequestServices = scope.ServiceProvider };
+        context.Request.Scheme = "https";
+        await context.SignInAsync(IdentityConstants.ApplicationScheme, principal,
+            new AuthenticationProperties { IsPersistent = true });
+        var browserCookie = Assert.Single(context.Response.Headers.SetCookie);
+        Assert.Contains("; samesite=lax", browserCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("; samesite=none", browserCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("; secure", browserCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("; httponly", browserCookie, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -440,6 +697,7 @@ public sealed class EntraAuthenticationTests
         Assert.Contains("; httponly", setCookie, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("; domain=", setCookie, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("; expires=", setCookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("; samesite=none", setCookie, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string CookieValue(string setCookie) =>
@@ -501,7 +759,8 @@ public sealed class EntraAuthenticationTests
         }
 
         public static async Task<Fixture> CreateAsync(TimeSpan? cookieSpan = null, string? pathBase = null,
-            bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true)
+            bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true, bool enableOfficeRealTime = false,
+            int? cookieChunkSize = null, bool diagnosticLogging = true)
         {
             var key = RSA.Create(2048);
             var otherKey = RSA.Create(2048);
@@ -533,7 +792,7 @@ public sealed class EntraAuthenticationTests
             var loggerProvider = new CapturingLoggerProvider();
             builder.Logging.ClearProviders();
             builder.Logging.AddProvider(loggerProvider);
-            builder.Logging.SetMinimumLevel(LogLevel.Debug);
+            builder.Logging.SetMinimumLevel(diagnosticLogging ? LogLevel.Debug : LogLevel.Information);
             services.AddSingleton(new AuthenticationOrigin("https://office.example.test"));
                     services.AddSingleton<IConfiguration>(configuration);
                     services.AddDbContext<AuthenticationDatabase>(options =>
@@ -549,6 +808,8 @@ public sealed class EntraAuthenticationTests
                             options.Cookie.Path = "/";
                             options.Cookie.HttpOnly = true;
                             options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                            if (cookieChunkSize is not null)
+                                options.CookieManager = new ChunkingCookieManager { ChunkSize = cookieChunkSize };
                             options.ExpireTimeSpan = cookieSpan ?? TimeSpan.FromHours(8);
                             options.SlidingExpiration = true;
                             options.Events.OnValidatePrincipal = context =>
@@ -561,7 +822,7 @@ public sealed class EntraAuthenticationTests
                     if (!forms) services.Configure<AuthenticationOptions>(options =>
                         options.DefaultScheme = EntraAuthentication.OfficeScheme);
                     services.AddCellBridge(TestStorage.Memory(), requireDurability: false,
-                        configure: options => options.EnableOfficeRealTime = false);
+                        configure: options => options.EnableOfficeRealTime = enableOfficeRealTime);
                     if (forms) services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
                         options =>
                         {

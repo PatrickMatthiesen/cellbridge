@@ -1,6 +1,7 @@
 namespace CellBridge.Storage;
 
 using System.IO.Compression;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
 using System.Xml;
@@ -336,14 +337,15 @@ public sealed partial class StoredDocument
                 return existing.Snapshot();
             }
 
-            var session = new CoauthSession(clientId, userName)
+            var joinedUtc = UtcNow;
+            var session = new CoauthSession(clientId, userName, joinedUtc)
             {
                 AsEditor = asEditor,
                 Owner = owner,
                 TimeoutSeconds = timeoutSeconds,
-                LastSeenUtc = UtcNow,
+                LastSeenUtc = joinedUtc,
             };
-            session.Refresh(timeoutSeconds, UtcNow);
+            session.Refresh(timeoutSeconds, joinedUtc);
             _sessions.Add(session);
             UpdateEditorsTablePartition();
             return session.Snapshot();
@@ -511,10 +513,11 @@ public sealed partial class StoredDocument
 
             editor.Add(new XElement("HasEditorPermission", session.AsEditor ? "true" : "false"));
             editor.Add(new XElement("Timeout", session.ExpiresUtc.Ticks.ToString(CultureInfo.InvariantCulture)));
-            if (session.Metadata.Count > 0)
+            var sessionMetadata = session.GetEditorsTableMetadata();
+            if (sessionMetadata.Count > 0)
             {
                 var metadata = new XElement("Metadata");
-                foreach (var pair in session.Metadata)
+                foreach (var pair in sessionMetadata)
                 {
                     // Metadata keys are XML element names in MS-FSSHTTPB.
                     // Invalid names cannot be emitted as a schema-valid table.
@@ -695,12 +698,13 @@ public sealed partial class DocumentPartition
 public sealed partial class CoauthSession
 {
     public const int DefaultTimeoutSeconds = 3600;
+    internal const string JoinCoauthTimeMetadataKey = "JoinCoauthTime";
 
-    internal CoauthSession(Guid clientId, string? userName)
+    internal CoauthSession(Guid clientId, string? userName, DateTime? joinedUtc = null)
     {
         ClientId = clientId;
         UserName = userName;
-        JoinedUtc = DateTime.UtcNow;
+        JoinedUtc = joinedUtc ?? DateTime.UtcNow;
         TimeoutSeconds = DefaultTimeoutSeconds;
         ExpiresUtc = JoinedUtc.AddSeconds(DefaultTimeoutSeconds);
     }
@@ -740,6 +744,30 @@ public sealed partial class CoauthSession
 
     /// <summary>Arbitrary editor metadata values, limited by the SOAP layer.</summary>
     public Dictionary<string, byte[]> Metadata { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Returns client metadata with the server-owned join timestamp.</summary>
+    internal IReadOnlyDictionary<string, byte[]> GetEditorsTableMetadata()
+    {
+        var metadata = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+        {
+            [JoinCoauthTimeMetadataKey] = JoinCoauthTimeValue,
+        };
+        foreach (var pair in Metadata)
+            if (!string.Equals(pair.Key, JoinCoauthTimeMetadataKey, StringComparison.Ordinal))
+                metadata[pair.Key] = pair.Value;
+        return metadata;
+    }
+
+    /// <summary>FILETIME encoded as an eight-byte little-endian integer for EditorsTable.</summary>
+    internal byte[] JoinCoauthTimeValue
+    {
+        get
+        {
+            var bytes = new byte[sizeof(long)];
+            BinaryPrimitives.WriteInt64LittleEndian(bytes, JoinedUtc.ToFileTimeUtc());
+            return bytes;
+        }
+    }
 
     /// <summary>When the session joined.</summary>
     public DateTime JoinedUtc { get; }

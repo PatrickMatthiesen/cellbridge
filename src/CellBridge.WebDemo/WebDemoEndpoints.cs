@@ -16,6 +16,7 @@ public static class WebDemoEndpoints
     {
         app.MapGet("/", () => Results.LocalRedirect("/library")).AllowAnonymous();
         app.MapRazorPages();
+        app.MapCellBridgeDocumentDeletion();
         app.MapGet("/api/documents", async (HttpContext context, DocumentWorkspace workspace) =>
         {
             context.Response.Headers.CacheControl = "no-store";

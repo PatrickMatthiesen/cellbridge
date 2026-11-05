@@ -51,8 +51,12 @@ internal sealed partial class RelationalDocumentRepository<TContext> where TCont
                 if (head.LifecycleGeneration != command.ExpectedGeneration || head.Counters.PendingDeliveries != 0) return new(false, head);
                 if (command is DocumentLifecycleCommand.Delete)
                 {
+                    var delete = (DocumentLifecycleCommand.Delete)command;
                     if (head.IsDeleted) return new(head.DeletedFromStateVersion == command.ExpectedStateVersion, head);
                     if (head.StateVersion != command.ExpectedStateVersion) return new(false, head);
+                    if (delete.ExpectedAuthorityGeneration is { } authority && head.AuthorityGeneration != authority ||
+                        delete.ExpectedCoordinationGeneration is { } coordination && head.CoordinationGeneration != coordination)
+                        return new(false, head);
                     var next = head with { IsDeleted = true, StateVersion = checked(head.StateVersion + 1), DeletedFromStateVersion = head.StateVersion, ModifiedUtc = now };
                     next = SetHead(row, next); return new(true, next);
                 }

@@ -154,6 +154,7 @@ public sealed partial class CellBridgeDocumentService
                 session.Owner?.DisplayName ?? session.UserName, session.Owner?.Login ?? session.UserName,
                 SipAddress: session.Owner?.SipAddress, EmailAddress: session.Owner?.EmailAddress,
                 HasEditorPermission: session.AsEditor && session.Owner is not null &&
-                    (_externalAuthorization is not null || Access(new(session.Owner), state).HasFlag(DocumentAccess.Write)), Metadata: session.Metadata)),
+                    (_externalAuthorization is not null || Access(new(session.Owner), state).HasFlag(DocumentAccess.Write)),
+                Metadata: session.GetEditorsTableMetadata())),
             partition.FssHttpBIdentity.CellId, partition.FssHttpBIdentity.SerialGuid, partition.KnowledgeSequence);
 }

@@ -96,8 +96,11 @@ public static class CellBridgeEndpoints
             ? Results.BadRequest() : await next(context));
         if (office is null) routes.RequireAuthorization();
         else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.ProtocolAuthenticationScheme });
-        routes.MapMethods("/", ["OPTIONS"], (HttpContext context) => Discovery(context));
+        routes.MapMethods("/", ["OPTIONS"], (HttpContext context) => Discovery(context))
+            .WithMetadata(new OfficeDiscoveryEndpointMetadata(ServiceEndpoint: false));
         routes.MapSharedAccess();
+        routes.MapNativeSharing();
+        routes.MapNativeSharingDialog();
         routes.MapGet("/_cellbridge/history/settings", (HttpContext context, CellBridgeDocumentService service, CellBridgeOptions options) =>
         {
             if (options.DocumentLibraryId is null) return Results.NotFound();
@@ -164,14 +167,57 @@ public static class CellBridgeEndpoints
                 }
             });
         routes.MapMethods("/_vti_bin/cellstorage.svc/{**suffix}", ["OPTIONS"], (HttpContext context) =>
-            HttpDocumentPath.TryRequestPath(context, out _) ? Discovery(context, serviceEndpoint: true) : Results.BadRequest());
+            HttpDocumentPath.TryRequestPath(context, out _) ? Discovery(context, serviceEndpoint: true) : Results.BadRequest())
+            .WithMetadata(new OfficeDiscoveryEndpointMetadata(ServiceEndpoint: true));
         routes.MapPost("/_vti_bin/cellstorage.svc/{**suffix}", (HttpContext context, CellBridgeDocumentService service) => HandleCellStoragePost(context, service));
         routes.MapMethods("/shared/{**documentPath}",
             app.ServiceProvider.GetRequiredService<CellBridgeOptions>().EnableOfficeRealTime
                 ? ["GET", "HEAD", "OPTIONS", "POST", "PROPFIND"]
-                : ["GET", "HEAD", "OPTIONS", "POST"], HandleSharedRequest);
+                : ["GET", "HEAD", "OPTIONS", "POST"], HandleSharedRequest)
+            .WithMetadata(new OfficeDiscoveryEndpointMetadata(ServiceEndpoint: false));
         return app;
     }
+
+    /// <summary>Handles unauthenticated Office capability discovery on explicitly marked protocol endpoints.</summary>
+    /// <remarks>Call from an authentication challenge only for absent or empty Bearer credentials. Other protocol
+    /// operations still require authentication, and supplied invalid credentials must not reach this method.</remarks>
+    public static async Task<bool> TryHandleCellBridgeOfficeDiscoveryAsync(this HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (!HttpMethods.IsOptions(context.Request.Method) ||
+            context.GetEndpoint()?.Metadata.GetMetadata<OfficeDiscoveryEndpointMetadata>() is not { } metadata)
+            return false;
+        if (context.Request.Headers.TryGetValue("Authorization", out var authorization) &&
+            (authorization.Count != 1 || !string.Equals(authorization[0]?.Trim(), "Bearer", StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        // Discovery normally passes through the route group's origin filter. The challenge path runs before that
+        // filter, so retain the same validation before advertising a public URL.
+        var path = context.Request.Path.Value ?? "";
+        if (CellBridgePublicOrigin.Resolve(context) is null ||
+            path != "/" && !HttpDocumentPath.TryRequestPath(context, out path))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return true;
+        }
+
+        const string servicePath = "/_vti_bin/cellstorage.svc";
+        var marker = path.IndexOf(servicePath, StringComparison.OrdinalIgnoreCase);
+        var serviceEndpoint = metadata.ServiceEndpoint || marker >= 0 &&
+            (marker + servicePath.Length == path.Length || marker + servicePath.Length < path.Length && path[marker + servicePath.Length] == '/');
+        if (!serviceEndpoint && path.Split('/').Any(segment =>
+                segment.Equals("_vti_bin", StringComparison.OrdinalIgnoreCase) ||
+                segment.Equals("_vti_inf.html", StringComparison.OrdinalIgnoreCase) ||
+                segment.Equals("_cellbridge", StringComparison.OrdinalIgnoreCase)))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return true;
+        }
+        await Discovery(context, serviceEndpoint).ExecuteAsync(context);
+        return true;
+    }
+
+    private sealed record OfficeDiscoveryEndpointMetadata(bool ServiceEndpoint);
 
 
 private static async Task<IResult> HandleSharedRequest(HttpContext context, CellBridgeDocumentService service)

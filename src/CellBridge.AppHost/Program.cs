@@ -58,6 +58,8 @@ if (builder.Configuration["Parameters:Entra:Enabled"]?.Equals("true", StringComp
 if (builder.Configuration["Parameters:PublicOrigin"] is { Length: > 0 } protocolOrigin)
     webdemo.WithEnvironment("Protocol__PublicOrigin", protocolOrigin);
 webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.Configuration["Parameters:WireCaptureDirectory"] ?? "");
+if (builder.Configuration["Parameters:MaxCaptureBytes"] is { Length: > 0 } captureBytes)
+    webdemo.WithEnvironment("Protocol__MaxCaptureBytes", captureBytes);
 webdemo.WithEnvironment("Protocol__EnableOfficeRealTime", builder.Configuration["Parameters:EnableOfficeRealTime"] ?? "true");
 if (builder.Configuration["Parameters:DocumentLibraryId"] is { Length: > 0 } libraryId)
     webdemo.WithEnvironment("Protocol__DocumentLibraryId", libraryId);

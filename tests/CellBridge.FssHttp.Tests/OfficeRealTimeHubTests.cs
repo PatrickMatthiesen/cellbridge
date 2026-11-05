@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Net.WebSockets;
 using CellBridge.AspNetCore;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.Http.Features;
@@ -8,6 +9,157 @@ namespace CellBridge.FssHttp.Tests;
 
 public sealed class OfficeRealTimeHubTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task Failed_classic_recipient_does_not_disconnect_sender_or_skip_healthy_peers(int failure)
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        var nativeTicket = new OfficeRealTimeTicket(sender.Ticket.ResourceId, 1,
+            new CellBridgeActor(new SubjectIdentity("phone", "phone", "Phone")), Guid.NewGuid(),
+            f.Clock.GetUtcNow().AddMinutes(5));
+        bool nativeAborted = false;
+        Exception fault = failure switch
+        {
+            0 => new WebSocketException("The recipient socket closed."),
+            1 => new IOException("The recipient transport failed."),
+            _ => new ObjectDisposedException("recipient socket"),
+        };
+        var native = new OfficeRealTimeConnection("failed-classic", CancellationToken.None,
+            (_, _, _) => Task.FromException(fault), () => nativeAborted = true);
+        Assert.True(await f.Store.ConnectAsync(nativeTicket, native, CancellationToken.None));
+        Assert.True(await f.Store.UpdatePresenceAsync(nativeTicket, native.ConnectionId, "{}", CancellationToken.None));
+        var firstPeer = await f.Connect(sender.Ticket.ResourceId, 1, "first-peer");
+        var secondPeer = await f.Connect(sender.Ticket.ResourceId, 1, "second-peer");
+        f.Clients.Calls.Clear();
+        string payload = $$"""{"A":"{{sender.Ticket.ClientId:B}}","text":"typed"}""";
+
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, payload, CancellationToken.None));
+        Assert.True(nativeAborted);
+        Assert.False(sender.Context.Aborted);
+        Assert.False(firstPeer.Context.Aborted);
+        Assert.False(secondPeer.Context.Aborted);
+        foreach (var peer in new[] { firstPeer, secondPeer })
+            Assert.Contains(f.Clients.Calls, call => call.ConnectionId == peer.Context.ConnectionId &&
+                call.Method == "updateNotification" && (string)call.Arguments[1]! == payload);
+        var presence = await f.Store.GetCompletePresenceStateAsync(sender.Ticket,
+            sender.Context.ConnectionId, CancellationToken.None);
+        Assert.DoesNotContain(ClientKey(nativeTicket.ClientId), presence.Keys);
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, payload, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Empty_channel_one_signal_reaches_peers_and_retains_write_authorization()
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "phone");
+        var peer = await f.Connect(sender.Ticket.ResourceId, 1, "desktop");
+
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            1, "", CancellationToken.None));
+        var delivery = Assert.Single(f.Clients.Calls);
+        Assert.Equal(peer.Context.ConnectionId, delivery.ConnectionId);
+        Assert.Equal("updateNotification", delivery.Method);
+        Assert.Equal(1, delivery.Arguments[0]);
+        Assert.Equal("", delivery.Arguments[1]);
+
+        f.Clients.Calls.Clear();
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, "", CancellationToken.None));
+        f.Authorizer.DeniedWriteSubjects.Add("phone");
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            1, "", CancellationToken.None));
+        Assert.Empty(f.Clients.Calls);
+    }
+
+    [Fact]
+    public async Task Classic_and_core_transports_share_authorized_presence_and_notifications()
+    {
+        Fixture f = new();
+        Guid resource = Guid.NewGuid();
+        Guid nativeClientId = Guid.NewGuid();
+        string nativeConnectionId = "classic-" + Guid.NewGuid().ToString("N");
+        var nativeTicket = new OfficeRealTimeTicket(resource, 1,
+            new CellBridgeActor(new SubjectIdentity("native-user", "native-user", "Native")), nativeClientId,
+            f.Clock.GetUtcNow().AddMinutes(5));
+        var nativeMessages = new List<(string Method, object?[] Arguments)>();
+        bool nativeAborted = false;
+        var nativeConnection = new OfficeRealTimeConnection(nativeConnectionId, CancellationToken.None,
+            (method, arguments, _) => { nativeMessages.Add((method, arguments)); return Task.CompletedTask; },
+            () => nativeAborted = true);
+        Assert.True(await f.Store.ConnectAsync(nativeTicket, nativeConnection, CancellationToken.None));
+        var desktop = await f.Connect(resource, 1, "desktop-user");
+
+        Assert.True(await f.Store.UpdatePresenceAsync(nativeTicket, nativeConnectionId, "{}", CancellationToken.None));
+        var desktopPresence = Assert.Single(f.Clients.Calls, call => call.ConnectionId == desktop.Context.ConnectionId);
+        Assert.Equal("presenceUpdated", desktopPresence.Method);
+        var presence = await f.Store.GetCompletePresenceStateAsync(desktop.Ticket,
+            desktop.Context.ConnectionId, CancellationToken.None);
+        Assert.Equal("{}", presence[ClientKey(nativeClientId)]);
+
+        f.Clients.Calls.Clear();
+        string notification = $$"""{"A":"{{desktop.Ticket.ClientId:D}}","text":"change"}""";
+        Assert.True(await f.Store.SendUpdateNotificationAsync(desktop.Ticket, desktop.Context.ConnectionId,
+            3, notification, CancellationToken.None));
+        var nativeDelivery = Assert.Single(nativeMessages, message => message.Method == "updateNotification");
+        Assert.Equal(notification, nativeDelivery.Arguments[1]);
+
+        f.Authorizer.DeniedWriteSubjects.Add("native-user");
+        Assert.False(await f.Store.SendUpdateNotificationAsync(nativeTicket, nativeConnectionId,
+            3, $$"""{"A":"{{nativeClientId:D}}","text":"denied"}""", CancellationToken.None));
+        Assert.True(nativeAborted);
+        Assert.DoesNotContain(f.Clients.Calls, call => call.ConnectionId == desktop.Context.ConnectionId &&
+            call.Method == "updateNotification");
+    }
+
+    [Fact]
+    public async Task Delivery_capture_correlates_sender_and_recipient_without_changing_repeated_notifications()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cellbridge-rtc-capture-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var captures = new ProtocolCaptureStore(new CellBridgeOptions { CaptureDirectory = directory },
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<ProtocolCaptureStore>.Instance);
+            Fixture f = new(captures);
+            var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+            var peer = await f.Connect(sender.Ticket.ResourceId, 1, "peer");
+            const string payload = "{\"etts\":[\"PersistedContentUpdate\"],\"osn\":\"Win32\",\"cr\":\"CC\"}";
+            for (int i = 0; i < 2; i++)
+                Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+                    14, payload, CancellationToken.None));
+
+            Assert.Equal(2, f.Clients.Calls.Count);
+            Assert.All(f.Clients.Calls, call => Assert.Equal(peer.Context.ConnectionId, call.ConnectionId));
+            var files = Directory.GetFiles(directory, "*.rtc.delivery.json");
+            Assert.Equal(2, files.Length);
+            var sequences = new List<long>();
+            foreach (var file in files)
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(file));
+                var root = document.RootElement;
+                Assert.Equal(sender.Ticket.ClientId, root.GetProperty("senderClientId").GetGuid());
+                Assert.Equal(peer.Ticket.ClientId, root.GetProperty("recipientClientId").GetGuid());
+                Assert.Equal(sender.Ticket.ResourceId, root.GetProperty("resourceId").GetGuid());
+                Assert.Equal(sender.Context.ConnectionId, root.GetProperty("senderConnectionId").GetString());
+                Assert.Equal(peer.Context.ConnectionId, root.GetProperty("recipientConnectionId").GetString());
+                Assert.Equal(14, root.GetProperty("channel").GetInt32());
+                Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(payload))), root.GetProperty("payloadSha256").GetString());
+                Assert.False(root.TryGetProperty("payload", out _));
+                sequences.Add(root.GetProperty("sequence").GetInt64());
+            }
+            Assert.Equal(new long[] { 1, 2 }, sequences.Order());
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -136,6 +288,64 @@ public sealed class OfficeRealTimeHubTests
         Assert.Single(f.Clients.Calls, x => x.ConnectionId == peer.Context.ConnectionId);
         Assert.DoesNotContain(f.Clients.Calls, x => x.ConnectionId == otherGeneration.Context.ConnectionId);
         Assert.DoesNotContain(f.Clients.Calls, x => x.ConnectionId == sender.Context.ConnectionId);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public async Task Channel_three_relays_excel_notifications_for_desktop_and_iphone_client_types(int clientType)
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        var peer = await f.Connect(sender.Ticket.ResourceId, 1, "peer");
+        string generatedXluid = Guid.NewGuid().ToString("D");
+        string fullSaveId = Guid.NewGuid().ToString("D");
+        string[] payloads =
+        [
+            $$"""{"Version":2,"ClientType":{{clientType}},"PresenceType":2,"GeneratedXluid":"{{generatedXluid}}","CollabMode":0,"OcsCapable":true}""",
+            $$"""{"Version":2,"ClientType":{{clientType}},"PresenceType":5,"FullSaveId":"{{fullSaveId}}"}"""
+        ];
+
+        foreach (string payload in payloads)
+        {
+            Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+                3, payload, CancellationToken.None));
+            var call = Assert.Single(f.Clients.Calls, x => x.ConnectionId == peer.Context.ConnectionId);
+            Assert.Equal("updateNotification", call.Method);
+            Assert.Equal(3, call.Arguments[0]);
+            Assert.Equal(payload, call.Arguments[1]);
+            f.Clients.Calls.Clear();
+        }
+    }
+
+    [Fact]
+    public async Task Channel_three_rejects_unbound_or_malformed_excel_payloads()
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        var peer = await f.Connect(sender.Ticket.ResourceId, 1, "peer");
+        string otherId = Guid.NewGuid().ToString("D");
+        string validGuid = Guid.NewGuid().ToString("D");
+        string[] invalidPayloads =
+        [
+            $$"""{"A":"{{otherId}}"}""",
+            $$"""{"Version":"2","ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
+            $$"""{"Version":2,"ClientType":0,"PresenceType":"2","GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
+            $$"""{"Version":1,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
+            $$"""{"Version":2,"ClientType":1,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
+            $$"""{"Version":2,"ClientType":2,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true,"A":"{{otherId}}"}""",
+            $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true,"unexpected":true}""",
+            $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"00000000-0000-0000-0000-000000000000","CollabMode":0,"OcsCapable":true}""",
+            $$"""{"Version":2,"ClientType":0,"PresenceType":5,"FullSaveId":"{{validGuid}}","clientId":"{{otherId}}"}""",
+            $$"""{"Version":2,"ClientType":0,"PresenceType":4,"FullSaveId":"{{validGuid}}"}"""
+        ];
+
+        foreach (string payload in invalidPayloads)
+            Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+                3, payload, CancellationToken.None));
+
+        Assert.Empty(f.Clients.Calls);
+        Assert.NotEqual(sender.Ticket.ClientId, peer.Ticket.ClientId);
     }
 
     [Fact]
@@ -466,7 +676,8 @@ public sealed class OfficeRealTimeHubTests
         internal ManualClock Clock { get; } = new();
         internal OfficeRealTimeSessionStore Store { get; }
 
-        internal Fixture() => Store = new(Authorizer, new FakeHubContext(Clients), Clock);
+        internal Fixture(ProtocolCaptureStore? captures = null) =>
+            Store = new(Authorizer, new FakeHubContext(Clients), Clock, captures);
 
         internal async Task<Connected> Connect(Guid resource, long generation, string subject,
             Guid? clientId = null, bool expectSuccess = true, TimeSpan? lifetime = null)

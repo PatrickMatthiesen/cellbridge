@@ -121,6 +121,57 @@ public sealed class LibraryIntegrationTests
         Assert.Empty(await fixture.Service.Provider.Documents.ListAsync(0, 100));
     }
 
+    [Fact]
+    public async Task DeletePageRequiresOwnerConfirmationAndAntiforgeryAndRetainsTheTombstone()
+    {
+        await using var fixture = await Fixture.Start();
+        using var owner = fixture.Client();
+        await fixture.SignIn(owner, "writer");
+        var token = await fixture.PageToken(owner);
+        using (var create = new HttpRequestMessage(HttpMethod.Post, "/api/documents")
+        { Content = JsonContent.Create(new { name = "Delete confirmation", type = "docx" }) })
+        {
+            create.Headers.Add(AuthenticationServices.AntiforgeryHeader, token);
+            using var created = await owner.SendAsync(create);
+            Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        }
+        var head = Assert.Single(await fixture.Service.Provider.Documents.ListAsync(0, 100));
+        var actor = new CellBridgeActor(new("writer", "writer", "Writer"));
+        await fixture.Service.SetRecipientGrantAsync(head.ResourceId, head.LifecycleGeneration,
+            head.AuthorityGeneration, actor, new("editor", "editor", "Editor"),
+            DocumentAccess.Read | DocumentAccess.Write);
+        var path = $"/library/delete/{head.ResourceId:D}";
+        using var editor = fixture.Client();
+        await fixture.SignIn(editor, "editor");
+        using var denied = await editor.GetAsync(path);
+        Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+        Assert.DoesNotContain(path, await editor.GetStringAsync("/library"));
+        Assert.Contains(path, await owner.GetStringAsync("/library"));
+
+        var html = await owner.GetStringAsync(path);
+        string Field(string name) => WebUtility.HtmlDecode(Regex.Match(html,
+            $"name=\"{name}\"[^>]*value=\"([^\"]+)\"").Groups[1].Value);
+        var form = new Dictionary<string, string>
+        {
+            ["LifecycleGeneration"] = Field("LifecycleGeneration"),
+            ["StateVersion"] = Field("StateVersion"),
+            ["Confirmed"] = "true",
+        };
+        using var noToken = await owner.PostAsync(path, new FormUrlEncodedContent(form));
+        Assert.Equal(HttpStatusCode.BadRequest, noToken.StatusCode);
+        Assert.False((await fixture.Service.Provider.Documents.ReadControlAsync(head.ResourceId))!.Head.IsDeleted);
+        form["__RequestVerificationToken"] = Field("__RequestVerificationToken");
+        form["Confirmed"] = "false";
+        using var unconfirmed = await owner.PostAsync(path, new FormUrlEncodedContent(form));
+        Assert.Equal(HttpStatusCode.BadRequest, unconfirmed.StatusCode);
+        form["Confirmed"] = "true";
+        using var deleted = await owner.PostAsync(path, new FormUrlEncodedContent(form));
+        Assert.Equal(HttpStatusCode.Redirect, deleted.StatusCode);
+        Assert.Empty((await owner.GetFromJsonAsync<DocumentListing[]>("/api/documents"))!);
+        Assert.True((await fixture.Service.Provider.Documents.FindAsync(
+            new DocumentIdentity.Resource(head.ResourceId, IncludeDeleted: true)))!.IsDeleted);
+    }
+
     private sealed class Fixture(WebApplication app) : IAsyncDisposable
     {
         public CellBridgeDocumentService Service => app.Services.GetRequiredService<CellBridgeDocumentService>();

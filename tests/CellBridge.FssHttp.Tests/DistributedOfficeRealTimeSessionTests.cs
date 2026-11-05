@@ -10,6 +10,69 @@ namespace CellBridge.FssHttp.Tests;
 public sealed partial class DistributedOfficeRealTimeSessionTests
 {
     [Fact]
+    public async Task Empty_channel_one_signal_reaches_peers_through_the_backplane()
+    {
+        var broker = new FakeBackplane();
+        var clients = new FakeClients();
+        await using var store = new DistributedOfficeRealTimeSessionStore(new AllowAllAuthorizer(),
+            new FakeHubContext(clients), broker);
+        var sender = await Connect(store, Guid.NewGuid(), "phone");
+        var peer = await Connect(store, sender.Ticket.ResourceId, "desktop");
+
+        Assert.True(await store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            1, "", CancellationToken.None));
+        await PollRoom(store, sender.Ticket.ResourceId);
+        var delivery = Assert.Single(clients.Calls);
+        Assert.Equal(peer.Context.ConnectionId, delivery.ConnectionId);
+        Assert.Equal("updateNotification", delivery.Method);
+        Assert.Equal(1, delivery.Arguments[0]);
+        Assert.Equal("", delivery.Arguments[1]);
+        Assert.False(await store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            3, "", CancellationToken.None));
+        await store.DisconnectAsync(sender.Context.ConnectionId, CancellationToken.None);
+        Assert.False(await store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            1, "", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Classic_connection_shares_redis_fanout_with_core_signalr_peers()
+    {
+        var broker = new FakeBackplane();
+        var clients = new FakeClients();
+        await using var store = new DistributedOfficeRealTimeSessionStore(new AllowAllAuthorizer(),
+            new FakeHubContext(clients), broker);
+        Guid resource = Guid.NewGuid();
+        Guid nativeClient = Guid.NewGuid();
+        string nativeConnectionId = "classic-" + Guid.NewGuid().ToString("N");
+        var nativeTicket = new OfficeRealTimeTicket(resource, 1,
+            new CellBridgeActor(new SubjectIdentity("native", "native", "Native")), nativeClient,
+            DateTimeOffset.UtcNow.AddMinutes(2));
+        var nativeCalls = new List<(string Method, object?[] Arguments)>();
+        var native = new OfficeRealTimeConnection(nativeConnectionId, CancellationToken.None,
+            (method, arguments, _) => { nativeCalls.Add((method, arguments)); return Task.CompletedTask; }, () => { });
+        Assert.True(await store.ConnectAsync(nativeTicket, native, CancellationToken.None));
+        var desktop = await Connect(store, resource, "desktop");
+        Assert.True(await store.SendUpdateNotificationAsync(nativeTicket, nativeConnectionId,
+            2, "{}", CancellationToken.None));
+        await PollRoom(store, resource);
+        Assert.Empty(clients.Calls);
+
+        string desktopPayload = $$"""{"A":"{{desktop.Ticket.ClientId:B}}","text":"desktop"}""";
+        Assert.True(await store.SendUpdateNotificationAsync(desktop.Ticket, desktop.Context.ConnectionId,
+            3, desktopPayload, CancellationToken.None));
+        await PollRoom(store, resource);
+        var toNative = Assert.Single(nativeCalls, call => call.Method == "updateNotification");
+        Assert.Equal(desktopPayload, toNative.Arguments[1]);
+
+        string nativePayload = $$"""{"A":"{{nativeClient:B}}","text":"phone"}""";
+        Assert.True(await store.SendUpdateNotificationAsync(nativeTicket, nativeConnectionId,
+            3, nativePayload, CancellationToken.None));
+        await PollRoom(store, resource);
+        Assert.Contains(clients.Calls, call => call.ConnectionId == desktop.Context.ConnectionId &&
+            call.Method == "updateNotification" && (string)call.Arguments[1]! == nativePayload);
+    }
+
+    [Fact]
     public async Task Joining_recipient_skips_presence_covered_by_its_admission_snapshot_without_skipping_existing_peers()
     {
         var broker = new FakeBackplane();
@@ -243,6 +306,44 @@ public sealed partial class DistributedOfficeRealTimeSessionTests
         }
     }
 
+    [Fact]
+    public async Task Ticket_renewal_updates_backplane_member_without_presence_or_departure()
+    {
+        var broker = new FakeBackplane();
+        var clients = new FakeClients();
+        await using var store = new DistributedOfficeRealTimeSessionStore(new AllowAllAuthorizer(),
+            new FakeHubContext(clients), broker);
+        Guid resource = Guid.NewGuid();
+        var sender = await Connect(store, resource, "renewing-sender");
+        var peer = await Connect(store, resource, "renewal-peer");
+        string initialPayload = $$"""{"A":"{{sender.Ticket.ClientId:D}}","text":"before"}""";
+        Assert.True(await store.UpdatePresenceAsync(sender.Ticket, sender.Context.ConnectionId,
+            initialPayload, CancellationToken.None));
+        long watermarkBeforeRenewal = (await broker.ReadSnapshotAsync(
+            new OfficeRealTimeRoomKey(resource, sender.Ticket.LifecycleGeneration), CancellationToken.None)).Snapshot!.Watermark;
+
+        OfficeRealTimeTicket renewed = sender.Ticket with { ExpiresUtc = sender.Ticket.ExpiresUtc.AddMinutes(5) };
+        Assert.True(await store.RenewTicketAsync(sender.Ticket, renewed, sender.Context.ConnectionId, CancellationToken.None));
+
+        var snapshot = (await broker.ReadSnapshotAsync(new OfficeRealTimeRoomKey(resource,
+            sender.Ticket.LifecycleGeneration), CancellationToken.None)).Snapshot!;
+        Assert.Equal(watermarkBeforeRenewal, snapshot.Watermark);
+        Assert.Contains(snapshot.Members, member => member.Incarnation == sender.Member.Incarnation && member.Ticket == renewed);
+        Assert.Contains(snapshot.Presence, presence => presence.ClientKey == ClientKey(sender.Ticket.ClientId) &&
+            presence.Payload == initialPayload);
+        Assert.Empty(clients.Calls);
+        Assert.False(sender.Context.Aborted);
+        Assert.False(await store.UpdatePresenceAsync(sender.Ticket, sender.Context.ConnectionId,
+            initialPayload, CancellationToken.None));
+
+        string renewedPayload = $$"""{"A":"{{sender.Ticket.ClientId:D}}","text":"after"}""";
+        Assert.True(await store.UpdatePresenceAsync(renewed, sender.Context.ConnectionId,
+            renewedPayload, CancellationToken.None));
+        await PollRoom(store, resource);
+        Assert.Contains(clients.Calls, call => call.ConnectionId == peer.Context.ConnectionId &&
+            call.Method == "presenceUpdated");
+    }
+
     private static async Task<Connected> Connect(DistributedOfficeRealTimeSessionStore store, Guid resource, string subject)
     {
         var ticket = new OfficeRealTimeTicket(resource, 1,
@@ -302,6 +403,19 @@ public sealed partial class DistributedOfficeRealTimeSessionTests
             ConnectStarted.TrySetResult();
             if (HoldConnect is { } hold) await hold.Task;
             return new OfficeRealTimeBackplaneConnectResult(OfficeRealTimeBackplaneStatus.Ok, Snapshot(member.Room));
+        }
+
+        public Task<OfficeRealTimeBackplaneMutationResult> RenewTicketAsync(
+            OfficeRealTimeBackplaneMember currentMember, OfficeRealTimeBackplaneMember renewedMember,
+            CancellationToken cancellationToken)
+        {
+            if (!_members.TryGetValue(currentMember.Incarnation, out var current) ||
+                current.ConnectionId != currentMember.ConnectionId || current.Ticket != currentMember.Ticket)
+                return Task.FromResult(new OfficeRealTimeBackplaneMutationResult(
+                    OfficeRealTimeBackplaneStatus.Missing, Epoch, 0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+            _members[currentMember.Incarnation] = renewedMember;
+            return Task.FromResult(new OfficeRealTimeBackplaneMutationResult(
+                OfficeRealTimeBackplaneStatus.Ok, Epoch, _sequence, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
         }
 
         public Task<OfficeRealTimeBackplaneSnapshotResult> ReadSnapshotAsync(OfficeRealTimeRoomKey room,

@@ -27,4 +27,8 @@ public static class DocumentLibrary
 }
 
 public sealed record DocumentListing(string Path, string Name, string ContentType, long Size,
-    uint Version, DateTime LastModifiedUtc, int ActiveEditors);
+    uint Version, DateTime LastModifiedUtc, int ActiveEditors)
+{
+    public Guid ResourceId { get; init; }
+    public bool CanDelete { get; init; }
+}

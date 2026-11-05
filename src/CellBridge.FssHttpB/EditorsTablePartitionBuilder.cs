@@ -24,11 +24,9 @@ public sealed record EditorsTableEditor(
 
 /// <summary>
 /// Builds the special Query Changes response for the editors-table partition.
-/// MS-FSSHTTPB 2.2.3.1.2.1 requires the UTF-8 XML to be DEFLATE-compressed,
-/// prefixed with the eight-byte editors header, and then represented as the
-/// first two object data values in the object group.  The object group itself
-/// remains a normal FSSHTTPB graph, while the stream is available to the
-/// FSSHTTPD chunker for callers that need to materialize a node tree.
+/// The UTF-8 XML is DEFLATE-compressed and prefixed with the eight-byte
+/// editors header. The v13 response represents that complete stream as a
+/// simple-chunking FSSHTTPD graph.
 /// </summary>
 public static class EditorsTablePartitionBuilder
 {
@@ -208,12 +206,9 @@ public static class EditorsTablePartitionBuilder
     }
 
     /// <summary>
-    /// Builds the six data elements observed in SharePoint's 13/11
-    /// EditorsTable response.  The graph is intentionally split into two
-    /// object groups: one root node group and one group containing the fixed
-    /// stream header, compressed XML, and its two leaf nodes.  This is the
-    /// legacy representation consumed by the Word client in the reference
-    /// capture.
+    /// Builds the six data elements in the v13 EditorsTable response. The
+    /// graph uses one root node and simple-chunking leaf nodes over the full
+    /// header-plus-deflate stream.
     /// </summary>
     public static IReadOnlyList<DataElement> BuildSharePointV13DataElements(
         IEnumerable<EditorsTableEditor>? editors,
@@ -228,55 +223,54 @@ public static class EditorsTablePartitionBuilder
     private static IReadOnlyList<DataElement> BuildSharePointV13DataElements(byte[] stream, CellId cellId, Guid identityGuid)
     {
         var guid = identityGuid == Guid.Empty ? Guid.NewGuid() : identityGuid;
-        var header = ZipStreamHeader.ToArray();
-        var compressed = stream[ZipStreamHeader.Length..];
-
         var revisionGuid = new ExGuid(21, guid);
         var revisionElementGuid = new ExGuid(22, guid);
         var rootGuid = new ExGuid(2, StorageManifestBuilder.RootExtendedGuid);
         var objectRootGuid = new ExGuid(13, guid);
-        var groupRootGuid = new ExGuid(24, guid);
-        var groupStreamGuid = new ExGuid(26, guid);
-        var headerGuid = new ExGuid(15, guid);
-        var compressedGuid = new ExGuid(17, guid);
-        var leafHeaderGuid = new ExGuid(14, guid);
-        var leafCompressedGuid = new ExGuid(16, guid);
+        var groupRootGuid = new ExGuid(12, guid);
+        var groupStreamGuid = new ExGuid(11, guid);
         var storageGuid = new ExGuid(18, guid);
         var cellGuid = new ExGuid(29, guid);
         var indexGuid = new ExGuid(43, guid);
         var serialGuid = identityGuid == Guid.Empty ? guid : identityGuid;
 
-        var rootChunk = FsshttpdChunker.Chunk(header,
-            _ => leafHeaderGuid).Single();
-        var compressedChunk = FsshttpdChunker.Chunk(compressed,
-            _ => leafCompressedGuid).Single();
-        var rootNode = FsshttpdNodeSerializer.SerializeLegacyIntermediate(
-            (ulong)stream.Length, stream);
-        var leafHeader = FsshttpdNodeSerializer.SerializeLegacyLeaf(rootChunk);
-        var leafCompressed = FsshttpdNodeSerializer.SerializeLegacyLeaf(compressedChunk);
+        const uint firstChunkObjectId = 1000;
+        // Keep generated chunk IDs disjoint from the fixed manifest IDs in
+        // this file (including the cell and storage-index elements).
+        var chunks = FsshttpdChunker.Chunk(stream)
+            .Select((chunk, index) => chunk with
+            {
+                ExtendedGuid = new ExGuid(
+                    checked((uint)(firstChunkObjectId + (2L * index))), guid),
+            })
+            .ToArray();
+        var leafGuids = chunks.Select(chunk => chunk.ExtendedGuid).ToArray();
+        var dataGuids = chunks.Select((_, index) =>
+            new ExGuid(checked((uint)(firstChunkObjectId + (2L * index) + 1)), guid)).ToArray();
+        var rootNode = FsshttpdNodeSerializer.SerializeSimpleRoot((ulong)stream.Length);
+        var leafNodes = chunks.Select(FsshttpdNodeSerializer.SerializeSimpleLeaf).ToArray();
 
         var rootGroup = BuildObjectGroupDataElement(
             groupRootGuid,
             new SerialNumber(serialGuid, 129),
-            new[] { new ObjectDataSpec(objectRootGuid, rootNode, new[] { leafHeaderGuid, leafCompressedGuid }) },
-            new[] { new ObjectDeclarationSpec(objectRootGuid, (ulong)rootNode.Length, 2) });
+            new[] { new ObjectDataSpec(objectRootGuid, rootNode, leafGuids) },
+            new[] { new ObjectDeclarationSpec(objectRootGuid, (ulong)rootNode.Length, leafGuids.Length) });
+
+        var streamObjects = new List<ObjectDataSpec>(chunks.Length * 2);
+        var streamDeclarations = new List<ObjectDeclarationSpec>(chunks.Length * 2);
+        for (var i = 0; i < chunks.Length; i++)
+        {
+            streamObjects.Add(new ObjectDataSpec(leafGuids[i], leafNodes[i], [dataGuids[i]]));
+            streamObjects.Add(new ObjectDataSpec(dataGuids[i], chunks[i].Content, Array.Empty<ExGuid>()));
+            streamDeclarations.Add(new ObjectDeclarationSpec(leafGuids[i], (ulong)leafNodes[i].Length, 1));
+            streamDeclarations.Add(new ObjectDeclarationSpec(dataGuids[i], chunks[i].Length, 0));
+        }
+
         var streamGroup = BuildObjectGroupDataElement(
             groupStreamGuid,
             new SerialNumber(serialGuid, 130),
-            new[]
-            {
-                new ObjectDataSpec(headerGuid, header, Array.Empty<ExGuid>()),
-                new ObjectDataSpec(compressedGuid, compressed, Array.Empty<ExGuid>()),
-                new ObjectDataSpec(leafHeaderGuid, leafHeader, new[] { headerGuid }),
-                new ObjectDataSpec(leafCompressedGuid, leafCompressed, new[] { compressedGuid }),
-            },
-            new[]
-            {
-                new ObjectDeclarationSpec(headerGuid, (ulong)header.Length, 0),
-                new ObjectDeclarationSpec(compressedGuid, (ulong)compressed.Length, 0),
-                new ObjectDeclarationSpec(leafHeaderGuid, (ulong)leafHeader.Length, 1),
-                new ObjectDeclarationSpec(leafCompressedGuid, (ulong)leafCompressed.Length, 1),
-            });
+            streamObjects,
+            streamDeclarations);
 
         var revision = StorageManifestBuilder.BuildRevisionManifestDataElement(
             revisionElementGuid, new SerialNumber(serialGuid, 128), revisionGuid,
@@ -286,7 +280,10 @@ public static class EditorsTablePartitionBuilder
         var cell = StorageManifestBuilder.BuildCellManifestDataElement(
             cellGuid, new SerialNumber(serialGuid, 126), revisionGuid);
         var index = StorageManifestBuilder.BuildStorageIndexDataElement(
-            indexGuid, new SerialNumber(serialGuid, 44));
+            indexGuid, new SerialNumber(serialGuid, 44),
+            storageGuid, new SerialNumber(serialGuid, 125),
+            cellId, cellGuid, new SerialNumber(serialGuid, 127),
+            revisionGuid, revisionElementGuid, new SerialNumber(serialGuid, 131));
 
         return new[] { revision, rootGroup, storage, cell, streamGroup, index };
     }
@@ -302,7 +299,10 @@ public static class EditorsTablePartitionBuilder
         ArgumentNullException.ThrowIfNull(cellId);
         var stream = BuildEditorsTableStream(editors);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData("CellBridge editors snapshot v1"u8);
+        // The graph layout is part of the snapshot identity. Version this
+        // domain when mappings change so Office does not reuse a cached
+        // snapshot whose storage index has a different graph.
+        hash.AppendData("CellBridge editors snapshot v3"u8);
         hash.AppendData((identityGuid == Guid.Empty ? Guid.NewGuid() : identityGuid).ToByteArray());
         hash.AppendData(stream);
         var snapshot = new Guid(hash.GetHashAndReset().AsSpan(0, 16));

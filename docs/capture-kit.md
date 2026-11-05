@@ -62,6 +62,11 @@ export Parameters__WireCaptureDirectory="$PWD/artifacts/office-wire"
 aspire start --isolated --apphost src/CellBridge.AppHost/CellBridge.AppHost.csproj --non-interactive
 ```
 
+Aspire also forwards `Parameters:MaxCaptureBytes` to `Protocol:MaxCaptureBytes`.
+Set it to `21474836480` for a 20 GiB capture budget when investigating a long run.
+Use a separate directory for each investigation so its existing files do not
+consume the next run's budget.
+
 The Aspire parameter defaults to empty. For an existing app, finish outstanding
 requests and restart only that app after changing configuration. To disable
 capture, remove the setting or set it to empty, then restart. Configuration is

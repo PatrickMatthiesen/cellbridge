@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Net.WebSockets;
 using CellBridge.Storage.Abstractions;
 using Microsoft.AspNetCore.SignalR;
 
@@ -10,6 +12,8 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     private readonly IOfficeRealTimeAuthorizer authorizer;
     private readonly IHubContext<OfficeRealTimeHub> hubContext;
     private readonly TimeProvider time;
+    private readonly ProtocolCaptureStore? captures;
+    private long captureSequence;
     private const int MaxConnections = 128;
     private const int MaxDocumentConnections = 32;
     private const int MaxSubjectConnections = 8;
@@ -28,14 +32,21 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     private readonly Dictionary<string, Connection> _connections = new(StringComparer.Ordinal);
 
     public OfficeRealTimeSessionStore(IOfficeRealTimeAuthorizer authorizer,
-        IHubContext<OfficeRealTimeHub> hubContext, TimeProvider? timeProvider = null)
+        IHubContext<OfficeRealTimeHub> hubContext, TimeProvider? timeProvider = null,
+        ProtocolCaptureStore? captures = null)
     {
         this.authorizer = authorizer;
         this.hubContext = hubContext;
         time = timeProvider ?? TimeProvider.System;
+        this.captures = captures;
     }
 
     public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
+        CancellationToken cancellationToken) =>
+        await ConnectAsync(ticket, OfficeRealTimeConnection.FromSignalR(context, hubContext), cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, OfficeRealTimeConnection context,
         CancellationToken cancellationToken)
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
@@ -100,6 +111,42 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             if (entered) room.Gate.Release();
             ReleaseRoomLease(key, room);
         }
+    }
+
+    public async Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket,
+        OfficeRealTimeTicket renewedTicket, string connectionId, CancellationToken cancellationToken)
+    {
+        if (!CanRenew(currentTicket, renewedTicket) || IsExpired(currentTicket) || IsExpired(renewedTicket) ||
+            string.IsNullOrEmpty(connectionId))
+            return false;
+        using var deadline = CreateDeadline(cancellationToken);
+        cancellationToken = deadline.Token;
+        if (!await authorizer.AuthorizeAsync(renewedTicket, DocumentAccess.Read, true, cancellationToken).ConfigureAwait(false))
+            return false;
+
+        Connection? current;
+        lock (_sync)
+        {
+            if (!_connections.TryGetValue(connectionId, out current) || current.Ticket != currentTicket ||
+                !IsCurrentConnectionLocked(current) || IsExpired(currentTicket)) return false;
+        }
+
+        Room room = current.Room;
+        try { await room.Gate.WaitAsync(cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { return false; }
+        try
+        {
+            lock (_sync)
+            {
+                if (!_connections.TryGetValue(connectionId, out var latest) || !ReferenceEquals(latest, current) ||
+                    latest.Ticket != currentTicket || !IsCurrentConnectionLocked(latest) ||
+                    IsExpired(currentTicket) || IsExpired(renewedTicket))
+                    return false;
+                latest.Ticket = renewedTicket;
+                return true;
+            }
+        }
+        finally { room.Gate.Release(); }
     }
 
     public async Task<Dictionary<string, string>> GetCompletePresenceStateAsync(
@@ -206,11 +253,31 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     {
         using var operationDeadline = CreateDeadline(cancellationToken);
         cancellationToken = operationDeadline.Token;
-        if ((!IsClientChannel(channel) && channel != 4) || !TryValidatePayload(payload, out JsonDocument? document) || document is null)
+        // Native Office also sends channel 1 as a signal with no JSON body.
+        // Validate that shape separately and relay the original empty string.
+        var validationPayload = channel == 1 && payload == string.Empty ? "{}" : payload;
+        if ((!IsClientChannel(channel) && channel != 4) || !TryValidatePayload(validationPayload, out JsonDocument? document) || document is null)
             return false;
         using (document)
         {
             JsonElement root = document.RootElement;
+            // The captured native iPhone sends an empty channel-2 message as part
+            // of its connection lifecycle. Accept it after a read check without
+            // relaying it as document state.
+            if (channel == 2)
+            {
+                if (root.EnumerateObject().Any()) return false;
+                if (!await AuthorizeAsync(ticket, DocumentAccess.Read, true, cancellationToken).ConfigureAwait(false))
+                {
+                    Connection? denied;
+                    lock (_sync) _connections.TryGetValue(connectionId, out denied);
+                    if (denied is not null) await RemoveDeniedAsync(denied, cancellationToken).ConfigureAwait(false);
+                    return false;
+                }
+                lock (_sync)
+                    return !IsExpired(ticket) && _connections.TryGetValue(connectionId, out var connection) &&
+                        connection.Ticket == ticket;
+            }
             // Native Excel reports receive latency on channel 4. This is local
             // telemetry, not a server-change notification to relay to peers.
             if (channel == 4)
@@ -229,14 +296,14 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             }
             if (channel == 1)
             {
-                if (!IsValidChannelOne(root)) return false;
+                if (payload != string.Empty && !IsValidChannelOne(root)) return false;
             }
-            else if (root.TryGetProperty("A", out JsonElement senderValue))
+            else if (channel != 3 && root.TryGetProperty("A", out JsonElement senderValue))
             {
                 if (senderValue.ValueKind != JsonValueKind.String ||
                     !Guid.TryParse(senderValue.GetString(), out Guid populatedSender) || populatedSender != ticket.ClientId) return false;
             }
-            if (channel == 3 && (!TryGetSender(root, out Guid sender) || sender != ticket.ClientId)) return false;
+            if (channel == 3 && !OfficeRealTimeChannel3Validator.IsValid(root, ticket.ClientId)) return false;
             if (channel == 8 && !root.TryGetProperty("SL2", out _)) return false;
         }
 
@@ -377,15 +444,52 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             sendDeadline.CancelAfter(RecipientSendTimeout);
             try
             {
-                await hubContext.Clients.Client(id).SendCoreAsync(method, args, sendDeadline.Token)
+                await recipient.Context.SendAsync(method, args, sendDeadline.Token)
                     .WaitAsync(sendDeadline.Token).ConfigureAwait(false);
+                await CaptureDeliveryAsync(sender, recipient, method, args, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 await RemoveDeniedAsync(recipient, cancellationToken).ConfigureAwait(false);
             }
+            catch (Exception error) when (error is WebSocketException or IOException or ObjectDisposedException)
+            {
+                await RemoveDeniedAsync(recipient, cancellationToken).ConfigureAwait(false);
+            }
         }
         return true;
+    }
+
+    private async Task CaptureDeliveryAsync(Connection? sender, Connection recipient, string method,
+        object?[] args, CancellationToken cancellationToken)
+    {
+        if (captures?.IsEnabled != true) return;
+        byte[] payload = method == "updateNotification" && args.Length == 2 && args[1] is string notification
+            ? Encoding.UTF8.GetBytes(notification) : JsonSerializer.SerializeToUtf8Bytes(args);
+        byte[] metadata = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            capturedUtc = time.GetUtcNow(),
+            sequence = Interlocked.Increment(ref captureSequence),
+            resourceId = recipient.Ticket.ResourceId,
+            lifecycleGeneration = recipient.Ticket.LifecycleGeneration,
+            senderClientId = sender?.Ticket.ClientId,
+            senderConnectionId = sender?.Context.ConnectionId,
+            recipientClientId = recipient.Ticket.ClientId,
+            recipientConnectionId = recipient.Context.ConnectionId,
+            operation = method,
+            channel = method == "updateNotification" ? args[0] : null,
+            payloadBytes = payload.Length,
+            payloadSha256 = Convert.ToHexString(SHA256.HashData(payload)),
+        });
+        try
+        {
+            await captures.WriteAsync(Guid.NewGuid().ToString("N"), ".rtc.delivery.json", metadata,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A diagnostic write cannot change the result of an already completed delivery.
+        }
     }
 
     private async Task RemoveDeniedAsync(Connection connection, CancellationToken cancellationToken)
@@ -516,6 +620,13 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
         _connections.TryGetValue(connection.Context.ConnectionId, out var current) && ReferenceEquals(current, connection);
 
     private bool IsExpired(OfficeRealTimeTicket ticket) => ticket.ExpiresUtc <= time.GetUtcNow();
+    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
+        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
+        current.ClientId == renewed.ClientId &&
+        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
+        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
+    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
+        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
     private static string ClientKey(Guid clientId) => clientId.ToString("B").ToLowerInvariant();
     private static CancellationTokenSource CreateDeadline(CancellationToken token)
     {
@@ -524,7 +635,7 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
         return source;
     }
 
-    private static bool IsClientChannel(int channel) => channel is 1 or 3 or 8 or 14 or 18;
+    private static bool IsClientChannel(int channel) => channel is 1 or 2 or 3 or 8 or 14 or 18;
 
     private static bool IsValidChannelOne(JsonElement root)
     {
@@ -534,13 +645,6 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
             if (ChangeTokenFields.Contains(property.Name) || !allowed.Contains(property.Name)) return false;
         }
         return root.EnumerateObject().Any();
-    }
-
-    private static bool TryGetSender(JsonElement root, out Guid sender)
-    {
-        sender = default;
-        return root.TryGetProperty("A", out JsonElement value) && value.ValueKind == JsonValueKind.String &&
-               Guid.TryParse(value.GetString(), out sender);
     }
 
     private static bool IdentityFieldMatches(JsonElement root, string fieldName, Guid clientId, bool allowEmpty = false)
@@ -598,7 +702,13 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     }
 
     private readonly record struct RoomKey(Guid ResourceId, long Generation);
-    private sealed record Connection(OfficeRealTimeTicket Ticket, HubCallerContext Context, Room Room, RoomKey Key);
+    private sealed class Connection(OfficeRealTimeTicket ticket, OfficeRealTimeConnection context, Room room, RoomKey key)
+    {
+        internal OfficeRealTimeTicket Ticket { get; set; } = ticket;
+        internal OfficeRealTimeConnection Context { get; } = context;
+        internal Room Room { get; } = room;
+        internal RoomKey Key { get; } = key;
+    }
     private sealed record Presence(string ConnectionId, string Payload);
     private sealed record Departure(Connection Connection, bool RemovedPresence);
 }

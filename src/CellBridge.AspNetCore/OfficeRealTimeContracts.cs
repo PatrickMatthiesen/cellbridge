@@ -11,9 +11,26 @@ internal sealed record OfficeRealTimeTicket(Guid ResourceId, long LifecycleGener
 internal sealed record OfficeRealTimeTicketCheck(OfficeRealTimeTicket Ticket,
     DocumentAccess RequiredAccess, bool RequireOwnedClient);
 
+internal sealed class OfficeRealTimeConnection(string connectionId, CancellationToken connectionAborted,
+    Func<string, object?[], CancellationToken, Task> send, Action abort)
+{
+    internal string ConnectionId { get; } = connectionId;
+    internal CancellationToken ConnectionAborted { get; } = connectionAborted;
+    internal Task SendAsync(string method, object?[] arguments, CancellationToken cancellationToken) =>
+        send(method, arguments, cancellationToken);
+    internal void Abort() => abort();
+
+    internal static OfficeRealTimeConnection FromSignalR(HubCallerContext context,
+        IHubContext<OfficeRealTimeHub> hub) => new(context.ConnectionId, context.ConnectionAborted,
+            (method, arguments, cancellationToken) => hub.Clients.Client(context.ConnectionId)
+                .SendCoreAsync(method, arguments, cancellationToken), context.Abort);
+}
+
 internal interface IOfficeRealTimeSessionStore
 {
-    Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context, CancellationToken cancellationToken);
+    Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, OfficeRealTimeConnection connection, CancellationToken cancellationToken);
+    Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket, OfficeRealTimeTicket renewedTicket,
+        string connectionId, CancellationToken cancellationToken);
     Task DisconnectAsync(string connectionId, CancellationToken cancellationToken);
     Task<Dictionary<string, string>> GetCompletePresenceStateAsync(OfficeRealTimeTicket ticket, string connectionId,
         CancellationToken cancellationToken);

@@ -1,0 +1,21 @@
+@page "/library/delete/{resourceId:guid}"
+@model CellBridge.WebDemo.Pages.DeleteModel
+@{
+    ViewData["Title"] = "Delete document";
+}
+<main class="shell">
+    <h1>Delete document</h1>
+    <p>Delete @Model.FileName from the library?</p>
+    <p>Close the document in Office first. The server retains its stored history; this action does not erase the stored data.</p>
+    @if (Model.ErrorMessage is not null)
+    {
+        <p class="create-error" role="alert">@Model.ErrorMessage</p>
+    }
+    <form method="post">
+        <input asp-for="LifecycleGeneration" type="hidden" />
+        <input asp-for="StateVersion" type="hidden" />
+        <label><input asp-for="Confirmed" required /> I want to delete this document.</label>
+        <button type="submit" class="button button-primary">Delete document</button>
+        <a asp-page="/Index" class="button button-quiet">Cancel</a>
+    </form>
+</main>

@@ -112,8 +112,23 @@ The native Share workflow uses SharePoint sharing contracts outside
 MS-FSSHTTP. Captured personal OneDrive traffic included calls to the REST
 methods `GetObjectSharingSettings` and `GetSharingInformation`, plus requests
 to `/_vti_bin/DocumentSharing.svc` and `/_vti_bin/sharedaccess.asmx`. CellBridge
-implements only `IsOnlyClient` at the latter route; it does not implement the
-document-sharing SOAP service or the CSOM sharing methods.
+implements `IsOnlyClient` at the latter route and a read-only
+`GetSharingInformation` REST projection. It does not implement the
+document-sharing SOAP service or native sharing mutations.
+
+Windows Word also posts to `/_layouts/15/sharedialog.aspx` for its Copy link and
+Manage access commands. CellBridge maps a read-only HTML dialog at that route.
+It authenticates the ordinary session cookie and does not treat the opaque
+posted token as document identity or permission. When Office supplies no usable
+document identifier, the dialog asks the user to choose a document from the
+caller-authorized catalog. A selected resource shows its canonical file URL;
+copying that URL grants no access. The owner can view existing recipients when
+the host registers `ICellBridgeSharingRecipientResolver`.
+
+Hosts can register `ICellBridgeNativeDocumentLinkProvider` to supply the file URL
+shown in this dialog. The default uses the public origin and current stored path.
+This hook supplies a URL; it does not change document authorization. Native
+Office acceptance of the dialog is a separate check from endpoint tests.
 
 These contracts cover different operations. MS-CSOMSPT defines
 `GetObjectSharingSettings` as data for rendering sharing information and

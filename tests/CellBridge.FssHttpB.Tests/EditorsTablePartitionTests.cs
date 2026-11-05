@@ -133,7 +133,7 @@ public sealed class EditorsTablePartitionTests
     }
 
     [Fact]
-    public void SharePointV13_ProfileUsesLegacyEditorsGraphAndStorageIndex()
+    public void SharePointV13_ProfileUsesSimpleChunkingEditorsGraphAndStorageIndex()
     {
         var guid = Guid.Parse("aa9843aa-4fa5-464b-bafc-9196a4225025");
         var cell = new CellId(new ExGuid(1, guid), new ExGuid(1, Guid.Parse("6f2a4665-42c8-46c7-bab4-e28fdce1e32b")));
@@ -167,8 +167,8 @@ public sealed class EditorsTablePartitionTests
         Assert.Equal(StreamObjectTypeHeaderStart.ObjectGroupObjectDeclare, declaration.Type);
         _ = ExGuid.Deserialize(rootReader);
         Assert.Equal(1UL, Compact64bitInt.Deserialize(rootReader).Value);
-        Assert.Equal(28UL, Compact64bitInt.Deserialize(rootReader).Value);
-        Assert.Equal(2UL, Compact64bitInt.Deserialize(rootReader).Value);
+        Assert.Equal(16UL, Compact64bitInt.Deserialize(rootReader).Value);
+        Assert.Equal(1UL, Compact64bitInt.Deserialize(rootReader).Value);
 
         var streamGroup = elements[4].Data!;
         var streamReader = new BinaryReaderEx(streamGroup);
@@ -183,18 +183,36 @@ public sealed class EditorsTablePartitionTests
                 Compact64bitInt.Deserialize(streamReader).Value));
             _ = Compact64bitInt.Deserialize(streamReader);
         }
-        Assert.Equal(4, declarations.Count);
-        Assert.Equal(8UL, declarations[0].Size);
-        Assert.True(declarations[1].Size > 0);
-        Assert.Equal(new[] { 0UL, 0UL, 1UL, 1UL }, declarations.Select(x => x.References));
+        Assert.Equal(2, declarations.Count);
+        Assert.Equal(36UL, declarations[0].Size);
+        Assert.True(declarations[1].Size > 8);
+        Assert.Equal(new[] { 1UL, 0UL }, declarations.Select(x => x.References));
 
         var index = elements[5];
-        var indexReader = new BinaryReaderEx(index.Data!);
-        var indexHeader = StreamObjectHeaderStart.Parse(indexReader);
-        Assert.Equal(StreamObjectTypeHeaderStart.StorageIndexManifestMapping, indexHeader.Type);
-        Assert.Equal(2, indexHeader.Length);
-        Assert.True(ExGuid.Deserialize(indexReader).IsNull);
-        Assert.True(SerialNumber.Deserialize(indexReader).IsNull);
+        var mappings = StorageIndexMappingSerials.ReadMappings(index.Data!);
+        Assert.Collection(mappings,
+            manifest =>
+            {
+                Assert.Equal(StreamObjectTypeHeaderStart.StorageIndexManifestMapping, manifest.Type);
+                Assert.Equal(elements[2].DataElementExtendedGuid, manifest.Target);
+                Assert.Equal(elements[2].SerialNumber.Value + 1, manifest.Serial.Value);
+            },
+            cellMapping =>
+            {
+                Assert.Equal(StreamObjectTypeHeaderStart.StorageIndexCellMapping, cellMapping.Type);
+                Assert.Equal(cell, cellMapping.Cell);
+                Assert.Equal(elements[3].DataElementExtendedGuid, cellMapping.Target);
+                Assert.Equal(elements[3].SerialNumber.Value + 1, cellMapping.Serial.Value);
+            },
+            revisionMapping =>
+            {
+                Assert.Equal(StreamObjectTypeHeaderStart.StorageIndexRevisionMapping, revisionMapping.Type);
+                Assert.Equal(new ExGuid(21, guid), revisionMapping.Revision);
+                Assert.Equal(elements[0].DataElementExtendedGuid, revisionMapping.Target);
+                Assert.Equal(elements[0].SerialNumber.Value + 3, revisionMapping.Serial.Value);
+            });
+
+        _ = PartitionGraphSnapshot.Create(elements, index.DataElementExtendedGuid);
     }
 
     private static (byte[] Content, ExGuid Guid, List<ExGuid> References) ReadObjectData(

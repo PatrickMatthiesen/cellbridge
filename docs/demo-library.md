@@ -27,6 +27,16 @@ CellBridge adds the file immediately. Duplicate names are rejected.
 Use the Office open button to open the server URL in the matching desktop app.
 Edit and save normally. The download button retrieves the latest stored file.
 
+**Copy link / access** opens a read-only page with the document URL. Copying it
+does not grant access. The owner can also see the existing recipients and their
+roles when the host supplies a trusted recipient resolver.
+
+Owners can choose **Delete**, review the confirmation page, and confirm deletion.
+The server checks current write permission and rejects deletion while an editor
+or lock is active. Deletion removes the document from the library and retains its
+stored history and tombstone. The library does not currently provide an undo or
+restore-deleted-document control.
+
 Office must be installed on the client computer and trust the server's HTTPS
 endpoint. Word may require approval of its forms-sign-in host; see
 [Office sign-in](authentication.md#desktop-validation).
@@ -65,6 +75,15 @@ The page uses the document service in process. HTTP consumers can call
 `{ "name": "My test", "type": "docx" }`. The other types are `xlsx` and
 `pptx`. Creation returns 201, invalid input returns 400 and duplicate names
 return 409. Requests use the signed-in caller's cookies and antiforgery token.
+
+`MapCellBridgeDocumentDeletion()` maps authenticated
+`DELETE /api/documents/{resourceId}` for reusable hosts. Its JSON body requires
+`expectedLifecycleGeneration` and `expectedStateVersion` from the document's
+current metadata. Cookie-authenticated callers must send the host's antiforgery
+header and paired cookie. Only the current owner with write access can delete;
+stale state, active editors, locks, or pending deliveries return 409. Deletion
+returns 204, and unavailable or unauthorized documents return 404. This endpoint
+does not implement a native Office Delete command.
 
 A supplied protocol ResourceID takes precedence over the URL. Unknown IDs fail;
 lookup never creates a document or redirects an obsolete ID to another file.

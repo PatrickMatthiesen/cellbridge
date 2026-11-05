@@ -35,24 +35,35 @@ the server does not use the client secret.
 Register the reachable HTTPS origin as an Application ID URI in the Entra API
 registration and configure v2 access tokens. The native Office client can request
 that origin as its resource. Expose the delegated `access_as_user` scope and
-authorize the Windows Office client
+authorize the Microsoft Office client
 `d3590ed6-52b3-4102-aeff-aad2292ab01c` for that scope. Add a **Web** redirect URI
 of `https://office.example.test/signin-oidc` for browser login. Do not add Office's
 broker redirect URI to the server registration. The server validates the API
 application GUID as the v2 token audience, the tenant issuer, expiry, scope and
 native Office client ID.
 
-In Entra mode, unauthenticated HTTP OPTIONS discovery returns a bearer challenge.
-Office must authenticate before receiving protocol capabilities. Downloads,
-PROPFIND, SOAP operations and historical versions also require authentication
-and their existing document permissions.
+In Entra mode, HTTP OPTIONS on the marked protocol discovery routes returns
+generic protocol capabilities without a cookie when no authentication probe is
+requested. An unauthenticated OPTIONS probe with
+`X-IDCRL_OPTIONS: force-auth-challenge` receives 401 with the OAuth challenge
+and configured `cookie_uri`. On these forced probes,
+`IgnoreCookieAuthentication: t` prevents cookie reuse for authentication
+negotiation. A plain `X-MS-CookieUri-Requested: t` requests authentication metadata
+on the 200 capability response without forcing another native sign-in round.
+Authenticated probes return 200 capabilities unless a forced probe explicitly
+requests cookie authentication to be ignored. The same rules apply to desktop
+and mobile clients; user-agent text does not select the challenge. Document downloads,
+PROPFIND, SOAP operations, RTC and historical versions still require
+authentication and their existing document permissions.
 
 The challenge advertises a same-origin `cookie_uri` at
 `/_api/SP.OAuth.NativeClient/Authenticate`. A POST with a validated Office token
 and a linked, permitted local account issues the existing application session
 cookie, named `SPOIDCRL` in Entra mode. Its explicit expiry cannot exceed the
 token or configured cookie lifetime, and does not slide. Enabling Entra changes
-the application's cookie name, including browser sessions. An empty-Bearer POST
+the application's cookie name, including browser sessions. Token-derived native
+cookies use `SameSite=None; Secure; HttpOnly`, matching the native Office reference
+exchange. Browser sign-in cookies retain `SameSite=Lax`. An empty-Bearer POST
 returns discovery information without issuing a cookie. Other missing or invalid
 credentials cannot create a session.
 An empty `Authorization: Bearer` probe on a document request permits cookie
@@ -65,7 +76,7 @@ requests or empty Bearer probes. Invalid nonempty credentials still receive the
 OAuth failure, and the native cookie-exchange endpoint never uses forms fallback.
 
 The implemented native integration is restricted to the configured Entra tenant,
-its registered API resource and the Windows Office client ID above. Browser OIDC
+its registered API resource and the Microsoft Office client ID above. Browser OIDC
 sign-in and server-side acceptance of a host-validated token do not establish that
 stock Office can discover another provider or acquire and renew its credentials.
 Other native providers, including personal Microsoft accounts, need their own

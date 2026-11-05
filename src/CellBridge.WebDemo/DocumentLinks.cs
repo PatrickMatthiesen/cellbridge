@@ -93,6 +93,8 @@ public sealed record DocumentCard(
     Uri? DownloadUri,
     string? OfficeLaunchUrl)
 {
+    public Guid ResourceId { get; init; }
+    public bool CanDelete { get; init; }
     public string ApplicationLabel => Application switch
     {
         OfficeApplication.Word => "Word",

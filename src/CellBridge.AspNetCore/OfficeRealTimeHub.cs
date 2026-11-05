@@ -11,17 +11,22 @@ internal sealed class OfficeRealTimeHub : Hub
     private readonly ProtocolCaptureStore captures;
     private readonly bool captureEnabled;
 
-    public OfficeRealTimeHub(IOfficeRealTimeSessionStore sessions, ProtocolCaptureStore captures, CellBridgeOptions options)
+    private readonly IHubContext<OfficeRealTimeHub> hub;
+
+    public OfficeRealTimeHub(IOfficeRealTimeSessionStore sessions, ProtocolCaptureStore captures, CellBridgeOptions options,
+        IHubContext<OfficeRealTimeHub> hub)
     {
         this.sessions = sessions;
         this.captures = captures;
         captureEnabled = options.CaptureDirectory is not null;
+        this.hub = hub;
     }
 
     public override async Task OnConnectedAsync()
     {
         OfficeRealTimeTicket? ticket = GetTicket();
-        if (ticket is null || !await sessions.ConnectAsync(ticket, Context, Context.ConnectionAborted).ConfigureAwait(false))
+        OfficeRealTimeConnection connection = OfficeRealTimeConnection.FromSignalR(Context, hub);
+        if (ticket is null || !await sessions.ConnectAsync(ticket, connection, Context.ConnectionAborted).ConfigureAwait(false))
         {
             Context.Abort();
             return;
@@ -66,6 +71,11 @@ internal sealed class OfficeRealTimeHub : Hub
             Encoding.UTF8.GetByteCount(payload) > MaximumCapturedRequestBytes) return;
         byte[] content = JsonSerializer.SerializeToUtf8Bytes(new
         {
+            capturedUtc = DateTimeOffset.UtcNow,
+            connectionId = Context.ConnectionId,
+            resourceId = GetRequiredTicket().ResourceId,
+            lifecycleGeneration = GetRequiredTicket().LifecycleGeneration,
+            clientId = GetRequiredTicket().ClientId,
             operation,
             channel,
             payload,

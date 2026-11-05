@@ -8,7 +8,7 @@ namespace CellBridge.FssHttpB.Tests;
 public sealed class ObjectGroupGraphTests
 {
     [Fact]
-    public void SharePointEditorsGraph_ParsesNodesAndFollowsReferencesInOrder()
+    public void SharePointEditorsGraph_UsesSimpleChunkingAndMaterializesFullStream()
     {
         var identity = Guid.Parse("aa9843aa-4fa5-464b-bafc-9196a4225025");
         var cell = new CellId(new ExGuid(1, identity),
@@ -22,10 +22,56 @@ public sealed class ObjectGroupGraphTests
 
         Assert.Equal(EditorsTablePartitionBuilder.BuildEditorsTableStream(
             Array.Empty<EditorsTableEditor>()), materialized);
-        Assert.Equal(ObjectGroupPayloadKind.IntermediateNode,
-            graph.Objects[root].PayloadKind);
-        Assert.Contains(graph.Objects.Values,
+        var rootObject = graph.Objects[root];
+        Assert.Equal(ObjectGroupPayloadKind.IntermediateNode, rootObject.PayloadKind);
+        Assert.Equal(new byte[] { 0x04, 0x01 }, rootObject.Content[..2]);
+        Assert.Equal(0x81, rootObject.Content[^1]);
+        Assert.Empty(rootObject.Node!.Signature);
+        Assert.Equal((ulong)materialized.Length, rootObject.Node.RepresentedDataSize);
+        var leaf = Assert.Single(graph.Objects.Values,
             x => x.PayloadKind == ObjectGroupPayloadKind.LeafNode);
+        Assert.Equal(ObjectGroupPayloadKind.LeafNode, leaf.PayloadKind);
+        Assert.Equal(new byte[] { 0xFC, 0x00 }, leaf.Content[..2]);
+        Assert.Equal(0x7D, leaf.Content[^1]);
+        Assert.Equal(System.Security.Cryptography.SHA1.HashData(materialized), leaf.Node!.Signature);
+        Assert.Equal((ulong)materialized.Length, leaf.Node.RepresentedDataSize);
+    }
+
+    [Fact]
+    public void SharePointEditorsGraph_UsesUniqueIdsAcrossMultipleChunks()
+    {
+        var identity = Guid.Parse("8f6c1ca0-1111-4fd4-9b17-9d0fd2a502a1");
+        var cell = new CellId(new ExGuid(1, identity), new ExGuid(2, identity));
+        var metadata = new byte[1_500_000];
+        new Random(12345).NextBytes(metadata);
+        var editors = new[]
+        {
+            new EditorsTableEditor("client", 638923456000000000,
+                Metadata: new Dictionary<string, byte[]> { ["payload"] = metadata }),
+        };
+        var stream = EditorsTablePartitionBuilder.BuildEditorsTableStream(editors);
+        Assert.True(stream.Length > FsshttpdChunker.DefaultChunkSize);
+
+        var elements = EditorsTablePartitionBuilder.BuildSharePointV13DataElements(
+            editors, cell, identity);
+        var graph = ObjectGroupGraph.FromDataElements(elements);
+        var root = graph.Objects[new ExGuid(13, identity)];
+        var leaves = root.ObjectReferences.Select(reference => graph.Objects[reference]).ToArray();
+        Assert.True(leaves.Length > 1);
+        Assert.All(leaves, leaf => Assert.Equal(ObjectGroupPayloadKind.LeafNode, leaf.PayloadKind));
+        Assert.Equal(stream, graph.Materialize(root.ObjectGuid));
+
+        foreach (var leaf in leaves)
+        {
+            var raw = graph.Objects[Assert.Single(leaf.ObjectReferences)];
+            Assert.Equal(SHA1.HashData(raw.Content), leaf.Node!.Signature);
+            Assert.Equal((ulong)raw.Content.Length, leaf.Node.RepresentedDataSize);
+        }
+
+        var objectIds = graph.Objects.Keys.ToArray();
+        var dataElementIds = elements.Select(element => element.DataElementExtendedGuid).ToArray();
+        Assert.Equal(objectIds.Length, objectIds.Distinct().Count());
+        Assert.Empty(objectIds.Intersect(dataElementIds));
     }
 
     [Fact]

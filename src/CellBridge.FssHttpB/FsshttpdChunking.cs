@@ -82,6 +82,21 @@ public static class FsshttpdNodeSerializer
             StreamObjectTypeHeaderEnd.RootNodeEnd,
             LegacySignature(content), representedSize);
 
+    /// <summary>Serializes a root for the simple chunking profile.</summary>
+    public static byte[] SerializeSimpleRoot(ulong representedSize) =>
+        SerializeLegacyNode(StreamObjectTypeHeaderStart.IntermediateNodeObject,
+            StreamObjectTypeHeaderEnd.RootNodeEnd,
+            [], representedSize);
+
+    /// <summary>Serializes a leaf with the full SHA-1 signature from simple chunking.</summary>
+    public static byte[] SerializeSimpleLeaf(FsshttpdChunk chunk)
+    {
+        ArgumentNullException.ThrowIfNull(chunk);
+        return SerializeLegacyNode(StreamObjectTypeHeaderStart.LeafNodeObject,
+            StreamObjectTypeHeaderEnd.IntermediateNodeEnd,
+            chunk.Signature, chunk.Length);
+    }
+
     /// <summary>Creates a leaf node with SHA-1 signature and represented size.</summary>
     public static byte[] SerializeLeaf(FsshttpdChunk chunk) =>
         SerializeNode(StreamObjectTypeHeaderStart.LeafNodeObject,

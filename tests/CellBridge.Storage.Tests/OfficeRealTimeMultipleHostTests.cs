@@ -1135,6 +1135,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests(OfficeRealTimeMultip
         public long Generation => inner.Generation;
         public bool IsHealthy => inner.IsHealthy;
         public Task<OfficeRealTimeBackplaneConnectResult> ConnectAsync(OfficeRealTimeBackplaneMember member, CancellationToken token) => inner.ConnectAsync(member, token);
+        public Task<OfficeRealTimeBackplaneMutationResult> RenewTicketAsync(OfficeRealTimeBackplaneMember current, OfficeRealTimeBackplaneMember renewed, CancellationToken token) => inner.RenewTicketAsync(current, renewed, token);
         public Task<OfficeRealTimeBackplaneSnapshotResult> ReadSnapshotAsync(OfficeRealTimeRoomKey room, CancellationToken token) => inner.ReadSnapshotAsync(room, token);
         public Task<OfficeRealTimeBackplaneEventsResult> ReadEventsAsync(OfficeRealTimeRoomKey room, string epoch, long sequence, int events, int bytes, CancellationToken token) => inner.ReadEventsAsync(room, epoch, sequence, events, bytes, token);
         public Task<OfficeRealTimeBackplaneMembersResult> ObserveMembersAsync(OfficeRealTimeRoomKey room, CancellationToken token) => inner.ObserveMembersAsync(room, token);

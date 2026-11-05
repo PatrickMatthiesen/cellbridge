@@ -144,7 +144,11 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         _workers.Dispose();
     }
 
-    public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
+    public Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, HubCallerContext context,
+        CancellationToken cancellationToken) =>
+        ConnectAsync(ticket, OfficeRealTimeConnection.FromSignalR(context, _hub), cancellationToken);
+
+    public async Task<bool> ConnectAsync(OfficeRealTimeTicket ticket, OfficeRealTimeConnection context,
         CancellationToken cancellationToken)
     {
         if (IsStopping) return false;
@@ -252,6 +256,55 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         return true;
     }
 
+    public async Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket,
+        OfficeRealTimeTicket renewedTicket, string connectionId, CancellationToken cancellationToken)
+    {
+        if (IsStopping || !CanRenew(currentTicket, renewedTicket) || IsExpired(currentTicket) || IsExpired(renewedTicket) ||
+            string.IsNullOrEmpty(connectionId)) return false;
+        using var deadline = CreateDeadline(cancellationToken);
+        cancellationToken = deadline.Token;
+        if (!await AuthorizeAsync(renewedTicket, DocumentAccess.Read, true, cancellationToken).ConfigureAwait(false) ||
+            !TryGet(connectionId, currentTicket, out var current)) return false;
+
+        LocalRoom room = current.Room;
+        if (!await EnterCoordinatorAsync(room, cancellationToken).ConfigureAwait(false)) return false;
+        try
+        {
+            if (!IsCurrent(current) || current.Member.Ticket != currentTicket || IsExpired(currentTicket) ||
+                IsExpired(renewedTicket) || !_backplane.IsHealthy) return false;
+
+            OfficeRealTimeBackplaneMember renewedMember = current.Member with { Ticket = renewedTicket };
+            OfficeRealTimeBackplaneMutationResult result = await _backplane.RenewTicketAsync(
+                current.Member, renewedMember, cancellationToken).ConfigureAwait(false);
+            if (result.Status != OfficeRealTimeBackplaneStatus.Ok || result.Epoch != room.Epoch)
+            {
+                if (result.Status != OfficeRealTimeBackplaneStatus.Busy || result.Epoch != room.Epoch)
+                    InvalidateRoom(room);
+                return false;
+            }
+
+            lock (_sync)
+            {
+                if (!IsCurrentLocked(current) || current.Member.Ticket != currentTicket ||
+                    IsExpired(renewedTicket))
+                    return false;
+                current.Member = renewedMember;
+                return true;
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            InvalidateRoom(room);
+            return false;
+        }
+        catch (Exception)
+        {
+            InvalidateRoom(room);
+            return false;
+        }
+        finally { room.Coordinator.Release(); }
+    }
+
     public Task<Dictionary<string, string>> GetCompletePresenceStateAsync(OfficeRealTimeTicket ticket,
         string connectionId, CancellationToken cancellationToken) => SnapshotAsync(ticket, connectionId, cancellationToken);
 
@@ -283,53 +336,28 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                     p => (p.ClientKey, p.Incarnation), m => (ClientKey(m.Ticket.ClientId), m.Incarnation),
                     (p, m) => (Presence: p, Member: m), EqualityComparer<(string, Guid)>.Default)
                 .Take(MaxConnectionsPerRoom).ToArray();
-            while (true)
+            long authorizationGeneration = _backplane.Generation;
+            var checks = new List<OfficeRealTimeTicketCheck> { new(ticket, DocumentAccess.Read, true) };
+            checks.AddRange(sources.Select(x => new OfficeRealTimeTicketCheck(x.Member.Ticket, DocumentAccess.Read, true)));
+            var allowed = await _authorizer.AuthorizeTogetherAsync(checks, deadline.Token).ConfigureAwait(false);
+            if (allowed.Length != checks.Count || !allowed[0])
             {
-                long authorizationGeneration = _backplane.Generation;
-                var checks = new List<OfficeRealTimeTicketCheck> { new(ticket, DocumentAccess.Read, true) };
-                checks.AddRange(sources.Select(x => new OfficeRealTimeTicketCheck(x.Member.Ticket, DocumentAccess.Read, true)));
-                var allowed = await _authorizer.AuthorizeTogetherAsync(checks, deadline.Token).ConfigureAwait(false);
-                if (allowed.Length != checks.Count || !allowed[0])
-                {
-                    await DenyAsync(requester, deadline.Token).ConfigureAwait(false);
-                    return [];
-                }
-                bool removed = false;
+                await DenyAsync(requester, deadline.Token).ConfigureAwait(false);
+                return [];
+            }
+            lock (_sync)
+            {
+                if (!IsCurrentLocked(requester) || IsExpired(ticket) || snapshot.Epoch != requester.Room.Epoch ||
+                    !_backplane.IsHealthy || _backplane.Generation != authorizationGeneration) return [];
+                var output = new Dictionary<string, string>(StringComparer.Ordinal);
                 for (int i = 0; i < sources.Length; i++)
-                    if (!allowed[i + 1] || IsExpired(sources[i].Member.Ticket))
-                    {
-                        await RemoveQuietlyAsync(sources[i].Member, sources[i].Presence.ClientKey).ConfigureAwait(false);
-                        removed = true;
-                    }
-                if (removed)
-                {
-                    var refreshed = await _backplane.ReadSnapshotAsync(requester.Member.Room, deadline.Token).ConfigureAwait(false);
-                    if (!SnapshotValid(requester.Room, refreshed.Status, refreshed.Snapshot))
-                    { InvalidateRoom(requester.Room); return []; }
-                    var next = refreshed.Snapshot!;
-                    if (next.Epoch != requester.Room.Epoch)
-                    { InvalidateRoom(requester.Room); return []; }
-                    if (!next.Members.Any(x => x.Incarnation == requester.Member.Incarnation))
-                    { DetachAndAbort(requester); return []; }
-                    snapshot = next;
-                    sources = next.Presence.Join(next.Members,
-                            p => (p.ClientKey, p.Incarnation), m => (ClientKey(m.Ticket.ClientId), m.Incarnation),
-                            (p, m) => (Presence: p, Member: m), EqualityComparer<(string, Guid)>.Default)
-                        .Take(MaxConnectionsPerRoom).ToArray();
-                    continue;
-                }
-                lock (_sync)
-                {
-                    if (!IsCurrentLocked(requester) || IsExpired(ticket) || snapshot.Epoch != requester.Room.Epoch ||
-                        !_backplane.IsHealthy || _backplane.Generation != authorizationGeneration) return [];
-                    var output = new Dictionary<string, string>(StringComparer.Ordinal);
-                    for (int i = 0; i < sources.Length; i++)
-                        if (allowed[i + 1] && !IsExpired(sources[i].Member.Ticket))
-                            output[sources[i].Presence.ClientKey] = sources[i].Presence.Payload;
-                    // The recipient watermark applies only to queued presence/departure events.
-                    requester.Room.PresenceWatermark[requester.Member.Incarnation] = snapshot.Watermark;
-                    return output;
-                }
+                    if (allowed[i + 1] && !IsExpired(sources[i].Member.Ticket))
+                        output[sources[i].Presence.ClientKey] = sources[i].Presence.Payload;
+                // Omit denied sources without removing remote incarnations that
+                // may have renewed since the snapshot. Their owning host reauthorizes them.
+                // The recipient watermark applies only to queued presence/departure events.
+                requester.Room.PresenceWatermark[requester.Member.Incarnation] = snapshot.Watermark;
+                return output;
             }
         }
         catch (OfficeRealTimeBusyException) { throw; }
@@ -358,11 +386,26 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         int channel, string payload, CancellationToken cancellationToken)
     {
         if (IsStopping) return false;
-        if ((!IsClientChannel(channel) && channel != 4) || !TryValidatePayload(payload, out var document) || document is null)
+        // Preserve the captured empty channel-1 signal through the backplane.
+        var validationPayload = channel == 1 && payload == string.Empty ? "{}" : payload;
+        if ((!IsClientChannel(channel) && channel != 4) || !TryValidatePayload(validationPayload, out var document) || document is null)
             return false;
         using (document)
         {
             var root = document.RootElement;
+            // The captured iPhone sends an empty channel-2 lifecycle message.
+            // Acknowledge it after the read check, without publishing an event.
+            if (channel == 2)
+            {
+                if (root.EnumerateObject().Any() || !TryGet(connectionId, ticket, out var requester)) return false;
+                using var checkDeadline = CreateDeadline(cancellationToken);
+                if (!await AuthorizeAsync(ticket, DocumentAccess.Read, true, checkDeadline.Token).ConfigureAwait(false))
+                {
+                    await DenyAsync(requester, checkDeadline.Token).ConfigureAwait(false);
+                    return false;
+                }
+                return TryGet(connectionId, ticket, out _);
+            }
             if (channel == 4)
             {
                 if (root.EnumerateObject().Count() != 2 || !root.TryGetProperty("Id", out var id) ||
@@ -373,10 +416,10 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                 return await AuthorizeAsync(ticket, DocumentAccess.Read, true, checkDeadline.Token).ConfigureAwait(false) &&
                     TryGet(connectionId, ticket, out _);
             }
-            if (channel == 1 && !IsValidChannelOne(root)) return false;
-            if (channel != 1 && root.TryGetProperty("A", out var senderValue) &&
+            if (channel == 1 && payload != string.Empty && !IsValidChannelOne(root)) return false;
+            if (channel != 1 && channel != 3 && root.TryGetProperty("A", out var senderValue) &&
                 (senderValue.ValueKind != JsonValueKind.String || !Guid.TryParse(senderValue.GetString(), out var suppliedId) || suppliedId != ticket.ClientId)) return false;
-            if (channel == 3 && (!TryGetSender(root, out var senderId) || senderId != ticket.ClientId)) return false;
+            if (channel == 3 && !OfficeRealTimeChannel3Validator.IsValid(root, ticket.ClientId)) return false;
             if (channel == 8 && !root.TryGetProperty("SL2", out _)) return false;
         }
         if (!TryGet(connectionId, ticket, out var connection)) return false;
@@ -716,12 +759,37 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
     {
         LocalConnection[] connections;
         lock (_sync) connections = room.Connections.Values.ToArray();
-        if (connections.Length == 0) return;
-        var checks = connections.Select(x => new OfficeRealTimeTicketCheck(x.Member.Ticket, DocumentAccess.Read, true)).ToArray();
-        var allowed = await _authorizer.AuthorizeTogetherAsync(checks, cancellationToken).ConfigureAwait(false);
-        if (allowed.Length != connections.Length) { InvalidateRoom(room); return; }
-        for (int i = 0; i < connections.Length; i++)
-            if (!allowed[i] || IsExpired(connections[i].Member.Ticket)) DetachAndAbort(connections[i]);
+        while (connections.Length > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            OfficeRealTimeTicketCheck[] checks;
+            lock (_sync) checks = connections.Select(x => new OfficeRealTimeTicketCheck(x.Member.Ticket, DocumentAccess.Read, true)).ToArray();
+            var allowed = await _authorizer.AuthorizeTogetherAsync(checks, cancellationToken).ConfigureAwait(false);
+            if (allowed.Length != connections.Length) { InvalidateRoom(room); return; }
+            var changed = new List<LocalConnection>();
+            var denied = new List<(LocalConnection Connection, OfficeRealTimeBackplaneMember Member)>();
+            lock (_sync)
+            {
+                for (int i = 0; i < connections.Length; i++)
+                {
+                    var connection = connections[i];
+                    if (!IsCurrentLocked(connection)) continue;
+                    if (connection.Member.Ticket != checks[i].Ticket)
+                    { changed.Add(connection); continue; }
+                    if (!allowed[i] || IsExpired(checks[i].Ticket))
+                    {
+                        denied.Add((connection, connection.Member));
+                        RemoveLocalLocked(connection);
+                    }
+                }
+            }
+            foreach (var item in denied)
+            {
+                item.Connection.Context.Abort();
+                QueueCleanup(item.Member);
+            }
+            connections = changed.ToArray();
+        }
     }
 
     private async Task DrainCleanupAsync(CancellationToken cancellationToken)
@@ -816,7 +884,8 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
             if (members.Status != OfficeRealTimeBackplaneStatus.Ok || members.Epoch != room.Epoch)
             { InvalidateRoom(room); return false; }
             var incarnations = members.Members.Select(x => x.Incarnation).ToHashSet();
-            if (!departure && !incarnations.Contains(item.Sender.Incarnation)) return true;
+            var currentSender = members.Members.FirstOrDefault(member => member.Incarnation == item.Sender.Incarnation);
+            if (!departure && currentSender is null) return true;
             var eligible = new List<LocalConnection>(candidates.Length);
             foreach (var recipient in candidates)
             {
@@ -833,19 +902,35 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                 eligible.Add(recipient);
             }
             if (eligible.Count == 0) continue;
-            var checks = new List<OfficeRealTimeTicketCheck>(eligible.Count + 1);
-            if (!departure) checks.Add(new(item.Sender.Ticket, item.Kind == "notification" ? DocumentAccess.Write : DocumentAccess.Read, true));
-            checks.AddRange(eligible.Select(x => new OfficeRealTimeTicketCheck(x.Member.Ticket, DocumentAccess.Read, false)));
-            long authorizationGeneration = _backplane.Generation;
-            var allowed = await _authorizer.AuthorizeTogetherAsync(checks.ToArray(), cancellationToken).ConfigureAwait(false);
-            if (allowed.Length != checks.Count) { InvalidateRoom(room); return false; }
-            bool senderAllowed = departure || allowed[0];
+            long authorizationGeneration;
+            bool[] allowed;
+            bool senderAllowed;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var checks = new List<OfficeRealTimeTicketCheck>(eligible.Count + 1);
+                if (!departure) checks.Add(new(currentSender!.Ticket, item.Kind == "notification" ? DocumentAccess.Write : DocumentAccess.Read, true));
+                checks.AddRange(eligible.Select(x => new OfficeRealTimeTicketCheck(x.Member.Ticket, DocumentAccess.Read, false)));
+                authorizationGeneration = _backplane.Generation;
+                allowed = await _authorizer.AuthorizeTogetherAsync(checks.ToArray(), cancellationToken).ConfigureAwait(false);
+                if (allowed.Length != checks.Count) { InvalidateRoom(room); return false; }
+                senderAllowed = departure || allowed[0] && !IsExpired(currentSender!.Ticket);
+                if (senderAllowed) break;
+                var refreshed = await _backplane.ObserveMembersAsync(room.Key, cancellationToken).ConfigureAwait(false);
+                if (refreshed.Status != OfficeRealTimeBackplaneStatus.Ok || refreshed.Epoch != room.Epoch)
+                { InvalidateRoom(room); return false; }
+                var refreshedSender = refreshed.Members.FirstOrDefault(member => member.Incarnation == item.Sender.Incarnation);
+                if (refreshedSender is null) return true;
+                if (refreshedSender.Ticket == currentSender!.Ticket) break;
+                currentSender = refreshedSender;
+            }
             if (!senderAllowed)
             {
                 LocalConnection? localSender;
                 lock (_sync) localSender = _connections.Values.FirstOrDefault(x => x.Member.Incarnation == item.Sender.Incarnation);
                 if (localSender is not null) DetachAndAbort(localSender);
-                else QueueCleanup(item.Sender);
+                // A remote host owns its sender's authorization sweep. Removing
+                // its incarnation here could delete a ticket renewed after our observation.
             }
             var sends = new List<(LocalConnection Recipient, Task Pending, CancellationTokenSource Deadline)>(eligible.Count);
             for (int index = 0; index < eligible.Count; index++)
@@ -859,7 +944,7 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                 {
                     if (!IsCurrentLocked(recipient) || IsExpired(recipient.Member.Ticket) || room.Epoch != item.Epoch ||
                         !_backplane.IsHealthy || _backplane.Generation != authorizationGeneration) continue;
-                    if (!departure && (IsExpired(item.Sender.Ticket) ||
+                    if (!departure && (IsExpired(currentSender!.Ticket) ||
                         (item.Sender.HostId == _hostId && !_connections.Values.Any(x => x.Member.Incarnation == item.Sender.Incarnation)))) continue;
                     // Departures precede any replacement presence in the room
                     // log. Snapshot watermarks suppress departures already
@@ -869,7 +954,7 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
                 deadline.CancelAfter(SendTimeout);
                 try
                 {
-                    var pending = _hub.Clients.Client(recipient.Context.ConnectionId).SendCoreAsync(item.Method, arguments, deadline.Token);
+                    var pending = recipient.Context.SendAsync(item.Method, arguments, deadline.Token);
                     sends.Add((recipient, pending, deadline));
                 }
                 catch { deadline.Dispose(); DetachAndAbort(recipient); }
@@ -1012,6 +1097,13 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
     }
 
     private bool IsExpired(OfficeRealTimeTicket ticket) => ticket.ExpiresUtc <= _time.GetUtcNow();
+    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
+        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
+        current.ClientId == renewed.ClientId &&
+        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
+        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
+    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
+        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
     private bool IsStopping => Volatile.Read(ref _stopRequested) != 0 ||
         _stopping?.IsCancellationRequested == true || Volatile.Read(ref _disposed) != 0;
     private ValueTask<bool> AuthorizeAsync(OfficeRealTimeTicket ticket, DocumentAccess access, bool owns, CancellationToken token) =>
@@ -1027,18 +1119,13 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
     }
 
     private static string ClientKey(Guid clientId) => clientId.ToString("B").ToLowerInvariant();
-    private static bool IsClientChannel(int channel) => channel is 1 or 3 or 8 or 14 or 18;
+    private static bool IsClientChannel(int channel) => channel is 1 or 2 or 3 or 8 or 14 or 18;
     private static bool IsValidChannelOne(JsonElement root)
     {
         HashSet<string> allowed = new(StringComparer.Ordinal) { "HQ", "Id", "NT", "WEB" };
         foreach (var property in root.EnumerateObject())
             if (ChangeTokenFields.Contains(property.Name) || !allowed.Contains(property.Name)) return false;
         return root.EnumerateObject().Any();
-    }
-    private static bool TryGetSender(JsonElement root, out Guid sender)
-    {
-        sender = default;
-        return root.TryGetProperty("A", out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out sender);
     }
     private static bool IdentityMatches(JsonElement root, string name, Guid client, bool allowEmpty = false)
     {
@@ -1101,8 +1188,14 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
         internal DateTimeOffset LastReapUtc { get; set; } = DateTimeOffset.MinValue;
         internal DateTimeOffset LastSuccessfulBrokerUtc { get; set; } = DateTimeOffset.MinValue;
     }
-    private sealed record LocalConnection(OfficeRealTimeBackplaneMember Member, HubCallerContext Context,
-        LocalRoom Room, long AdmissionWatermark);
+    private sealed class LocalConnection(OfficeRealTimeBackplaneMember member, OfficeRealTimeConnection context,
+        LocalRoom room, long admissionWatermark)
+    {
+        internal OfficeRealTimeBackplaneMember Member { get; set; } = member;
+        internal OfficeRealTimeConnection Context { get; } = context;
+        internal LocalRoom Room { get; } = room;
+        internal long AdmissionWatermark { get; } = admissionWatermark;
+    }
 }
 
 internal sealed record OfficeRealTimeSchedulerDiagnostics(long AuthorizationSweeps, long HeartbeatCalls,

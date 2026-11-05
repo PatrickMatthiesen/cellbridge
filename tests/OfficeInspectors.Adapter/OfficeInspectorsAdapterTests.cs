@@ -76,6 +76,7 @@ public sealed class OfficeInspectorsAdapterTests
             var bytes = response.ToByteArray(FsshttpbSerializationProfile.SharePoint13_11);
             var result = OfficeInspectorsAdapter.ParseResponse(bytes);
             Assert.True(result.Parsed, result.Error ?? result.Summary);
+            Assert.Equal(bytes.Length, result.Consumed);
         }
     }
 }

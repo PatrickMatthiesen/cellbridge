@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Buffers.Binary;
 using System.Xml.Linq;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
@@ -31,8 +32,12 @@ public sealed class EditorsTableStateTests
 
         var elementNames = editor.Elements().Select(element => element.Name.LocalName).ToArray();
         Assert.Equal(
-            new[] { "CacheID", "FriendlyName", "LoginName", "HasEditorPermission", "Timeout" },
+            new[] { "CacheID", "FriendlyName", "LoginName", "HasEditorPermission", "Timeout", "Metadata" },
             elementNames);
+        var joined = Assert.Single(editor.Element("Metadata")!.Elements());
+        Assert.Equal("JoinCoauthTime", joined.Name.LocalName);
+        Assert.Equal(DateTime.FromFileTimeUtc(BinaryPrimitives.ReadInt64LittleEndian(Convert.FromBase64String(joined.Value))),
+            document.Sessions.Single().JoinedUtc);
     }
 
     [Fact]
@@ -54,7 +59,8 @@ public sealed class EditorsTableStateTests
         Assert.Equal("login", (string?)editor.Element("LoginName"));
         Assert.Equal("sip:editor@example.test", (string?)editor.Element("SIPAddress"));
         Assert.Equal("editor@example.test", (string?)editor.Element("EmailAddress"));
-        Assert.Equal(new[] { "CacheID", "FriendlyName", "LoginName", "SIPAddress", "EmailAddress", "HasEditorPermission", "Timeout" },
+        Assert.Contains(editor.Element("Metadata")!.Elements(), element => element.Name.LocalName == "JoinCoauthTime");
+        Assert.Equal(new[] { "CacheID", "FriendlyName", "LoginName", "SIPAddress", "EmailAddress", "HasEditorPermission", "Timeout", "Metadata" },
             editor.Elements().Select(element => element.Name.LocalName));
     }
 
@@ -95,14 +101,12 @@ public sealed class EditorsTableStateTests
                 TargetPartitionId = StoredDocument.EditorsTablePartitionId,
                 Data = new QueryChangesSubRequestData { IncludeStorageManifest = true, IncludeCellChanges = true },
             } } }, new Dictionary<string, string>(), owner)).Response;
-        var groups = response.DataElementPackage!.DataElements
-            .Where(element => element.DataElementType == DataElementType.ObjectGroupDataElementData)
-            .Select(ObjectGroupDataElement.ParseOpaque).ToArray();
-        var objects = Assert.Single(groups, group => group.Objects.Any(item =>
-            item.Content.SequenceEqual(EditorsTablePartitionBuilder.ZipStreamHeader))).Objects;
-        Assert.True(objects.Count >= 2);
-        Assert.Equal(EditorsTablePartitionBuilder.ZipStreamHeader, objects[0].Content);
-        using var compressed = new MemoryStream(objects[1].Content, writable: false);
+        var query = Assert.IsType<QueryChangesSubResponseData>(Assert.Single(response.SubResponses).Data);
+        var stream = PartitionGraphSnapshot.Create(response.DataElementPackage!.DataElements,
+            query.StorageIndexExtendedGuid).Materialize();
+        var headerLength = EditorsTablePartitionBuilder.ZipStreamHeader.Length;
+        Assert.Equal(EditorsTablePartitionBuilder.ZipStreamHeader, stream[..headerLength]);
+        using var compressed = new MemoryStream(stream, headerLength, stream.Length - headerLength, writable: false);
         using var inflater = new DeflateStream(compressed, CompressionMode.Decompress);
         using var xml = new MemoryStream();
         inflater.CopyTo(xml);
@@ -112,6 +116,38 @@ public sealed class EditorsTableStateTests
         Assert.Equal(clientId.ToString("B"), (string?)editor.Element("CacheID"));
         Assert.Equal("sip:editor@example.test", (string?)editor.Element("SIPAddress"));
         Assert.Equal("editor@example.test", (string?)editor.Element("EmailAddress"));
+        var joinMetadata = editor.Element("Metadata")!.Elements().Single(element => element.Name.LocalName == "JoinCoauthTime");
+        var control = (await provider.Documents.ReadControlAsync(state.ResourceId))!;
+        Assert.Equal(Assert.Single(control.Editors).JoinedUtc, DateTime.FromFileTimeUtc(
+            BinaryPrimitives.ReadInt64LittleEndian(Convert.FromBase64String(joinMetadata.Value))));
+    }
+
+    [Fact]
+    public void JoinCoauthTime_RemainsStableAcrossRefreshAndDoesNotConsumeClientMetadataQuota()
+    {
+        var document = new DocumentStore().GetOrAdd("/shared/test.xlsx");
+        var joinedUtc = new DateTime(2026, 10, 30, 20, 40, 22, DateTimeKind.Utc);
+        document.UseAuthoritativeTime(joinedUtc);
+        var session = document.JoinEditingSession(Guid.NewGuid(), 3600, asEditor: true, userName: "Editor");
+
+        var initial = Assert.Single(ReadEditorsTable(document).Elements("Editor"));
+        var metadata = initial.Element("Metadata")!;
+        var value = Assert.Single(metadata.Elements());
+        Assert.Equal("JoinCoauthTime", value.Name.LocalName);
+        Assert.Equal(joinedUtc.ToFileTimeUtc(), BinaryPrimitives.ReadInt64LittleEndian(Convert.FromBase64String(value.Value)));
+        Assert.Empty(session.Metadata);
+
+        foreach (var key in new[] { "JoinCoauthTime", "Capabilities", "Platform", "ClientValue" })
+            Assert.True(document.UpdateEditorMetadata(session.ClientId, key, [1]));
+        Assert.Equal(4, Assert.Single(document.Sessions).Metadata.Count);
+
+        document.UseAuthoritativeTime(joinedUtc.AddMinutes(10));
+        document.JoinEditingSession(session.ClientId, 3600, asEditor: true, userName: "Editor");
+        var refreshed = Assert.Single(ReadEditorsTable(document).Elements("Editor"));
+        var refreshedValue = Assert.Single(refreshed.Element("Metadata")!.Elements(), element => element.Name.LocalName == "JoinCoauthTime");
+        Assert.Equal(value.Value, refreshedValue.Value);
+        Assert.Equal(4, refreshed.Element("Metadata")!.Elements().Count());
+        Assert.Equal(4, Assert.Single(document.Sessions).Metadata.Count);
     }
 
     [Fact]

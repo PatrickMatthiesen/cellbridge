@@ -105,6 +105,14 @@
                         {
                             <a class="button button-quiet" href="@document.DownloadUri" download="@document.Name">Download</a>
                         }
+                        @if (document.ResourceId != Guid.Empty)
+                        {
+                            <a class="button button-quiet" href="/_layouts/15/sharedialog.aspx?resourceId=@document.ResourceId">Copy link / access</a>
+                            @if (document.CanDelete)
+                            {
+                                <a class="button button-quiet" asp-page="/Delete" asp-route-resourceId="@document.ResourceId">Delete</a>
+                            }
+                        }
                     </div>
                 </article>
             }

@@ -18,6 +18,10 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.WebUtilities;
+using System.Net.WebSockets;
+using System.Text;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace CellBridge.FssHttp.Tests;
 
@@ -138,9 +142,203 @@ public sealed class OfficeRealTimeEndpointTests
         Assert.Contains("no-store", response.Headers.CacheControl?.ToString());
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.True(json.RootElement.GetProperty("enabled").GetBoolean());
+        Assert.True(json.RootElement.GetProperty("netcore").GetBoolean());
         Assert.Equal(PublicOrigin + Mount + "/_cellbridge/rtc/signalr", json.RootElement.GetProperty("url").GetString());
         Assert.Equal("environment=CellBridge", json.RootElement.GetProperty("connectionString").GetString());
         Assert.Contains(Mount + "/_cellbridge/rtc/", properties["RealtimeTypingEndpointUrl"]);
+    }
+
+    [Theory]
+    [InlineData("Name")]
+    [InlineData("name")]
+    public async Task ClassicSignalRNegotiatesAndRunsTheObservedOfficeWebSocketMethods(string nameProperty)
+    {
+        await using var fixture = await Fixture.Start();
+        Guid clientId = await fixture.CreateCoauthorLease();
+        string signature = (await fixture.Properties())["DocumentAccessToken"];
+        var negotiationQuery = new Dictionary<string, string?>
+        {
+            ["clientProtocol"] = "1.4",
+            ["connectionData"] = "[{\"" + nameProperty + "\":\"RealtimeChannelHub\"}]",
+            ["qs"] = signature,
+            ["ClientId"] = clientId.ToString("D"),
+        };
+        string path = QueryHelpers.AddQueryString("/_cellbridge/rtc/signalr/signalr/negotiate", negotiationQuery);
+        using var client = TestActor.CreateClient(fixture.Server, "writer");
+        using var negotiate = await client.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, negotiate.StatusCode);
+        using JsonDocument negotiation = JsonDocument.Parse(await negotiate.Content.ReadAsStringAsync());
+        JsonElement negotiated = negotiation.RootElement;
+        Assert.Equal("1.4", negotiated.GetProperty("ProtocolVersion").GetString());
+        Assert.True(negotiated.GetProperty("TryWebSockets").GetBoolean());
+        Assert.Equal(PublicOrigin + "/_cellbridge/rtc/signalr", negotiated.GetProperty("Url").GetString());
+        string connectionToken = negotiated.GetProperty("ConnectionToken").GetString()!;
+
+        var connectQuery = new Dictionary<string, string?>
+        {
+            ["transport"] = "webSockets",
+            ["connectionToken"] = connectionToken,
+            ["qs"] = signature,
+            ["ClientId"] = clientId.ToString("D"),
+        };
+        var websocketClient = fixture.Server.CreateWebSocketClient();
+        UriBuilder websocketBase = new(fixture.Server.BaseAddress) { Scheme = "ws" };
+        Uri websocketUri = new(websocketBase.Uri, QueryHelpers.AddQueryString(
+            "/_cellbridge/rtc/signalr/signalr/connect", connectQuery));
+        using WebSocket socket = await websocketClient.ConnectAsync(websocketUri, CancellationToken.None);
+
+        JsonElement initialize = await ReadClassicFrameAsync(socket);
+        Assert.Equal(1, initialize.GetProperty("S").GetInt32());
+        await SendClassicFrameAsync(socket, """{"H":"RealtimeChannelHub","M":"GetCompletePresenceState","A":[],"I":"1"}""");
+        JsonElement presence = await ReadClassicFrameAsync(socket);
+        Assert.Equal("1", presence.GetProperty("I").GetString());
+        Assert.Empty(presence.GetProperty("R").EnumerateObject());
+
+        await SendClassicFrameAsync(socket, """{"H":"RealtimeChannelHub","M":"UpdatePresence","A":["{}"],"I":"2"}""");
+        JsonElement update = await ReadClassicFrameAsync(socket);
+        Assert.Equal("2", update.GetProperty("I").GetString());
+        Assert.False(update.TryGetProperty("R", out _));
+        Assert.False(update.TryGetProperty("E", out _));
+        await SendClassicFrameAsync(socket, """{"H":"RealtimeChannelHub","M":"SendUpdateNotification","A":[2,"{}"],"I":"3"}""");
+        JsonElement channelTwo = await ReadClassicFrameAsync(socket);
+        Assert.Equal("3", channelTwo.GetProperty("I").GetString());
+        Assert.False(channelTwo.TryGetProperty("E", out _));
+
+        string mobileNotification = JsonSerializer.Serialize(new
+        {
+            H = "RealtimeChannelHub", M = "SendUpdateNotification", I = "mobile-excel",
+            A = new object[] { 3, JsonSerializer.Serialize(new
+            {
+                Version = 2, ClientType = 2, PresenceType = 2,
+                GeneratedXluid = Guid.NewGuid().ToString("D"), CollabMode = 0, OcsCapable = true,
+            }) },
+        });
+        await SendClassicFrameAsync(socket, mobileNotification);
+        JsonElement mobileReply = await ReadClassicFrameAsync(socket);
+        Assert.Equal("mobile-excel", mobileReply.GetProperty("I").GetString());
+        Assert.False(mobileReply.TryGetProperty("E", out _));
+
+        // SignalR reconnect can arrive while the prior physical socket is still open.
+        // The session store replaces its connection, and stale cleanup must not remove
+        // the new connection or its presence.
+        var reconnectQuery = new Dictionary<string, string?>
+        {
+            ["transport"] = "webSockets", ["connectionToken"] = connectionToken,
+            ["qs"] = signature, ["ClientId"] = clientId.ToString("D"),
+        };
+        Uri reconnectUri = new(websocketBase.Uri, QueryHelpers.AddQueryString(
+            "/_cellbridge/rtc/signalr/signalr/reconnect", reconnectQuery));
+        using WebSocket reconnected = await websocketClient.ConnectAsync(reconnectUri, CancellationToken.None);
+        JsonElement reconnectInitialization = await ReadClassicFrameAsync(reconnected);
+        Assert.Equal(1, reconnectInitialization.GetProperty("S").GetInt32());
+        await SendClassicFrameAsync(reconnected,
+            """{"H":"RealtimeChannelHub","M":"GetCompletePresenceState","A":[],"I":"4"}""");
+        JsonElement reconnectPresence = await ReadClassicFrameAsync(reconnected);
+        Assert.Equal("4", reconnectPresence.GetProperty("I").GetString());
+        Assert.Equal("{}", reconnectPresence.GetProperty("R").GetProperty("{" + clientId.ToString("D").ToLowerInvariant() + "}").GetString());
+        var auxiliaryQuery = new Dictionary<string, string?>
+        {
+            ["connectionToken"] = connectionToken, ["qs"] = signature, ["ClientId"] = clientId.ToString("D"),
+        };
+        using var start = await client.GetAsync(QueryHelpers.AddQueryString("/_cellbridge/rtc/signalr/signalr/start", auxiliaryQuery));
+        Assert.Equal(HttpStatusCode.OK, start.StatusCode);
+        using (JsonDocument startBody = JsonDocument.Parse(await start.Content.ReadAsStringAsync()))
+            Assert.Equal("started", startBody.RootElement.GetProperty("Response").GetString());
+        using var abort = await client.GetAsync(QueryHelpers.AddQueryString("/_cellbridge/rtc/signalr/signalr/abort", auxiliaryQuery));
+        Assert.Equal(HttpStatusCode.OK, abort.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ClassicSignalRWorksOnKestrelWithoutHostWebSocketSetup(bool stopWhileConnected)
+    {
+        var provider = TestStorage.Memory();
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+        TestActor.Register(builder.Services);
+        builder.Services.AddDataProtection().UseEphemeralDataProtectionProvider();
+        builder.Services.AddCellBridge(provider, requireDurability: false);
+        await using var app = builder.Build();
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.MapCellBridge();
+        await app.StartAsync();
+        string origin = app.Services.GetRequiredService<IServer>().Features
+            .Get<IServerAddressesFeature>()!.Addresses.Single();
+        var service = app.Services.GetRequiredService<CellBridgeDocumentService>();
+        var head = (await service.CreateAsync("/shared/classic-signalr.docx", MinimalDocx.Create(), TestActor.Value))!;
+        Guid clientId = await CreateCoauthorLeaseAsync(service, head.ResourceId);
+        var properties = await app.Services.GetRequiredService<IOfficeRealTimePropertiesProvider>()
+            .GetPropertiesAsync(head.ResourceId, TestActor.Value, origin, CancellationToken.None);
+        var query = new Dictionary<string, string?>
+        {
+            ["clientProtocol"] = "1.4", ["connectionData"] = "[{\"Name\":\"RealtimeChannelHub\"}]",
+            ["qs"] = properties["DocumentAccessToken"], ["ClientId"] = clientId.ToString("D"),
+        };
+        using var http = new HttpClient { BaseAddress = new Uri(origin) };
+        using var response = await http.GetAsync(QueryHelpers.AddQueryString(
+            "/_cellbridge/rtc/signalr/signalr/negotiate", query));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using JsonDocument negotiation = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var connectQuery = new Dictionary<string, string?>
+        {
+            ["transport"] = "webSockets", ["connectionToken"] = negotiation.RootElement.GetProperty("ConnectionToken").GetString(),
+            ["qs"] = properties["DocumentAccessToken"], ["ClientId"] = clientId.ToString("D"),
+        };
+        UriBuilder websocketOrigin = new(new Uri(origin)) { Scheme = "ws" };
+        Uri websocketUri = new(websocketOrigin.Uri, QueryHelpers.AddQueryString(
+            "/_cellbridge/rtc/signalr/signalr/connect", connectQuery));
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(websocketUri, CancellationToken.None);
+        JsonElement initialization = await ReadClassicFrameAsync(socket);
+        Assert.Equal(1, initialization.GetProperty("S").GetInt32());
+        await SendClassicFrameAsync(socket, """{"H":"RealtimeChannelHub","M":"GetCompletePresenceState","A":[],"I":"1"}""");
+        JsonElement presence = await ReadClassicFrameAsync(socket);
+        Assert.Equal("1", presence.GetProperty("I").GetString());
+        if (stopWhileConnected)
+            await app.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        else
+            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "test complete", CancellationToken.None);
+    }
+
+    private static async Task<Guid> CreateCoauthorLeaseAsync(CellBridgeDocumentService service, Guid resourceId)
+    {
+        Guid clientId = Guid.NewGuid();
+        string exclusiveId = Guid.NewGuid().ToString("D");
+        string schemaId = Guid.NewGuid().ToString("D");
+        var getLock = new FssHttpSubRequest { Type = SubRequestType.ExclusiveLock,
+            SubRequestDataAttributes = { ["ExclusiveLockRequestType"] = "GetLock", ["ExclusiveLockID"] = exclusiveId,
+                ["ClientID"] = clientId.ToString("D"), ["Timeout"] = "3600" } };
+        Assert.Null((await service.ExecuteControlAsync(resourceId, getLock, TestActor.Value, CancellationToken.None)).ErrorCode);
+        var convert = new FssHttpSubRequest { Type = SubRequestType.ExclusiveLock,
+            SubRequestDataAttributes = { ["ExclusiveLockRequestType"] = "ConvertToSchemaJoinCoauth",
+                ["ExclusiveLockID"] = exclusiveId, ["SchemaLockID"] = schemaId,
+                ["ClientID"] = clientId.ToString("D"), ["Timeout"] = "3600" } };
+        Assert.Null((await service.ExecuteControlAsync(resourceId, convert, TestActor.Value, CancellationToken.None)).ErrorCode);
+        return clientId;
+    }
+
+    private static async Task SendClassicFrameAsync(WebSocket socket, string json)
+    {
+        byte[] text = Encoding.UTF8.GetBytes(json);
+        int split = Math.Max(1, text.Length / 2);
+        await socket.SendAsync(new ArraySegment<byte>(text, 0, split), WebSocketMessageType.Text, false, CancellationToken.None);
+        await socket.SendAsync(new ArraySegment<byte>(text, split, text.Length - split), WebSocketMessageType.Text, true, CancellationToken.None);
+    }
+
+    private static async Task<JsonElement> ReadClassicFrameAsync(WebSocket socket)
+    {
+        byte[] buffer = new byte[64 * 1024];
+        var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+        Assert.Equal(WebSocketMessageType.Text, result.MessageType);
+        Assert.True(result.EndOfMessage);
+        Assert.NotEmpty(buffer.AsSpan(0, result.Count).ToArray());
+        string frame = Encoding.UTF8.GetString(buffer, 0, result.Count);
+        Assert.DoesNotContain('\u001e', frame);
+        using JsonDocument json = JsonDocument.Parse(frame);
+        return json.RootElement.Clone();
     }
 
     [Fact]
@@ -311,12 +509,22 @@ public sealed class OfficeRealTimeEndpointTests
             Assert.Equal(HttpStatusCode.Unauthorized, soap.StatusCode);
         using (var negotiate = await anonymous.PostAsync("/_cellbridge/rtc/rtchub/negotiate?negotiateVersion=1", null))
             Assert.Equal(HttpStatusCode.Unauthorized, negotiate.StatusCode);
+        using (var classicNegotiate = await anonymous.GetAsync(
+            "/_cellbridge/rtc/signalr/signalr/negotiate?clientProtocol=1.4&connectionData=%5B%7B%22name%22%3A%22realtimechannelhub%22%7D%5D"))
+            Assert.Equal(HttpStatusCode.Unauthorized, classicNegotiate.StatusCode);
 
         var authorizedNegotiatePath = QueryHelpers.AddQueryString("/_cellbridge/rtc/rtchub/negotiate",
             new Dictionary<string, string?> { ["negotiateVersion"] = "1", ["qs"] = signature,
                 ["ClientId"] = clientId.ToString("D") });
         using var authorized = await fixture.Client.PostAsync(authorizedNegotiatePath, null);
         Assert.Equal(HttpStatusCode.OK, authorized.StatusCode);
+
+        var classicPath = QueryHelpers.AddQueryString("/_cellbridge/rtc/signalr/signalr/negotiate",
+            new Dictionary<string, string?> { ["clientProtocol"] = "1.4",
+                ["connectionData"] = "[{\"name\":\"realtimechannelhub\"}]", ["qs"] = signature,
+                ["ClientId"] = clientId.ToString("D") });
+        using var classicAuthorized = await fixture.Client.GetAsync(classicPath);
+        Assert.Equal(HttpStatusCode.OK, classicAuthorized.StatusCode);
     }
 
     [Fact]
