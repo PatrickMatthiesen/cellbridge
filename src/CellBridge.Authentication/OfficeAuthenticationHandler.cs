@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Encodings.Web;
 using CellBridge.AspNetCore;
 using Microsoft.AspNetCore.Authentication;
@@ -7,6 +10,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Net.Http.Headers;
 
 namespace CellBridge.Authentication;
 
@@ -84,15 +88,24 @@ internal static class OfficeAuthenticationDiagnostics
 
     internal static void Authentication(HttpContext context, string scheme, AuthenticateResult result)
     {
+        var logger = Logger(context);
+        if (!logger.IsEnabled(LogLevel.Debug)) return;
         var cookie = CookieName(context);
         var present = context.Request.Cookies.ContainsKey(cookie);
         var outcome = result.Succeeded ? "succeeded" : result.Failure is not null ? "rejected" : "no-result";
-        Logger(context).LogDebug(
-            "Office authentication {RequestId} {Method} {Path}; credential {Credential}; session cookie present {CookiePresent}; cookie header present {CookieHeaderPresent}; cookie name {CookieName}; scheme {Scheme}; outcome {Outcome}; failure {FailureType}",
+        var fingerprint = Fingerprint(ReadCookie(cookie, context.Request.Cookies.Count,
+            name => context.Request.Cookies[name]));
+        // Failed cookie authentication does not expose the decrypted ticket.
+        // Do not decrypt it again just to fill a diagnostic field.
+        var expiry = scheme == IdentityConstants.ApplicationScheme
+            ? result.Ticket?.Properties.ExpiresUtc : null;
+        logger.LogDebug(
+            "Office authentication {RequestId} {Method} {Path}; credential {Credential}; session cookie present {CookiePresent}; cookie header present {CookieHeaderPresent}; cookie name {CookieName}; scheme {Scheme}; outcome {Outcome}; failure {FailureType}; cookie SHA256 {CookieSha256}; cookie length {CookieLength}; ticket expiry UTC {CookieTicketExpiresUtc}",
             context.TraceIdentifier, context.Request.Method, context.Request.Path.Value,
             OfficeAuthenticationHandler.CredentialCategory(context.Request), present,
             context.Request.Headers.ContainsKey("Cookie"), cookie, scheme, outcome,
-            result.Failure?.GetType().Name ?? "none");
+            result.Failure?.GetType().Name ?? "none", fingerprint.Sha256, fingerprint.Length,
+            expiry?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
     }
 
     internal static void ObserveResponse(HttpContext context)
@@ -100,6 +113,7 @@ internal static class OfficeAuthenticationDiagnostics
         if (!context.Items.TryAdd(ResponseObserved, true)) return;
         var cookie = CookieName(context);
         var logger = Logger(context);
+        if (!logger.IsEnabled(LogLevel.Debug)) return;
         var requestId = context.TraceIdentifier;
         var method = context.Request.Method;
         var path = context.Request.Path.Value;
@@ -110,10 +124,49 @@ internal static class OfficeAuthenticationDiagnostics
         {
             var issued = context.Response.Headers.SetCookie.Any(value =>
                 value?.StartsWith(cookie + "=", StringComparison.Ordinal) == true);
-            logger.LogDebug("Office response {RequestId} {Method} {Path}; status {Status}; session Set-Cookie issued {CookieIssued}",
-                requestId, method, path, context.Response.StatusCode, issued);
+            var values = new Dictionary<string, string>(StringComparer.Ordinal);
+            DateTimeOffset? expiry = null;
+            foreach (var header in context.Response.Headers.SetCookie)
+            {
+                if (!SetCookieHeaderValue.TryParse(header, out var parsed)) continue;
+                var name = parsed.Name.ToString();
+                if (name != cookie && !name.StartsWith(cookie + "C", StringComparison.Ordinal)) continue;
+                values[name] = parsed.Value.ToString();
+                if (name == cookie) expiry = parsed.Expires;
+            }
+            var fingerprint = Fingerprint(ReadCookie(cookie, values.Count,
+                name => values.GetValueOrDefault(name)));
+            logger.LogDebug("Office response {RequestId} {Method} {Path}; status {Status}; session Set-Cookie issued {CookieIssued}; cookie SHA256 {CookieSha256}; cookie length {CookieLength}; cookie Expires UTC {CookieExpiresUtc}",
+                requestId, method, path, context.Response.StatusCode, issued,
+                fingerprint.Sha256, fingerprint.Length,
+                expiry?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
             return Task.CompletedTask;
         });
+    }
+
+    private static (string? Sha256, int? Length) Fingerprint(string? value)
+    {
+        if (value is null) return (null, null);
+        var bytes = Encoding.UTF8.GetBytes(value);
+        return (Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes.Length);
+    }
+
+    private static string? ReadCookie(string name, int availableParts, Func<string, string?> read)
+    {
+        var value = read(name);
+        if (value is null || !value.StartsWith("chunks-", StringComparison.Ordinal)) return value;
+        // Match ChunkingCookieManager's wire representation. Incomplete chunks
+        // have no fingerprint; the shared marker alone does not identify a ticket.
+        if (!int.TryParse(value.AsSpan(7), NumberStyles.None, CultureInfo.InvariantCulture, out var count) ||
+            count < 1 || count >= availableParts) return null;
+        var combined = new StringBuilder();
+        for (var index = 1; index <= count; index++)
+        {
+            var part = read(name + "C" + index.ToString(CultureInfo.InvariantCulture));
+            if (part is null) return null;
+            combined.Append(part);
+        }
+        return combined.ToString();
     }
 
     private static string CookieName(HttpContext context) => context.RequestServices

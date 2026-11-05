@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Globalization;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text;
 using CellBridge.AspNetCore;
 using CellBridge.Authentication;
 using CellBridge.Storage.Abstractions;
@@ -568,6 +569,10 @@ public sealed class EntraAuthenticationTests
 
         using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(cookie)));
+        Assert.Contains(fixture.LogMessages, message => message.Contains("scheme Identity.Application", StringComparison.Ordinal) &&
+            message.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
+            message.Contains("ticket expiry UTC (null)", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -578,14 +583,59 @@ public sealed class EntraAuthenticationTests
         using var response = await fixture.ExchangeCookieAsync(token);
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         var cookie = CookieValue(Assert.Single(response.Headers.GetValues("Set-Cookie")));
+        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(cookie)));
+        using var opened = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
+        Assert.Equal(System.Net.HttpStatusCode.OK, opened.StatusCode);
 
         Assert.Contains(fixture.LogMessages, value => value.Contains("credential bearer", StringComparison.OrdinalIgnoreCase) &&
             value.Contains("session cookie present False", StringComparison.OrdinalIgnoreCase) &&
             value.Contains("scheme CellBridge.Entra.Bearer", StringComparison.Ordinal) &&
             value.Contains("outcome succeeded", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(fixture.LogMessages, value => value.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(fixture.LogMessages, value => value.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase) &&
+            value.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
+            value.Contains("cookie length " + cookie.Length, StringComparison.Ordinal) &&
+            value.Contains("cookie Expires UTC " + CookieExpiry(Assert.Single(response.Headers.GetValues("Set-Cookie")))
+                .ToString("O", CultureInfo.InvariantCulture), StringComparison.Ordinal));
+        Assert.Contains(fixture.LogMessages, value => value.Contains("scheme Identity.Application", StringComparison.Ordinal) &&
+            value.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
+            !value.Contains("ticket expiry UTC (null)", StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.LogMessages, value => value.Contains(token, StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.LogMessages, value => value.Contains(cookie, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CookieFingerprintMatchesAcrossChunkedIssuanceAndRequest()
+    {
+        await using var fixture = await Fixture.CreateAsync(cookieChunkSize: 300);
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookies = exchange.Headers.GetValues("Set-Cookie").Select(header => header.Split(';', 2)[0]).ToArray();
+        Assert.True(cookies.Length > 2);
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/office");
+        request.Headers.TryAddWithoutValidation("Cookie", string.Join("; ", cookies));
+        using var response = await fixture.Client.SendAsync(request);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        var issuance = Assert.Single(fixture.LogMessages, message => message.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase));
+        var requestLog = Assert.Single(fixture.LogMessages, message => message.Contains("session cookie present True", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("scheme Identity.Application", StringComparison.Ordinal));
+        var issuanceHash = issuance.Split("cookie SHA256 ", StringSplitOptions.None)[1].Split(';')[0];
+        Assert.Equal(64, issuanceHash.Length);
+        Assert.Contains("cookie SHA256 " + issuanceHash, requestLog, StringComparison.Ordinal);
+        foreach (var cookie in cookies.Skip(1))
+            Assert.DoesNotContain(fixture.LogMessages, message => message.Contains(CookieValue(cookie), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CookieFingerprintsAreNotLoggedOutsideDiagnosticMode()
+    {
+        await using var fixture = await Fixture.CreateAsync(diagnosticLogging: false);
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookie = CookieValue(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("cookie SHA256", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -709,7 +759,8 @@ public sealed class EntraAuthenticationTests
         }
 
         public static async Task<Fixture> CreateAsync(TimeSpan? cookieSpan = null, string? pathBase = null,
-            bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true, bool enableOfficeRealTime = false)
+            bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true, bool enableOfficeRealTime = false,
+            int? cookieChunkSize = null, bool diagnosticLogging = true)
         {
             var key = RSA.Create(2048);
             var otherKey = RSA.Create(2048);
@@ -741,7 +792,7 @@ public sealed class EntraAuthenticationTests
             var loggerProvider = new CapturingLoggerProvider();
             builder.Logging.ClearProviders();
             builder.Logging.AddProvider(loggerProvider);
-            builder.Logging.SetMinimumLevel(LogLevel.Debug);
+            builder.Logging.SetMinimumLevel(diagnosticLogging ? LogLevel.Debug : LogLevel.Information);
             services.AddSingleton(new AuthenticationOrigin("https://office.example.test"));
                     services.AddSingleton<IConfiguration>(configuration);
                     services.AddDbContext<AuthenticationDatabase>(options =>
@@ -757,6 +808,8 @@ public sealed class EntraAuthenticationTests
                             options.Cookie.Path = "/";
                             options.Cookie.HttpOnly = true;
                             options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                            if (cookieChunkSize is not null)
+                                options.CookieManager = new ChunkingCookieManager { ChunkSize = cookieChunkSize };
                             options.ExpireTimeSpan = cookieSpan ?? TimeSpan.FromHours(8);
                             options.SlidingExpiration = true;
                             options.Events.OnValidatePrincipal = context =>
