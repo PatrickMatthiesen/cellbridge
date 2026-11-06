@@ -204,19 +204,18 @@ public sealed class OfficeRealTimeEndpointTests
         Assert.Equal("3", channelTwo.GetProperty("I").GetString());
         Assert.False(channelTwo.TryGetProperty("E", out _));
 
-        string mobileNotification = JsonSerializer.Serialize(new
+        foreach (object[] notification in ExcelRealTimePayloads.Notifications())
         {
-            H = "RealtimeChannelHub", M = "SendUpdateNotification", I = "mobile-excel",
-            A = new object[] { 3, JsonSerializer.Serialize(new
+            string invocation = JsonSerializer.Serialize(new
             {
-                Version = 2, ClientType = 2, PresenceType = 2,
-                GeneratedXluid = Guid.NewGuid().ToString("D"), CollabMode = 0, OcsCapable = true,
-            }) },
-        });
-        await SendClassicFrameAsync(socket, mobileNotification);
-        JsonElement mobileReply = await ReadClassicFrameAsync(socket);
-        Assert.Equal("mobile-excel", mobileReply.GetProperty("I").GetString());
-        Assert.False(mobileReply.TryGetProperty("E", out _));
+                H = "RealtimeChannelHub", M = "SendUpdateNotification", I = "native-excel",
+                A = notification,
+            });
+            await SendClassicFrameAsync(socket, invocation);
+            JsonElement reply = await ReadClassicFrameAsync(socket);
+            Assert.Equal("native-excel", reply.GetProperty("I").GetString());
+            Assert.False(reply.TryGetProperty("E", out _));
+        }
 
         // SignalR reconnect can arrive while the prior physical socket is still open.
         // The session store replaces its connection, and stale cleanup must not remove

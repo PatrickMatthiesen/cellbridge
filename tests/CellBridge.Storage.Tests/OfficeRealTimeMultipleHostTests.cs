@@ -127,8 +127,8 @@ public sealed partial class OfficeRealTimeMultipleHostTests(OfficeRealTimeMultip
         Guid peerClient = await fixture.JoinCoauthoringAsync(file.Path);
         await using var sender = await fixture.ConnectAsync(fixture.First,
             await fixture.GetDocumentTicketAsync(fixture.First, file.Path), senderClient, utf8Json: true);
-        await using var peer = await fixture.ConnectAsync(fixture.First,
-            await fixture.GetDocumentTicketAsync(fixture.First, file.Path), peerClient);
+        await using var peer = await fixture.ConnectAsync(fixture.Second,
+            await fixture.GetDocumentTicketAsync(fixture.Second, file.Path), peerClient);
         await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
         string oversized = $$"""{"A":"{{senderClient:B}}","text":"{{new string('漢', 14_000)}}"}""";
         await Assert.ThrowsAsync<Microsoft.AspNetCore.SignalR.HubException>(() =>
@@ -138,7 +138,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests(OfficeRealTimeMultip
         await peer.Connection.InvokeAsync<Dictionary<string, string>>("GetCompletePresenceState");
         var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         peer.Connection.On<int, string>("updateNotification", (_, payload) => received.TrySetResult(payload));
-        string accepted = $$"""{"A":"{{senderClient:B}}","text":"accepted"}""";
+        string accepted = $$"""{"Version":2,"ClientType":0,"PresenceType":6,"ClientId":"{{Guid.NewGuid():D}}","SavRev":1}""";
         await sender.Connection.InvokeAsync("SendUpdateNotification", 3, accepted);
         Assert.Equal(accepted, await received.Task.WaitAsync(TimeSpan.FromSeconds(5)));
     }
@@ -428,7 +428,7 @@ public sealed partial class OfficeRealTimeMultipleHostTests(OfficeRealTimeMultip
 
         var writeFailure = await Record.ExceptionAsync(() =>
             reader.Connection.InvokeAsync("SendUpdateNotification", 3,
-                $$"""{"A":"{{readerClient:D}}","id":1,"payload":"denied"}"""));
+                $$"""{"Version":2,"ClientType":0,"PresenceType":5,"FullSaveId":"{{Guid.NewGuid():D}}"}"""));
         Assert.True(writeFailure is Microsoft.AspNetCore.SignalR.HubException or TaskCanceledException,
             $"Read-only write unexpectedly completed or failed with {writeFailure?.GetType().Name ?? "no exception"}.");
         await reader.Closed.Task.WaitAsync(TimeSpan.FromSeconds(10));

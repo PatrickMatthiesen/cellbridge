@@ -420,7 +420,8 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
             if (channel != 1 && channel != 3 && root.TryGetProperty("A", out var senderValue) &&
                 (senderValue.ValueKind != JsonValueKind.String || !Guid.TryParse(senderValue.GetString(), out var suppliedId) || suppliedId != ticket.ClientId)) return false;
             if (channel == 3 && !OfficeRealTimeChannel3Validator.IsValid(root, ticket.ClientId)) return false;
-            if (channel == 8 && !root.TryGetProperty("SL2", out _)) return false;
+            if (channel == 8 && !root.TryGetProperty("SL2", out _) &&
+                !OfficeRealTimeExcelNotificationValidator.IsValid(root, 8, ticket.ClientId)) return false;
         }
         if (!TryGet(connectionId, ticket, out var connection)) return false;
         using var deadline = CreateDeadline(cancellationToken);

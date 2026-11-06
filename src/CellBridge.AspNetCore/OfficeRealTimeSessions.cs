@@ -304,7 +304,8 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
                     !Guid.TryParse(senderValue.GetString(), out Guid populatedSender) || populatedSender != ticket.ClientId) return false;
             }
             if (channel == 3 && !OfficeRealTimeChannel3Validator.IsValid(root, ticket.ClientId)) return false;
-            if (channel == 8 && !root.TryGetProperty("SL2", out _)) return false;
+            if (channel == 8 && !root.TryGetProperty("SL2", out _) &&
+                !OfficeRealTimeExcelNotificationValidator.IsValid(root, 8, ticket.ClientId)) return false;
         }
 
         return await RelayAsync(ticket, connectionId, DocumentAccess.Write, "updateNotification",
