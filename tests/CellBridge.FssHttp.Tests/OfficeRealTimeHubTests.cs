@@ -291,31 +291,64 @@ public sealed class OfficeRealTimeHubTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(2)]
-    public async Task Channel_three_relays_excel_notifications_for_desktop_and_iphone_client_types(int clientType)
+    [MemberData(nameof(ExcelRealTimePayloads.Notifications), MemberType = typeof(ExcelRealTimePayloads))]
+    public async Task Excel_native_families_relay_unchanged_only_to_authorized_document_generation(int channel, string payload)
     {
         Fixture f = new();
         var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
         var peer = await f.Connect(sender.Ticket.ResourceId, 1, "peer");
-        string generatedXluid = Guid.NewGuid().ToString("D");
-        string fullSaveId = Guid.NewGuid().ToString("D");
-        string[] payloads =
-        [
-            $$"""{"Version":2,"ClientType":{{clientType}},"PresenceType":2,"GeneratedXluid":"{{generatedXluid}}","CollabMode":0,"OcsCapable":true}""",
-            $$"""{"Version":2,"ClientType":{{clientType}},"PresenceType":5,"FullSaveId":"{{fullSaveId}}"}"""
-        ];
+        await f.Connect(sender.Ticket.ResourceId, 2, "other-generation");
+        await f.Connect(Guid.NewGuid(), 1, "other-document");
 
-        foreach (string payload in payloads)
-        {
-            Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
-                3, payload, CancellationToken.None));
-            var call = Assert.Single(f.Clients.Calls, x => x.ConnectionId == peer.Context.ConnectionId);
-            Assert.Equal("updateNotification", call.Method);
-            Assert.Equal(3, call.Arguments[0]);
-            Assert.Equal(payload, call.Arguments[1]);
-            f.Clients.Calls.Clear();
-        }
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            channel, payload, CancellationToken.None));
+        var call = Assert.Single(f.Clients.Calls);
+        Assert.Equal(peer.Context.ConnectionId, call.ConnectionId);
+        Assert.Equal("updateNotification", call.Method);
+        Assert.Equal(channel, call.Arguments[0]);
+        Assert.Equal(payload, call.Arguments[1]);
+        f.Clients.Calls.Clear();
+
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            channel, ExcelRealTimePayloads.WithProperty(payload, "A", peer.Ticket.ClientId), CancellationToken.None));
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            channel == 3 ? 8 : 3, payload, CancellationToken.None));
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            4, payload, CancellationToken.None));
+        Assert.Empty(f.Clients.Calls);
+
+        f.Authorizer.DeniedWriteSubjects.Add("sender");
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            channel, payload, CancellationToken.None));
+        Assert.Empty(f.Clients.Calls);
+    }
+
+    [Theory]
+    [MemberData(nameof(ExcelRealTimePayloads.InvalidNotifications), MemberType = typeof(ExcelRealTimePayloads))]
+    public async Task Native_excel_envelopes_retain_json_and_identity_limits(int channel, string payload)
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        await f.Connect(sender.Ticket.ResourceId, 1, "peer");
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            channel, payload, CancellationToken.None));
+        Assert.Empty(f.Clients.Calls);
+    }
+
+    [Fact]
+    public async Task Collaboration_retains_legacy_sl2_and_rejects_an_unrecognized_envelope()
+    {
+        Fixture f = new();
+        var sender = await f.Connect(Guid.NewGuid(), 1, "sender");
+        await f.Connect(sender.Ticket.ResourceId, 1, "peer");
+        const string legacy = "{\"SL2\":[]}";
+        Assert.True(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            8, legacy, CancellationToken.None));
+        Assert.Equal(legacy, Assert.Single(f.Clients.Calls).Arguments[1]);
+        f.Clients.Calls.Clear();
+        Assert.False(await f.Store.SendUpdateNotificationAsync(sender.Ticket, sender.Context.ConnectionId,
+            8, "{\"Version\":2,\"ClientType\":0,\"PresenceType\":99}", CancellationToken.None));
+        Assert.Empty(f.Clients.Calls);
     }
 
     [Fact]
@@ -334,7 +367,6 @@ public sealed class OfficeRealTimeHubTests
             $$"""{"Version":1,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
             $$"""{"Version":2,"ClientType":1,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true}""",
             $$"""{"Version":2,"ClientType":2,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true,"A":"{{otherId}}"}""",
-            $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"{{validGuid}}","CollabMode":0,"OcsCapable":true,"unexpected":true}""",
             $$"""{"Version":2,"ClientType":0,"PresenceType":2,"GeneratedXluid":"00000000-0000-0000-0000-000000000000","CollabMode":0,"OcsCapable":true}""",
             $$"""{"Version":2,"ClientType":0,"PresenceType":5,"FullSaveId":"{{validGuid}}","clientId":"{{otherId}}"}""",
             $$"""{"Version":2,"ClientType":0,"PresenceType":4,"FullSaveId":"{{validGuid}}"}"""

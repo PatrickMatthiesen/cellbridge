@@ -161,6 +161,49 @@ store. Both transports share ticket checks, participant permissions, presence,
 notifications, revocation and Redis fanout. Both transports accept the
 captured Excel channel-3 client classifications: desktop `0` and iPhone `2`.
 Notifications require write access and retain their field and sender checks.
+The local and Redis stores also accept version-2 Excel notification envelopes
+with `ClientType` 0 or 2. Inner `PresenceType` 2 and 5 through 10 use outer
+channel 3; inner type 3 uses outer channel 8 without requiring `SL2`.
+The inner type and outer channel are separate values. Supported envelope fields
+are checked before relay:
+
+| Inner type | Required metadata |
+| --- | --- |
+| 2 | Nonzero GUID `GeneratedXluid`, Int32 `CollabMode`, boolean `OcsCapable` |
+| 5 | Nonzero GUID `FullSaveId` |
+| 6, 7 | Nonzero GUID `ClientId`, UInt64 `SavRev` below the all-ones sentinel |
+| 8 | Nonzero GUID `ClientId` |
+| 9 | Nonzero GUID `Nsv` |
+| 10 | Opaque metadata; the checked sender establishes the family, but its metadata key remains unresolved |
+| 3, on outer channel 8 | UInt32 `SeqNum`, nonempty string `SessionId` |
+
+Additional metadata, including revision and blob objects, remains opaque and
+travels in the original payload string. All payloads remain JSON objects with
+no duplicate properties, at most 64 KiB UTF-8 and depth at most 16. Supplied
+`A`, `clientId` and `Cid` identity fields in these envelopes must match the
+ticket. Excel's capitalized `ClientId` is native notification metadata, not a
+replacement for the ticket's authenticated sender. Relay still requires Write
+and an owned editing lease for that same RTC client. Rooms remain isolated by
+document and lifecycle generation. Existing `A`-bound channel-3 messages and
+channel-8 `SL2` messages retain their existing contracts.
+
+Channel 4 still accepts only exact `{Id,TD}` latency reports and acknowledges
+them locally. The checked Snowfall RTC library names outer 4 as persisted
+content, but the checked Excel JSON writer fails for inner type 4. This evidence
+does not establish a second supported channel-4 JSON schema. The captured
+channel-14 notification contract also remains unchanged.
+
+These envelope families follow checked Snowfall Excel writer/sender instructions
+and RTC channel dispatch, rather than a new live capture. They extend the
+captured lifecycle schemas; automated delivery tests use synthetic metadata.
+Loaded-module binding and native UI acceptance remain untested. Subsequent
+server captures show channel-3 lifecycle/save notifications reaching peers,
+but no separate unfinished-cell-text notification. Wet-content naming includes
+lifecycle and revision messages and does not establish unfinished cell-text previews.
+That feature needs a same-build Microsoft-hosted control and native tests of
+typing before commit, Escape cancellation and Ctrl+Enter commit without moving
+the selection.
+
 The classic adapter supports the observed negotiate, connect, start, reconnect
 and abort requests. It returns an
 explicit error for unsupported invocations and does not implement long polling
