@@ -196,9 +196,10 @@ channel-14 notification contract also remains unchanged.
 These envelope families follow checked Snowfall Excel writer/sender instructions
 and RTC channel dispatch, rather than a new live capture. They extend the
 captured lifecycle schemas; automated delivery tests use synthetic metadata.
-Raindance was unreachable during this change, so loaded-module binding and
-native UI acceptance remain untested. Wet-content naming includes lifecycle
-and revision messages and does not establish unfinished cell-text previews.
+Loaded-module binding and native UI acceptance remain untested. Subsequent
+server captures show channel-3 lifecycle/save notifications reaching peers,
+but no separate unfinished-cell-text notification. Wet-content naming includes
+lifecycle and revision messages and does not establish unfinished cell-text previews.
 That feature needs a same-build Microsoft-hosted control and native tests of
 typing before commit, Escape cancellation and Ctrl+Enter commit without moving
 the selection.
