@@ -42,3 +42,7 @@ See the repository's [list guide](https://github.com/PatrickMatthiesen/cellbridg
 and [host authorization guide](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/host-list-authorization.md)
 and [document-library example](https://github.com/PatrickMatthiesen/cellbridge/tree/main/examples/DocumentLibrary)
 for configuration, supported operations and limits. These packages are experimental.
+
+## License
+
+Licensed under the [MIT License](https://github.com/PatrickMatthiesen/cellbridge/blob/main/LICENSE).

@@ -29,7 +29,7 @@ tested at production scale.
 
 Optional [customer workspace list libraries](docs/lists.md) provide typed schemas,
 company templates, custom fields, record merge previews, references and authorized
-extracts. They use independent PostgreSQL storage and a native HTTP API. Hosts
+extracts. They use independent PostgreSQL or SQL Server storage and a native HTTP API. Hosts
 provide their own customer lifecycle and user interface.
 
 ## Features
@@ -158,3 +158,25 @@ own disposable hosts by default. Remote and desktop checks remain opt-in.
 [MIT](LICENSE). Vendored Microsoft protocol test code retains its
 [notice](tests/CellBridge.Interop.Tests/MicrosoftProtocol/FssHttpB/NOTICE.md)
 and [license](tests/CellBridge.Interop.Tests/MicrosoftProtocol/FssHttpB/LICENSE-MIT.txt).
+
+### Microsoft protocol licensing
+
+CellBridge implements Microsoft Office interoperability protocols, including
+MS-FSSHTTP and MS-FSSHTTPB, based on Microsoft's publicly available Open
+Specifications.
+
+CellBridge is distributed under the MIT License. This license does not grant
+rights to patents held by Microsoft or other third parties.
+
+Microsoft provides an Interoperability Principles Patent Pledge for Open Source
+Developers, under which Microsoft agrees not to assert certain patent claims
+against qualifying open-source developers implementing covered specifications,
+subject to the pledge's terms and limitations. See
+[Microsoft's patent pledge](https://learn.microsoft.com/en-us/openspecs/dev_center/ms-devcentlp/d84cac00-b312-44ee-9156-23bde6477c3d#interoperability-principles-patent-pledge-for-open-source-developers).
+
+The pledge does not automatically extend to all downstream uses of the software.
+Users should review the applicable terms when evaluating their own deployment
+or distribution requirements.
+
+CellBridge is an independent project and is not affiliated with or endorsed by
+Microsoft.

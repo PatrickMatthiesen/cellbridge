@@ -15,7 +15,17 @@ internal sealed class BenchmarkDatabase(NpgsqlDataSource source) : IAsyncDisposa
             await using (var reset = source.CreateCommand("""
                 TRUNCATE cellbridge_documents, cellbridge_states, cellbridge_read_heads,
                     cellbridge_revision_summaries, cellbridge_chunks, cellbridge_objects,
-                    cellbridge_recovery_receipts;
+                    cellbridge_recovery_receipts, cellbridge_repository_heads,
+                    cellbridge_repository_coordination, cellbridge_repository_editors,
+                    cellbridge_repository_partitions, cellbridge_repository_elements,
+                    cellbridge_repository_visibility, cellbridge_repository_graph,
+                    cellbridge_repository_bindings, cellbridge_repository_binding_changes,
+                    cellbridge_repository_checkpoints, cellbridge_repository_revisions,
+                    cellbridge_repository_receipts, cellbridge_repository_paths,
+                    cellbridge_repository_deliveries, cellbridge_repository_references,
+                    cellbridge_repository_deltas, cellbridge_repository_mappings,
+                    cellbridge_repository_mapping_intervals, cellbridge_repository_mapping_roots,
+                    cellbridge_repository_mapping_claims;
                 """))
                 await reset.ExecuteNonQueryAsync();
             return new(source);
