@@ -22,6 +22,27 @@ public static class AuthenticationServices
     public const string AntiforgeryHeader = "X-CellBridge-CSRF";
     public const string LoginRateLimitPolicy = "CellBridge.Authentication.Login";
 
+    /// <summary>Configures the packaged Office flow against the demo's existing account links.</summary>
+    public static void ConfigureCellBridgeOffice(CellBridgeHostingBuilder hosting, IConfiguration configuration)
+    {
+        if (!configuration.GetValue<bool>("Authentication:Entra:Enabled")) return;
+        hosting.Authentication(auth =>
+        {
+            auth.UseIdentity<CellBridgeUser>(options =>
+            {
+                options.Subject = user => user.Subject;
+                options.DisplayName = user => user.DisplayName;
+                options.CanCreate = user => user.CanCreate;
+                options.IsAllowed = user => user.Enabled;
+            });
+            auth.UseEntra(options =>
+            {
+                configuration.GetSection("Authentication:Entra").Bind(options);
+                options.DiscoverAccountTypes = configuration.GetValue("Authentication:Entra:DiscoverAccountTypes", true);
+            });
+        });
+    }
+
     public static IServiceCollection AddCellBridgeAuthentication(this IServiceCollection services,
         IConfiguration configuration)
     {
@@ -56,7 +77,8 @@ public static class AuthenticationServices
         services.Configure<SecurityStampValidatorOptions>(o => o.ValidationInterval = TimeSpan.FromMinutes(1));
         services.Configure<CookieAuthenticationOptions>(IdentityConstants.ApplicationScheme, o =>
         {
-            o.Cookie.Name = CookieName;
+            o.Cookie.Name = configuration.GetValue<bool>("Authentication:Entra:Enabled")
+                ? EntraAuthentication.SessionCookieName : CookieName;
             o.Cookie.Path = "/";
             o.Cookie.HttpOnly = true;
             o.Cookie.SecurePolicy = CookieSecurePolicy.Always;
@@ -77,7 +99,7 @@ public static class AuthenticationServices
             { context.Response.StatusCode = StatusCodes.Status403Forbidden; return Task.CompletedTask; };
         });
         var entraEnabled = configuration.GetValue<bool>("Authentication:Entra:Enabled");
-        EntraAuthentication.AddCellBridgeEntraAuthentication(services, configuration);
+        BrowserEntraAuthentication.AddBrowserEntraAuthentication(services, configuration);
         services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
             o =>
             {

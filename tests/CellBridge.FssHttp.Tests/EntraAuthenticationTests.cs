@@ -2,7 +2,6 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Globalization;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Text;
 using CellBridge.AspNetCore;
 using CellBridge.Authentication;
 using CellBridge.Storage.Abstractions;
@@ -203,6 +202,16 @@ public sealed class EntraAuthenticationTests
             authorization: "Bearer " + fixture.CreateToken(change));
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.False(response.Headers.Contains("X-FORMS_BASED_AUTH_REQUIRED"));
+    }
+
+    [Fact]
+    public async Task MatchingEmailCannotLinkADifferentExternalIdentity()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office",
+            authorization: "Bearer " + fixture.CreateToken("unlinked-same-email"));
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.False(response.Headers.Contains("Set-Cookie"));
     }
 
     [Theory]
@@ -569,10 +578,12 @@ public sealed class EntraAuthenticationTests
 
         using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
-        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(cookie)));
         Assert.Contains(fixture.LogMessages, message => message.Contains("scheme Identity.Application", StringComparison.Ordinal) &&
-            message.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
-            message.Contains("ticket expiry UTC (null)", StringComparison.Ordinal));
+            message.Contains("session cookie present True", StringComparison.Ordinal) &&
+            message.Contains("outcome rejected; subject (null)", StringComparison.Ordinal));
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("subject local:", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains(cookie, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -583,29 +594,50 @@ public sealed class EntraAuthenticationTests
         using var response = await fixture.ExchangeCookieAsync(token);
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
         var cookie = CookieValue(Assert.Single(response.Headers.GetValues("Set-Cookie")));
-        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(cookie)));
         using var opened = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
         Assert.Equal(System.Net.HttpStatusCode.OK, opened.StatusCode);
 
+        var subject = "local:" + fixture.User.Id;
+        Assert.Contains(fixture.LogMessages, value => value.Contains("Office Entra identity mapped", StringComparison.Ordinal) &&
+            value.Contains("tenant " + TenantId.ToString("D"), StringComparison.Ordinal) &&
+            value.Contains("object " + ObjectId.ToString("D"), StringComparison.Ordinal) &&
+            value.Contains("subject " + subject, StringComparison.Ordinal));
         Assert.Contains(fixture.LogMessages, value => value.Contains("credential bearer", StringComparison.OrdinalIgnoreCase) &&
             value.Contains("session cookie present False", StringComparison.OrdinalIgnoreCase) &&
             value.Contains("scheme CellBridge.Entra.Bearer", StringComparison.Ordinal) &&
-            value.Contains("outcome succeeded", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(fixture.LogMessages, value => value.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase));
+            value.Contains("outcome succeeded", StringComparison.OrdinalIgnoreCase) &&
+            value.Contains("subject " + subject, StringComparison.Ordinal));
         Assert.Contains(fixture.LogMessages, value => value.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase) &&
-            value.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
-            value.Contains("cookie length " + cookie.Length, StringComparison.Ordinal) &&
-            value.Contains("cookie Expires UTC " + CookieExpiry(Assert.Single(response.Headers.GetValues("Set-Cookie")))
-                .ToString("O", CultureInfo.InvariantCulture), StringComparison.Ordinal));
+            value.Contains("subject " + subject, StringComparison.Ordinal));
         Assert.Contains(fixture.LogMessages, value => value.Contains("scheme Identity.Application", StringComparison.Ordinal) &&
-            value.Contains("cookie SHA256 " + hash, StringComparison.Ordinal) &&
-            !value.Contains("ticket expiry UTC (null)", StringComparison.Ordinal));
+            value.Contains("session cookie present True", StringComparison.Ordinal) &&
+            value.Contains("outcome succeeded", StringComparison.Ordinal) &&
+            value.Contains("subject " + subject, StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.LogMessages, value => value.Contains(token, StringComparison.Ordinal));
         Assert.DoesNotContain(fixture.LogMessages, value => value.Contains(cookie, StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, value => value.Contains("local:attacker-controlled", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, value => value.Contains("attacker@example.test", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("wrong-audience")]
+    [InlineData("unlinked-same-email")]
+    public async Task RejectedOfficeTokensDoNotLogAnAuthenticatedSubject(string change)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var token = fixture.CreateToken(change);
+        using var response = await fixture.ExchangeCookieAsync(token);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+        Assert.Contains(fixture.LogMessages, value => value.Contains("Office authentication", StringComparison.Ordinal) &&
+            value.Contains("outcome rejected; subject (null)", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, value => value.Contains("Office Entra identity mapped", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, value => value.Contains("subject local:", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, value => value.Contains(token, StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task CookieFingerprintMatchesAcrossChunkedIssuanceAndRequest()
+    public async Task ChunkedNativeCookiesAuthenticateWithoutLoggingTheirValues()
     {
         await using var fixture = await Fixture.CreateAsync(cookieChunkSize: 300);
         using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
@@ -616,18 +648,17 @@ public sealed class EntraAuthenticationTests
         request.Headers.TryAddWithoutValidation("Cookie", string.Join("; ", cookies));
         using var response = await fixture.Client.SendAsync(request);
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
-        var issuance = Assert.Single(fixture.LogMessages, message => message.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase));
-        var requestLog = Assert.Single(fixture.LogMessages, message => message.Contains("session cookie present True", StringComparison.OrdinalIgnoreCase) &&
-            message.Contains("scheme Identity.Application", StringComparison.Ordinal));
-        var issuanceHash = issuance.Split("cookie SHA256 ", StringSplitOptions.None)[1].Split(';')[0];
-        Assert.Equal(64, issuanceHash.Length);
-        Assert.Contains("cookie SHA256 " + issuanceHash, requestLog, StringComparison.Ordinal);
-        foreach (var cookie in cookies.Skip(1))
+        Assert.Contains(fixture.LogMessages, message => message.Contains("session Set-Cookie issued True", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(fixture.LogMessages, message => message.Contains("session cookie present True", StringComparison.OrdinalIgnoreCase) &&
+            message.Contains("scheme Identity.Application", StringComparison.Ordinal) &&
+            message.Contains("outcome succeeded", StringComparison.Ordinal) &&
+            message.Contains("subject local:" + fixture.User.Id, StringComparison.Ordinal));
+        foreach (var cookie in cookies)
             Assert.DoesNotContain(fixture.LogMessages, message => message.Contains(CookieValue(cookie), StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task CookieFingerprintsAreNotLoggedOutsideDiagnosticMode()
+    public async Task AuthenticationDiagnosticsAreDisabledOutsideDebugMode()
     {
         await using var fixture = await Fixture.CreateAsync(diagnosticLogging: false);
         using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
@@ -635,7 +666,10 @@ public sealed class EntraAuthenticationTests
         var cookie = CookieValue(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
         using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
         Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
-        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("cookie SHA256", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("Office authentication", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("Office response", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("Office Entra identity mapped", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.LogMessages, message => message.Contains("subject local:", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -715,13 +749,37 @@ public sealed class EntraAuthenticationTests
     public async Task BrowserOidcUsesCodePkceAndMapsCallbackToLinkedLocalAccount()
     {
         await using var fixture = await Fixture.CreateAsync();
-        var options = fixture.Services.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>().Get(EntraAuthentication.OidcScheme);
+        var options = fixture.Services.GetRequiredService<IOptionsMonitor<OpenIdConnectOptions>>().Get(BrowserEntraAuthentication.OidcScheme);
         Assert.Equal("code", options.ResponseType);
         Assert.True(options.UsePkce);
         Assert.False(options.SaveTokens);
         Assert.Equal("/signin-oidc", options.CallbackPath);
         Assert.Equal(IdentityConstants.ApplicationScheme, options.SignInScheme);
         Assert.Equal("local:" + fixture.User.Id, await fixture.InvokeBrowserCallbackAsync(options));
+    }
+
+    [Theory]
+    [InlineData("refresh", System.Net.HttpStatusCode.OK)]
+    [InlineData("different-account", System.Net.HttpStatusCode.Unauthorized)]
+    [InlineData("reject", System.Net.HttpStatusCode.Unauthorized)]
+    public async Task NativeIdentitySessionPreservesMappingThroughHostPrincipalValidation(
+        string validation, System.Net.HttpStatusCode expectedStatus)
+    {
+        await using var fixture = await Fixture.CreateAsync(nativePrincipalValidation: validation);
+        using var exchange = await fixture.ExchangeCookieAsync(fixture.CreateToken());
+        Assert.Equal(System.Net.HttpStatusCode.OK, exchange.StatusCode);
+        var cookie = CookieValue(Assert.Single(exchange.Headers.GetValues("Set-Cookie")));
+        using var response = await fixture.SendOfficeRequestAsync(HttpMethod.Get, "/office", cookie);
+        Assert.Equal(expectedStatus, response.StatusCode);
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+        if (expectedStatus == System.Net.HttpStatusCode.OK)
+        {
+            var identity = await response.Content.ReadFromJsonAsync<IdentityResult>();
+            Assert.NotNull(identity);
+            Assert.Equal(fixture.User.Subject, identity.Subject);
+            Assert.Equal(fixture.User.DisplayName, identity.DisplayName);
+            Assert.True(identity.CanCreate);
+        }
     }
 
     private sealed record IdentityResult(string? Subject, string? DisplayName, bool CanCreate);
@@ -760,7 +818,7 @@ public sealed class EntraAuthenticationTests
 
         public static async Task<Fixture> CreateAsync(TimeSpan? cookieSpan = null, string? pathBase = null,
             bool forceCookieRenewal = false, bool allowFallback = false, bool forms = true, bool enableOfficeRealTime = false,
-            int? cookieChunkSize = null, bool diagnosticLogging = true)
+            int? cookieChunkSize = null, bool diagnosticLogging = true, string? nativePrincipalValidation = null)
         {
             var key = RSA.Create(2048);
             var otherKey = RSA.Create(2048);
@@ -769,6 +827,7 @@ public sealed class EntraAuthenticationTests
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Authentication:Entra:Enabled"] = "true",
+                ["Authentication:Entra:DiscoverAccountTypes"] = "false",
                 ["Authentication:Entra:TenantId"] = TenantId.ToString("D"),
                 ["Authentication:Entra:ClientId"] = ClientId.ToString("D"),
                 ["Authentication:Entra:ClientSecret"] = "test-only-secret",
@@ -815,14 +874,33 @@ public sealed class EntraAuthenticationTests
                             options.Events.OnValidatePrincipal = context =>
                             {
                                 if (forceCookieRenewal) context.ShouldRenew = true;
+                                if (nativePrincipalValidation == "reject") context.RejectPrincipal();
+                                else if (nativePrincipalValidation is not null && context.Principal is not null)
+                                {
+                                    // Identity stamp validation can rebuild the principal from its local store.
+                                    // Simulate a refreshed principal before the external mapping callbacks run.
+                                    var fresh = new ClaimsIdentity(context.Principal.Claims
+                                        .Where(c => !c.Type.StartsWith("cellbridge:", StringComparison.Ordinal)), "Identity.Application");
+                                    if (nativePrincipalValidation == "different-account")
+                                    {
+                                        foreach (var id in fresh.FindAll(ClaimTypes.NameIdentifier).ToArray()) fresh.RemoveClaim(id);
+                                        fresh.AddClaim(new(ClaimTypes.NameIdentifier, "another-account"));
+                                    }
+                                    context.ReplacePrincipal(new ClaimsPrincipal(fresh));
+                                    context.ShouldRenew = true;
+                                }
                                 return Task.CompletedTask;
                             };
                         });
-                    EntraAuthentication.AddCellBridgeEntraAuthentication(services, configuration);
+                    BrowserEntraAuthentication.AddBrowserEntraAuthentication(services, configuration);
                     if (!forms) services.Configure<AuthenticationOptions>(options =>
                         options.DefaultScheme = EntraAuthentication.OfficeScheme);
                     services.AddCellBridge(TestStorage.Memory(), requireDurability: false,
-                        configure: options => options.EnableOfficeRealTime = enableOfficeRealTime);
+                        configure: options =>
+                        {
+                            options.EnableOfficeRealTime = enableOfficeRealTime;
+                            options.PublicOrigin = "https://office.example.test";
+                        }, configureHosting: hosting => AuthenticationServices.ConfigureCellBridgeOffice(hosting, configuration));
                     if (forms) services.AddCellBridgeOfficeFormsAuthentication(IdentityConstants.ApplicationScheme,
                         options =>
                         {
@@ -843,7 +921,6 @@ public sealed class EntraAuthenticationTests
             app.UseAuthentication();
             app.UseAuthorization();
             app.MapCellBridge();
-            EntraAuthentication.MapNativeCookieExchange(app);
             app.MapGet("/office", async context =>
             {
                 var result = new IdentityResult(
@@ -884,10 +961,11 @@ public sealed class EntraAuthenticationTests
             var claims = new[]
             {
                 new Claim("tid", tenant.ToString("D")),
-                new Claim("oid", ObjectId.ToString("D")),
+                new Claim("ver", "2.0"),
+                new Claim("oid", change == "unlinked-same-email" ? Guid.NewGuid().ToString("D") : ObjectId.ToString("D")),
                 new Claim("scp", scope),
                 new Claim("azp", authorizedParty),
-                new Claim("email", "attacker@example.test"),
+                new Claim("email", change == "unlinked-same-email" ? "local@example.test" : "attacker@example.test"),
                 new Claim(CellBridgeActor.SubjectClaim, "local:attacker-controlled"),
                 new Claim(CellBridgeActor.DisplayNameClaim, "Forged token display name"),
                 new Claim(CellBridgeActor.CreateClaim, "true"),
@@ -970,12 +1048,13 @@ public sealed class EntraAuthenticationTests
         public async Task<string?> InvokeBrowserCallbackAsync(OpenIdConnectOptions options)
         {
             var context = new DefaultHttpContext { RequestServices = Services };
-            var scheme = new AuthenticationScheme(EntraAuthentication.OidcScheme,
-                EntraAuthentication.OidcScheme, typeof(OpenIdConnectHandler));
+            var scheme = new AuthenticationScheme(BrowserEntraAuthentication.OidcScheme,
+                BrowserEntraAuthentication.OidcScheme, typeof(OpenIdConnectHandler));
             var callback = new Microsoft.AspNetCore.Authentication.OpenIdConnect.TokenValidatedContext(context, scheme, options,
                 new ClaimsPrincipal(new ClaimsIdentity(new[]
                 {
                     new Claim("tid", TenantId.ToString("D")),
+                    new Claim("ver", "2.0"),
                     new Claim("oid", ObjectId.ToString("D")),
                     new Claim("name", "Untrusted Entra name"),
                     new Claim("email", "untrusted@example.test"),

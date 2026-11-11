@@ -69,8 +69,10 @@ partition graphs and receipts. Codec and response-assembly tests keep independen
 binary and reference assertions.
 
 Fixtures apply the existing initialization and dispose their own application.
-They do not use the development database or volume. Storage tests always own
-their database. Lists accepts an explicitly supplied
+They do not use the development database or volume. Testing AppHosts skip the
+operator's ignored settings and user secrets. Local-account fixtures explicitly
+disable Entra and use fixture-owned origins and dynamic endpoint ports on every
+peer. Storage tests always own their database. Lists accepts an explicitly supplied
 `CELLBRIDGE_LISTS_TEST_CONNECTION_STRING` for an externally managed test database.
 
 Run a focused suite with `dotnet test tests/CellBridge.Storage.Tests`,

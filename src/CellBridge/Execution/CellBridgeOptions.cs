@@ -32,6 +32,10 @@ public sealed class CellBridgeOptions
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromMinutes(2);
     /// <summary>Fixed external HTTPS origin. Required for remote hosts unless AllowedHosts validates their authority.</summary>
     public string? PublicOrigin { get; set; }
+    /// <summary>Conceals authenticated document-download permission denials with HTTP 404.
+    /// Set false to return HTTP 403 and disclose that access was denied. Applies to current-document GET/HEAD only;
+    /// missing documents remain 404, and authentication challenges and protocol errors are unchanged.</summary>
+    public bool ConcealUnauthorizedDownloads { get; set; } = true;
     /// <summary>Total bytes retained by this process in its capture directory, including existing evidence.</summary>
     public long MaxCaptureBytes { get; set; } = 1024L * 1024 * 1024;
     public int MaxMtomParts { get; set; } = 128;

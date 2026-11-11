@@ -86,8 +86,24 @@ public sealed class LoadIdentityTests(BenchmarkEnvironment fixture, ITestOutputH
         var denied = await new CellStorageTransport(second, endpoint).SendCellAsync(fileUrl,
             request.ToByteArray(), null, true, request.UserAgentGuid);
         Assert.Equal(HttpStatusCode.OK, denied.StatusCode);
-        Assert.Contains(XDocument.Parse(denied.Soap).Descendants().Attributes(), attribute =>
-            attribute.Name.LocalName == "ErrorCode" && attribute.Value == "FileUnauthorizedAccess");
+        XNamespace protocol = "http://schemas.microsoft.com/sharepoint/soap/";
+        var fileResponse = Assert.Single(XDocument.Parse(denied.Soap).Descendants(protocol + "Response"));
+        Assert.Null(fileResponse.Attribute("ErrorCode"));
+        Assert.Null(fileResponse.Attribute("ErrorMessage"));
+        Assert.Null(fileResponse.Attribute("ResourceID"));
+        Assert.NotNull(denied.Binary);
+        var deniedMessage = FsshttpbResponse.Deserialize(new BinaryReaderEx(denied.Binary));
+        Assert.False(deniedMessage.Status);
+        Assert.Null(deniedMessage.Error);
+        Assert.Null(deniedMessage.DataElementPackage);
+        var deniedOperation = Assert.Single(deniedMessage.SubResponses);
+        Assert.Equal(RequestTypes.PutChanges, deniedOperation.RequestType);
+        Assert.Equal(Assert.Single(request.SubRequests).RequestId, deniedOperation.RequestId);
+        Assert.True(deniedOperation.Status);
+        Assert.Null(deniedOperation.Data);
+        var deniedError = Assert.IsType<ResponseError>(deniedOperation.Error);
+        Assert.Equal(ErrorType.HResult, deniedError.Type);
+        Assert.Equal((ulong)CellBridgeAuthorization.AccessDeniedHResult, deniedError.ErrorCode);
         var unchanged = (await provider.Documents.FindAsync(new DocumentIdentity.Resource(before.ResourceId)))!;
         Assert.Equal(before.StateVersion, unchanged.StateVersion);
         Assert.Equal(before.Package, unchanged.Package);

@@ -97,6 +97,9 @@ public sealed class PostgreSqlEnvironment : IAsyncDisposable
     {
         var builder = await DistributedApplicationTestingBuilder.CreateAsync<Projects.CellBridge_AppHost>(
             ["--environment", "Testing"], cancellationToken);
+        // These fixtures exercise local Identity accounts. Operator Entra settings
+        // must not change their cookie format or reach a child process as credentials.
+        builder.Configuration["Authentication:Entra:Enabled"] = "false";
         var storage = builder.Resources.Single(resource => resource.Name == "storage");
         foreach (var mount in storage.Annotations.OfType<ContainerMountAnnotation>().ToArray())
             storage.Annotations.Remove(mount);
@@ -105,10 +108,23 @@ public sealed class PostgreSqlEnvironment : IAsyncDisposable
                      resource.Annotations.OfType<ResourceRelationshipAnnotation>()
                          .Any(relationship => relationship.Type == "Parent" && relationship.Resource == capture)).ToArray())
             builder.Resources.Remove(resource);
-        builder.CreateResourceBuilder<DotnetProjectResource>("webdemo")
-            .WithEnvironment("Protocol__CaptureDirectory", "");
+        ConfigureLocalWebDemo(builder.CreateResourceBuilder<DotnetProjectResource>("webdemo"));
         return builder;
     }
+
+    /// <summary>Uses the fixture's local account flow consistently on every owned WebDemo peer.</summary>
+    public static IResourceBuilder<DotnetProjectResource> ConfigureLocalWebDemo(
+        IResourceBuilder<DotnetProjectResource> webdemo) => webdemo
+        .WithEndpoint("http", endpoint => endpoint.Port = null)
+        .WithEndpoint("https", endpoint => endpoint.Port = null)
+        .WithEnvironment("Authentication__Entra__Enabled", "false")
+        .WithEnvironment("Authentication__Entra__TenantId", "")
+        .WithEnvironment("Authentication__Entra__ClientId", "")
+        .WithEnvironment("Authentication__Entra__ClientSecret", "")
+        .WithEnvironment("Authentication__AllowOAuthToFormsFallback", "false")
+        .WithEnvironment("Protocol__CaptureDirectory", "")
+        .WithEnvironment("Authentication__PublicOrigin", webdemo.GetEndpoint("https"))
+        .WithEnvironment("Protocol__PublicOrigin", webdemo.GetEndpoint("https"));
 
     public async ValueTask DisposeAsync()
     {

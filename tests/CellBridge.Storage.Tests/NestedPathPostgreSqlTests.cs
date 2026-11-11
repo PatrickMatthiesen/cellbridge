@@ -98,7 +98,7 @@ public sealed class NestedPathPostgreSqlTests
         Assert.Equal("FileNotExistsOrCannotBeCreated", FileError(XDocument.Parse(await badId.Content.ReadAsStringAsync())));
         using var isolatedSoap = await Soap(client, duplicateUrl + "/_vti_bin/cellstorage.svc", duplicateUrl,
             "GetDocMetaInfo", true, duplicateId.ToString("D"));
-        Assert.Equal("FileUnauthorizedAccess", FileError(XDocument.Parse(await isolatedSoap.Content.ReadAsStringAsync())));
+        AssertDeniedSoapResponse(XDocument.Parse(await isolatedSoap.Content.ReadAsStringAsync()));
 
         using var versions = await Soap(client, oldUrl + "/_vti_bin/cellstorage.svc", oldUrl,
             "GetVersions", true, id.ToString("D"));
@@ -118,7 +118,7 @@ public sealed class NestedPathPostgreSqlTests
         Assert.Equal(HttpStatusCode.NotFound, revokedHistory.StatusCode);
         using var revokedSoap = await Soap(client, oldUrl + "/_vti_bin/cellstorage.svc", oldUrl,
             "GetDocMetaInfo", true, id.ToString("D"));
-        Assert.Equal("FileUnauthorizedAccess", FileError(XDocument.Parse(await revokedSoap.Content.ReadAsStringAsync())));
+        AssertDeniedSoapResponse(XDocument.Parse(await revokedSoap.Content.ReadAsStringAsync()));
     }
 
     private static StorageProvider Provider(NpgsqlDataSource source) =>
@@ -132,6 +132,20 @@ public sealed class NestedPathPostgreSqlTests
 
     private static string? SubError(XDocument xml) =>
         (string?)xml.Descendants(Protocol + "SubResponse").Single().Attribute("ErrorCode");
+
+    private static void AssertDeniedSoapResponse(XDocument xml)
+    {
+        var response = Assert.Single(xml.Descendants(Protocol + "Response"));
+        Assert.Null(response.Attribute("ErrorCode"));
+        Assert.Null(response.Attribute("ErrorMessage"));
+        Assert.Null(response.Attribute("ResourceID"));
+        Assert.Equal("1", (string?)response.Attribute("RequestToken"));
+        var denied = Assert.Single(response.Elements(Protocol + "SubResponse"));
+        Assert.Equal("1", (string?)denied.Attribute("SubRequestToken"));
+        Assert.Equal("FileUnauthorizedAccess", (string?)denied.Attribute("ErrorCode"));
+        Assert.Equal("2147942405", (string?)denied.Attribute("HResult"));
+        Assert.Empty(denied.Elements());
+    }
 
     private static Task<HttpResponseMessage> Soap(HttpClient client, string target, string documentUrl,
         string operation, bool useResourceId = false, string? resourceId = null)

@@ -66,6 +66,13 @@ browser and Office. Local runs use the allocated HTTPS endpoint; another
 computer needs a hostname that resolves to the server and a trusted certificate.
 See [Tailscale setup](automated-testing.md#connect-the-windows-laptop-through-tailscale).
 
+For a reverse proxy that needs a stable local upstream, set
+`Parameters:WebDemoHttpPort` in the AppHost's ignored `apphost.settings.json`.
+This fixes Aspire's HTTP proxy port while the application's target port remains
+managed by Aspire. Keep the relay or reverse proxy pointed at this proxy port,
+not the application's target port. Start without `--isolated` for this setup,
+because isolation randomizes ports. Set `Parameters:PublicOrigin` to the trusted
+external HTTPS origin; the local HTTP hop does not change that public origin.
 
 ## API and document identity
 

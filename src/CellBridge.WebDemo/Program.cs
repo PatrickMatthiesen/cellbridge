@@ -80,13 +80,15 @@ builder.Services.AddCellBridge(provider, requireDurability: !storageKind.Equals(
         options.MaxQueuedRequests = builder.Configuration.GetValue("Protocol:MaxQueuedRequests", options.MaxQueuedRequests);
         options.MaxQueuedRequestsPerSubject = builder.Configuration.GetValue("Protocol:MaxQueuedRequestsPerSubject", options.MaxQueuedRequestsPerSubject);
         options.RequestTimeout = builder.Configuration.GetValue("Protocol:RequestTimeout", options.RequestTimeout);
-        options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"];
+        options.PublicOrigin = builder.Configuration["Protocol:PublicOrigin"]
+            ?? builder.Configuration["Authentication:PublicOrigin"];
         options.DocumentLibraryId = builder.Configuration.GetValue<Guid?>("Protocol:DocumentLibraryId");
+        options.ConcealUnauthorizedDownloads = builder.Configuration.GetValue("Protocol:ConcealUnauthorizedDownloads", true);
         options.MaxCaptureBytes = builder.Configuration.GetValue("Protocol:MaxCaptureBytes", options.MaxCaptureBytes);
         options.MaxMtomParts = builder.Configuration.GetValue("Protocol:MaxMtomParts", options.MaxMtomParts);
         options.MaxMtomHeaderBytes = builder.Configuration.GetValue("Protocol:MaxMtomHeaderBytes", options.MaxMtomHeaderBytes);
         options.CaptureDirectory = builder.Configuration["Protocol:CaptureDirectory"];
-    });
+    }, configureHosting: hosting => AuthenticationServices.ConfigureCellBridgeOffice(hosting, builder.Configuration));
 builder.Services.AddCellBridgeAuthentication(builder.Configuration);
 builder.Services.AddWebDemoSharingRecipients();
 var listsConnection = builder.Configuration.GetConnectionString("lists");

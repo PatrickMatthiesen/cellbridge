@@ -47,6 +47,10 @@ provide their own customer lifecycle and user interface.
 | Coauthoring | Two Windows desktops exchanged Word, Excel and PowerPoint changes under distinct accounts with AutoSave. Independent downloads retained both editors' changes. See the bounded [client coverage](docs/interoperability.md#client-coverage). |
 | Real-time collaboration | RTC is enabled by default. Multiple hosts require [Redis coordination](docs/multi-host-rtc.md). Set `CellBridgeOptions.EnableOfficeRealTime = false` to disable it, or `Protocol:EnableOfficeRealTime=false` in WebDemo. Remote Excel selections and Word cursor indicators were observed on a single host. Participant names, typing latency and reliable startup across all three apps remain unqualified. OCS is not implemented. |
 
+Direct personal Microsoft accounts are currently unsupported in CellBridge's
+native Office integration. Got a personal account through the maze? Send us a
+tested PR. We'll happily retire this footnote.
+
 Some advanced synchronization options and automatic graph pruning remain
 unimplemented or disabled. See [revision history](docs/revision-history.md),
 [protocol support and compatibility](docs/interoperability.md) and the
@@ -117,6 +121,21 @@ forms challenge/completion flow separately with
 `AddCellBridgeOfficeFormsAuthentication` for the selected cookie. OAuth-to-forms
 fallback requires another explicit opt-in and defaults to disabled. See
 [login integration](docs/package-integration.md#use-the-built-in-login-page).
+
+Native Office Entra authentication is included in `CellBridge.AspNetCore`.
+Enable it through the `AddCellBridge` hosting callback with `Authentication`,
+`UseIdentity<TUser>` and `UseEntra`, after registering the host's Identity accounts
+and native-compatible application cookie.
+`MapCellBridge()` maps its endpoints. Custom account systems implement
+`ICellBridgeExternalIdentityMapper` instead of using the Identity adapter.
+The host owns account creation, external-login linking and browser providers.
+Package consumers can opt into `DiscoverAccountTypes` to read Azure's supported
+account types through Microsoft Graph. WebDemo enables this when Entra is enabled;
+it refreshes the policy without a restart. Existing cookies retain their session
+rules. These server policies do not enable direct personal-account sign-in in
+native Office.
+See [native Entra setup](docs/authentication.md#native-office-entra-authentication)
+and [Azure-driven account policy](docs/authentication.md#follow-azures-supported-account-types).
 
 For applications with their own document permissions, start with
 [async host authorization](docs/async-document-authorization.md).

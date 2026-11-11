@@ -242,6 +242,49 @@ Polling intervals must be at least one millisecond and fit a timer. Transient
 failures delay background retries by that interval, including when wakes arrive. Stopping the worker cancels
 active and waiting passes and waits for the active pass within the shutdown timeout; interrupted revisions remain queued for recovery.
 
+### Enable native Office Entra authentication
+
+Native Entra authentication is part of `CellBridge.AspNetCore`. Configure it
+through `AddCellBridge` and map it with the ordinary `MapCellBridge()` call:
+
+```csharp
+builder.Services.AddCellBridge(provider,
+    configure: options => options.PublicOrigin = "https://office.example.test",
+    configureHosting: hosting => hosting.Authentication(auth =>
+    {
+        auth.UseIdentity<ApplicationUser>();
+        auth.UseEntra(builder.Configuration.GetSection("Entra"));
+    }));
+```
+
+Register the host's Identity user store first, and explicitly configure its
+application cookie as `SPOIDCRL`, with path `/`, `HttpOnly`, `SecurePolicy.Always`
+and no domain. `UseIdentity` maps existing external-login links; it does not
+register an account database or create links. For custom accounts, use
+`auth.UseMapper<MyExternalIdentityMapper>("MyCookie")` instead. The mapper returns
+a permitted host principal with stable CellBridge claims or null to reject it.
+See [account mapping and cookie configuration](authentication.md#native-office-entra-authentication).
+
+`UseEntra` requires the registration's home tenant and API client ID. Its default
+fixed-tenant mode needs no client secret. Set `DiscoverAccountTypes=true` and
+supply `ClientSecret` from the host's secret store to read the supported account
+types from Azure through Microsoft Graph. Keep the home tenant ID unchanged.
+The policy refreshes on demand after 30 seconds by default, so accepted Azure
+audience changes need no code change or restart. Expired discovery failures
+return HTTP 503; they never broaden access or reuse an expired policy.
+See [Azure-driven account policy](authentication.md#follow-azures-supported-account-types)
+for permissions, refresh options, session behavior and test instructions.
+
+Entra registration selects native Office authentication on CellBridge protocol
+routes without changing the host's default scheme. The host retains its browser
+login, UI framework and other providers, including Google. Server acceptance of
+personal-account test tokens does not establish native Office token acquisition.
+Direct personal Microsoft accounts are currently unsupported in CellBridge's
+native Office integration. The native challenge uses the resource-based
+`/oauth2/authorize` endpoint, independently of the API's v2 access-token format.
+Browser OIDC uses the v2 endpoint. Forms authentication and OAuth-to-forms fallback
+remain independent opt-ins.
+
 ### Enable Office forms authentication
 
 Register the Office integration separately, using the same cookie as your login:

@@ -201,7 +201,10 @@ public sealed class NestedDocumentEndpointTests
             { Owner = null, Grants = state.Security.Grants.SetItem("tests:writer", DocumentAccess.None) });
         using var revoked = await fixture.Soap("/shared/old/place.docx/_vti_bin/cellstorage.svc",
             "/shared/old/place.docx", "GetDocMetaInfo", useResourceId: true, resourceId: state.ResourceId.ToString("D"));
-        Assert.Equal("FileUnauthorizedAccess", FileError(XDocument.Parse(await revoked.Content.ReadAsStringAsync())));
+        var denied = XDocument.Parse(await revoked.Content.ReadAsStringAsync());
+        Assert.Null(denied.Descendants(Protocol + "Response").Single().Attribute("ErrorCode"));
+        Assert.Null(denied.Descendants(Protocol + "Response").Single().Attribute("ErrorMessage"));
+        Assert.Equal("FileUnauthorizedAccess", Error(denied));
     }
 
     [Fact]
@@ -217,7 +220,10 @@ public sealed class NestedDocumentEndpointTests
         Assert.Equal(HttpStatusCode.NotFound, download.StatusCode);
         using var soap = await fixture.Soap("/shared/deep/private.docx/_vti_bin/cellstorage.svc",
             "/shared/deep/private.docx", "GetDocMetaInfo");
-        Assert.Equal("FileUnauthorizedAccess", FileError(XDocument.Parse(await soap.Content.ReadAsStringAsync())));
+        var denied = XDocument.Parse(await soap.Content.ReadAsStringAsync());
+        Assert.Null(denied.Descendants(Protocol + "Response").Single().Attribute("ErrorCode"));
+        Assert.Null(denied.Descendants(Protocol + "Response").Single().Attribute("ErrorMessage"));
+        Assert.Equal("FileUnauthorizedAccess", Error(denied));
     }
 
     [Fact]
