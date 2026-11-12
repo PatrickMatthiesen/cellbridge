@@ -1,9 +1,13 @@
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
 
 var builder = DistributedApplication.CreateBuilder(args);
-builder.Configuration.AddUserSecrets<Program>()
-    .AddJsonFile(Path.Combine(builder.AppHostDirectory, "apphost.settings.json"), optional: true)
-    .AddEnvironmentVariables();
+var isTesting = builder.Environment.IsEnvironment("Testing");
+// Disposable test hosts must not load the operator's credentials or demo routing.
+if (!isTesting)
+    builder.Configuration.AddUserSecrets<Program>()
+        .AddJsonFile(Path.Combine(builder.AppHostDirectory, "apphost.settings.json"), optional: true);
+builder.Configuration.AddEnvironmentVariables();
 
 var repositoryDirectory = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "../.."));
 var temporaryDirectory = Path.GetFullPath(
@@ -26,7 +30,7 @@ var initialization = builder.AddDotnetProject("storage-init", "../../tools/CellB
 
 var webdemo = builder.AddDotnetProject("webdemo", "../CellBridge.WebDemo/CellBridge.WebDemo.csproj",
         options => options.ExcludeLaunchProfile = true)
-    .WithHttpEndpoint()
+    .WithHttpEndpoint(port: builder.Configuration.GetValue<int?>("Parameters:WebDemoHttpPort"))
     .WithHttpsEndpoint()
     .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Development")
     .WithReference(database)
@@ -47,13 +51,16 @@ webdemo.WithEnvironment(context =>
 webdemo.WithEnvironment("Authentication__ApplicationName", builder.AddParameter("ApplicationName",
     () => builder.Configuration["Parameters:ApplicationName"] ?? "CellBridge"));
 // Optional Entra configuration stays in operator settings or environment, not source.
-foreach (var setting in new[] { "Enabled", "TenantId", "ClientId" })
-    if (builder.Configuration["Parameters:Entra:" + setting] is { Length: > 0 } value)
-        webdemo.WithEnvironment("Authentication__Entra__" + setting, value);
-if (builder.Configuration["Parameters:Entra:Enabled"]?.Equals("true", StringComparison.OrdinalIgnoreCase) == true)
+if (!isTesting)
 {
-    var clientSecret = builder.AddParameter("EntraClientSecret", secret: true);
-    webdemo.WithEnvironment("Authentication__Entra__ClientSecret", clientSecret);
+    foreach (var setting in new[] { "Enabled", "TenantId", "ClientId" })
+        if (builder.Configuration["Parameters:Entra:" + setting] is { Length: > 0 } value)
+            webdemo.WithEnvironment("Authentication__Entra__" + setting, value);
+    if (builder.Configuration["Parameters:Entra:Enabled"]?.Equals("true", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        var clientSecret = builder.AddParameter("EntraClientSecret", secret: true);
+        webdemo.WithEnvironment("Authentication__Entra__ClientSecret", clientSecret);
+    }
 }
 if (builder.Configuration["Parameters:PublicOrigin"] is { Length: > 0 } protocolOrigin)
     webdemo.WithEnvironment("Protocol__PublicOrigin", protocolOrigin);
@@ -61,6 +68,7 @@ webdemo.WithEnvironment("Protocol__CaptureDirectory", builder.Configuration["Par
 if (builder.Configuration["Parameters:MaxCaptureBytes"] is { Length: > 0 } captureBytes)
     webdemo.WithEnvironment("Protocol__MaxCaptureBytes", captureBytes);
 webdemo.WithEnvironment("Protocol__EnableOfficeRealTime", builder.Configuration["Parameters:EnableOfficeRealTime"] ?? "true");
+webdemo.WithEnvironment("Protocol__ConcealUnauthorizedDownloads", builder.Configuration["Parameters:ConcealUnauthorizedDownloads"] ?? "true");
 if (builder.Configuration["Parameters:DocumentLibraryId"] is { Length: > 0 } libraryId)
     webdemo.WithEnvironment("Protocol__DocumentLibraryId", libraryId);
 

@@ -1,4 +1,5 @@
 using System.Text.Encodings.Web;
+using CellBridge.AspNetCore;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
@@ -31,9 +32,27 @@ public static class AuthenticationEndpoints
                 : LoginPage.Render(page, options.Value.EntraLoginEnabled);
             return Results.Content(html, "text/html");
         }).AllowAnonymous();
-        if (app.ServiceProvider.GetService<EntraAuthenticationOptions>() is not null)
+        if (app.ServiceProvider.GetRequiredService<IOptions<AuthenticationPageOptions>>().Value.EntraLoginEnabled)
         {
-            EntraAuthentication.MapNativeCookieExchange(app);
+            app.MapGet("/auth/entra/status", async (HttpContext context, ICellBridgeEntraAudienceProvider audience) =>
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                try
+                {
+                    var snapshot = await audience.GetAsync(context.RequestAborted);
+                    return Results.Json(new
+                    {
+                        available = true,
+                        supportedAccountTypes = snapshot.Audience.ToString(),
+                        lastRefreshedUtc = snapshot.RetrievedAt,
+                    });
+                }
+                catch (EntraAudienceUnavailableException error)
+                {
+                    return Results.Json(new { available = false, error = error.ErrorCode },
+                        statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+            }).AllowAnonymous();
             app.MapGet("/auth/entra", (HttpContext context) =>
             {
                 context.Response.Headers.CacheControl = "no-store";
@@ -41,7 +60,7 @@ public static class AuthenticationEndpoints
                 {
                     RedirectUri = LocalReturnUrl(context.Request.Query["returnUrl"]),
                 };
-                return Results.Challenge(properties, [EntraAuthentication.OidcScheme]);
+                return Results.Challenge(properties, [BrowserEntraAuthentication.OidcScheme]);
             }).AllowAnonymous();
         }
         app.MapPost("/auth/login", async (HttpContext context, IAntiforgery antiforgery, SignInManager<CellBridgeUser> signIn) =>

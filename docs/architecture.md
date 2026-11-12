@@ -44,10 +44,14 @@ The endpoint serializes each operation's protocol response. HTTP 200 alone does
 not indicate save success.
 See [protocol scope](protocol-version-decision.md).
 
-Authentication runs before parsing. The sample supplies PostgreSQL Identity
-accounts, MS-OFBA challenges and shared cookie protection keys. Each operation
-checks the caller's stable subject against the resolved document's ownership
-and grants. Sessions, leases and receipts retain their authenticated owner.
+Authentication runs before parsing. The HTTP package supplies native Office Entra
+authentication and opt-in MS-OFBA challenges. The sample supplies PostgreSQL
+Identity accounts, browser OIDC and shared cookie protection keys. Direct personal
+Microsoft accounts are unsupported in the current native Office integration.
+Browser providers and server audience validation are separate from Office token
+acquisition. Each operation checks the caller's stable subject against the
+resolved document's ownership and grants. Sessions, leases and receipts retain
+their authenticated owner.
 See [authentication and permissions](authentication.md).
 
 ## Libraries and executables
@@ -67,7 +71,7 @@ The eleven shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
 | `CellBridge.Storage.SqlServer` | Independent EF Core document persistence, explicit migrations, coordinated state and chunked content |
 | `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory flushes |
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
-| `CellBridge.AspNetCore` | HTTP endpoints, login integration and dependency registration |
+| `CellBridge.AspNetCore` | HTTP endpoints, native Entra authentication, login integration and dependency registration |
 | `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
 | `CellBridge.Lists.PostgreSql` | Independent EF Core list persistence and migrations, JSONB records, workspace isolation and grants |
 | `CellBridge.Lists.SqlServer` | List persistence, migrations, SQL queries, workspace authorization, views and audit |

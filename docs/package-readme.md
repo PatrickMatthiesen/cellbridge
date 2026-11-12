@@ -22,6 +22,19 @@ is optional. Enable MS-OFBA separately with
 packaged pages or an existing complete login flow. OAuth-to-MS-OFBA fallback is
 a separate opt-in and defaults to disabled. WebDemo explicitly enables forms
 authentication for testing; its configuration is not the library default.
+Native Office Entra authentication is included in `CellBridge.AspNetCore`.
+Enable it in the `AddCellBridge` hosting callback with `Authentication`,
+`UseIdentity<TUser>` (or a custom `ICellBridgeExternalIdentityMapper`) and
+`UseEntra`. `MapCellBridge()` maps the enabled native exchange automatically.
+Hosts explicitly configure the selected cookie, provision and link accounts,
+and choose browser sign-in providers. Fixed-tenant native authentication needs
+no client secret. Opt into `DiscoverAccountTypes` with a credential for the
+read-only Microsoft Graph registration lookup to follow Azure's supported
+account types without code changes or restarts. Expired discovery failures
+return 503; account links and document permissions still apply. This server
+policy support does not enable direct personal-account sign-in. Direct personal
+Microsoft accounts are currently unsupported in CellBridge's native Office
+integration.
 The sample account database is not packaged.
 
 `CellBridge.Storage.SqlServer` supplies document state and content. It is

@@ -20,7 +20,7 @@ public static class CellBridgeEndpoints
     /// Existing native/versioned bindings require explicit migration before this mode can use them.</remarks>
     public static IServiceCollection AddCellBridgeWithExternalAuthorization<TProvider>(this IServiceCollection services,
         StorageProvider provider, bool requireDurability = true, bool multipleInstances = false,
-        Action<CellBridgeOptions>? configure = null) where TProvider : class, IDocumentAuthorizationProvider
+        Action<CellBridgeOptions>? configure = null, Action<CellBridgeHostingBuilder>? configureHosting = null) where TProvider : class, IDocumentAuthorizationProvider
     {
         if (services.Any(x => !x.IsKeyedService && (x.ServiceType == typeof(CellBridgeOptions) ||
             x.ServiceType == typeof(ICellBridgeAuthorizationPolicy) || x.ServiceType == typeof(IDocumentAuthorizationProvider))))
@@ -28,7 +28,7 @@ public static class CellBridgeEndpoints
         CellBridgeHostingRegistration.RequireSingleton<TProvider>(services);
         services.TryAddSingleton<TProvider>();
         services.AddSingleton<IDocumentAuthorizationProvider>(sp => sp.GetRequiredService<TProvider>());
-        return services.AddCellBridge(provider, requireDurability, multipleInstances, configure);
+        return services.AddCellBridge(provider, requireDurability, multipleInstances, configure, configureHosting);
     }
 
     /// <summary>Registers CellBridge with a shared singleton host document-permission policy.</summary>
@@ -36,7 +36,7 @@ public static class CellBridgeEndpoints
     /// An existing singleton registration for the concrete policy is reused.</remarks>
     public static IServiceCollection AddCellBridge<TAuthorizationPolicy>(this IServiceCollection services,
         StorageProvider provider, bool requireDurability = true, bool multipleInstances = false,
-        Action<CellBridgeOptions>? configure = null) where TAuthorizationPolicy : class, ICellBridgeAuthorizationPolicy
+        Action<CellBridgeOptions>? configure = null, Action<CellBridgeHostingBuilder>? configureHosting = null) where TAuthorizationPolicy : class, ICellBridgeAuthorizationPolicy
     {
         if (services.Any(x => !x.IsKeyedService && (x.ServiceType == typeof(CellBridgeOptions) ||
             x.ServiceType == typeof(ICellBridgeAuthorizationPolicy))))
@@ -44,11 +44,12 @@ public static class CellBridgeEndpoints
         CellBridgeHostingRegistration.RequireSingleton<TAuthorizationPolicy>(services);
         services.TryAddSingleton<TAuthorizationPolicy>();
         services.AddSingleton<ICellBridgeAuthorizationPolicy>(sp => sp.GetRequiredService<TAuthorizationPolicy>());
-        return services.AddCellBridge(provider, requireDurability, multipleInstances, configure);
+        return services.AddCellBridge(provider, requireDurability, multipleInstances, configure, configureHosting);
     }
 
     public static IServiceCollection AddCellBridge(this IServiceCollection services, StorageProvider provider,
-        bool requireDurability = true, bool multipleInstances = false, Action<CellBridgeOptions>? configure = null)
+        bool requireDurability = true, bool multipleInstances = false, Action<CellBridgeOptions>? configure = null,
+        Action<CellBridgeHostingBuilder>? configureHosting = null)
     {
         provider.Require(requireDurability, multipleInstances);
         var options = new CellBridgeOptions();
@@ -75,6 +76,7 @@ public static class CellBridgeEndpoints
         services.AddSingleton<ProtocolRequestAdmission>();
         services.AddSingleton<ProtocolCaptureStore>();
         services.AddSingleton(options);
+        configureHosting?.Invoke(new CellBridgeHostingBuilder(services, options));
         services.TryAddSingleton(options.Hashing);
         services.AddSingleton(provider);
         services.AddAuthorization();
@@ -90,11 +92,18 @@ public static class CellBridgeEndpoints
     {
         CellBridgeLogin.MapLogin(app);
         var office = CellBridgeOfficeFormsAuthentication.MapCompletion(app);
+        var entra = EntraAuthentication.MapNativeCookieExchange(app);
         app.MapOfficeRealTime();
         var routes = app.MapGroup("").WithMetadata(new CellBridgeOfficeFormsAuthentication.OfficeEndpointMetadata());
         routes.AddEndpointFilter(async (context, next) => CellBridgePublicOrigin.Resolve(context.HttpContext) is null
             ? Results.BadRequest() : await next(context));
-        if (office is null) routes.RequireAuthorization();
+        if (entra is not null)
+        {
+            if (office is not null && office.ProtocolAuthenticationScheme != EntraAuthentication.OfficeScheme)
+                throw new InvalidOperationException("Office forms and Entra must select the same protocol authentication scheme.");
+            routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = EntraAuthentication.OfficeScheme });
+        }
+        else if (office is null) routes.RequireAuthorization();
         else routes.RequireAuthorization(new AuthorizeAttribute { AuthenticationSchemes = office.ProtocolAuthenticationScheme });
         routes.MapMethods("/", ["OPTIONS"], (HttpContext context) => Discovery(context))
             .WithMetadata(new OfficeDiscoveryEndpointMetadata(ServiceEndpoint: false));
@@ -256,6 +265,7 @@ private static async Task<IResult> HandleSharedRequest(HttpContext context, Cell
 private static async Task<IResult> HandleSharedDownload(HttpContext context, CellBridgeDocumentService service,
     string path, CellBridgeActor actor)
 {
+    context.Response.Headers.CacheControl = "private, no-store";
     DocumentHead state;
     DocumentPackage package;
     Stream? content = null;
@@ -276,11 +286,14 @@ private static async Task<IResult> HandleSharedDownload(HttpContext context, Cel
             content = download.Content;
         }
     }
-    catch (UnauthorizedAccessException) { return Results.NotFound(); }
+    catch (UnauthorizedAccessException)
+    {
+        return context.RequestServices.GetRequiredService<CellBridgeOptions>().ConcealUnauthorizedDownloads
+            ? Results.NotFound() : Results.StatusCode(StatusCodes.Status403Forbidden);
+    }
     catch (KeyNotFoundException) { return Results.NotFound(); }
     try
     {
-        context.Response.Headers.CacheControl = "private, no-store";
         context.Response.ContentLength = package.Length;
         context.Response.Headers.ETag = state.Etag;
         context.Response.Headers.LastModified = state.ModifiedUtc.ToString("R");

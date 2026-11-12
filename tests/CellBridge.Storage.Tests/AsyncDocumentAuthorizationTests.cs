@@ -278,8 +278,12 @@ public sealed class AsyncDocumentAuthorizationTests
             "https://host.test", Owner);
 
         var fileResponse = Assert.Single(result.Response.Responses);
-        Assert.Equal("FileUnauthorizedAccess", fileResponse.ErrorCode);
-        Assert.Equal("FileUnauthorizedAccess", Assert.Single(fileResponse.SubResponses).ErrorCode);
+        Assert.Null(fileResponse.ErrorCode);
+        Assert.Null(fileResponse.ErrorMessage);
+        var denied = Assert.Single(fileResponse.SubResponses);
+        Assert.Equal(rename.SubRequests[0].Type, denied.Type);
+        Assert.Equal(rename.SubRequests[0].SubRequestToken, denied.SubRequestToken);
+        Assert.Equal("FileUnauthorizedAccess", denied.ErrorCode);
         Assert.Empty(policy.Requests);
         Assert.Equal(state.Path, (await service.Provider.Documents.FindAsync(new DocumentIdentity.Resource(state.ResourceId)))!.Path);
     }

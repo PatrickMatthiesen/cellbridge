@@ -87,22 +87,126 @@ public sealed partial class AuthorizationEndpointTests
     }
 
     [Theory]
-    [InlineData("GET", false)]
-    [InlineData("HEAD", false)]
-    [InlineData("GET", true)]
-    [InlineData("HEAD", true)]
-    public async Task ReadPermissionControlsBytesAndHeaders(string method, bool externalPolicy)
+    [InlineData("GET", false, true)]
+    [InlineData("HEAD", false, true)]
+    [InlineData("GET", true, true)]
+    [InlineData("HEAD", true, true)]
+    [InlineData("GET", false, false)]
+    [InlineData("HEAD", false, false)]
+    [InlineData("GET", true, false)]
+    [InlineData("HEAD", true, false)]
+    public async Task ReadPermissionControlsBytesAndHeaders(string method, bool externalPolicy, bool concealUnauthorized)
     {
-        await using var fixture = await Fixture.Start(externalPolicy: externalPolicy);
+        await using var fixture = await Fixture.Start(externalPolicy: externalPolicy,
+            configure: options => options.ConcealUnauthorizedDownloads = concealUnauthorized);
         foreach (var user in new[] { "reader", "other" })
         {
             using var client = fixture.CreateClient(user);
             using var request = new HttpRequestMessage(new(method), "/shared/secret.bin");
             using var result = await client.SendAsync(request);
-            Assert.Equal(user == "reader" ? HttpStatusCode.OK : HttpStatusCode.NotFound, result.StatusCode);
+            Assert.Equal(user == "reader" ? HttpStatusCode.OK
+                : concealUnauthorized ? HttpStatusCode.NotFound : HttpStatusCode.Forbidden, result.StatusCode);
             if (user == "other") { Assert.Null(result.Headers.ETag); Assert.Null(result.Content.Headers.LastModified); }
             else if (method == "GET") Assert.Equal(new byte[] { 1, 2, 3 }, await result.Content.ReadAsByteArrayAsync());
         }
+    }
+
+    [Theory]
+    [InlineData("GET", false, false, true)]
+    [InlineData("HEAD", false, false, true)]
+    [InlineData("GET", true, false, true)]
+    [InlineData("HEAD", true, false, true)]
+    [InlineData("GET", false, true, true)]
+    [InlineData("HEAD", false, true, true)]
+    [InlineData("GET", true, true, true)]
+    [InlineData("HEAD", true, true, true)]
+    [InlineData("GET", false, false, false)]
+    [InlineData("HEAD", false, false, false)]
+    [InlineData("GET", true, false, false)]
+    [InlineData("HEAD", true, false, false)]
+    [InlineData("GET", false, true, false)]
+    [InlineData("HEAD", false, true, false)]
+    [InlineData("GET", true, true, false)]
+    [InlineData("HEAD", true, true, false)]
+    public async Task DeniedAndMissingDownloadsArePrivateAndDoNotChangeAuthenticationOrDocumentState(
+        string method, bool missing, bool externalPolicy, bool concealUnauthorized)
+    {
+        await using var fixture = await Fixture.Start(externalPolicy: externalPolicy,
+            configure: options => options.ConcealUnauthorizedDownloads = concealUnauthorized);
+        var before = await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(fixture.State.ResourceId));
+        Assert.NotNull(before);
+        var beforeBytes = await TestStorage.ReadPackageAsync(fixture.Provider, before.Package);
+        using var client = fixture.CreateClient("other");
+        using var request = new HttpRequestMessage(new(method), missing ? "/shared/missing.bin" : "/shared/secret.bin");
+
+        using var result = await client.SendAsync(request);
+
+        Assert.Equal(missing || concealUnauthorized ? HttpStatusCode.NotFound : HttpStatusCode.Forbidden, result.StatusCode);
+        AssertPrivateDownloadWithoutAuthenticationChanges(result);
+        Assert.Null(result.Headers.ETag);
+        Assert.Null(result.Content.Headers.LastModified);
+        Assert.Empty(await result.Content.ReadAsByteArrayAsync());
+        Assert.Equal(before, await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(fixture.State.ResourceId)));
+        Assert.Equal(beforeBytes, await TestStorage.ReadPackageAsync(fixture.Provider, before.Package));
+        Assert.Null(await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Path(StorageIds.PathKey("/shared/missing.bin"))));
+    }
+
+    [Theory]
+    [InlineData("GET", true)]
+    [InlineData("HEAD", true)]
+    [InlineData("GET", false)]
+    [InlineData("HEAD", false)]
+    public async Task DeniedDownloadSucceedsOnTheSameClientAfterReadPermissionIsGranted(string method, bool concealUnauthorized)
+    {
+        await using var fixture = await Fixture.Start(configure: options =>
+            options.ConcealUnauthorizedDownloads = concealUnauthorized);
+        using var client = fixture.CreateClient("other");
+        using (var deniedRequest = new HttpRequestMessage(new(method), "/shared/secret.bin"))
+        using (var denied = await client.SendAsync(deniedRequest))
+        {
+            Assert.Equal(concealUnauthorized ? HttpStatusCode.NotFound : HttpStatusCode.Forbidden, denied.StatusCode);
+            AssertPrivateDownloadWithoutAuthenticationChanges(denied);
+            Assert.Empty(await denied.Content.ReadAsByteArrayAsync());
+        }
+
+        var beforeGrant = (await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(fixture.State.ResourceId)))!;
+        await TestStorage.SetPermissionsAsync(fixture.Provider, beforeGrant.ResourceId,
+            beforeGrant.Security with { Grants = beforeGrant.Security.Grants.SetItem("tests:other", DocumentAccess.Read) });
+        var afterGrant = await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(fixture.State.ResourceId));
+        Assert.NotNull(afterGrant);
+        using var retryRequest = new HttpRequestMessage(new(method), "/shared/secret.bin");
+        using var retry = await client.SendAsync(retryRequest);
+
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        AssertPrivateDownloadWithoutAuthenticationChanges(retry);
+        Assert.NotNull(retry.Headers.ETag);
+        Assert.Equal(3, retry.Content.Headers.ContentLength);
+        if (method == "HEAD") Assert.Empty(await retry.Content.ReadAsByteArrayAsync());
+        else Assert.Equal(new byte[] { 1, 2, 3 }, await retry.Content.ReadAsByteArrayAsync());
+        Assert.Equal(afterGrant, await fixture.Provider.Documents.FindAsync(new DocumentIdentity.Resource(fixture.State.ResourceId)));
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task AnonymousDownloadsStillRequireAuthenticationWhenUnauthorizedDownloadsAreNotConcealed(string method)
+    {
+        await using var fixture = await Fixture.Start(configure: options => options.ConcealUnauthorizedDownloads = false);
+        using var request = new HttpRequestMessage(new(method), "/shared/secret.bin");
+
+        using var result = await fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, result.StatusCode);
+        Assert.Empty(await result.Content.ReadAsByteArrayAsync());
+    }
+
+    private static void AssertPrivateDownloadWithoutAuthenticationChanges(HttpResponseMessage response)
+    {
+        Assert.True(response.Headers.CacheControl?.Private);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.False(response.Headers.Contains("WWW-Authenticate"));
+        Assert.False(response.Headers.Contains("Set-Cookie"));
+        Assert.Null(response.Headers.Location);
     }
 
     [Fact]
@@ -157,8 +261,8 @@ public sealed partial class AuthorizationEndpointTests
             Assert.Null(file.Attribute("ResourceID"));
             Assert.Empty(data.Attributes());
             Assert.Equal("http://localhost/shared/supplied-only.bin", (string?)file.Attribute("Url"));
-            Assert.Equal("FileUnauthorizedAccess", (string?)file.Attribute("ErrorCode"));
-            Assert.NotNull(file.Attribute("ErrorMessage"));
+            Assert.Null(file.Attribute("ErrorCode"));
+            Assert.Null(file.Attribute("ErrorMessage"));
         }
         else Assert.NotNull(file.Attribute("ResourceID"));
     }
@@ -359,6 +463,7 @@ public sealed partial class AuthorizationEndpointTests
 
     private sealed class Fixture(WebApplication app, StorageProvider provider, DocumentHead state, HttpClient client) : IAsyncDisposable
     {
+        public CellBridgeDocumentService Service => app.Services.GetRequiredService<CellBridgeDocumentService>();
         public StorageProvider Provider => provider;
         public DocumentHead State => state;
         public HttpClient Client => client;

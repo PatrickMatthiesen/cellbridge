@@ -29,6 +29,7 @@ internal sealed class LoadIdentitySessions(IHost host, string cookieName, string
         {
             ["ConnectionStrings:cellbridge"] = connectionString,
             ["Authentication:PublicOrigin"] = origin.GetLeftPart(UriPartial.Authority),
+            ["Authentication:Entra:Enabled"] = "false",
         });
         builder.Services.AddCellBridgeAuthentication(builder.Configuration);
         var host = builder.Build();

@@ -98,11 +98,9 @@ public sealed class CellBridgeRequestProcessor(CellBridgeDocumentService service
                 fileResponse.Url = canRead ? DocumentRequestResolver.CanonicalUrl(doc, publicBase) : fileRequest.Url;
                 fileResponse.IntervalOverride = 0;
                 fileResponse.ResourceId = canRead ? doc.ResourceId : null;
-                if (!canRead)
-                {
-                    fileResponse.ErrorCode = "FileUnauthorizedAccess";
-                    fileResponse.ErrorMessage = "The current user is not authorized to read this file.";
-                }
+                // Ordinary ACL failures belong to the operation responses below.
+                // MS-FSSHTTP 2.2.3.5 reserves Response.ErrorCode for its listed
+                // request-level conditions and unhandled subrequest exceptions.
 
                 foreach (var subRequest in fileRequest.SubRequests)
                 {

@@ -17,5 +17,6 @@
   <ItemGroup>
     <Compile Remove="CoreConsumer/**" />
     <Compile Include="../CellBridge.TestIdentity.cs" Link="TestIdentity.cs" />
+    <Compile Include="../CellBridge.FssHttp.Tests/PackagedEntraAuthenticationTests.cs" Link="PackagedEntraAuthenticationTests.cs" />
   </ItemGroup>
 </Project>

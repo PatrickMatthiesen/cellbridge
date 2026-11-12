@@ -13,8 +13,27 @@ document requests.
 
 ## Microsoft Entra sign-in
 
-WebDemo can also accept delegated Entra access tokens from native Office and use
-OpenID Connect for browser sign-in. Local browser login remains available.
+`CellBridge.AspNetCore` supplies native Office Entra token validation, discovery
+and token-to-cookie exchange. WebDemo uses that packaged implementation and
+adds OpenID Connect for browser sign-in. Local browser login remains available.
+
+Direct personal Microsoft account sign-in without tenant invitations is currently
+unsupported in CellBridge's native Office integration. Our investigation found
+that the native Office personal-account/LiveID path we tested restricts document
+resources to a specific allowlist of Microsoft domains. This restriction prevented
+direct personal-account sign-in on our custom CellBridge host.
+
+Binary analysis of the checked Office build found a hostname allowlist including
+`live.com`, `onedrive.com`, `office.com` and `outlook.com`. In the matching live
+test, Office logged `Unacceptable resourceId`, failed MSA parameter validation and
+parser result `8` before authentication. The finding applies to this investigated
+native Office flow, not all Microsoft personal-account authentication. Browser
+OpenID Connect and tenant-guest sign-in are separate flows; tenant invitations do
+not provide the broad direct access we were trying to support.
+
+Got a personal account through the maze? [Send us a tested PR](../README.md).
+We'll happily retire this footnote.
+
 Enable this explicitly through the AppHost's operator configuration:
 
 ```text
@@ -29,8 +48,11 @@ The AppHost treats `EntraClientSecret` as a secret parameter. Outside Aspire,
 configure `Authentication:Entra:Enabled`, `TenantId`, `ClientId`, and
 `ClientSecret`, plus `Authentication:PublicOrigin` and `Protocol:PublicOrigin`.
 Keep the credential outside source control. The browser uses it to redeem its
-authorization code. Native Office obtains its own token; token validation on
-the server does not use the client secret.
+authorization code. WebDemo also uses it to read the app registration's supported
+account types through Microsoft Graph. Native Office obtains its own token;
+native token validation does not use the client secret. `TenantId` is always the
+app registration's home tenant, even when the registration allows other tenants
+or personal accounts.
 
 Register the reachable HTTPS origin as an Application ID URI in the Entra API
 registration and configure v2 access tokens. The native Office client can request
@@ -39,8 +61,9 @@ authorize the Microsoft Office client
 `d3590ed6-52b3-4102-aeff-aad2292ab01c` for that scope. Add a **Web** redirect URI
 of `https://office.example.test/signin-oidc` for browser login. Do not add Office's
 broker redirect URI to the server registration. The server validates the API
-application GUID as the v2 token audience, the tenant issuer, expiry, scope and
-native Office client ID.
+application GUID as the v2 token audience, issuer and signing-key issuer, expiry,
+`tid`, `oid` and `ver=2.0`, delegated scope and native Office client ID. The
+registration must have `requestedAccessTokenVersion=2`.
 
 In Entra mode, HTTP OPTIONS on the marked protocol discovery routes returns
 generic protocol capabilities without a cookie when no authentication probe is
@@ -56,12 +79,22 @@ and mobile clients; user-agent text does not select the challenge. Document down
 PROPFIND, SOAP operations, RTC and historical versions still require
 authentication and their existing document permissions.
 
+Reverse proxies must preserve Office request headers whose names contain
+underscores, including `X-IDCRL_OPTIONS`. For Nginx, set
+`underscores_in_headers on;` in the CellBridge virtual server and verify a forced
+OPTIONS probe through the public origin. Nginx disables these headers by
+[default](https://nginx.org/en/docs/http/ngx_http_core_module.html#underscores_in_headers).
+If the proxy drops this header, a forced sign-in probe can receive ordinary 200
+capabilities instead of the required 401 challenge.
+
 The challenge advertises a same-origin `cookie_uri` at
 `/_api/SP.OAuth.NativeClient/Authenticate`. A POST with a validated Office token
 and a linked, permitted local account issues the existing application session
 cookie, named `SPOIDCRL` in Entra mode. Its explicit expiry cannot exceed the
-token or configured cookie lifetime, and does not slide. Enabling Entra changes
-the application's cookie name, including browser sessions. Token-derived native
+token or configured cookie lifetime, and does not slide. The host explicitly
+configures the selected cookie name as `SPOIDCRL`; package registration does not
+rename cookies or replace authentication defaults. WebDemo selects that name
+for its application cookie when Entra is enabled, including browser sessions. Token-derived native
 cookies use `SameSite=None; Secure; HttpOnly`, matching the native Office reference
 exchange. Browser sign-in cookies retain `SameSite=Lax`. An empty-Bearer POST
 returns discovery information without issuing a cookie. Other missing or invalid
@@ -75,13 +108,17 @@ only when the test host should offer its forms login for unauthenticated protoco
 requests or empty Bearer probes. Invalid nonempty credentials still receive the
 OAuth failure, and the native cookie-exchange endpoint never uses forms fallback.
 
-The implemented native integration is restricted to the configured Entra tenant,
-its registered API resource and the Microsoft Office client ID above. Browser OIDC
-sign-in and server-side acceptance of a host-validated token do not establish that
-stock Office can discover another provider or acquire and renew its credentials.
-Other native providers, including personal Microsoft accounts, need their own
-implemented and qualified discovery, acquisition and session flow. The FSSHTTP
-and FSSHTTPB implementations do not choose an identity provider.
+The fixed-tenant package mode accepts only the configured Entra tenant. With
+account-type discovery enabled, the server accepts validated tokens according
+to the Azure registration's current audience. It still requires the registered
+API resource, Microsoft Office client ID and an existing permitted local account.
+Browser OIDC sign-in and acceptance of a signed test token do not establish that
+stock Office can acquire or renew that token. Direct personal-account sign-in in
+native Office is unsupported. The native challenge uses Office's resource-based
+`/oauth2/authorize` endpoint; the API registration independently selects v2 access
+tokens. Browser OIDC uses the v2 authorization endpoint. Other providers need
+their own implemented and tested Office flow. The FSSHTTP and FSSHTTPB
+implementations do not choose an identity provider.
 
 The operator must link each Entra tenant ID and user object ID to a local account.
 Email addresses and display names do not establish a link. Existing links keep
@@ -99,6 +136,113 @@ remains available; Entra sign-in does not substitute for that second-factor flow
 Bearer requests recheck the linked account on each request. Browser cookies keep
 the existing security-stamp validation interval. Document grants still apply to
 downloads, saves, history, restore and collaboration.
+
+By default, an authenticated account without document access receives a masked
+404 for downloads, including HEAD requests, with `Cache-Control: private, no-store`.
+Set `CellBridgeOptions.ConcealUnauthorizedDownloads=false` to return an explicit
+403 for these denials instead. This discloses the denial; genuine missing files
+still return 404. WebDemo exposes this as `Protocol:ConcealUnauthorizedDownloads`,
+or `Parameters:ConcealUnauthorizedDownloads` through Aspire. This option does not
+guarantee a particular Office error dialog or an account picker.
+FSSHTTP operations retain their protocol permission errors. These denials do not
+invalidate the session or request another login. A repeated challenge can reuse
+the same Office account rather than display an account picker.
+Routine ACL failures are reported by the individual SOAP or binary operations,
+without setting `Response.ErrorCode` on the enclosing file response. A successful
+QueryAccess operation can report denied read and write access; its successful
+evaluation does not grant either permission.
+
+To test another identity, use Office's account UI and reopen the same document.
+Enable Debug logging for `CellBridge.Authentication.Entra` to verify the identity
+actually used. Native token mapping logs the validated tenant and object IDs and
+the mapped local subject. Authentication and completed-response logs include the
+request ID, authentication outcome and whether a session cookie was issued.
+Raw tokens, cookie values and email claims are not logged by these diagnostics.
+Browser logout does not guarantee
+that Office changes accounts. The selected identity still needs an explicit local
+link and permission to the document.
+
+## Follow Azure's supported account types
+
+WebDemo enables `DiscoverAccountTypes` by default when Entra is enabled. It reads
+`signInAudience` from the existing Azure app registration; there is no second
+local account-audience setting. The same policy controls browser sign-in and
+native token acceptance and challenges.
+
+The table describes server token policy and authority selection. It does not
+establish native Office acquisition for every audience; direct personal-account
+sign-in remains unsupported in that integration.
+
+| Azure `signInAudience` | Allowed issuing tenants | Authority tenant segment |
+| --- | --- | --- |
+| `AzureADMyOrg` | The registration's home tenant | Home tenant GUID |
+| `AzureADMultipleOrgs` | Organizational tenants | `organizations` |
+| `AzureADandPersonalMicrosoftAccount` | Organizational and personal accounts | `common` |
+| `PersonalMicrosoftAccount` | Personal Microsoft accounts | `consumers` |
+
+Classification uses the validated token's issuing tenant. A personal account
+represented as a guest in an organizational tenant has that organization's
+`tid` and its guest `oid`; it is a different login link from the direct personal
+identity. Local invitations do not create Azure guest users or external-login
+links. Email addresses do not merge those identities. Guest identity mapping
+does not establish tested native guest acquisition or support direct personal
+sign-in without a tenant invitation.
+
+Discovery obtains a Microsoft Graph token from the home tenant with the
+application credential and reads
+`GET /applications(appId='APPLICATION_GUID')?$select=appId,signInAudience,api`.
+It checks the returned application ID, known audience and v2 access-token
+configuration. The application needs permission to read its registration. A
+permission failure is reported without automatically requesting or granting
+broader permissions. Do not give an application write permission just to change
+its supported account types through this feature; this lookup is read-only.
+
+A successful policy is cached for 30 seconds by default. Refresh runs on demand,
+including when `/auth/entra/status` is requested. The JSON status reports
+`available`, `supportedAccountTypes` and `lastRefreshedUtc`. Concurrent requests
+share a refresh. An expired policy is never used to authorize a new sign-in or
+token request. If discovery is unavailable, the host stays running and affected
+operations return HTTP 503 with a sanitized unavailable state. Requests retry
+after bounded backoff; throttling can delay a retry by up to five minutes.
+The Graph credential token has its own cache and is renewed when needed.
+
+Browser sign-in records the selected authority in protected authentication state
+and uses it for both authorization and code redemption. Callback validation
+checks the current account policy before creating a session, so a narrowing
+change can reject a sign-in already in progress. The ordinary authorization-code
+flow retains PKCE, nonce and correlation checks; pushed authorization requests
+are disabled for this flow. Changing the Azure dropdown does not revoke existing
+application cookies. Account validation, cookie expiry and explicit session
+revocation continue to govern those sessions.
+
+To test a change without editing code or restarting WebDemo:
+
+1. Confirm `/auth/entra/status` reports the current audience, then complete a
+   fresh sign-in with an already-linked account.
+2. Change **Supported account types** in Azure and save. Azure may require other
+   registration properties to meet that audience's constraints before accepting
+   the change.
+3. Wait at least 30 seconds with the default refresh interval, then request the
+   status again. If it returns 503, resolve the reported credential, permission
+   or registration error and retry; the old policy is not a fallback.
+4. Start a fresh sign-in and verify the expected account is allowed or rejected.
+   For an allowed new identity, provision or link its exact tenant/object ID with
+   the [operator commands](#microsoft-entra-sign-in). Keep the existing database
+   and accounts. Reusing a session cookie does not test new sign-in policy.
+5. Test real Office open, save, reopen and renewal separately for the supported
+   organizational-account flow. Mocked token and browser-flow tests do not
+   establish native Office acquisition. A personal-capable Azure registration
+   does not enable direct personal-account sign-in in this integration.
+
+Changing an audience may also affect Azure credential acquisition or application
+reads, especially for a personal-accounts-only registration. Verify that discovery
+still succeeds after the cached Graph token expires. The dropdown-only behavior
+applies after Azure accepts the registration change and the application can read
+it; it does not bypass Azure's registration or client restrictions.
+
+Set `Authentication:Entra:DiscoverAccountTypes=false` only to select WebDemo's
+fixed-home-tenant behavior explicitly. Package consumers opt into discovery as
+described below.
 
 ## First setup
 
@@ -288,6 +432,101 @@ use the packaged pages or an existing complete host login flow. Enabling forms
 authentication leaves OAuth-to-forms fallback disabled. See the
 [explicit options](package-integration.md#enable-office-forms-authentication).
 
+### Native Office Entra authentication
+
+Enable native Entra authentication in the hosting callback on `AddCellBridge`.
+`MapCellBridge()` maps the native cookie-exchange endpoint and selects the Office
+scheme for protocol routes. No separate mapping call or Razor Pages dependency
+is required. The same backend can serve Blazor, React, MVC or another frontend.
+
+The host registers its accounts and application cookie first. For existing
+ASP.NET Core Identity accounts:
+
+```csharp
+using CellBridge.AspNetCore;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+
+// Existing AddIdentity<ApplicationUser, IdentityRole>() and user store go here.
+builder.Services.ConfigureApplicationCookie(cookie =>
+{
+    cookie.Cookie.Name = EntraAuthentication.SessionCookieName;
+    cookie.Cookie.Path = "/";
+    cookie.Cookie.HttpOnly = true;
+    cookie.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    cookie.Cookie.Domain = null;
+});
+
+builder.Services.AddCellBridge(provider,
+    configure: options => options.PublicOrigin = "https://office.example.test",
+    configureHosting: hosting => hosting.Authentication(auth =>
+    {
+        auth.UseIdentity<ApplicationUser>();
+        auth.UseEntra(builder.Configuration.GetSection("Entra"));
+    }));
+
+// After UseAuthentication() and UseAuthorization():
+app.MapCellBridge();
+```
+
+The `Entra` section requires the home `TenantId` and API `ClientId`. Calling
+`UseEntra` enables this flow without an `Enabled` flag. By default,
+`DiscoverAccountTypes=false` selects fixed-home-tenant authentication and needs
+no client secret. To follow Azure's dropdown, configure:
+
+```json
+{
+  "Entra": {
+    "TenantId": "HOME_TENANT_GUID",
+    "ClientId": "API_APPLICATION_GUID",
+    "DiscoverAccountTypes": true
+  }
+}
+```
+
+Supply `Entra:ClientSecret` through the host's secret store for the read-only
+Graph lookup. Keep `TenantId` set to the registration's home tenant; do not
+replace it with `common` or `consumers`. `AudienceRefreshInterval` defaults to
+30 seconds and accepts one second through five minutes. `DiscoveryTimeout`
+defaults to ten seconds and accepts one through thirty seconds. Browser OIDC
+registration, its client secret and callback routes remain host-owned. Follow
+[Azure-driven account policy](#follow-azures-supported-account-types) and the API
+registration steps under [Microsoft Entra sign-in](#microsoft-entra-sign-in).
+
+`UseIdentity<TUser>` uses the existing Identity application cookie. It finds
+external-login links with provider `EntraAuthentication.LoginProvider` and key
+`EntraAuthentication.ProviderKey(tenantId, objectId)`, checks sign-in eligibility
+and lockout, and rejects locally two-factor-enabled accounts. It never creates
+an account or links by email. The consumer owns provisioning and authenticated
+account-linking flows. Its default CellBridge subject uses the same `application`
+namespace as packaged Identity login. Keep subject mapping stable after document
+creation. Configure `Subject`, `DisplayName`, `CanCreate` and `IsAllowed` callbacks
+on `UseIdentity<TUser>` for host-specific account fields and policies.
+
+For a custom account system, replace `UseIdentity` with
+`auth.UseMapper<MyExternalIdentityMapper>("MyCookie")`. The host registers that
+cookie with the native attributes above. The scoped mapper implements
+`ICellBridgeExternalIdentityMapper.MapAsync(ValidatedExternalIdentity,
+CancellationToken)` and returns an authenticated host principal with the required
+CellBridge subject claim, or null to reject sign-in. Its input contains the
+validated provider, provider key, tenant ID and object ID. The package checks the
+native token's issuer, audience, signature, lifetime, scope and Office client ID
+before invoking the mapper. It does not copy provider-supplied CellBridge claims
+into the host principal.
+
+Adding a Google or other browser login through standard ASP.NET Core schemes
+can map another external login to the same local account. That does not establish
+native Google token acquisition or renewal in Office. Native provider support
+remains limited to the implemented Entra flow; direct personal Microsoft accounts
+are unsupported. Forms authentication and
+OAuth-to-forms fallback remain separate explicit opt-ins.
+
+Automated checks exercise signed tokens, all four server audience policies,
+policy transitions, cookie exchange and repeated discovery. Mocked browser tests
+exercise authorization, code redemption, nonce, correlation and PKCE, including
+a policy change during sign-in. They do not run native Office. Real-client open,
+save, reopen and renewal checks remain separate.
+
 ### Integration constraints
 
 Request-facing service methods take a `CellBridgeActor`. `CreateAsync` records
@@ -411,7 +650,8 @@ no I/O; mutable evaluator decisions are not a coordinated permission update.
 
 The sample account database is outside the reusable NuGet packages.
 `CellBridge.AspNetCore` packages the default login HTML, optional renderer and
-Office challenge/completion flow. The account database remains host-owned.
+Office forms challenge/completion flow and native Entra authentication. The account
+database and browser provider setup remain host-owned.
 See [login integration](package-integration.md#use-the-built-in-login-page).
 Keep passwords, tokens, cookies and connection strings out of shared captures.
 The authentication database holds cookie protection keys; protect its access

@@ -2,7 +2,9 @@
 
 The document and Lists tests use NuGet package references only. Document checks
 cover custom-provider conformance and HTTP hosting for discovery, download, HEAD
-and SOAP Cell QueryAccess.
+and SOAP Cell QueryAccess. Native Entra checks use locally signed test tokens
+and a host-owned account mapper to exercise cookie exchange, capability discovery,
+credential rejection and session expiry without the demo account database.
 
 Run from the repository root with Aspire stopped:
 
