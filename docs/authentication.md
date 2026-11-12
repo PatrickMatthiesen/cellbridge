@@ -17,13 +17,22 @@ document requests.
 and token-to-cookie exchange. WebDemo uses that packaged implementation and
 adds OpenID Connect for browser sign-in. Local browser login remains available.
 
-Direct personal Microsoft accounts are currently unsupported in CellBridge's
-native Office integration. The tested consumer challenge was rejected by Office's
-MSA resource validation before authentication. This is a boundary of the current
-CellBridge integration and tested flow, not a claim that Microsoft products
-universally reject personal accounts. A tenant-issued guest identity is a separate
-login context; inviting users into a tenant does not meet direct sign-in without
-an invitation.
+Direct personal Microsoft account sign-in without tenant invitations is currently
+unsupported in CellBridge's native Office integration. Our investigation found
+that the native Office personal-account/LiveID path we tested restricts document
+resources to a specific allowlist of Microsoft domains. This restriction prevented
+direct personal-account sign-in on our custom CellBridge host.
+
+Binary analysis of the checked Office build found a hostname allowlist including
+`live.com`, `onedrive.com`, `office.com` and `outlook.com`. In the matching live
+test, Office logged `Unacceptable resourceId`, failed MSA parameter validation and
+parser result `8` before authentication. The finding applies to this investigated
+native Office flow, not all Microsoft personal-account authentication. Browser
+OpenID Connect and tenant-guest sign-in are separate flows; tenant invitations do
+not provide the broad direct access we were trying to support.
+
+Got a personal account through the maze? [Send us a tested PR](../README.md).
+We'll happily retire this footnote.
 
 Enable this explicitly through the AppHost's operator configuration:
 
