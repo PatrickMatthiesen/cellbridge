@@ -95,7 +95,7 @@ jobs:
         run: >-
           dotnet test ${{ matrix.project }} -m:1 -c Release --nologo --verbosity minimal
           --logger trx --results-directory artifacts/release-tests
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: release-tests-${{ matrix.suite }}-${{ github.sha }}
@@ -132,7 +132,7 @@ jobs:
       - run: python -m pytest tools/capture tools/testing -q
       - run: python tools/verify_packages.py
       - run: python tools/check_release.py --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nuget-release-${{ github.sha }}
           path: |
