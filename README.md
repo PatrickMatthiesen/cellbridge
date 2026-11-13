@@ -177,6 +177,8 @@ own disposable hosts by default. Remote and desktop checks remain opt-in.
 [MIT](LICENSE). Vendored Microsoft protocol test code retains its
 [notice](tests/CellBridge.Interop.Tests/MicrosoftProtocol/FssHttpB/NOTICE.md)
 and [license](tests/CellBridge.Interop.Tests/MicrosoftProtocol/FssHttpB/LICENSE-MIT.txt).
+Adapted synthetic-client scenarios retain a separate
+[notice and source mapping](tests/CellBridge.Interop.Tests/NOTICE-Interop-TestSuites.md).
 
 ### Microsoft protocol licensing
 

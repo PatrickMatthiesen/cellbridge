@@ -267,6 +267,10 @@ The reverse listener uses a temporary combined server PEM. Normal shutdown
 removes it; forced termination can leave a private-key file in the user's
 temporary directory. Keep certificate keys and raw captures private.
 
+For a bounded comparison of conflicting coauthor Exit behavior, use the
+[lock-exit procedure](conflicting-lock-exit.md). It separates documented SE
+server behavior, synthetic probes and actual Office-emitted requests.
+
 ## Capture a desktop scenario
 
 1. Record SharePoint/Office builds, authentication scheme, document URL and
