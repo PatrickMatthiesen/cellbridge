@@ -1,0 +1,73 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directories:
+      - "/benchmark/CellBridge.Allocations.Benchmark"
+      - "/benchmark/CellBridge.Benchmarks"
+      - "/benchmark/CellBridge.Lists.Benchmark"
+      - "/benchmark/CellBridge.Storage.Benchmark"
+      - "/examples/DocumentLibrary"
+      - "/examples/HostAuthorizedLists"
+      - "/examples/NuGetConsumer"
+      - "/src/CellBridge"
+      - "/src/CellBridge.AppHost"
+      - "/src/CellBridge.AspNetCore"
+      - "/src/CellBridge.Authentication"
+      - "/src/CellBridge.FssHttpB"
+      - "/src/CellBridge.Lists"
+      - "/src/CellBridge.Lists.AspNetCore"
+      - "/src/CellBridge.Lists.PostgreSql"
+      - "/src/CellBridge.Lists.SqlServer"
+      - "/src/CellBridge.OfficeInspectors"
+      - "/src/CellBridge.ServiceDefaults"
+      - "/src/CellBridge.Storage.FileSystem"
+      - "/src/CellBridge.Storage.InMemory"
+      - "/src/CellBridge.Storage.PostgreSql"
+      - "/src/CellBridge.Storage.SqlServer"
+      - "/src/CellBridge.WebDemo"
+      - "/tests/CellBridge.Benchmarks.Tests"
+      - "/tests/CellBridge.DocumentLibrary.Tests"
+      - "/tests/CellBridge.FssHttp.Tests"
+      - "/tests/CellBridge.FssHttpB.Tests"
+      - "/tests/CellBridge.Interop.Tests"
+      - "/tests/CellBridge.Lists.AspNetCore.Tests"
+      - "/tests/CellBridge.Lists.PostgreSql.Tests"
+      - "/tests/CellBridge.Lists.SqlServer.Packages.Tests"
+      - "/tests/CellBridge.Lists.Tests"
+      - "/tests/CellBridge.Packages.Tests"
+      - "/tests/CellBridge.Packages.Tests/CoreConsumer"
+      - "/tests/CellBridge.SqlServer.Tests"
+      - "/tests/CellBridge.Storage.SqlServer.Packages.Tests"
+      - "/tests/CellBridge.Storage.Tests"
+      - "/tests/CellBridge.TestFixtures"
+      - "/tests/CellBridge.TestInfrastructure"
+      - "/tests/CellBridge.WebDemo.Tests"
+      - "/tests/OfficeInspectors.Adapter"
+      - "/tools/CellBridge.Admin"
+      - "/tools/CellBridge.FssHttpB.Dump"
+      - "/tools/CellBridge.Lists.Setup"
+      - "/tools/CellBridge.Storage.Portability"
+      - "/tools/CellBridge.Storage.ProcessProbe"
+      - "/tools/CellBridge.Storage.Setup"
+      - "/tools/OfficeInspectors.Dump"
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: pip
+    directories:
+      - "/tools/capture"
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
