@@ -225,6 +225,83 @@ public sealed class FssHttpLockCoordinatorTests
         Assert.Equal(current, Assert.Single(document.Sessions).ClientId);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DelayedCloseExitAndSchemaReleaseCannotUnlockANewOwner(bool exclusive)
+    {
+        // Deterministically order the dangerous interleaving: A exits, B acquires,
+        // then A's delayed/retried close operations arrive. This is not a parallel
+        // race or native Office test; the oracle is internal coordinator state.
+        // Historical Word sent Exit + an OnNotSupported schema-release fallback,
+        // but successful Exit skipped that fallback. Sending Release directly is
+        // a stronger synthetic probe, not evidence Word executed it.
+        // See docs/conflicting-lock-exit.md and the interop adaptation notice.
+        var document = NewDocument();
+        var firstActor = TestActor.Value.Identity;
+        var nextActor = new SubjectIdentity("next-owner", "next", "Next owner");
+        var first = Guid.NewGuid().ToString();
+        var next = Guid.NewGuid().ToString();
+        var oldSchema = Guid.NewGuid().ToString();
+        var newSchema = Guid.NewGuid().ToString();
+        var exclusiveId = Guid.NewGuid().ToString();
+        FssHttpSubRequest Coauth(string client, string schema, string operation) => Request(
+            ("ClientID", client), ("SchemaLockID", schema), ("CoauthRequestType", operation));
+        FssHttpSubRequest Exclusive(string id, string operation) => Request(
+            ("ExclusiveLockID", id), ("ExclusiveLockRequestType", operation));
+
+        var coordinator = FssHttpLockCoordinator.For(document, firstActor);
+        Assert.Equal(LockOperationResult.Granted,
+            coordinator.ApplyCoauthSession(document, Coauth(first, oldSchema, "JoinCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Released,
+            coordinator.ApplyCoauthSession(document, Coauth(first, oldSchema, "ExitCoauthoring"), new()));
+        coordinator = FssHttpLockCoordinator.For(document, nextActor);
+        Assert.Equal(LockOperationResult.Granted, exclusive
+            ? coordinator.ApplyExclusiveLock(Exclusive(exclusiveId, "GetLock"), new())
+            : coordinator.ApplyCoauthSession(document, Coauth(next, newSchema, "JoinCoauthoring"), new()));
+
+        coordinator = FssHttpLockCoordinator.For(document, firstActor);
+        // The Exit Conflict assertion records current CellBridge behavior, not a
+        // permanent interop requirement. Documented SE Exit no-op Success may
+        // change the Exit assertion; it does not establish a different SchemaLock
+        // Release result. Current Office behavior under these conflicts is unverified.
+        for (var retry = 0; retry < 2; retry++)
+        {
+            Assert.Equal(LockOperationResult.Conflict,
+                coordinator.ApplyCoauthSession(document, Coauth(first, oldSchema, "ExitCoauthoring"), new()));
+            Assert.Equal(LockOperationResult.Conflict, coordinator.ApplySchemaLock(Request(
+                ("ClientID", first), ("SchemaLockID", oldSchema), ("SchemaLockRequestType", "ReleaseLock")), new()));
+        }
+        // Safety invariant regardless of Exit/Release response code: stale close
+        // must not remove B's live lease. Observe ownership and blocked acquisition
+        // BEFORE refresh, which could conceal deletion by reacquiring a lease.
+        var state = coordinator.Capture();
+        if (exclusive)
+        {
+            Assert.Equal(exclusiveId, state.Exclusive!.Id);
+            Assert.Equal(nextActor.Subject, state.Exclusive.OwnerSubject);
+        }
+        else
+        {
+            var lease = Assert.Single(state.SchemaOwners);
+            Assert.Equal(next, lease.Client);
+            Assert.Equal(newSchema, lease.Id);
+            Assert.Equal(nextActor.Subject, lease.OwnerSubject);
+            Assert.Equal(Guid.Parse(next), Assert.Single(document.Sessions).ClientId);
+        }
+        Assert.Equal(LockOperationResult.Conflict,
+            coordinator.ApplyExclusiveLock(Exclusive(Guid.NewGuid().ToString(), "GetLock"), new()));
+        coordinator = FssHttpLockCoordinator.For(document, nextActor);
+        Assert.Equal(LockOperationResult.Refreshed, exclusive
+            ? coordinator.ApplyExclusiveLock(Exclusive(exclusiveId, "RefreshLock"), new())
+            : coordinator.ApplyCoauthSession(document, Coauth(next, newSchema, "RefreshCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Released, exclusive
+            ? coordinator.ApplyExclusiveLock(Exclusive(exclusiveId, "ReleaseLock"), new())
+            : coordinator.ApplyCoauthSession(document, Coauth(next, newSchema, "ExitCoauthoring"), new()));
+        Assert.Equal(LockOperationResult.Granted,
+            coordinator.ApplyExclusiveLock(Exclusive(Guid.NewGuid().ToString(), "GetLock"), new()));
+    }
+
     [Fact]
     public void SchemaLock_AllowsAnotherClientWithTheSameSchemaId()
     {

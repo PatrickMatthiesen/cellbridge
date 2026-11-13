@@ -61,3 +61,28 @@ checks concurrent coauthor joins, persisted subject ownership, session hijack
 rejection and independent departure. That test requires the disposable fixture
 and skips an external endpoint override. These HTTP tests do not qualify native
 desktop coauthoring or edit propagation.
+
+## Stateful synthetic clients
+
+`StatefulCoauthoringTests` selectively adapts OfficeDev S02 scenarios for
+same-schema sharing, incompatible schemas, duplicate operations and exclusive
+lock fencing. `EditorKnowledgeInteropTests` checks editor-partition knowledge
+as clients join and depart across the two HTTP hosts. The tests observe SOAP
+responses and independently decoded FSSHTTPB responses, without reading the
+server's stored coordination state. The conflicting Exit assertions preserve
+current CellBridge lock errors, which differ from documented SharePoint SE
+Success responses. They are regression tests, not SE compatibility proof.
+
+The editor-knowledge test transfers knowledge between clients and locates a
+small editor stream by its header in independently decoded payloads. It does
+not traverse object references or reconstruct a complete graph per independent
+client. Knowledge suppression and editor membership are the bounded assertions.
+
+Existing save tests already cover S13-related expected-index conflicts,
+applied-index and added-element acknowledgements, plus identical save retries
+across hosts. They remain in place. The new scenarios do not qualify Office
+UI, authentication negotiation, document merging or native retry behavior.
+A completed request whose response the synthetic client ignores models a lost
+acknowledgement; it does not inject a transport failure before commit.
+
+See [scenario provenance and MIT notice](NOTICE-Interop-TestSuites.md).
