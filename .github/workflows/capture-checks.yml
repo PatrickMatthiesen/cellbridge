@@ -2,15 +2,6 @@ name: Capture and tooling checks
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - 'tools/capture/**'
-      - 'tools/testing/**'
-      - 'tools/verify_packages.py'
-      - 'tools/package_manifest.py'
-      - 'tools/check_release.py'
-      - 'tools/publish_packages.py'
-      - 'testdata/**'
-      - '.github/workflows/capture-checks.yml'
   push:
     branches: [main]
     paths:
