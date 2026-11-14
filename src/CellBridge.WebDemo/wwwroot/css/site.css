@@ -7,9 +7,11 @@ html { background: var(--paper); }
 body { margin: 0; color: var(--ink); background: radial-gradient(circle at 80% 0%, rgba(224, 201, 145, .24), transparent 31rem), var(--paper); font-family: Manrope, 'Segoe UI', sans-serif; }
 .shell { max-width: 1160px; margin: auto; padding: 40px 32px 64px; }
 .masthead { border-bottom: 1px solid var(--ink); padding: 0 0 56px; }
+.brand { display: inline-block; max-width: 100%; border-radius: 8px; }
+.brand img { display: block; width: 260px; max-width: 100%; height: auto; }
+.brand:focus-visible { outline: 2px solid var(--orange); outline-offset: 4px; }
 .eyebrow, .count-label, .file-meta, .file-path, .version, .page-note, .unsupported, kbd { font-family: 'DM Mono', Consolas, monospace; }
 .eyebrow { color: var(--green); font-size: .72rem; letter-spacing: .15em; text-transform: uppercase; }
-.pulse { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 5px rgba(82, 124, 98, .14); }
 .masthead-row { display: flex; align-items: end; justify-content: space-between; gap: 40px; margin-top: 44px; }
 h1 { margin: 0; font-size: clamp(3.5rem, 8vw, 7.1rem); line-height: .95; letter-spacing: -.035em; font-weight: 600; }
 h1 em { color: var(--orange); font-family: 'Playfair Display', Georgia, serif; font-weight: 600; letter-spacing: -.06em; }

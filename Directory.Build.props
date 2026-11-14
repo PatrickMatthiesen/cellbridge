@@ -3,6 +3,7 @@
     <Version>0.1.0-beta.6</Version>
     <CellBridgePackageVersion Condition="'$(CellBridgePackageVersion)' == ''">$(Version)</CellBridgePackageVersion>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>cellbridge-icon.png</PackageIcon>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
@@ -13,6 +14,7 @@
     <Description>Experimental Office document synchronization through MS-FSSHTTP and MS-FSSHTTPB.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)src/CellBridge.WebDemo/wwwroot/images/cellbridge-icon.png" Pack="true" PackagePath="/cellbridge-icon.png" />
     <None Include="$(MSBuildThisFileDirectory)docs/package-readme.md" Pack="true" PackagePath="README.md"
           Condition="'$(MSBuildProjectName)' != 'CellBridge.Lists' and '$(MSBuildProjectName)' != 'CellBridge.Lists.PostgreSql' and '$(MSBuildProjectName)' != 'CellBridge.Lists.SqlServer' and '$(MSBuildProjectName)' != 'CellBridge.Lists.AspNetCore'" />
   </ItemGroup>

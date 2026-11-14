@@ -1,5 +1,7 @@
 # CellBridge customer workspace lists
 
+![CellBridge logo](https://raw.githubusercontent.com/PatrickMatthiesen/cellbridge/main/src/CellBridge.WebDemo/wwwroot/images/cellbridge-logo.png)
+
 Optional .NET 11 libraries for typed customer-workspace lists. These libraries
 use a native list API and are independent of CellBridge's Office synchronization
 protocols.
