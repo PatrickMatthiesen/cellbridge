@@ -2,9 +2,9 @@
   <PropertyGroup><TargetFramework>net11.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="11.0.0-rc.3.26522.148" />
-    <PackageReference Include="Microsoft.IdentityModel.Validators" Version="8.19.2" />
-    <PackageReference Include="StackExchange.Redis" Version="3.4.29" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="11.0.0" />
+    <PackageReference Include="Microsoft.IdentityModel.Validators" Version="8.23.0" />
+    <PackageReference Include="StackExchange.Redis" Version="3.4.35" />
     <ProjectReference Include="../CellBridge/CellBridge.csproj" />
   </ItemGroup>
   <ItemGroup>
