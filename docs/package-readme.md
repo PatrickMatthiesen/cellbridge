@@ -1,5 +1,7 @@
 # CellBridge
 
+![CellBridge logo](https://raw.githubusercontent.com/PatrickMatthiesen/cellbridge/main/src/CellBridge.WebDemo/wwwroot/images/cellbridge-logo.png)
+
 CellBridge implements MS-FSSHTTP and MS-FSSHTTPB for ASP.NET Core hosts on .NET 11.
 It is experimental software. The packages contain the protocol
 libraries, reusable host and storage providers. API and storage compatibility

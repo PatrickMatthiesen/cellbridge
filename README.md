@@ -1,5 +1,7 @@
 # CellBridge
 
+<p><img src="src/CellBridge.WebDemo/wwwroot/images/cellbridge-logo.png" alt="CellBridge logo" width="420" height="112" /></p>
+
 [![Build and tests](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml/badge.svg?branch=main)](https://github.com/PatrickMatthiesen/cellbridge/actions/workflows/capture-kit.yml)
 [![.NET 11](https://img.shields.io/badge/.NET-11-512BD4?logo=dotnet&logoColor=white)](src/CellBridge/CellBridge.csproj)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
