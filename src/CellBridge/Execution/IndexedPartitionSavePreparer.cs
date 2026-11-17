@@ -98,6 +98,9 @@ public static class IndexedPartitionSavePreparer
                     return Reject(operation.RequestId, CellErrorCode.ReferencedDataElementNotFound, "Missing expected storage index in request package.");
                 expected = StorageIndexPatch.Read(expectedElement);
             }
+            // Check coherency before resolving references. This also satisfies
+            // Favor Coherency Failure Over Not Found (0x08): a missing referenced
+            // element cannot mask an already demonstrable mapping conflict.
             if (!StorageIndexPatch.IsCoherent(currentMappings, updates, expected, (put.Flags & 1) != 0))
                 return Reject(operation.RequestId, CellErrorCode.CoherencyFailure, "An affected storage-index mapping is no longer coherent.");
             var addedIds = incoming.Where(pair => pair.Value.DataElementType != DataElementType.StorageIndexDataElementData &&
@@ -151,7 +154,7 @@ public static class IndexedPartitionSavePreparer
                 element.DataElementExtendedGuid.Equals(put.StorageIndex))
                 .Select(element => IndexedDocumentGraph.ReadMetadata(scope, element)).ToArray();
             var overlay = new CandidateSource(scope, index, before.StorageIndex, updates,
-                new IndexedGraphOverlaySource(scope, records, currentSource), currentSource);
+                new IndexedGraphOverlaySource(scope, records, currentSource), currentSource, loader);
             var manifestMapping = await overlay.FindMappingAsync(scope, index, new(IndexedMappingKind.Manifest), cancellationToken);
             ProtocolStorageManifestRecord? storageManifest = null;
             if (manifestMapping is not null && !IsNull(manifestMapping.Target))
@@ -390,6 +393,8 @@ public static class IndexedPartitionSavePreparer
                 DeliveryOperationId = before.Kind == 0 ? Guid.NewGuid() : null,
             });
         }
+        catch (MissingReferencedElementException error)
+        { return Reject(operation.RequestId, CellErrorCode.ReferencedDataElementNotFound, error.Message); }
         catch (Exception error) when (error is InvalidDataException or EndOfStreamException or ArgumentException or OverflowException)
         { return Reject(operation.RequestId, CellErrorCode.InvalidObject, error.Message); }
     }
@@ -519,7 +524,7 @@ public static class IndexedPartitionSavePreparer
     }
 
     private sealed class CandidateSource(IndexedGraphScope scope, ExtendedId index, ExtendedId? previousIndex,
-        IReadOnlyList<StorageIndexMapping> updates, IIndexedGraphSource metadata, IIndexedGraphSource current) : IIndexedGraphSource
+        IReadOnlyList<StorageIndexMapping> updates, IIndexedGraphSource metadata, IIndexedGraphSource current, Loader loader) : IIndexedGraphSource
     {
         private readonly Dictionary<IndexedMappingKey, StorageIndexMapping> changed = updates.ToDictionary(Key);
         public HashSet<ExtendedId> ReferencedElements { get; } = [];
@@ -536,6 +541,12 @@ public static class IndexedPartitionSavePreparer
         public async ValueTask<IndexedRevisionManifest?> ReadRevisionAsync(IndexedGraphScope scope, ExtendedId manifest, CancellationToken cancellationToken = default)
         {
             var revision = await metadata.ReadRevisionAsync(scope,manifest,cancellationToken);
+            if (revision is null)
+            {
+                // Distinguish an absent immutable element from one with the wrong type.
+                _ = await loader.ReadAsync(manifest, cancellationToken);
+                throw new InvalidDataException("A revision reference does not identify a revision manifest.");
+            }
             if (revision is not null)
             {
                 ReferencedElements.Add(revision.ElementId);
@@ -547,6 +558,11 @@ public static class IndexedPartitionSavePreparer
         public async ValueTask<ImmutableArray<IndexedObjectDefinition>> ReadGroupAsync(IndexedGraphScope scope, ExtendedId group, CancellationToken cancellationToken = default)
         {
             var objects = await metadata.ReadGroupAsync(scope,group,cancellationToken);
+            if (objects.IsDefault)
+            {
+                _ = await loader.ReadAsync(group, cancellationToken);
+                throw new InvalidDataException("An object group reference does not identify an object group.");
+            }
             ReferencedElements.Add(group);
             ReferencedGroups.Add(group);
             if (!objects.IsDefault)
@@ -646,6 +662,8 @@ public static class IndexedPartitionSavePreparer
         return new(Path.Combine(Path.GetTempPath(), "cellbridge-indexed-save-" + Guid.NewGuid().ToString("N")), options);
     }
 
+    private sealed class MissingReferencedElementException() : Exception("Missing referenced immutable graph element.");
+
     private sealed class Loader(IndexedGraphScope scope, IIndexedSaveSource source, IContentStore content,
         StorageLimits limits, Dictionary<ExtendedId, DataElement> incoming, IEnumerable<GraphElementState> known)
     {
@@ -677,7 +695,7 @@ public static class IndexedPartitionSavePreparer
                 foreach (var id in missingDescriptors)
                 {
                     if (!byId.TryGetValue(id, out var descriptor))
-                        throw new InvalidDataException("Missing referenced immutable graph element.");
+                        throw new MissingReferencedElementException();
                     descriptors.Add(id, descriptor);
                 }
             }
@@ -710,7 +728,7 @@ public static class IndexedPartitionSavePreparer
             if (!descriptors.TryGetValue(id, out var descriptor))
             {
                 descriptor = (await source.ReadElementsAsync(scope, [id], ct)).SingleOrDefault(value => value.Id == id)
-                    ?? throw new InvalidDataException("Missing referenced immutable graph element.");
+                    ?? throw new MissingReferencedElementException();
                 descriptors.Add(id, descriptor);
             }
             var bytes = await content.ReadVerifiedAsync(descriptor.Payload, limits.MaxObjectBytes, ct);

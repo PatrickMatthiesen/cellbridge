@@ -262,6 +262,15 @@ test coverage. It is not an exhaustive Office conformance audit.
 | Native sharing | Owner-only service APIs now read, grant and revoke stored access with lifecycle and authority checks. Native Share endpoints and host recipient resolution are not implemented. OneDrive traffic exposed CSOM sharing reads and `/_vti_bin/DocumentSharing.svc`; see [protocol profiles](office-protocol-profiles.md#native-sharing). Email invitations and anonymous links are not supported. |
 | WOPI integration | A host adapter must use indexed APIs, supply a production conditional revision destination and qualify OOS framing. CSPP Plus coauthor locks, chunk operations and sequence operations are not implemented by the RTC hub. |
 
+Reference traffic includes server-originated channel-4 `updateNotification` envelopes
+with `ChangeToken`, `SyncToken`, `SubscriptionId` and source-app fields. The retained
+Excel Core example is capture `worktree-20261030T222911Z-live-b04ed797`, flow
+`cde15950-5a61-4b55-bb07-4557a988476f`, frame `00000056.json` in the private evidence
+dataset. This establishes a payload shape, but does not establish token generation,
+subscription identity or a controlled correlation with a persisted package revision.
+The publication integration remains blocked on that evidence. Relayed client
+notifications and subscription acknowledgements do not establish this contract.
+
 ## Automated checks
 
 The [integration fixtures](automated-testing.md) reuse `CellBridge.AppHost` with
