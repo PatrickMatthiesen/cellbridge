@@ -12,6 +12,46 @@ namespace CellBridge.Storage.Tests;
 public sealed class FilePartitionSaveTests
 {
     [Theory]
+    [InlineData(false, false, DataElementType.StorageManifestDataElementData)]
+    [InlineData(false, true, DataElementType.StorageManifestDataElementData)]
+    [InlineData(true, false, DataElementType.StorageManifestDataElementData)]
+    [InlineData(true, true, DataElementType.StorageManifestDataElementData)]
+    [InlineData(false, false, DataElementType.RevisionManifestDataElementData)]
+    [InlineData(false, true, DataElementType.RevisionManifestDataElementData)]
+    [InlineData(true, false, DataElementType.RevisionManifestDataElementData)]
+    [InlineData(true, true, DataElementType.RevisionManifestDataElementData)]
+    [InlineData(false, false, DataElementType.ObjectGroupDataElementData)]
+    [InlineData(false, true, DataElementType.ObjectGroupDataElementData)]
+    [InlineData(true, false, DataElementType.ObjectGroupDataElementData)]
+    [InlineData(true, true, DataElementType.ObjectGroupDataElementData)]
+    public async Task FavorCoherencyChecksMappingsDespiteMissingReferencedElement(bool postgreSql, bool stale, DataElementType missingType)
+    {
+        await using var context = new ProviderContext(postgreSql);
+        var document = await context.CreateAsync("/favor.docx", MinimalDocx.Create("before"));
+        var request = Proposal(document, MinimalDocx.Create("candidate"));
+        var put = Assert.IsType<PutChangesSubRequestData>(request.SubRequests[0].Data);
+        put.Flags |= 0x08;
+        // Leave the index and expected mappings available, but omit a referenced
+        // immutable element that has never existed in the repository.
+        var existingIds = document.Graph.Elements.Select(element => element.DataElementExtendedGuid).ToHashSet();
+        Assert.True(request.DataElementPackage!.DataElements.RemoveAll(element =>
+            element.DataElementType == missingType && !existingIds.Contains(element.DataElementExtendedGuid)) > 0);
+        if (stale)
+        {
+            AssertSucceeded(await context.ExecuteAsync(document, Proposal(document, MinimalDocx.Create("winner"))));
+            document = await context.ReadAsync(document.Head.ResourceId);
+        }
+        var before = await context.StateJsonAsync(document);
+        var execution = await context.ExecuteAsync(document, request);
+        var result = Assert.Single(execution.Response.SubResponses);
+        Assert.True(result.Status);
+        Assert.Equal((ulong)(stale ? CellErrorCode.CoherencyFailure : CellErrorCode.ReferencedDataElementNotFound),
+            result.Error!.ErrorCode);
+        Assert.Empty(execution.AcceptedSaves);
+        await AssertUnchangedAsync(context, document, before);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task RecordedExcelSaveIgnoresReservedBitsAndReopensWorkbookGraph(bool postgreSql)
@@ -291,6 +331,10 @@ public sealed class FilePartitionSaveTests
     [InlineData(true, "last-partial")]
     [InlineData(false, "alternate-coherency")]
     [InlineData(true, "alternate-coherency")]
+    [InlineData(false, "full-replace")]
+    [InlineData(true, "full-replace")]
+    [InlineData(false, "rooted-mappings")]
+    [InlineData(true, "rooted-mappings")]
     [InlineData(false, "editors")]
     [InlineData(true, "editors")]
     public async Task UnsupportedUploadRejectsWithoutPublishingState(bool postgreSql, string mode)
@@ -305,6 +349,8 @@ public sealed class FilePartitionSaveTests
             case "partial": put.Flags = 0x02; break;
             case "last-partial": put.Flags = 0x04; break;
             case "alternate-coherency": put.AdditionalFlagsBits = 0x08; break;
+            case "full-replace": put.AdditionalFlagsBits = 0x10; break;
+            case "rooted-mappings": put.AdditionalFlagsBits = 0x20; break;
             case "editors": request.SubRequests[0].TargetPartitionId = StoredDocument.EditorsTablePartitionId; break;
             default: throw new ArgumentOutOfRangeException(nameof(mode));
         }
