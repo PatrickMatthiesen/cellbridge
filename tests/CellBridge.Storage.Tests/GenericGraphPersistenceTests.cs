@@ -206,7 +206,7 @@ public class GenericGraphPersistenceTests
         f.Elements.RemoveAll(e => e.DataElementExtendedGuid.Equals(f.Blob));
         var result = await service.ExecuteAsync(initial.ResourceId, DocumentPartitionKind.FileContents,
             await Save(service, initial, f), new Dictionary<string, string>(), TestActor.Value);
-        Assert.Equal((ulong)CellErrorCode.InvalidObject, Assert.Single(result.Response.SubResponses).Error!.ErrorCode);
+        Assert.Equal((ulong)CellErrorCode.ReferencedDataElementNotFound, Assert.Single(result.Response.SubResponses).Error!.ErrorCode);
         Assert.Equal(initial, await provider.Documents.FindAsync(new DocumentIdentity.Resource(initial.ResourceId)));
     }
 
