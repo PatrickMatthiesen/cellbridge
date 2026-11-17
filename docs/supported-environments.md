@@ -37,11 +37,14 @@ qualify physical power loss. Record a successful run's environment before adding
 a concrete configuration to a deployment's supported matrix.
 
 The repository selects the .NET 11 SDK pinned in `global.json`, currently
-`11.0.100-rc.3.26522.148`. Prerelease SDKs are enabled while .NET 11 is a
-release candidate. See Microsoft's
+`11.0.100`. Prerelease SDKs are disabled. See Microsoft's
 [SDK selection rules](https://learn.microsoft.com/en-us/dotnet/core/tools/global-json).
 Retain `dotnet --info`, the environment report and test results for each
 qualification run.
+
+The PostgreSQL EF provider is `11.0.0-rc.3` and requires EF Core
+`11.0.0-rc.3.26522.148` exactly. Keep the EF Core packages and Identity EF
+integration on that version until a compatible PostgreSQL provider is available.
 
 ## Limits and recovery
 

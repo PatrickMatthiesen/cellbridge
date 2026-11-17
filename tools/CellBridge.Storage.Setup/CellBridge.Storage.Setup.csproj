@@ -5,7 +5,7 @@
     <ProjectReference Include="../../src/CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
     <ProjectReference Include="../../src/CellBridge.Lists.SqlServer/CellBridge.Lists.SqlServer.csproj" />
     <ProjectReference Include="../../src/CellBridge.Storage.SqlServer/CellBridge.Storage.SqlServer.csproj" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="11.0.0-rc.3.26522.148" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="11.0.0" />
   </ItemGroup>
   <ItemGroup><ProjectReference Include="../../src/CellBridge.Authentication/CellBridge.Authentication.csproj" /></ItemGroup>
 </Project>
