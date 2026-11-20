@@ -32,7 +32,7 @@
     <ProjectReference Include="../../src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Aspire.Hosting.Dotnet" Version="17.1.0-preview.1.26566.9" />
+    <PackageReference Include="Aspire.Hosting.Dotnet" Version="17.1.0-preview.1.26569.8" />
     <ProjectReference Include="../CellBridge.TestInfrastructure/CellBridge.TestInfrastructure.csproj" />
     <ProjectReference Include="../CellBridge.TestFixtures/CellBridge.TestFixtures.csproj" />
   </ItemGroup>
