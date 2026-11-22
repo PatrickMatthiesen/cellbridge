@@ -315,6 +315,8 @@ internal sealed class ExcelWorksheet
         var movements = new Dictionary<ExcelCellValue, ValueMovement>();
         // Keep raw formula matches and also look for references Excel adjusted during a shift.
         var formulaMovements = new Dictionary<ExcelCellValue, ValueMovement>();
+        // A shift can change both signatures. Track formula additions and removals by row and column.
+        var formulaChanges = new Dictionary<(bool IsRow, int Index), bool>();
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
@@ -324,8 +326,13 @@ internal sealed class ExcelWorksheet
             if (Equivalent(before, after))
                 continue;
 
+            var hadFormula = before.Type == ExcelCellType.Formula;
+            var hasFormula = after.Type == ExcelCellType.Formula;
+            if (hadFormula != hasFormula && HasAlignedFormulaChange(address, added: hasFormula))
+                return true;
+
             RecordMovement(movements, before, after, address);
-            if (before.Type == ExcelCellType.Formula || after.Type == ExcelCellType.Formula)
+            if (hadFormula || hasFormula)
                 RecordMovement(formulaMovements, RelativeFormula(before, address), RelativeFormula(after, address), address,
                     formulasOnly: true);
         }
@@ -336,12 +343,30 @@ internal sealed class ExcelWorksheet
             if (Find(address) is not null)
                 continue;
             var after = remote.Value(cell, address);
+            var hasFormula = after.Type == ExcelCellType.Formula;
+            if (hasFormula && HasAlignedFormulaChange(address, added: true))
+                return true;
+
             RecordMovement(movements, ExcelCellValue.Blank, after, address);
-            if (after.Type == ExcelCellType.Formula)
+            if (hasFormula)
                 RecordMovement(formulaMovements, ExcelCellValue.Blank, RelativeFormula(after, address), address);
         }
 
         return HasMovement(movements.Values) || HasMovement(formulaMovements.Values);
+
+        bool HasAlignedFormulaChange(CellAddress address, bool added) =>
+            HasOppositeFormulaChange((true, address.Row), added) ||
+            HasOppositeFormulaChange((false, address.Column), added);
+
+        bool HasOppositeFormulaChange((bool IsRow, int Index) axis, bool added)
+        {
+            if (formulaChanges.TryGetValue(axis, out var previouslyAdded))
+                return previouslyAdded != added;
+
+            _package.Charge(64);
+            formulaChanges.Add(axis, added);
+            return false;
+        }
     }
 
     private static ExcelCellValue RelativeFormula(ExcelCellValue value, CellAddress address) =>

@@ -250,6 +250,23 @@ public sealed class ExcelWorkbookTests
         Assert.Null(result.Package);
     }
 
+    [Theory]
+    [InlineData("<row r='2'><c r='B2'><f>A1+A3</f></c></row>",
+        "<row r='3'><c r='B3'><f>A1+A4</f></c></row>", "C2")]
+    [InlineData("<row r='2'><c r='A2'><f>$B$2</f></c></row>",
+        "<row r='3'><c r='A3'><f>$B$3</f></c></row>", "C2")]
+    [InlineData("<row r='2'><c r='B2'><f>A1+C1</f></c></row>",
+        "<row r='2'><c r='C2'><f>A1+D1</f></c></row>", "B3")]
+    public void InsertingARowOrColumnThatMovesAFormulaConflictsAtABlankAddress(
+        string before, string after, string address)
+    {
+        var result = ExcelWorkbook.MergeCells(Workbook(before), Workbook(after), 4,
+            [new(address, ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
     [Fact]
     public void SortWithAThreeCellCycleConflictsAtABlankAddress()
     {
@@ -282,6 +299,27 @@ public sealed class ExcelWorkbookTests
             ExcelWorkbook.ReadRange(result.Package!, 4, "A1:D1").Select(cell => cell.Value.RawValue));
     }
 
+    [Theory]
+    [InlineData("B1+1", "B1+2")]
+    [InlineData(null, "B1+1")]
+    [InlineData("B1+1", null)]
+    public void DisjointEditsMergeWithAnIsolatedFormulaChange(string? before, string? after)
+    {
+        var formula = before is null ? "" : $"<c r='A1'><f>{before}</f></c>";
+        var original = Workbook($"<row r='1'>{formula}<c r='B1'><v>2</v></c></row>");
+        var remoteValue = after is null ? ExcelCellValue.Blank : ExcelCellValue.Formula(after);
+        var latest = Edit(original, new ExcelCellEdit("A1", remoteValue));
+        var localValue = ExcelCellValue.Number(5);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C2", localValue)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        var package = Assert.IsType<byte[]>(result.Package);
+        Validate(package);
+        Assert.Equal(remoteValue, Assert.Single(ExcelWorkbook.ReadRange(package, 4, "A1")).Value);
+        Assert.Equal(localValue, Assert.Single(ExcelWorkbook.ReadRange(package, 4, "C2")).Value);
+    }
+
     [Fact]
     public void RejectsWritesIntoProtectedMergedSharedOrSpillCells()
     {
@@ -309,6 +347,20 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelCellValue.Number(11), cells[0].CachedValue);
         Assert.True(cells[1].Calculated);
         Assert.Equal(ExcelCellValue.String(""), cells[1].CachedValue);
+    }
+
+    [Fact]
+    public void SharedFormulaFollowerPreservesDefinedNamesOutsideTheCellGrid()
+    {
+        var original = Workbook(
+            "<row r='1'><c r='B1'><f t='shared' si='0' ref='B1:C2'>SUM(XFE1,A1048577,A1,$A$1)</f></c></row>" +
+            "<row r='2'><c r='C2'><f t='shared' si='0'/></c></row>",
+            definedNames: "<definedName name='XFE1'>1</definedName><definedName name='A1048577'>2</definedName>");
+        Validate(original);
+
+        var follower = Assert.Single(ExcelWorkbook.ReadRange(original, 4, "C2"));
+
+        Assert.Equal(ExcelCellValue.Formula("SUM(XFE1,A1048577,B2,$A$1)"), follower.Value);
     }
 
     [Fact]
@@ -402,7 +454,7 @@ public sealed class ExcelWorkbookTests
 
     private static byte[] Workbook(string rows, string beforeData = "", string afterData = "", bool date1904 = false,
         string? calculationChain = null, string[]? sharedStrings = null, bool nonSeekableZip = false,
-        bool reverseSheets = false, string? tableRange = null)
+        bool reverseSheets = false, string? tableRange = null, string? definedNames = null)
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string workbookType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
@@ -440,7 +492,8 @@ public sealed class ExcelWorkbookTests
                 Relationship("root", "officeDocument", "xl/workbook.xml") + "</Relationships>");
             Add("xl/workbook.xml", $"<workbook xmlns='{Main}' xmlns:r='{OfficeRels}'>" +
                 (date1904 ? "<workbookPr date1904='1'/>" : "") +
-                "<sheets>" + (reverseSheets ? second + first : first + second) + "</sheets></workbook>");
+                "<sheets>" + (reverseSheets ? second + first : first + second) + "</sheets>" +
+                (definedNames is null ? "" : $"<definedNames>{definedNames}</definedNames>") + "</workbook>");
             Add("xl/_rels/workbook.xml.rels", $"<Relationships xmlns='{PackageRels}'>" +
                 Relationship("rId1", "worksheet", "worksheets/sheet1.xml") +
                 Relationship("rId2", "worksheet", "worksheets/sheet2.xml") +

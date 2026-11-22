@@ -182,9 +182,17 @@ internal sealed class DocumentSessionGraph
         var indexId = save.PutChangesResponse?.AppliedStorageIndexID;
         if (indexId is null || indexId.IsNull)
             throw new InvalidDataException("Save omitted its applied storage index identifier.");
-        var delta = response.DataElementPackage?.DataElements.SingleOrDefault(element =>
-            element.DataElementExtendedGuid.Equals(indexId) && element.DataElementType == DataElementType.StorageIndexDataElementData)
-            ?? throw new InvalidDataException("Save omitted its applied storage index element.");
+        DataElement? delta = null;
+        foreach (var element in response.DataElementPackage?.DataElements ?? [])
+        {
+            if (!element.DataElementExtendedGuid.Equals(indexId))
+                continue;
+            if (delta is not null || element.DataElementType != DataElementType.StorageIndexDataElementData)
+                throw new InvalidDataException("Save returned a duplicate or invalid applied storage index element.");
+            delta = element;
+        }
+        if (delta is null)
+            throw new InvalidDataException("Save omitted its applied storage index element.");
 
         var mappings = StorageIndexPatch.Read(Index).ToDictionary(MappingKey);
         foreach (var mapping in StorageIndexPatch.Read(delta))

@@ -136,9 +136,15 @@ internal static partial class ExcelFormula
 
     private static string ShiftCell(string text, int rowOffset, int columnOffset, bool relative)
     {
-        var separator = text[0] == '$' ? 1 : 0;
+        var columnStart = text[0] == '$' ? 1 : 0;
+        var separator = columnStart;
         while (separator < text.Length && char.IsAsciiLetter(text[separator]))
             separator++;
+        var rowStart = text[separator] == '$' ? separator + 1 : separator;
+        if (ColumnNumber(text.AsSpan(columnStart, separator - columnStart)) is < 1 or > CellAddress.LastColumn ||
+            int.Parse(text.AsSpan(rowStart), CultureInfo.InvariantCulture) is < 1 or > CellAddress.LastRow)
+            return text;
+
         var column = ShiftAxis(text[..separator], columnOffset, row: false, relative);
         var row = ShiftAxis(text[separator..], rowOffset, row: true, relative);
         return column is null || row is null ? "#REF!" : column + row;
@@ -169,7 +175,7 @@ internal static partial class ExcelFormula
         return row ? number.ToString(CultureInfo.InvariantCulture) : new CellAddress(1, number).ToString()[..^1];
     }
 
-    private static int ColumnNumber(string axis)
+    private static int ColumnNumber(ReadOnlySpan<char> axis)
     {
         var column = 0;
         foreach (var letter in axis)

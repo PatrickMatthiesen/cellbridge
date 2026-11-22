@@ -68,7 +68,8 @@ dotnet run --project tools/CellBridge.Emulator -- save "$WORKBOOK_URL" 1 B2 42
 
 Before reopening, record whether Excel shows the new value, prompts to reload,
 or reports repair. Save a disjoint edit from desktop Excel and reopen the
-workbook to check that both values survived. Stop and validate the capture.
+workbook to check that both values survived. Close Excel and let the RTC
+connection close before stopping and validating the capture.
 Confirm the emulator sent `PutChanges` and record any channel 3 notifications
 and their `FullSaveId` or `SavRev` fields. Record if no matching notification
 appeared. [Capture workflow](capture-kit.md)

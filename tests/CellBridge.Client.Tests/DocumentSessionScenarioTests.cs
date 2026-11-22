@@ -188,10 +188,12 @@ public sealed class DocumentSessionScenarioTests
     }
 
     [Theory]
-    [InlineData(false, 1, false)]
-    [InlineData(true, 2, false)]
-    [InlineData(true, 1, true)]
-    public async Task SupersededSaveWithAnAmbiguousResponseDoesNotRebase(bool overHttp, int lostReplies, bool duplicateReply)
+    [InlineData(false, 1, false, false)]
+    [InlineData(true, 2, false, false)]
+    [InlineData(true, 1, true, false)]
+    [InlineData(true, 1, false, true)]
+    public async Task SupersededSaveWithAnAmbiguousResponseDoesNotRebase(bool overHttp, int lostReplies,
+        bool duplicateReply, bool duplicateAppliedIndex)
     {
         await using var host = await ScenarioHost.StartAsync(overHttp);
         var original = OfficeDocumentTemplates.CreateExcelWorkbook();
@@ -214,6 +216,16 @@ public sealed class DocumentSessionScenarioTests
             {
                 var subresponses = Assert.Single(response.Response.Responses).SubResponses;
                 subresponses.Add(Assert.Single(subresponses));
+                return response;
+            }
+            if (duplicateAppliedIndex)
+            {
+                var subresponse = Assert.Single(Assert.Single(response.Response.Responses).SubResponses);
+                var binary = Assert.IsType<FsshttpbResponse>(subresponse.BinaryResponse);
+                var put = Assert.IsType<PutChangesSubResponseData>(Assert.Single(binary.SubResponses).Data);
+                var elements = binary.DataElementPackage!.DataElements;
+                elements.Add(Assert.Single(elements, element =>
+                    element.DataElementExtendedGuid.Equals(put.PutChangesResponse!.AppliedStorageIndexID)));
                 return response;
             }
             throw new HttpRequestException("The save response was lost.");
