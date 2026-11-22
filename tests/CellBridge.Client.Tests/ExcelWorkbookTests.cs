@@ -328,6 +328,9 @@ public sealed class ExcelWorkbookTests
     [InlineData("<col min='2' max='4' width='20'/>",
         "<col min='2' max='2' width='20'/><col min='3' max='3' width='25'/><col min='4' max='4' width='20'/>",
         ExcelWriteStatus.Success)]
+    [InlineData("<col min='2' max='2' width='12'/><col min='3' max='3' width='20'/>",
+        "<col min='2' max='2' width='20'/><col min='3' max='3' width='12'/><col min='5' max='5' width='15'/>",
+        ExcelWriteStatus.Success)]
     public void DistinguishesColumnDeletionFromWidthRangeSplit(string before, string after, ExcelWriteStatus expected)
     {
         var original = Workbook("", beforeData: $"<cols>{before}</cols>");
@@ -338,11 +341,13 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(expected, result.Status);
     }
 
-    [Fact]
-    public void UnrelatedFormulaChangesCanDifferOnlyByReferenceAnchors()
+    [Theory]
+    [InlineData("SUM($A$1)", "SUM(D5)")]
+    [InlineData("SUM(A2,$A$1)", "SUM(#REF!,D5)")]
+    public void UnrelatedFormulaChangesCanDifferByIntactReferenceAnchors(string before, string after)
     {
-        var original = Workbook("<row r='2'><c r='B2'><f>SUM($A$1)</f></c></row>");
-        var latest = Workbook("<row r='2'><c r='C2'><f>SUM(D5)</f></c></row>");
+        var original = Workbook($"<row r='2'><c r='B2'><f>{before}</f></c></row>");
+        var latest = Workbook($"<row r='2'><c r='C2'><f>{after}</f></c></row>");
 
         var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("A1", ExcelCellValue.Number(5))]);
 

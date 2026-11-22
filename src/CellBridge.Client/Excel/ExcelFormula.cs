@@ -122,28 +122,39 @@ internal static partial class ExcelFormula
     internal static string RelativeSignature(string formula, CellAddress address) =>
         RewriteReferences(formula, -address.Row, -address.Column, ReferenceRewrite.Relative);
 
-    internal static string ReferencePattern(string formula, bool ignoreAnchors, out bool hasBrokenReference)
-    {
-        var broken = false;
-        var pattern = RewriteReferences(formula, 0, 0, ReferenceRewrite.Pattern, ignoreAnchors, () => broken = true);
-        hasBrokenReference = broken;
-        return pattern;
-    }
+    internal static string ReferencePattern(string formula, bool ignoreAnchors) =>
+        RewriteReferences(formula, 0, 0, ReferenceRewrite.Pattern, ignoreAnchors);
 
     private const string CellReferenceMarker = "\0Cell\0";
+    private const string BrokenReferenceMarker = CellReferenceMarker + "??";
+
+    internal static bool HasBrokenReference(string pattern) =>
+        pattern.Contains(BrokenReferenceMarker, StringComparison.Ordinal);
+
+    // Both patterns already share the same spelling with anchors removed.
+    internal static bool CompatibleReferenceAnchors(string left, string right)
+    {
+        int search = 0;
+        while (left.IndexOf(CellReferenceMarker, search, StringComparison.Ordinal) is var marker && marker >= 0)
+        {
+            int anchors = marker + CellReferenceMarker.Length;
+            if (left[anchors] != '?' && right[anchors] != '?' &&
+                (left[anchors] != right[anchors] || left[anchors + 1] != right[anchors + 1]))
+                return false;
+            search = anchors + 2;
+        }
+        return true;
+    }
 
     private static string RewriteReferences(string formula, int rowOffset, int columnOffset, ReferenceRewrite rewrite,
-        bool ignoreAnchors = false, Action? foundBrokenReference = null)
+        bool ignoreAnchors = false)
     {
         return ReferenceToken().Replace(formula, match =>
         {
             if (match.Groups["reference"].Success)
                 return RewriteCell(match.Value, rowOffset, columnOffset, rewrite, ignoreAnchors);
             if (match.Groups["broken"].Success && rewrite == ReferenceRewrite.Pattern)
-            {
-                foundBrokenReference?.Invoke();
-                return CellReferenceMarker;
-            }
+                return ignoreAnchors ? CellReferenceMarker : BrokenReferenceMarker;
             if (match.Groups["rows"].Success)
                 return RewriteRange(match.Value, rowOffset, row: true, rewrite);
             if (match.Groups["columns"].Success)

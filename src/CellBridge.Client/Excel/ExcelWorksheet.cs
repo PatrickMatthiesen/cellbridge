@@ -318,7 +318,7 @@ internal sealed class ExcelWorksheet
         // Keep raw formula matches and also look for references Excel adjusted during a shift.
         var formulaMovements = new Dictionary<ExcelCellValue, ValueMovement>();
         // A shift can adjust references that neither raw nor relative signatures match.
-        var formulaChanges = new Dictionary<(bool IsRow, int Index, string Pattern, bool Relaxed), FormulaChange>();
+        var formulaChanges = new Dictionary<(bool IsRow, int Index, string Pattern, FormulaChange Change), FormulaPatterns>();
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
@@ -382,30 +382,30 @@ internal sealed class ExcelWorksheet
 
         bool HasAlignedFormulaChange(CellAddress address, ExcelCellValue formula, FormulaChange change)
         {
-            var pattern = ExcelFormula.ReferencePattern(formula.RawValue!, ignoreAnchors: false, out var broken);
-            if (!broken && (HasDifferentFormulaChange((true, address.Row, pattern, false), change) ||
-                HasDifferentFormulaChange((false, address.Column, pattern, false), change)))
-                return true;
-            var relaxed = ExcelFormula.ReferencePattern(formula.RawValue!, ignoreAnchors: true, out _);
-            return HasDifferentFormulaChange((true, address.Row, relaxed, true), change, broken) ||
-                HasDifferentFormulaChange((false, address.Column, relaxed, true), change, broken);
-        }
-
-        bool HasDifferentFormulaChange((bool IsRow, int Index, string Pattern, bool Relaxed) axis, FormulaChange change,
-            bool broken = false)
-        {
+            var pattern = ExcelFormula.ReferencePattern(formula.RawValue!, ignoreAnchors: false);
+            var relaxed = ExcelFormula.ReferencePattern(formula.RawValue!, ignoreAnchors: true);
+            var broken = ExcelFormula.HasBrokenReference(pattern);
             var opposite = change == FormulaChange.Introduced ? FormulaChange.Removed : FormulaChange.Introduced;
-            var brokenChange = change == FormulaChange.Introduced ? FormulaChange.BrokenIntroduced : FormulaChange.BrokenRemoved;
-            var brokenOpposite = change == FormulaChange.Introduced ? FormulaChange.BrokenRemoved : FormulaChange.BrokenIntroduced;
-            var evidence = axis.Relaxed && !broken ? brokenOpposite : opposite;
-            if (formulaChanges.TryGetValue(axis, out var previous))
+            return OnAxis(true, address.Row) || OnAxis(false, address.Column);
+
+            bool OnAxis(bool isRow, int index)
             {
-                formulaChanges[axis] = previous | change | (broken ? brokenChange : 0);
-                return (previous & evidence) != 0;
+                if (formulaChanges.TryGetValue((isRow, index, relaxed, opposite), out var previous) &&
+                    (previous.Intact.Contains(pattern) ||
+                     previous.Broken.Any(candidate => ExcelFormula.CompatibleReferenceAnchors(pattern, candidate)) ||
+                     broken && previous.Intact.Any(candidate => ExcelFormula.CompatibleReferenceAnchors(pattern, candidate))))
+                    return true;
+
+                var key = (isRow, index, relaxed, change);
+                if (!formulaChanges.TryGetValue(key, out var patterns))
+                {
+                    _package.Charge(192L + relaxed.Length * 2L);
+                    formulaChanges.Add(key, patterns = new());
+                }
+                if ((broken ? patterns.Broken : patterns.Intact).Add(pattern))
+                    _package.Charge(64L + pattern.Length * 2L);
+                return false;
             }
-            _package.Charge(64L + axis.Pattern.Length * 2L);
-            formulaChanges.Add(axis, change | (broken ? brokenChange : 0));
-            return false;
         }
     }
 
@@ -417,8 +417,13 @@ internal sealed class ExcelWorksheet
         return signature != _package.Styles.Signature(0) ? signature : null;
     }
 
-    [Flags]
-    private enum FormulaChange { Introduced = 1, Removed = 2, BrokenIntroduced = 4, BrokenRemoved = 8 }
+    private enum FormulaChange { Introduced, Removed }
+
+    private sealed class FormulaPatterns
+    {
+        internal HashSet<string> Intact { get; } = new(StringComparer.Ordinal);
+        internal HashSet<string> Broken { get; } = new(StringComparer.Ordinal);
+    }
 
     private static ExcelCellValue RelativeFormula(ExcelCellValue value, CellAddress address) =>
         value.Type == ExcelCellType.Formula
@@ -599,11 +604,45 @@ internal sealed class ExcelWorksheet
     {
         var before = ColumnLayouts().ToHashSet();
         var after = remote.ColumnLayouts().ToHashSet();
-        if (ColumnCoverage(before).SequenceEqual(ColumnCoverage(after)))
+        var beforeCoverage = ColumnCoverage(before).ToArray();
+        var afterCoverage = ColumnCoverage(after).ToArray();
+        if (beforeCoverage.SequenceEqual(afterCoverage))
             return false;
-        // Column ranges can be coalesced when inserted columns inherit the adjacent layout.
-        var removed = before.Except(after).Select(range => range.Signature).ToHashSet(StringComparer.Ordinal);
-        return after.Except(before).Any(range => removed.Contains(range.Signature));
+
+        // A matching old and new layout is evidence of movement only when at
+        // least one candidate range intersects changed column coverage.
+        _package.Charge((CellAddress.LastColumn + 2L) * sizeof(int));
+        var coverageChanges = new int[CellAddress.LastColumn + 2];
+        foreach (var (min, max) in beforeCoverage)
+        {
+            coverageChanges[min]++;
+            coverageChanges[max + 1]--;
+        }
+        foreach (var (min, max) in afterCoverage)
+        {
+            coverageChanges[min]--;
+            coverageChanges[max + 1]++;
+        }
+        int coverage = 0, changedColumns = 0;
+        for (int column = 1; column <= CellAddress.LastColumn; column++)
+        {
+            coverage += coverageChanges[column];
+            if (coverage != 0)
+                changedColumns++;
+            coverageChanges[column] = changedColumns;
+        }
+
+        var removed = before.Except(after).ToArray();
+        var added = after.Except(before).ToArray();
+        return MatchesChangedCoverage(removed, added) || MatchesChangedCoverage(added, removed);
+
+        bool MatchesChangedCoverage(IEnumerable<(int Min, int Max, string Signature)> endpoints,
+            IEnumerable<(int Min, int Max, string Signature)> other)
+        {
+            var signatures = endpoints.Where(range => coverageChanges[range.Max] != coverageChanges[range.Min - 1])
+                .Select(range => range.Signature).ToHashSet(StringComparer.Ordinal);
+            return other.Any(range => signatures.Contains(range.Signature));
+        }
     }
 
     private static IEnumerable<(int Min, int Max)> ColumnCoverage(IEnumerable<(int Min, int Max, string Signature)> ranges)
