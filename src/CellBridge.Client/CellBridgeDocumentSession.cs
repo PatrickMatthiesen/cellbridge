@@ -296,7 +296,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             await SendCoauthAsync("JoinCoauthoring", cancellationToken);
             _joinedAsWriter = true;
         }
-        catch (CellBridgeProtocolException error) when (error.ErrorCode is not ("CellRequestFail" or "SubRequestFail"))
+        catch (CellBridgeProtocolException error) when (!error.IsSoapFault && !IsAmbiguous(error))
         {
             _writerMayExist = mayHaveWriter;
             throw;

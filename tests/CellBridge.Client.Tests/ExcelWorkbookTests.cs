@@ -194,6 +194,54 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
+    [InlineData("First!A1")]
+    [InlineData("SUM(Second:Third!A1)")]
+    [InlineData("SUM(Third:Second!A1)")]
+    public void StaleFormulaConflictsWhenRowsShiftOnAReferencedWorksheet(string text)
+    {
+        var original = ExcelWorkbook.AddSheet(Workbook(
+            "<row r='1'><c r='A1'><v>11</v></c></row><row r='2'><c r='A2'><v>22</v></c></row>",
+            reverseSheets: true), "Third").Package;
+        var latest = ExcelWorkbook.AddSheet(Workbook(
+            "<row r='2'><c r='A2'><v>11</v></c></row><row r='3'><c r='A3'><v>22</v></c></row>",
+            reverseSheets: true), "Third").Package;
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", ExcelCellValue.Formula(text))],
+            policy: ExcelConflictPolicy.LocalWins);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
+    [Fact]
+    public void StaleFormulaMergesWhenAReferencedCellValueChanges()
+    {
+        var original = Workbook("<row r='1'><c r='A1'><v>11</v></c></row>");
+        var latest = Edit(original, new ExcelCellEdit("A1", ExcelCellValue.Number(22)));
+        var formula = ExcelCellValue.Formula("First!A1");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        var package = Assert.IsType<byte[]>(result.Package);
+        Assert.Equal(ExcelCellValue.Number(22), Assert.Single(ExcelWorkbook.ReadRange(package, 4, "A1")).Value);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(package, 9, "B1")).Value);
+    }
+
+    [Fact]
+    public void StaleFormulaMergesAcrossAChartSheetInAThreeDimensionalReference()
+    {
+        var original = ExcelWorkbook.AddSheet(Workbook("", reverseSheets: true, firstSheetIsChart: true), "Third").Package;
+        var latest = ExcelWorkbook.MergeCells(original, original, 9, [new("A2", ExcelCellValue.Number(22))]);
+        var formula = ExcelCellValue.Formula("SUM(Second:Third!A1)");
+
+        var result = ExcelWorkbook.MergeCells(original, Assert.IsType<byte[]>(latest.Package), 9, [new("B1", formula)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(Assert.IsType<byte[]>(result.Package), 9, "B1")).Value);
+    }
+
+    [Theory]
     [InlineData("fIrSt!A1+1", "FIRST")]
     [InlineData("\"First!A1\"&Table1[First!A1]", "Renamed")]
     [InlineData("'[1]First'!A1+[1]First!A1", "Renamed")]
@@ -848,9 +896,30 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
+    [InlineData("SUM({A1})")]
+    [InlineData("SUM({First!A1})")]
+    [InlineData("SUM({MyName})")]
+    [InlineData("SUM({1+2})")]
+    [InlineData("SUM({2%})")]
+    [InlineData("SUM({NOW()})")]
+    [InlineData("SUM({{1}})")]
+    [InlineData("SUM({-TRUE})")]
+    [InlineData("SUM({--1})")]
+    [InlineData("SUM({})")]
+    [InlineData("SUM({1;})")]
+    [InlineData("SUM({1,2;3})")]
+    [InlineData("SUM({1;2,3})")]
+    public void RejectsInvalidArrayConstants(string text)
+    {
+        Assert.Throws<ArgumentException>(() => Edit(Workbook(""), new ExcelCellEdit("A1", ExcelCellValue.Formula(text))));
+    }
+
+    [Theory]
     [InlineData("SUM(-1E-2,+.5,2^-3,100%,A1<>B1)")]
     [InlineData("SUM((A1,B1),A1:B2 B1:C2,A1:B2 2:4,2:4 A1:B2)")]
     [InlineData("IF(,SUM({1,2;3,-4}),)")]
+    [InlineData("SUM({-1E-2,+.5; 3, -4}, {1;2})")]
+    [InlineData("SUM({TRUE,false;#N/A,#REF!;\"a,\"\"b\"\";}\",\"\"})")]
     [InlineData("SUM(Table1[[#Data],[Cost'] A1]],[@X],My.Name,\\A1,XFE1)")]
     [InlineData("SUM(\"A1! +\",#REF!,#DIV/0!,NOW())")]
     [InlineData("_xlfn.LAMBDA(x,x+1)(2)")]
@@ -916,9 +985,10 @@ public sealed class ExcelWorkbookTests
         string? calculationChain = null, string[]? sharedStrings = null, bool nonSeekableZip = false,
         bool reverseSheets = false, string? tableRange = null, string? definedNames = null, bool swapStyles = false,
         string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null,
-        string firstSheetName = "First")
+        string firstSheetName = "First", bool firstSheetIsChart = false)
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
+        const string chartSheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml";
         const string workbookType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
         static string Override(string name, string type) => $"<Override PartName='/{name}' ContentType='{type}'/>";
         static string Relationship(string id, string type, string target) =>
@@ -933,6 +1003,7 @@ public sealed class ExcelWorkbookTests
             "xmlns:xr='http://schemas.microsoft.com/office/spreadsheetml/2014/revision' ";
         var revisionAttributes = firstSheetUid is null ? "" : $" xr:uid='{firstSheetUid}'";
         var ignorable = firstSheetUid is null ? "x14ac" : "x14ac xr";
+        var firstSheetTarget = firstSheetIsChart ? $"chartsheets/{firstSheetPart}" : $"worksheets/{firstSheetPart}";
         using var memory = new MemoryStream();
         using var nonSeekable = new WriteOnlyStream(memory);
         using (var zip = new ZipArchive(nonSeekableZip ? nonSeekable : memory, ZipArchiveMode.Create, leaveOpen: true))
@@ -949,7 +1020,8 @@ public sealed class ExcelWorkbookTests
                 "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>" +
                 "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>" +
                 "<Default Extension='xml' ContentType='application/xml'/>" +
-                Override("xl/workbook.xml", workbookType) + Override($"xl/worksheets/{firstSheetPart}", worksheetType) +
+                Override("xl/workbook.xml", workbookType) +
+                Override($"xl/{firstSheetTarget}", firstSheetIsChart ? chartSheetType : worksheetType) +
                 Override("xl/worksheets/sheet2.xml", worksheetType) +
                 Override("xl/styles.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml") +
                 chainType + sharedType + (tableRange is null ? "" : Override("xl/tables/table1.xml",
@@ -961,12 +1033,12 @@ public sealed class ExcelWorkbookTests
                 "<sheets>" + (reverseSheets ? second + first : first + second) + "</sheets>" +
                 (definedNames is null ? "" : $"<definedNames>{definedNames}</definedNames>") + "</workbook>");
             Add("xl/_rels/workbook.xml.rels", $"<Relationships xmlns='{PackageRels}'>" +
-                Relationship("rId1", "worksheet", $"worksheets/{firstSheetPart}") +
+                Relationship("rId1", firstSheetIsChart ? "chartsheet" : "worksheet", firstSheetTarget) +
                 Relationship("rId2", "worksheet", "worksheets/sheet2.xml") +
                 Relationship("rId3", "styles", "styles.xml") +
                 (calculationChain is null ? "" : Relationship("rId4", "calcChain", "calcChain.xml")) +
                 (sharedStrings is null ? "" : Relationship("rId5", "sharedStrings", "sharedStrings.xml")) + "</Relationships>");
-            Add($"xl/worksheets/{firstSheetPart}", $"<worksheet xmlns='{Main}' " +
+            Add($"xl/{firstSheetTarget}", firstSheetIsChart ? $"<chartsheet xmlns='{Main}'/>" : $"<worksheet xmlns='{Main}' " +
                 "xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' " +
                 "xmlns:x14ac='http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac' " +
                 revisionNamespace + $"mc:Ignorable='{ignorable}' x14ac:dyDescent='0.25'{revisionAttributes}>" + beforeData +

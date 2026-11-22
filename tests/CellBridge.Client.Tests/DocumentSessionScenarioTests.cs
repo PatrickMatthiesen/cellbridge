@@ -390,6 +390,22 @@ public sealed class DocumentSessionScenarioTests
     }
 
     [Fact]
+    public async Task JoinSoapFaultReleasesAnAcceptedWriterRegistration()
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp: true);
+        var document = await host.CreateAsync(OfficeDocumentTemplates.CreateExcelWorkbook());
+        var transport = new FaultAfterWriterJoin(host.Transport);
+
+        var error = await Assert.ThrowsAsync<CellBridgeProtocolException>(() => CellBridgeDocumentSession.OpenAsync(
+            transport, host.DocumentUrl, new() { Mode = CellBridgeDocumentSessionMode.EagerWriter }));
+
+        Assert.Equal("Server", error.ErrorCode);
+        var state = await host.ReadControlAsync(document.ResourceId);
+        Assert.Empty(state.Editors);
+        Assert.Empty(state.Coordination.SchemaOwners);
+    }
+
+    [Fact]
     public async Task DuplicateRealTimePropertyAllowsDocumentSyncWithoutRealTime()
     {
         await using var host = await ScenarioHost.StartAsync(overHttp: true, enableRealTime: true);
@@ -507,6 +523,25 @@ public sealed class DocumentSessionScenarioTests
                 return intercept(Payloads.Count, () => inner.ExecuteAsync(request, cancellationToken));
             }
             return inner.ExecuteAsync(request, cancellationToken);
+        }
+
+        public Task<ICellBridgeRealTimeChannel?> TryConnectRealTimeAsync(RealTimeConnectionTarget target,
+            CancellationToken cancellationToken = default) => inner.TryConnectRealTimeAsync(target, cancellationToken);
+    }
+
+    private sealed class FaultAfterWriterJoin(ICellBridgeClientTransport inner) : ICellBridgeClientTransport
+    {
+        public async Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, CancellationToken cancellationToken = default)
+        {
+            var execution = await inner.ExecuteAsync(request, cancellationToken);
+            if (request.Requests.SelectMany(file => file.SubRequests).Any(operation =>
+                operation.Type == SubRequestType.Coauth &&
+                operation.SubRequestDataAttributes.GetValueOrDefault("CoauthRequestType") == "JoinCoauthoring"))
+            {
+                Assert.Equal("Success", Assert.Single(Assert.Single(execution.Response.Responses).SubResponses).ErrorCode);
+                execution.Response.Fault = new("Server", "The join response was lost.", "<Fault />");
+            }
+            return execution;
         }
 
         public Task<ICellBridgeRealTimeChannel?> TryConnectRealTimeAsync(RealTimeConnectionTarget target,

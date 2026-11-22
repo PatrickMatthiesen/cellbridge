@@ -25,7 +25,7 @@ internal static partial class ExcelFormula
 
     private enum TokenKind { Name, Literal, Error, Sheet, RowRange, StructuredReference, Symbol }
     private enum Expression { Empty, Incomplete, Sheet, Value, Reference }
-    private enum Group { Root, Parentheses, Function, Array }
+    private enum Group { Root, Parentheses, Function }
 
     private readonly record struct Token(TokenKind Kind, int Start, int End);
 
@@ -39,8 +39,10 @@ internal static partial class ExcelFormula
         groups.Push(Group.Root);
         var expression = Expression.Empty;
         var previous = default(Token);
-        foreach (var token in Tokens(formula))
+        using var tokens = Tokens(formula).GetEnumerator();
+        while (tokens.MoveNext())
         {
+            var token = tokens.Current;
             var separated = previous.End < token.Start;
             var group = groups.Peek();
             var symbol = formula[token.Start];
@@ -56,32 +58,42 @@ internal static partial class ExcelFormula
                 expression = token.Kind == TokenKind.Sheet ? Expression.Sheet :
                     isReference || expression == Expression.Sheet ? Expression.Reference : Expression.Value;
             }
-            else if (symbol is '(' or '{')
+            else if (symbol == '{')
+            {
+                if (expression == Expression.Sheet || hasOperand)
+                    throw InvalidExpression();
+                ValidateArrayConstant(formula, tokens);
+                token = tokens.Current;
+                expression = Expression.Value;
+            }
+            else if (symbol == '(')
             {
                 var hasFunctionName = previous.Kind == TokenKind.Name && hasOperand;
                 var invokesResult = !separated && hasOperand && formula[previous.Start] == ')';
-                var opensFunction = symbol == '(' && (hasFunctionName || invokesResult);
+                var opensFunction = hasFunctionName || invokesResult;
                 if (opensFunction && hasFunctionName)
                     ValidateFunction(formula[previous.Start..previous.End]);
                 if (!opensFunction && (expression == Expression.Sheet ||
-                    hasOperand && !(symbol == '(' && separated && expression == Expression.Reference)))
+                    hasOperand && !(separated && expression == Expression.Reference)))
                     throw InvalidExpression();
-                groups.Push(opensFunction ? Group.Function : symbol == '(' ? Group.Parentheses : Group.Array);
+                groups.Push(opensFunction ? Group.Function : Group.Parentheses);
                 expression = Expression.Empty;
             }
             else if (symbol is ')' or '}')
             {
-                if (group == Group.Root || (symbol == '}') != (group == Group.Array))
+                if (group == Group.Root || symbol == '}')
                     throw new ArgumentException("The Excel formula delimiters are unbalanced.");
                 if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
                     throw InvalidExpression();
                 groups.Pop();
-                expression = group == Group.Array ? Expression.Value : Expression.Reference;
+                expression = Expression.Reference;
             }
-            else if (symbol is ',' or ';')
+            else if (symbol == ';')
             {
-                if (symbol == ';' && group != Group.Array)
-                    throw new ArgumentException("Use commas between arguments in invariant Excel formulas.");
+                throw new ArgumentException("Use commas between arguments in invariant Excel formulas.");
+            }
+            else if (symbol == ',')
+            {
                 if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
                     throw InvalidExpression();
                 expression = group == Group.Function ? Expression.Empty : Expression.Incomplete;
@@ -110,6 +122,47 @@ internal static partial class ExcelFormula
             throw new ArgumentException("The Excel formula delimiters are unbalanced.");
         if (expression is not (Expression.Value or Expression.Reference))
             throw InvalidExpression();
+    }
+
+    private static void ValidateArrayConstant(string formula, IEnumerator<Token> tokens)
+    {
+        var width = 0;
+        var columns = 0;
+        while (tokens.MoveNext())
+        {
+            var token = tokens.Current;
+            var signed = token.Kind == TokenKind.Symbol && formula[token.Start] is '+' or '-';
+            if (signed)
+            {
+                if (!tokens.MoveNext())
+                    throw InvalidExpression();
+                token = tokens.Current;
+            }
+
+            var constant = token.Kind switch
+            {
+                TokenKind.Literal => !signed || formula[token.Start] != '"',
+                TokenKind.Error => !signed,
+                TokenKind.Name => !signed &&
+                    (formula.AsSpan(token.Start, token.End - token.Start).Equals("TRUE", StringComparison.OrdinalIgnoreCase) ||
+                     formula.AsSpan(token.Start, token.End - token.Start).Equals("FALSE", StringComparison.OrdinalIgnoreCase)),
+                _ => false
+            };
+            if (!constant || !tokens.MoveNext() || tokens.Current.Kind != TokenKind.Symbol)
+                throw InvalidExpression();
+
+            columns++;
+            var delimiter = formula[tokens.Current.Start];
+            if (delimiter == ',')
+                continue;
+            if (delimiter is not (';' or '}') || width != 0 && columns != width)
+                throw InvalidExpression();
+            if (delimiter == '}')
+                return;
+            width = columns;
+            columns = 0;
+        }
+        throw InvalidExpression();
     }
 
     private static ArgumentException InvalidExpression() =>

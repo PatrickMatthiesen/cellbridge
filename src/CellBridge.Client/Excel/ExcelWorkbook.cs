@@ -126,9 +126,8 @@ public static class ExcelWorkbook
         }
         if (conflicts.Count > 0)
             return new ExcelMergeResult(ExcelWriteStatus.CellConflict, null, conflicts);
-        if (original is not null && FormulaSheetBindingChanged(original, current, pending.Values) is { } binding)
-            return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [],
-                $"The worksheet binding for formula reference '{binding}' changed.");
+        if (original is not null && FormulaSheetConflict(original, current, sheetId, pending.Values) is { } detail)
+            return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], detail);
 
         var changed = remote.Apply(pending);
         if (changed.Count == 0)
@@ -138,20 +137,22 @@ public static class ExcelWorkbook
         return new ExcelMergeResult(ExcelWriteStatus.Success, current.Save(), []);
     }
 
-    private static string? FormulaSheetBindingChanged(ExcelPackage original, ExcelPackage current,
+    private static string? FormulaSheetConflict(ExcelPackage original, ExcelPackage current, uint editedSheetId,
         IEnumerable<ExcelCellValue> pending)
     {
         IReadOnlyList<ExcelSheet>? originalSheets = null;
         IReadOnlyList<ExcelSheet>? currentSheets = null;
         Dictionary<string, int>? originalIndices = null;
         Dictionary<string, int>? currentIndices = null;
-        var verified = new HashSet<(int First, int Last)>();
+        var verifiedRanges = new HashSet<(int First, int Last)>();
+        var verifiedSheets = new HashSet<uint> { editedSheetId };
         foreach (var value in pending)
         {
             if (value.Type != ExcelCellType.Formula)
                 continue;
             foreach (var (first, last) in ExcelFormula.LocalSheetReferences(value.RawValue!))
             {
+                var reference = last is null ? first : $"{first}:{last}";
                 originalSheets ??= original.ListSheets();
                 currentSheets ??= current.ListSheets();
                 originalIndices ??= SheetIndices(originalSheets);
@@ -161,8 +162,8 @@ public static class ExcelWorkbook
                     !originalIndices.TryGetValue(last ?? first, out var beforeLast) ||
                     !currentIndices.TryGetValue(last ?? first, out var afterLast) ||
                     beforeLast - beforeFirst != afterLast - afterFirst)
-                    return last is null ? first : $"{first}:{last}";
-                if (!verified.Add((beforeFirst, beforeLast)))
+                    return $"The worksheet binding for formula reference '{reference}' changed.";
+                if (!verifiedRanges.Add((beforeFirst, beforeLast)))
                     continue;
 
                 var length = Math.Abs(beforeLast - beforeFirst) + 1;
@@ -171,12 +172,21 @@ public static class ExcelWorkbook
                     var step = beforeLast < beforeFirst ? -offset : offset;
                     var beforeSheet = originalSheets[beforeFirst + step];
                     var afterSheet = currentSheets[afterFirst + step];
-                    if (beforeSheet.SheetId != afterSheet.SheetId ||
-                        !string.Equals(original.SheetPath(beforeSheet.SheetId), current.SheetPath(afterSheet.SheetId),
+                    var targetId = beforeSheet.SheetId;
+                    if (targetId != afterSheet.SheetId)
+                        return $"The worksheet binding for formula reference '{reference}' changed.";
+                    if (!verifiedSheets.Add(targetId))
+                        continue;
+
+                    var isWorksheet = original.IsWorksheet(targetId);
+                    if (isWorksheet != current.IsWorksheet(targetId) ||
+                        !string.Equals(original.SheetPath(targetId), current.SheetPath(targetId),
                             StringComparison.OrdinalIgnoreCase) ||
-                        !string.Equals(original.SheetUid(beforeSheet.SheetId), current.SheetUid(afterSheet.SheetId),
+                        !string.Equals(original.SheetUid(targetId), current.SheetUid(targetId),
                             StringComparison.OrdinalIgnoreCase))
-                        return last is null ? first : $"{first}:{last}";
+                        return $"The worksheet binding for formula reference '{reference}' changed.";
+                    if (isWorksheet && original.Sheet(targetId).StructureDiffers(current.Sheet(targetId)))
+                        return $"The structure of worksheet '{beforeSheet.Name}' changed for formula reference '{reference}'.";
                 }
             }
         }

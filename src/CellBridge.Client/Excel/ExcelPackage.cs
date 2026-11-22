@@ -34,7 +34,7 @@ internal sealed class ExcelPackage : IDisposable
     private readonly HashSet<string> _removed = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<uint, ExcelWorksheet> _worksheets = [];
     private readonly Dictionary<uint, string?> _sheetUids = [];
-    private readonly Dictionary<uint, (ExcelSheet Sheet, string Path)> _sheets = [];
+    private readonly Dictionary<uint, (ExcelSheet Sheet, string Path, bool IsWorksheet)> _sheets = [];
     private readonly XElement _sheetList;
     private readonly XElement _relationships;
     private ExcelStyles? _styles;
@@ -62,7 +62,8 @@ internal sealed class ExcelPackage : IDisposable
                 var id = (uint?)sheet.Attribute("sheetId") ?? 0;
                 var relationship = Relationship(_relationships, Required(sheet, R + "id"));
                 var path = ResolvePart(WorkbookPart, relationship);
-                if (id == 0 || !_sheets.TryAdd(id, (new ExcelSheet(id, name), path)))
+                var isWorksheet = (string?)relationship.Attribute("Type") == R.NamespaceName + "/worksheet";
+                if (id == 0 || !_sheets.TryAdd(id, (new ExcelSheet(id, name), path, isWorksheet)))
                     throw new InvalidDataException("The workbook contains an invalid or duplicate sheetId.");
             }
         }
@@ -79,6 +80,7 @@ internal sealed class ExcelPackage : IDisposable
     internal IReadOnlyList<ExcelSheet> ListSheets() => _sheets.Values.Select(entry => entry.Sheet).ToArray();
     internal bool HasSheet(uint id) => _sheets.ContainsKey(id);
     internal string SheetPath(uint id) => _sheets[id].Path;
+    internal bool IsWorksheet(uint id) => _sheets[id].IsWorksheet;
     internal string? SheetUid(uint id)
     {
         var path = SheetPath(id);
@@ -187,7 +189,7 @@ internal sealed class ExcelPackage : IDisposable
             new XAttribute("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml")));
         _changes.Add(path, new XDocument(new XElement(S + "worksheet",
             new XElement(S + "dimension", new XAttribute("ref", "A1")), new XElement(S + "sheetData"))));
-        _sheets.Add(id, (new ExcelSheet(id, name), path));
+        _sheets.Add(id, (new ExcelSheet(id, name), path, true));
         MarkChanged(WorkbookPart);
         MarkChanged(WorkbookRelationships);
         MarkChanged(ContentTypes);
