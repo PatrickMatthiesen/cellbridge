@@ -46,7 +46,7 @@ public sealed record ExcelCell(
 
 public sealed record ExcelCellEdit(string Address, ExcelCellValue Value);
 public enum ExcelConflictPolicy { FailWithConflict, LocalWins, RemoteWins }
-public enum ExcelWriteStatus { Success, CellConflict, StructuralConflict, BaseRevisionUnavailable, RetryExhausted }
+public enum ExcelWriteStatus { Success, CellConflict, StructuralConflict, BaseRevisionUnavailable, RetryExhausted, OutcomeUnknown }
 public sealed record ExcelCellConflict(string Address, ExcelCellValue Base, ExcelCellValue Remote, ExcelCellValue Local);
 public sealed record ExcelWriteResult(
     ExcelWriteStatus Status, string Revision, IReadOnlyList<ExcelCellConflict> Conflicts, string? Detail = null)

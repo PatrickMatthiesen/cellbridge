@@ -96,6 +96,8 @@ public sealed class ExcelWorkbookSession
             var result = await SendProposalAsync(pending, cancellationToken);
             if (result.Succeeded)
                 return new ExcelWriteResult(ExcelWriteStatus.Success, result.Revision, []) { AddedSheetId = pending.AddedSheetId };
+            if (result.Status == CellBridgeCommitStatus.OutcomeUnknown)
+                return UnknownOutcome(result.Revision);
             var latest = Remember(await _document.SyncAsync(cancellationToken));
             return new ExcelWriteResult(ExcelWriteStatus.RetryExhausted, latest.Revision, [],
                 "The recovered proposal had a confirmed revision conflict. Resubmit the original edits to rebase.");
@@ -129,6 +131,8 @@ public sealed class ExcelWorkbookSession
                 var result = await SendProposalAsync(proposal, cancellationToken, original.Revision);
                 if (result.Succeeded)
                     return new ExcelWriteResult(ExcelWriteStatus.Success, result.Revision, []) { AddedSheetId = proposal.AddedSheetId };
+                if (result.Status == CellBridgeCommitStatus.OutcomeUnknown)
+                    return UnknownOutcome(result.Revision);
                 if (attempt + 1 < _limits.MaxCommitAttempts)
                 {
                     var ceiling = 20 * (1 << Math.Min(attempt, 5));
@@ -215,6 +219,10 @@ public sealed class ExcelWorkbookSession
         Dictionary<CellAddress, ExcelCellValue>? expected) =>
         edits.Values.Sum(value => 200L + (value.RawValue?.Length ?? 0) * 8L) +
         (expected?.Values.Sum(value => 200L + (value.RawValue?.Length ?? 0) * 8L) ?? 0L);
+
+    private static ExcelWriteResult UnknownOutcome(string revision) =>
+        new(ExcelWriteStatus.OutcomeUnknown, revision, [],
+            "The replay conflicted after a lost response. Sync and inspect the workbook before editing.");
 
     private void ThrowIfUnresolved()
     {

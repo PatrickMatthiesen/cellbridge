@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Threading.Channels;
 using System.Xml;
 using System.Xml.Linq;
@@ -30,7 +31,6 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
     private Task? _renewal;
     private Task? _notificationPump;
     private ICellBridgeRealTimeChannel? _realTime;
-    private RealTimeConnectionTarget? _realTimeTarget;
     private bool _readerMayExist;
     private bool _writerMayExist;
     private bool _joinedAsWriter;
@@ -75,10 +75,9 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 await session.SendEditorsAsync("JoinEditingSession", cancellationToken);
             }
 
-            if (options.EnableRealTime)
-                session._realTimeTarget = await session.GetRealTimeTargetAsync(cancellationToken);
+            var realTimeTarget = options.EnableRealTime ? await session.GetRealTimeTargetAsync(cancellationToken) : null;
             await session.SyncCoreAsync(cancellationToken);
-            if (session._realTimeTarget is { } target)
+            if (realTimeTarget is { } target)
             {
                 try
                 {
@@ -91,11 +90,17 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            session._renewal = session.RenewAsync();
-            if (session._realTime is { } channel)
+            var leaseRenewal = session.RenewLeaseAsync();
+            if (session._realTime is { } channel && realTimeTarget is { } connectedTarget)
+            {
+                session._renewal = Task.WhenAll(leaseRenewal, session.RenewRealTimeAsync(channel, connectedTarget.ExpiresAt));
                 session._notificationPump = session.PumpNotificationsAsync(channel);
+            }
             else
+            {
+                session._renewal = leaseRenewal;
                 session._notifications.Writer.TryComplete();
+            }
             return session;
         }
         catch (Exception openError)
@@ -140,8 +145,8 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
     }
 
     /// <summary>Attempts to commit one package against the supplied revision.</summary>
-    /// <remarks>If the outcome is unknown, retry with the same revision and package. The session retains
-    /// the exact request until the server confirms success or conflict.</remarks>
+    /// <remarks>If the response is lost, retry with the same revision and package. If the replay returns
+    /// <see cref="CellBridgeCommitStatus.OutcomeUnknown"/>, sync and inspect the current document before editing.</remarks>
     public async Task<CellBridgeCommitResult> TryCommitAsync(string expectedRevision, ReadOnlyMemory<byte> package,
         CancellationToken cancellationToken = default)
     {
@@ -205,8 +210,10 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 var (response, operation) = ReadCell(outer, RequestTypes.PutChanges);
                 if (operation is { Status: true, Error: { Type: ErrorType.Cell, ErrorCode: (ulong)CellErrorCode.CoherencyFailure } })
                 {
+                    // A newer save can supersede an accepted receipt before we receive its response.
                     _pending = null;
-                    return new(CellBridgeCommitStatus.Conflict, current.Revision);
+                    return new(pending.HadAmbiguousResponse ? CellBridgeCommitStatus.OutcomeUnknown :
+                        CellBridgeCommitStatus.Conflict, current.Revision);
                 }
 
                 CheckCellError(operation.Status, operation.Error);
@@ -224,6 +231,14 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 _pending = null;
                 return new(CellBridgeCommitStatus.Committed, next.Revision);
             }
+            catch (HttpRequestException error) when (error.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+            {
+                // CellStorage rejects the request body before executing its subrequests.
+                if (pending.HadAmbiguousResponse)
+                    throw UnknownSaveOutcome(error);
+                _pending = null;
+                throw;
+            }
             catch (Exception error) when (IsAmbiguous(error))
             {
                 pending.HadAmbiguousResponse = true;
@@ -235,6 +250,8 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             }
             catch (CellBridgeProtocolException error)
             {
+                if (error.ErrorCode == "InvalidCoauthSession")
+                    _joinedAsWriter = false;
                 if (pending.HadAmbiguousResponse)
                     throw UnknownSaveOutcome(error);
                 _pending = null;
@@ -417,7 +434,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         throw new InvalidDataException("Query exceeded the configured page limit.");
     }
 
-    private async Task RenewAsync()
+    private async Task RenewLeaseAsync()
     {
         var cancellationToken = _lifetime.Token;
         using var timer = new PeriodicTimer(_options.LeaseRenewalInterval);
@@ -441,16 +458,6 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                             await SendEditorsAsync("JoinEditingSession", cancellationToken);
                         }
                     }
-
-                    if (_realTime is { } channel &&
-                        (_realTimeTarget?.ExpiresAt is not { } expiry || expiry - DateTimeOffset.UtcNow <= _options.LeaseRenewalInterval))
-                    {
-                        if (await GetRealTimeTargetAsync(cancellationToken) is { } target)
-                        {
-                            await channel.UpdateClientInfoAsync(target, cancellationToken);
-                            _realTimeTarget = target;
-                        }
-                    }
                 }
                 catch (Exception error) when (error is CellBridgeProtocolException || IsAmbiguous(error))
                 {
@@ -460,6 +467,55 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private async Task RenewRealTimeAsync(ICellBridgeRealTimeChannel channel, DateTimeOffset? expiry)
+    {
+        var cancellationToken = _lifetime.Token;
+        var delay = RealTimeRenewalDelay(expiry);
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(delay, cancellationToken);
+                await _gate.WaitAsync(cancellationToken);
+                try
+                {
+                    if (await GetRealTimeTargetAsync(cancellationToken) is { } target &&
+                        (target.ExpiresAt is null || target.ExpiresAt > DateTimeOffset.UtcNow))
+                    {
+                        await channel.UpdateClientInfoAsync(target, cancellationToken);
+                        if (target.ExpiresAt is null || target.ExpiresAt != expiry)
+                        {
+                            expiry = target.ExpiresAt;
+                            delay = RealTimeRenewalDelay(expiry);
+                            continue;
+                        }
+                    }
+                }
+                catch (Exception error) when (error is CellBridgeProtocolException || IsAmbiguous(error))
+                {
+                    // A failed ticket update can be retried without refreshing the editor lease.
+                }
+                finally { _gate.Release(); }
+
+                var retryDelay = RealTimeRenewalDelay(expiry);
+                delay = retryDelay > TimeSpan.Zero
+                    ? TimeSpan.FromMilliseconds(Math.Clamp(retryDelay.TotalMilliseconds, 100, 5000))
+                    : _options.LeaseRenewalInterval;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private TimeSpan RealTimeRenewalDelay(DateTimeOffset? expiry)
+    {
+        if (expiry is null)
+            return _options.LeaseRenewalInterval;
+
+        // Renew halfway through the remaining lifetime to leave time for delays and retries.
+        var remaining = expiry.Value - DateTimeOffset.UtcNow;
+        return TimeSpan.FromMilliseconds(Math.Clamp(remaining.TotalMilliseconds / 2, 0, uint.MaxValue - 1));
     }
 
     private async Task PumpNotificationsAsync(ICellBridgeRealTimeChannel channel)
@@ -597,11 +653,10 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
 
     private static (FsshttpbResponse, FsshttpbSubResponse) ReadCell(FssHttpSubResponse outer, RequestTypes type)
     {
-        var bytes = outer.SubResponseDataBase64 ?? throw new InvalidDataException("The Cell subresponse has no binary data.");
-        var reader = new BinaryReaderEx(bytes);
-        var response = FsshttpbResponse.Deserialize(reader);
-        if (reader.Remaining != 0)
-            throw new InvalidDataException("The Cell subresponse has trailing bytes.");
+        if (outer.SubResponseStreamInvalid)
+            throw new InvalidDataException("The server marked the Cell subresponse stream invalid.");
+        var response = outer.BinaryResponse ?? FsshttpbResponse.FromBytes(
+            outer.SubResponseDataBase64 ?? throw new InvalidDataException("The Cell subresponse has no binary data."));
         CheckCellError(response.Status, response.Error);
         var operation = response.SubResponses.SingleOrDefault(sub => sub.RequestId == 1 && sub.RequestType == type)
             ?? throw new InvalidDataException("The Cell subresponse did not match the requested operation.");

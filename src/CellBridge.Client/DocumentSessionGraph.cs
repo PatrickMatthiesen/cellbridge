@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using CellBridge.Client.Excel;
 using CellBridge.FssHttpB;
 
 namespace CellBridge.Client;
@@ -102,7 +103,7 @@ internal sealed class DocumentSessionGraph
         var elements = new DataElementPackage();
         var groups = new HashSet<ExGuid>();
         var leaves = new List<ExGuid>();
-        foreach (var chunk in FsshttpdChunker.Chunk(package))
+        foreach (var chunk in ChunkPackage(package))
         {
             // The group identity includes a format domain so it identifies the framed
             // objects as well as the bytes they represent.
@@ -159,6 +160,22 @@ internal sealed class DocumentSessionGraph
         };
     }
 
+    private static IEnumerable<FsshttpdChunk> ChunkPackage(byte[] package)
+    {
+        // Keep the chunks of each large local ZIP record stable when an earlier
+        // record changes size. Pack the small records together.
+        int start = 0;
+        foreach (int end in RawExcelZip.LargeRecordBoundaries(package, FsshttpdChunker.DefaultChunkSize))
+        {
+            foreach (var chunk in FsshttpdChunker.Chunk(package.AsSpan(start, end - start)))
+                yield return chunk with { Offset = (ulong)start + chunk.Offset };
+            start = end;
+        }
+        if (start < package.Length || package.Length == 0)
+            foreach (var chunk in FsshttpdChunker.Chunk(package.AsSpan(start)))
+                yield return chunk with { Offset = (ulong)start + chunk.Offset };
+    }
+
     internal DocumentSessionGraph ApplySave(FsshttpbCellRequest request, FsshttpbResponse response,
         PutChangesSubResponseData save, long maxBytes)
     {
@@ -192,8 +209,12 @@ internal sealed class DocumentSessionGraph
                 size += ElementSize(admitted);
         }
         CheckSize(size, maxBytes);
+        _ = ReadKnowledge(save.KnowledgeBytes);
+        // Advertise both previously retained and newly admitted payloads. Leave
+        // the provisional index out so the next query sends the full mapping set.
+        var knowledge = ClientKnowledge.FromElements(elements.Values);
         AddElement(elements, index);
-        return new(elements, index, ReadKnowledge(save.KnowledgeBytes), size, provisionalIndex: true);
+        return new(elements, index, knowledge, size, provisionalIndex: true);
     }
 
     internal static ClientKnowledge ReadKnowledge(byte[]? bytes) =>

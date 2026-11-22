@@ -112,7 +112,8 @@ static class Scenarios
                         new() { Mode = CellBridgeDocumentSessionMode.EagerWriter, EnableRealTime = false }, ct);
                     if (string.IsNullOrWhiteSpace(session.UserLogin) || !logins.Add(session.UserLogin))
                         throw new ArgumentException($"Scenario account {index} must have a distinct server login.");
-                    Sessions.Add(new(connection, session, new ExcelWorkbookSession(session), session.GetSnapshot().Revision));
+                    var limits = new ExcelWorkbookLimits { MaxCommitAttempts = Math.Max(4, count * 2) };
+                    Sessions.Add(new(connection, session, new ExcelWorkbookSession(session, limits), session.GetSnapshot().Revision));
                 }
                 catch
                 {

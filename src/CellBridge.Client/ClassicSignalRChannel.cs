@@ -36,9 +36,7 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
         RealTimeConnectionTarget target, CancellationToken cancellationToken)
     {
         var endpoint = target.Endpoint;
-        if (!endpoint.IsAbsoluteUri || endpoint.Scheme != origin.Scheme || endpoint.IdnHost != origin.IdnHost ||
-            endpoint.Port != origin.Port || endpoint.UserInfo.Length != 0 ||
-            endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0)
+        if (!IsSameOrigin(origin, endpoint) || endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0)
             return null;
 
         // The Properties endpoint reports the RTC base. Some hosts report the classic route directly.
@@ -51,11 +49,16 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
         var ct = timeout.Token;
         try
         {
+            using var invoker = new HttpMessageInvoker(new SameOriginHandler(client));
             var negotiate = Route(endpoint, basePath, "negotiate",
                 ("clientProtocol", "1.4"), ("connectionData", """[{"name":"RealtimeChannelHub"}]"""),
                 ("qs", target.DocumentAccessToken), ("ClientId", target.ClientId));
-            using var response = await client.GetAsync(negotiate, HttpCompletionOption.ResponseHeadersRead, ct)
-                .ConfigureAwait(false);
+            using var request = new HttpRequestMessage(HttpMethod.Get, negotiate)
+            {
+                Version = client.DefaultRequestVersion,
+                VersionPolicy = client.DefaultVersionPolicy,
+            };
+            using var response = await invoker.SendAsync(request, ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
                 return null;
             await response.Content.LoadIntoBufferAsync(64 * 1024, ct).ConfigureAwait(false);
@@ -76,8 +79,7 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
             ClassicSignalRChannel? channel = null;
             try
             {
-                // The RTC ticket authenticates the socket even when the SOAP client uses cookies or bearer auth.
-                await socket.ConnectAsync(websocket.Uri, ct).ConfigureAwait(false);
+                await socket.ConnectAsync(websocket.Uri, invoker, ct).ConfigureAwait(false);
                 channel = new(socket, target);
                 await channel._initialized.Task.WaitAsync(ct).ConfigureAwait(false);
                 return channel;
@@ -220,6 +222,29 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
             _socket.Abort();
         await _receive.ConfigureAwait(false);
         _socket.Dispose();
+    }
+
+    private static bool IsSameOrigin(Uri origin, Uri uri) =>
+        uri.IsAbsoluteUri && uri.Scheme == origin.Scheme && uri.IdnHost == origin.IdnHost &&
+        uri.Port == origin.Port && uri.UserInfo.Length == 0;
+
+    // Use the caller's handler for TLS and proxy settings. Check the final URI before
+    // accepting negotiation data or opening a socket that can receive renewed tickets.
+    private sealed class SameOriginHandler(HttpClient client) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var origin = request.RequestUri!;
+            var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .ConfigureAwait(false);
+            var finalUri = response.RequestMessage?.RequestUri ?? request.RequestUri;
+            if (finalUri is not null && IsSameOrigin(origin, finalUri))
+                return response;
+
+            response.Dispose();
+            throw new HttpRequestException("The RTC request was redirected to a different origin.");
+        }
     }
 
     private static Uri Route(Uri endpoint, string basePath, string operation, params (string Key, string Value)[] fields)

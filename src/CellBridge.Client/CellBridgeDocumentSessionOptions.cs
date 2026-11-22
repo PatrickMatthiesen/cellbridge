@@ -26,6 +26,8 @@ public enum CellBridgeCommitStatus
 {
     Committed,
     Conflict,
+    /// <summary>The replay reported a conflict after an earlier attempt lost its response.</summary>
+    OutcomeUnknown,
 }
 
 public sealed record CellBridgeCommitResult(CellBridgeCommitStatus Status, string Revision)

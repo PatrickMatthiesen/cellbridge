@@ -723,6 +723,7 @@ public sealed class PutChangesSubResponseData : ISubResponseData
     {
         ArgumentNullException.ThrowIfNull(reader);
         var data = new PutChangesSubResponseData();
+        using var serials = new MemoryStream();
 
         while (reader.Remaining > 0)
         {
@@ -733,13 +734,14 @@ public sealed class PutChangesSubResponseData : ISubResponseData
             switch (type.Value)
             {
                 case StreamObjectTypeHeaderStart.PutChangesResponseSerialNumberReassignAll:
-                    data.SerialNumberReassignAllBytes = StreamObjectHeaderStart.ReadFramedObject(reader, type.Value);
+                    serials.SetLength(0);
+                    serials.Write(StreamObjectHeaderStart.ReadFramedObject(reader, type.Value));
                     break;
 
                 case StreamObjectTypeHeaderStart.PutChangesResponseSerialNumberReassign:
-                    if (data.SerialNumberReassignAllBytes is null)
+                    if (serials.Length == 0)
                         throw new InvalidDataException("Serial reassignment entry has no reassignment header.");
-                    data.SerialNumberReassignAllBytes = [..data.SerialNumberReassignAllBytes, ..StreamObjectHeaderStart.ReadFramedObject(reader, type.Value)];
+                    serials.Write(StreamObjectHeaderStart.ReadFramedObject(reader, type.Value));
                     break;
 
                 case StreamObjectTypeHeaderStart.PutChangesResponse:
@@ -766,6 +768,8 @@ public sealed class PutChangesSubResponseData : ISubResponseData
                 "PutChangesSubResponseData is missing its mandatory Knowledge object.");
         }
 
+        if (serials.Length != 0)
+            data.SerialNumberReassignAllBytes = serials.ToArray();
         return data;
     }
 

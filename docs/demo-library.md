@@ -57,16 +57,19 @@ dotnet run --project tools/CellBridge.Emulator -- interactive "$WORKBOOK_URL"
 For a desktop Excel capture, use a disposable workbook and distinct accounts
 for desktop Excel and the emulator. Start the capture, open the workbook in
 desktop Excel, then save one cell with the emulator. In this example the
-sheet ID is `1` and the new value in `B2` is the number `42`.
+sheet ID is `1` and the new value in `B2` is the number `42`. Start with a
+different value in `B2` so the emulator sends a `PutChanges` request.
 
 ```sh
 dotnet run --project tools/CellBridge.Emulator -- save "$WORKBOOK_URL" 1 B2 42
 ```
 
-Record whether Excel shows the new value, prompts to reload, or reports
-repair. Check the saved value by reopening the workbook. Stop and validate
-the capture, then compare the save response with any channel 3 collaboration
-notifications. [Capture workflow](capture-kit.md)
+Before reopening, record whether Excel shows the new value, prompts to reload,
+or reports repair. Save a disjoint edit from desktop Excel and reopen the
+workbook to check that both values survived. Stop and validate the capture.
+Confirm the emulator sent `PutChanges` and record any channel 3 notifications
+and their `FullSaveId` or `SavRev` fields. Record if no matching notification
+appeared. [Capture workflow](capture-kit.md)
 
 ## Import existing files
 

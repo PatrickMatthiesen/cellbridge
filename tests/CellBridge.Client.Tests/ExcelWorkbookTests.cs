@@ -167,6 +167,56 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ShiftingRowsWithDuplicateValuesConflictsAtAnUnchangedAddress(bool insert)
+    {
+        var shorter = Workbook(
+            "<row r='1'><c r='A1'><v>7</v></c></row><row r='2'><c r='A2'><v>9</v></c></row>");
+        var longer = Workbook(
+            "<row r='1'><c r='A1'><v>7</v></c></row><row r='2'><c r='A2'><v>7</v></c></row>" +
+            "<row r='3'><c r='A3'><v>9</v></c></row>");
+
+        var result = ExcelWorkbook.MergeCells(insert ? shorter : longer, insert ? longer : shorter, 4,
+            [new("A1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
+    [Fact]
+    public void SortWithAThreeCellCycleConflictsAtABlankAddress()
+    {
+        var original = Workbook(
+            "<row r='1'><c r='A1'><v>2</v></c></row><row r='2'><c r='A2'><v>4</v></c></row>" +
+            "<row r='3'><c r='A3'><v>3</v></c></row><row r='4'><c r='A4'><v>1</v></c></row>");
+        var sorted = Workbook(
+            "<row r='1'><c r='A1'><v>1</v></c></row><row r='2'><c r='A2'><v>2</v></c></row>" +
+            "<row r='3'><c r='A3'><v>3</v></c></row><row r='4'><c r='A4'><v>4</v></c></row>" +
+            "<row r='5'><c r='C5'><v>8</v></c></row>");
+
+        var result = ExcelWorkbook.MergeCells(original, sorted, 4, [new("B1", ExcelCellValue.String("annotation"))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
+    [Fact]
+    public void DisjointReplacementsAndClearsMergeWithoutAMovementCycle()
+    {
+        var original = Workbook("<row r='1'><c r='A1'><v>1</v></c><c r='B1'><v>2</v></c>" +
+            "<c r='C1'><v>4</v></c></row>");
+        var latest = Edit(original, new ExcelCellEdit("A1", ExcelCellValue.Number(2)),
+            new ExcelCellEdit("B1", ExcelCellValue.Number(3)), new ExcelCellEdit("C1", ExcelCellValue.Blank));
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("D1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Equal(["2", "3", null, "5"],
+            ExcelWorkbook.ReadRange(result.Package!, 4, "A1:D1").Select(cell => cell.Value.RawValue));
+    }
+
     [Fact]
     public void RejectsWritesIntoProtectedMergedSharedOrSpillCells()
     {
@@ -220,7 +270,18 @@ public sealed class ExcelWorkbookTests
         Assert.Throws<ArgumentException>(() => Edit(workbook, new ExcelCellEdit("A1", ExcelCellValue.Formula("SUM(1;2)"))));
         Assert.Throws<ArgumentException>(() => Edit(workbook, new ExcelCellEdit("A1", ExcelCellValue.Formula("XLOOKUP(1,A2:A3,B2:B3)"))));
         Assert.Throws<ArgumentException>(() => Edit(workbook, new ExcelCellEdit("A1", ExcelCellValue.Formula("_xlfn.SEQUENCE(2)"))));
+        Assert.Throws<ArgumentException>(() => Edit(workbook, new ExcelCellEdit("A1", ExcelCellValue.Formula("_xlfn._xlws.FILTER(A2:A3,B2:B3)"))));
         Validate(Edit(workbook, new ExcelCellEdit("A1", ExcelCellValue.Formula("_xlfn.XLOOKUP(1,A2:A3,B2:B3)"))));
+    }
+
+    [Fact]
+    public void AcceptsDottedFutureFunctions()
+    {
+        var formula = ExcelCellValue.Formula("_xlfn.NORM.DIST(0,0,1,TRUE)");
+        var edited = Edit(Workbook(""), new ExcelCellEdit("A1", formula));
+
+        Validate(edited);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(edited, 4, "A1")).Value);
     }
 
     private static byte[] Edit(byte[] package, params ExcelCellEdit[] edits)

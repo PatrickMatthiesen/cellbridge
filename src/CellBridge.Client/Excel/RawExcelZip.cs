@@ -24,6 +24,8 @@ internal sealed class RawExcelZip : IDisposable
     {
         _bytes = bytes;
         _end = FindEnd(bytes);
+        if (_end < 0)
+            throw new InvalidDataException("The workbook ZIP directory is missing.");
         var directory = U32(bytes, _end + 16);
         var size = U32(bytes, _end + 12);
         var count = U16(bytes, _end + 10);
@@ -231,15 +233,64 @@ internal sealed class RawExcelZip : IDisposable
         }
     }
 
-    private static int FindEnd(byte[] bytes)
+    // Read local record boundaries without opening or decompressing the package.
+    // Unsupported ZIP layouts can still use the default file chunking.
+    internal static int[] LargeRecordBoundaries(ReadOnlySpan<byte> bytes, int minimumSize)
+    {
+        int end = FindEnd(bytes);
+        if (end < 0 || U32(bytes, end + 4) != 0)
+            return [];
+        uint directory = U32(bytes, end + 16);
+        uint directorySize = U32(bytes, end + 12);
+        int count = U16(bytes, end + 10);
+        if (count == ushort.MaxValue || count != U16(bytes, end + 8) ||
+            (long)directory + directorySize != end || count > directorySize / 46)
+            return [];
+
+        var offsets = new int[count + 1];
+        int central = (int)directory;
+        for (int i = 0; i < count; i++)
+        {
+            if (central > end - 46 || U32(bytes, central) != DirectorySignature)
+                return [];
+            uint local = U32(bytes, central + 42);
+            if ((long)local + 30 > directory || U32(bytes, (int)local) != LocalSignature)
+                return [];
+            offsets[i] = (int)local;
+            int length = 46 + U16(bytes, central + 28) + U16(bytes, central + 30) + U16(bytes, central + 32);
+            if (length > end - central)
+                return [];
+            central += length;
+        }
+        if (central != end)
+            return [];
+        offsets[count] = (int)directory;
+        Array.Sort(offsets);
+        var boundaries = new List<int>();
+        for (int i = 0; i < count; i++)
+        {
+            int start = offsets[i];
+            int next = offsets[i + 1];
+            if (next - start < 30)
+                return [];
+            if (next - start < minimumSize)
+                continue;
+            if (start != 0 && (boundaries.Count == 0 || boundaries[^1] != start))
+                boundaries.Add(start);
+            boundaries.Add(next);
+        }
+        return boundaries.ToArray();
+    }
+
+    private static int FindEnd(ReadOnlySpan<byte> bytes)
     {
         for (int i = bytes.Length - 22, min = Math.Max(0, bytes.Length - 22 - ushort.MaxValue); i >= min; i--)
             if (U32(bytes, i) == EndSignature && U16(bytes, i + 20) == bytes.Length - i - 22)
                 return i;
-        throw new InvalidDataException("The workbook ZIP directory is missing.");
+        return -1;
     }
 
-    private static uint U32(byte[] bytes, int offset) => BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(offset, 4));
-    private static ushort U16(byte[] bytes, int offset) => BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset, 2));
+    private static uint U32(ReadOnlySpan<byte> bytes, int offset) => BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(offset, 4));
+    private static ushort U16(ReadOnlySpan<byte> bytes, int offset) => BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(offset, 2));
     public void Dispose() => _archive.Dispose();
 }

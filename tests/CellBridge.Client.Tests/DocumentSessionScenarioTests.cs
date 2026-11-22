@@ -139,16 +139,21 @@ public sealed class DocumentSessionScenarioTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task LostSaveResponseReplaysTheProposalAndNextSaveUsesAppliedIndex(bool overHttp)
+    public async Task InvalidSaveResponseReplaysTheProposalAndNextSaveUsesAppliedIndex(bool overHttp)
     {
         await using var host = await ScenarioHost.StartAsync(overHttp);
         var unchanged = new byte[2 * 1024 * 1024];
         new Random(37).NextBytes(unchanged);
         var original = AddEntry(OfficeDocumentTemplates.CreateExcelWorkbook(), "custom/unchanged.bin", unchanged);
         var firstEdit = AddEntry(original, "custom/first.txt", "first"u8);
-        var secondEdit = AddEntry(firstEdit, "custom/second.txt", "second"u8);
+        var sheet = Assert.Single(ExcelWorkbook.ListSheets(firstEdit)).SheetId;
+        var secondEdit = Assert.IsType<byte[]>(ExcelWorkbook.MergeCells(firstEdit, firstEdit, sheet,
+            [new("A1", ExcelCellValue.String(new string('x', 2000)))]).Package);
+        var originalOffset = firstEdit.AsSpan().IndexOf(unchanged.AsSpan(0, 32));
+        var shiftedOffset = secondEdit.AsSpan().IndexOf(unchanged.AsSpan(0, 32));
+        Assert.True(originalOffset >= 0 && shiftedOffset > originalOffset);
         var document = await host.CreateAsync(original);
-        var transport = new LoseFirstSaveResponse(host.Transport);
+        var transport = new InvalidateFirstSaveResponse(host.Transport);
         await using var session = await CellBridgeDocumentSession.OpenAsync(transport, host.DocumentUrl,
             new CellBridgeDocumentSessionOptions { Mode = CellBridgeDocumentSessionMode.EagerWriter });
 
@@ -168,13 +173,158 @@ public sealed class DocumentSessionScenarioTests
         Assert.Equal(transport.Saves[1].AppliedIndex, next.Proposal.ExpectedStorageIndex);
         Assert.NotEqual(next.Proposal.StorageIndex, next.AppliedIndex);
         Assert.True(next.Bytes.Length < FsshttpdChunker.DefaultChunkSize,
-            "The save should omit both unchanged 1 MiB chunks.");
+            "The save should omit both shifted, unchanged 1 MiB chunks.");
         var latest = await host.ReadControlAsync(document.ResourceId);
         Assert.Equal(document.ContentVersion + 2, latest.Head.ContentVersion);
+
+        transport.FileQueryPayloadSizes.Clear();
+        Assert.Equal(secondEdit, (await session.SyncAsync()).Package);
+        Assert.True(Assert.Single(transport.FileQueryPayloadSizes) < FsshttpdChunker.DefaultChunkSize,
+            "Sync should use knowledge of both saved and retained data elements.");
 
         await using var reopened = await CellBridgeDocumentSession.OpenAsync(host.Transport, host.DocumentUrl,
             new CellBridgeDocumentSessionOptions { QueryPageBytes = 256 * 1024 });
         Assert.Equal(secondEdit, reopened.GetSnapshot().Package);
+    }
+
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 2)]
+    public async Task SupersededSaveWithALostResponseDoesNotRebase(bool overHttp, int lostReplies)
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        var document = await host.CreateAsync(original);
+        await host.SetPeerAccessAsync(document.ResourceId, DocumentAccess.Read | DocumentAccess.Write);
+        var options = new CellBridgeDocumentSessionOptions { Mode = CellBridgeDocumentSessionMode.EagerWriter };
+        await using var peer = await CellBridgeDocumentSession.OpenAsync(host.PeerTransport, host.DocumentUrl, options);
+        var transport = new InterceptSaveResponses(host.Transport, async (attempt, send) =>
+        {
+            var response = await send();
+            if (attempt > lostReplies)
+                return response;
+            if (attempt == lostReplies)
+            {
+                var accepted = await peer.SyncAsync();
+                Assert.NotEqual(original, accepted.Package);
+                Assert.True((await peer.TryCommitAsync(accepted.Revision, original)).Succeeded);
+            }
+            throw new HttpRequestException("The save response was lost.");
+        });
+        await using var session = await CellBridgeDocumentSession.OpenAsync(transport, host.DocumentUrl, options);
+        var workbook = new ExcelWorkbookSession(session);
+        var sheet = Assert.Single(workbook.ListSheets()).SheetId;
+        var originalRead = workbook.ReadRangeAtRevision(sheet, "A1");
+        Task<ExcelWriteResult> EditAsync() =>
+            workbook.SetCellsAsync(sheet, [new("A1", ExcelCellValue.Number(42))], originalRead.Revision);
+
+        ExcelWriteResult result;
+        if (lostReplies == 2)
+        {
+            await Assert.ThrowsAsync<IOException>(EditAsync);
+            result = await workbook.RetryPendingCommitAsync();
+        }
+        else
+        {
+            result = await EditAsync();
+        }
+        Assert.Equal(ExcelWriteStatus.OutcomeUnknown, result.Status);
+        Assert.Equal(lostReplies + 1, transport.Payloads.Count);
+        Assert.All(transport.Payloads, payload => Assert.Equal(transport.Payloads[0], payload));
+        Assert.Equal(document.ContentVersion + 2, (await host.ReadControlAsync(document.ResourceId)).Head.ContentVersion);
+
+        Assert.Equal(peer.GetSnapshot().Revision, await workbook.SyncAsync());
+        Assert.Equal(original, session.GetSnapshot().Package);
+        Assert.Equal(Assert.Single(originalRead.Cells).Value, Assert.Single(workbook.ReadRange(sheet, "A1")).Value);
+    }
+
+    [Fact]
+    public async Task FirstHttp413ClearsRejectedProposal()
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp: true, maxRequestBytes: 128 * 1024);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        var document = await host.CreateAsync(original);
+        await using var session = await CellBridgeDocumentSession.OpenAsync(host.Transport, host.DocumentUrl,
+            new() { Mode = CellBridgeDocumentSessionMode.EagerWriter });
+        var initial = session.GetSnapshot();
+        var oversized = AddEntry(original, "custom/large.bin", new byte[256 * 1024]);
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => session.TryCommitAsync(initial.Revision, oversized));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, error.StatusCode);
+        Assert.Equal(document.ContentVersion, (await host.ReadControlAsync(document.ResourceId)).Head.ContentVersion);
+        Assert.Equal(initial.Revision, (await session.SyncAsync()).Revision);
+        var smaller = AddEntry(original, "custom/small.txt", "small"u8);
+        Assert.True((await session.TryCommitAsync(initial.Revision, smaller)).Succeeded);
+    }
+
+    [Fact]
+    public async Task Http413AfterAnAmbiguousResponsePreservesThePendingProposal()
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp: false);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        var changed = AddEntry(original, "custom/saved.txt", "saved"u8);
+        var document = await host.CreateAsync(original);
+        var transport = new InterceptSaveResponses(host.Transport, async (attempt, send) =>
+        {
+            if (attempt == 2)
+                throw new HttpRequestException("Request rejected before execution.", null, HttpStatusCode.RequestEntityTooLarge);
+            var response = await send();
+            if (attempt == 1)
+                throw new HttpRequestException("The response timed out.", null, HttpStatusCode.RequestTimeout);
+            return response;
+        });
+        await using var session = await CellBridgeDocumentSession.OpenAsync(transport, host.DocumentUrl,
+            new() { Mode = CellBridgeDocumentSessionMode.EagerWriter });
+        var revision = session.GetSnapshot().Revision;
+        var error = await Assert.ThrowsAsync<IOException>(() => session.TryCommitAsync(revision, changed));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, Assert.IsType<HttpRequestException>(error.InnerException).StatusCode);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.SyncAsync());
+        Assert.True((await session.TryCommitAsync(revision, changed)).Succeeded);
+        Assert.Equal(3, transport.Payloads.Count);
+        Assert.All(transport.Payloads, payload => Assert.Equal(transport.Payloads[0], payload));
+        Assert.Equal(document.ContentVersion + 1, (await host.ReadControlAsync(document.ResourceId)).Head.ContentVersion);
+    }
+
+    [Fact]
+    public async Task WriterRejoinsAfterTheServerRejectsItsReleasedSession()
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp: false);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        var document = await host.CreateAsync(original);
+        await using var session = await CellBridgeDocumentSession.OpenAsync(host.Transport, host.DocumentUrl,
+            new() { Mode = CellBridgeDocumentSessionMode.EagerWriter });
+        var released = await host.Transport.ExecuteAsync(new()
+        {
+            Requests =
+            {
+                new()
+                {
+                    RequestToken = 1,
+                    Url = host.DocumentUrl.AbsoluteUri,
+                    ResourceId = document.ResourceId.ToString("D"),
+                    UseResourceId = true,
+                    SubRequests =
+                    [
+                        new()
+                        {
+                            SubRequestToken = 1,
+                            Type = SubRequestType.Coauth,
+                            SubRequestDataAttributes =
+                            {
+                                ["CoauthRequestType"] = "ExitCoauthoring",
+                                ["ClientID"] = session.ClientId.ToString("B"),
+                                ["SchemaLockID"] = CellBridgeDocumentSession.ExcelSchemaLockId,
+                            },
+                        },
+                    ],
+                },
+            },
+        });
+        Assert.Equal("Success", Assert.Single(Assert.Single(released.Response.Responses).SubResponses).ErrorCode);
+        var revision = session.GetSnapshot().Revision;
+        var changed = AddEntry(original, "custom/saved.txt", "saved"u8);
+        var error = await Assert.ThrowsAsync<CellBridgeProtocolException>(() => session.TryCommitAsync(revision, changed));
+        Assert.Equal("InvalidCoauthSession", error.ErrorCode);
+        Assert.True((await session.TryCommitAsync(revision, changed)).Succeeded);
     }
 
     [Fact]
@@ -205,9 +355,10 @@ public sealed class DocumentSessionScenarioTests
         return stream.ToArray();
     }
 
-    private sealed class LoseFirstSaveResponse(ICellBridgeClientTransport inner) : ICellBridgeClientTransport
+    private sealed class InvalidateFirstSaveResponse(ICellBridgeClientTransport inner) : ICellBridgeClientTransport
     {
         public List<SaveExchange> Saves { get; } = [];
+        public List<long> FileQueryPayloadSizes { get; } = [];
 
         public async Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, CancellationToken cancellationToken = default)
         {
@@ -218,9 +369,17 @@ public sealed class DocumentSessionScenarioTests
                 var bytes = sub.SubRequestDataBinary
                     ?? Convert.FromBase64String(Assert.IsType<string>(sub.SubRequestDataXml));
                 var binary = FsshttpbCellRequest.Deserialize(new BinaryReaderEx(bytes));
+                var response = result.Response.Responses.Single(item => item.RequestToken == file.RequestToken);
+                var subResponse = response.SubResponses.Single(item => item.SubRequestToken == sub.SubRequestToken);
+                var decoded = subResponse.BinaryResponse ?? FsshttpbResponse.FromBytes(subResponse.SubResponseDataBase64!);
                 var put = binary.SubRequests.Select(item => item.Data).OfType<PutChangesSubRequestData>().SingleOrDefault();
                 if (put is null)
+                {
+                    if (Guid.Parse(sub.SubRequestDataAttributes["PartitionID"]) == Guid.Empty)
+                        FileQueryPayloadSizes.Add(decoded.DataElementPackage?.DataElements.Sum(element =>
+                            (long)element.GetSerializedLength()) ?? 0);
                     continue;
+                }
 
                 Assert.True(file.UseResourceId);
                 Assert.True(Guid.TryParse(file.ResourceId, out _));
@@ -232,16 +391,13 @@ public sealed class DocumentSessionScenarioTests
                     element.DataElementType == DataElementType.StorageIndexDataElementData &&
                     element.DataElementExtendedGuid.Equals(put.ExpectedStorageIndex));
 
-                var response = result.Response.Responses.Single(item => item.RequestToken == file.RequestToken);
-                var subResponse = response.SubResponses.Single(item => item.SubRequestToken == sub.SubRequestToken);
-                var decoded = FsshttpbResponse.Deserialize(new BinaryReaderEx(subResponse.SubResponseDataBase64!));
                 var putResponse = Assert.IsType<PutChangesSubResponseData>(Assert.Single(decoded.SubResponses).Data);
                 var appliedIndex = putResponse.PutChangesResponse!.AppliedStorageIndexID;
                 Assert.False(appliedIndex.IsNull);
                 Assert.NotEmpty(putResponse.SerialNumberReassignAllBytes!);
                 Saves.Add(new(bytes, put, appliedIndex));
                 if (Saves.Count == 1)
-                    throw new HttpRequestException("The host committed the save, but the response was lost.");
+                    subResponse.SubResponseStreamInvalid = true;
             }
             return result;
         }
@@ -251,6 +407,29 @@ public sealed class DocumentSessionScenarioTests
     }
 
     private sealed record SaveExchange(byte[] Bytes, PutChangesSubRequestData Proposal, ExGuid AppliedIndex);
+
+    private sealed class InterceptSaveResponses(ICellBridgeClientTransport inner,
+        Func<int, Func<Task<CellStorageExecution>>, Task<CellStorageExecution>> intercept) : ICellBridgeClientTransport
+    {
+        public List<byte[]> Payloads { get; } = [];
+
+        public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, CancellationToken cancellationToken = default)
+        {
+            foreach (var sub in request.Requests.SelectMany(file => file.SubRequests).Where(item => item.Type == SubRequestType.Cell))
+            {
+                var bytes = Assert.IsType<byte[]>(sub.SubRequestDataBinary);
+                var binary = FsshttpbCellRequest.Deserialize(new BinaryReaderEx(bytes));
+                if (!binary.SubRequests.Any(item => item.Data is PutChangesSubRequestData))
+                    continue;
+                Payloads.Add(bytes);
+                return intercept(Payloads.Count, () => inner.ExecuteAsync(request, cancellationToken));
+            }
+            return inner.ExecuteAsync(request, cancellationToken);
+        }
+
+        public Task<ICellBridgeRealTimeChannel?> TryConnectRealTimeAsync(RealTimeConnectionTarget target,
+            CancellationToken cancellationToken = default) => inner.TryConnectRealTimeAsync(target, cancellationToken);
+    }
 
     private sealed class RememberRealTimeConnection(ICellBridgeClientTransport inner) : ICellBridgeClientTransport
     {
@@ -307,7 +486,7 @@ public sealed class DocumentSessionScenarioTests
         public ICellBridgeClientTransport Transport { get; }
         public ICellBridgeClientTransport PeerTransport { get; }
 
-        public static async Task<ScenarioHost> StartAsync(bool overHttp, bool enableRealTime = false)
+        public static async Task<ScenarioHost> StartAsync(bool overHttp, bool enableRealTime = false, long? maxRequestBytes = null)
         {
             var content = new InMemoryContentStore();
             var storage = new StorageProvider(new InMemoryDocumentRepository(content), content);
@@ -316,7 +495,12 @@ public sealed class DocumentSessionScenarioTests
             builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
             builder.Services.AddAuthentication();
             builder.Services.AddCellBridge(storage, requireDurability: false,
-                configure: options => options.EnableOfficeRealTime = enableRealTime);
+                configure: options =>
+                {
+                    options.EnableOfficeRealTime = enableRealTime;
+                    if (maxRequestBytes is { } limit)
+                        options.MaxRequestBytes = limit;
+                });
             var app = builder.Build();
             try
             {

@@ -300,69 +300,128 @@ internal sealed class ExcelWorksheet
 
         // OOXML does not record the operation that produced a cell grid. Detect
         // identifiable values that moved as evidence of insertion, deletion or sorting.
-        var removed = new Dictionary<ExcelCellValue, Movement>();
-        var added = new Dictionary<ExcelCellValue, Movement>();
+        var movements = new Dictionary<ExcelCellValue, ValueMovement>();
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
             var address = new CellAddress(row, column);
             var before = Value(cell, address);
             var after = remote.Value(address);
-            if (!Equivalent(before, after))
+            if (Equivalent(before, after))
+                continue;
+
+            var source = FindMovement(movements, before);
+            var destination = FindMovement(movements, after);
+            if (source is not null)
+                source.Removed.Add(address);
+            if (destination is not null)
+                destination.Added.Add(address);
+            if (source is not null && destination is not null && source != destination)
             {
-                TrackMovement(removed, before, address);
-                TrackMovement(added, after, address);
+                if (source.Replacements is null)
+                {
+                    _package.Charge(64);
+                    source.Replacements = [];
+                }
+                _package.Charge(16);
+                source.Replacements.Add(destination);
+                destination.IncomingReplacements++;
             }
         }
         foreach (var (row, data) in remote._rows)
         foreach (var (column, cell) in data.Cells)
         {
             var address = new CellAddress(row, column);
-            if (Find(address) is null)
-                TrackMovement(added, remote.Value(cell, address), address);
+            if (Find(address) is null && FindMovement(movements, remote.Value(cell, address)) is { } movement)
+                movement.Added.Add(address);
         }
 
         var offsets = new HashSet<(int Row, int Column)>();
-        foreach (var (value, source) in removed)
+        foreach (var movement in movements.Values)
         {
-            if (!added.TryGetValue(value, out var destination))
+            var source = movement.Removed;
+            var destination = movement.Added;
+            if (source.Count == 0 || destination.Count == 0)
                 continue;
             var from = source.First;
             var to = destination.First;
-            var fromAfter = remote.Value(from);
-            var toBefore = Value(to);
-            if (Equivalent(fromAfter, toBefore))
-                return true; // A swap, or a move between a formerly empty and now empty cell.
+            var sourceVacated = remote.Value(from).Type == ExcelCellType.Blank;
+            var destinationWasBlank = Value(to).Type == ExcelCellType.Blank;
+            // A shift can leave just one detectable move when adjacent values repeat.
+            if ((sourceVacated && destinationWasBlank) ||
+                ((sourceVacated || destinationWasBlank) && (from.Row == to.Row || from.Column == to.Column)))
+                return true;
 
             var offset = (to.Row - from.Row, to.Column - from.Column);
             if (!offsets.Add(offset) || (source.Count > 1 && destination.Count > 1 &&
                 offset == (destination.Last.Row - source.Last.Row, destination.Last.Column - source.Last.Column)))
                 return true;
         }
-        return false;
+        return HasReplacementCycle(movements.Values);
     }
 
-    private readonly record struct Movement(CellAddress First, CellAddress Last, int Count);
+    private static bool HasReplacementCycle(ICollection<ValueMovement> movements)
+    {
+        // Follow replacements by value. A sort can close a cycle even if
+        // some cells stayed in place or other changes occurred alongside it.
+        var ready = new Queue<ValueMovement>();
+        foreach (var movement in movements)
+            if (movement.IncomingReplacements == 0)
+                ready.Enqueue(movement);
 
-    private void TrackMovement(Dictionary<ExcelCellValue, Movement> values, ExcelCellValue value, CellAddress address)
+        var remaining = movements.Count;
+        while (ready.TryDequeue(out var movement))
+        {
+            remaining--;
+            if (movement.Replacements is not { } replacements)
+                continue;
+            foreach (var replacement in replacements)
+                if (--replacement.IncomingReplacements == 0)
+                    ready.Enqueue(replacement);
+        }
+        return remaining > 0;
+    }
+
+    private sealed class ValueMovement
+    {
+        internal Occurrences Removed;
+        internal Occurrences Added;
+        internal List<ValueMovement>? Replacements;
+        internal int IncomingReplacements;
+    }
+
+    private struct Occurrences
+    {
+        internal CellAddress First { get; private set; }
+        internal CellAddress Last { get; private set; }
+        internal int Count { get; private set; }
+
+        internal void Add(CellAddress address)
+        {
+            if (Count == 0 || address.CompareTo(First) < 0)
+                First = address;
+            if (Count == 0 || address.CompareTo(Last) > 0)
+                Last = address;
+            Count++;
+        }
+    }
+
+    private ValueMovement? FindMovement(Dictionary<ExcelCellValue, ValueMovement> values, ExcelCellValue value)
     {
         if (value.Type == ExcelCellType.Blank)
-            return;
+            return null;
         if (value.Type == ExcelCellType.Number &&
             double.TryParse(value.RawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
-            value = ExcelCellValue.Number(number);
+            value = ExcelCellValue.Number(number == 0 ? 0 : number);
         else if (value.Type == ExcelCellType.Boolean)
             value = ExcelCellValue.Boolean(BooleanValue(value.RawValue));
         if (values.TryGetValue(value, out var movement))
-        {
-            values[value] = new Movement(address.CompareTo(movement.First) < 0 ? address : movement.First,
-                address.CompareTo(movement.Last) > 0 ? address : movement.Last, movement.Count + 1);
-        }
-        else
-        {
-            _package.Charge(120L + (value.RawValue?.Length ?? 0) * 2L);
-            values.Add(value, new Movement(address, address, 1));
-        }
+            return movement;
+
+        _package.Charge(144L + (value.RawValue?.Length ?? 0) * 2L);
+        movement = new ValueMovement();
+        values.Add(value, movement);
+        return movement;
     }
 
     private IEnumerable<string> StructuralMarkup()

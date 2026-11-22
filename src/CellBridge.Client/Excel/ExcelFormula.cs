@@ -93,8 +93,8 @@ internal static partial class ExcelFormula
         if (SpillFunctions.Contains(name) || name.Equals("ANCHORARRAY", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException($"Dynamic-array function '{name}' is outside the supported formula subset.");
         var futurePrefix = token.StartsWith("_xlfn.", StringComparison.Ordinal);
-        if (FutureFunctions.Contains(name) ? !futurePrefix :
-            futurePrefix && (pieces.Length != 2 || pieces[1].Length == 0 || !char.IsAsciiLetter(pieces[1][0])))
+        if ((FutureFunctions.Contains(name) && !futurePrefix) ||
+            (futurePrefix && pieces.Skip(1).Any(piece => piece.Length == 0 || !char.IsAsciiLetter(piece[0]))))
             throw new ArgumentException($"Function '{name}' has an invalid or missing _xlfn. prefix.");
     }
 

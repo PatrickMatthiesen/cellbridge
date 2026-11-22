@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using CellBridge.AspNetCore;
@@ -62,6 +63,8 @@ public sealed class HttpCellBridgeTransport : ICellBridgeClientTransport
         {
             using var response = await _client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, ct)
                 .ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+                response.EnsureSuccessStatusCode();
             var contentType = response.Content.Headers.ContentType;
             if (contentType?.MediaType?.ToLowerInvariant() is not ("text/xml" or "application/soap+xml" or "multipart/related"))
             {

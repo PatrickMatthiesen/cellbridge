@@ -11,7 +11,7 @@ namespace CellBridge.Packages.Tests;
 public sealed class ClientPackageConsumerTests
 {
     [Fact]
-    public async Task PackagedClientCanOpenAndSyncFromPackagedHost()
+    public async Task PackagedClientCanOpenSaveAndSyncFromPackagedHost()
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -42,5 +42,16 @@ public sealed class ClientPackageConsumerTests
         await session.SyncAsync();
         Assert.Equal(initial.Revision, session.GetSnapshot().Revision);
         Assert.Equal(package, session.GetSnapshot().Package);
+
+        await using var writer = await CellBridgeDocumentSession.OpenAsync(transport, new Uri(http.BaseAddress!, path),
+            new() { Mode = CellBridgeDocumentSessionMode.LazyWriter });
+        var editor = new ExcelWorkbookSession(writer);
+        var savedValue = ExcelCellValue.Number(42);
+        var result = await editor.SetCellsAsync(sheet.SheetId, [new("A1", savedValue)], writer.GetSnapshot().Revision);
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+
+        await session.SyncAsync();
+        Assert.NotEqual(initial.Revision, session.GetSnapshot().Revision);
+        Assert.Equal(savedValue, Assert.Single(workbook.ReadRange(sheet.SheetId, "A1")).Value);
     }
 }
