@@ -621,12 +621,31 @@ internal sealed class ExcelWorksheet
         var after = remote.RowStyles();
         if (before.Keys.ToHashSet().SetEquals(after.Keys))
             return false;
-        var removed = before.Where(row => after.GetValueOrDefault(row.Key) != row.Value).Select(row => row.Value)
-            .ToHashSet(StringComparer.Ordinal);
-        var added = after.Where(row => before.GetValueOrDefault(row.Key) != row.Value).Select(row => row.Value)
-            .ToHashSet(StringComparer.Ordinal);
-        return before.Any(row => !remote._rows.ContainsKey(row.Key) && added.Contains(row.Value)) ||
-            after.Any(row => !_rows.ContainsKey(row.Key) && removed.Contains(row.Value));
+
+        return HasMovedStyle(before, after, _rows, remote._rows) ||
+            HasMovedStyle(after, before, remote._rows, _rows);
+
+        static bool HasMovedStyle(Dictionary<int, string> source, Dictionary<int, string> destination,
+            SortedList<int, Row> sourceRows, SortedList<int, Row> destinationRows)
+        {
+            var changedStyles = destination.Where(row => source.GetValueOrDefault(row.Key) != row.Value)
+                .Select(row => row.Value).ToHashSet(StringComparer.Ordinal);
+            foreach (var (index, style) in source)
+            {
+                if (destination.GetValueOrDefault(index) == style || !changedStyles.Contains(style))
+                    continue;
+                if (!destinationRows.ContainsKey(index))
+                    return true;
+
+                // A one-row shift can leave both style endpoints occupied.
+                // The row just below the source must disappear or, in reverse, appear.
+                if (destination.GetValueOrDefault(index - 1) == style &&
+                    source.GetValueOrDefault(index - 1) != style && sourceRows.ContainsKey(index - 1) &&
+                    sourceRows.ContainsKey(index + 1) && !destinationRows.ContainsKey(index + 1))
+                    return true;
+            }
+            return false;
+        }
     }
 
     private Dictionary<int, string> RowStyles()

@@ -128,8 +128,20 @@ internal static partial class ExcelFormula
     private const string ReferenceMarker = "\0Ref\0";
     private const string BrokenReferenceMarker = ReferenceMarker + "???";
 
-    internal static bool HasBrokenReference(string pattern) =>
-        pattern.Contains(BrokenReferenceMarker, StringComparison.Ordinal);
+    // Pattern tokens carry a reference kind and two anchor characters. A
+    // missing endpoint leaves only its own anchor character unknown.
+    internal static bool HasBrokenReference(string pattern)
+    {
+        int search = 0;
+        while (pattern.IndexOf(ReferenceMarker, search, StringComparison.Ordinal) is var marker && marker >= 0)
+        {
+            int kind = marker + ReferenceMarker.Length;
+            if (pattern.AsSpan(kind, 3).Contains('?'))
+                return true;
+            search = kind + 3;
+        }
+        return false;
+    }
 
     // Both patterns already share the same spelling with anchors removed.
     internal static bool CompatibleReferenceAnchors(string left, string right)
@@ -138,9 +150,11 @@ internal static partial class ExcelFormula
         while (left.IndexOf(ReferenceMarker, search, StringComparison.Ordinal) is var marker && marker >= 0)
         {
             int kind = marker + ReferenceMarker.Length;
-            if (left[kind] != '?' && right[kind] != '?' &&
-                !left.AsSpan(kind, 3).SequenceEqual(right.AsSpan(kind, 3)))
-                return false;
+            for (int i = kind; i < kind + 3; i++)
+            {
+                if (left[i] != '?' && right[i] != '?' && left[i] != right[i])
+                    return false;
+            }
             search = kind + 3;
         }
         return true;
@@ -151,28 +165,15 @@ internal static partial class ExcelFormula
     {
         return ReferenceToken().Replace(formula, match =>
         {
-            if (match.Groups["rectangle"].Success)
+            if (match.Groups["colon"].Success)
             {
-                var separator = match.Value.IndexOf(':');
-                var first = match.Value[..separator];
-                var last = match.Value[(separator + 1)..];
-                if (rewrite == ReferenceRewrite.Pattern)
-                    return TryCellAxes(first, out var firstColumnEnd, out var firstRowStart) &&
-                        TryCellAxes(last, out var lastColumnEnd, out var lastRowStart)
-                        ? PatternToken('B', CellAnchors(first, firstColumnEnd, firstRowStart),
-                            CellAnchors(last, lastColumnEnd, lastRowStart), ignoreAnchors)
-                        : match.Value;
-                return RewriteCell(first, rowOffset, columnOffset, rewrite, ignoreAnchors) + ":" +
-                    RewriteCell(last, rowOffset, columnOffset, rewrite, ignoreAnchors);
+                var kind = match.Groups["rows"].Success ? 'R' : match.Groups["columns"].Success ? 'C' : 'B';
+                return RewriteRange(match, kind, rowOffset, columnOffset, rewrite, ignoreAnchors);
             }
             if (match.Groups["reference"].Success)
                 return RewriteCell(match.Value, rowOffset, columnOffset, rewrite, ignoreAnchors);
             if (match.Groups["broken"].Success && rewrite == ReferenceRewrite.Pattern)
                 return ignoreAnchors ? ReferenceMarker : BrokenReferenceMarker;
-            if (match.Groups["rows"].Success)
-                return RewriteRange(match.Value, rowOffset, row: true, rewrite, ignoreAnchors);
-            if (match.Groups["columns"].Success)
-                return RewriteRange(match.Value, columnOffset, row: false, rewrite, ignoreAnchors);
             return match.Value;
         });
     }
@@ -199,23 +200,48 @@ internal static partial class ExcelFormula
             int.Parse(text.AsSpan(rowStart), CultureInfo.InvariantCulture) is >= 1 and <= CellAddress.LastRow;
     }
 
-    private static char CellAnchors(string text, int columnEnd, int rowStart) =>
-        (char)('0' + (text[0] == '$' ? 2 : 0) + (rowStart != columnEnd ? 1 : 0));
-
-    private static string RewriteRange(string range, int offset, bool row, ReferenceRewrite rewrite, bool ignoreAnchors)
+    private static string RewriteRange(Match match, char kind, int rowOffset, int columnOffset,
+        ReferenceRewrite rewrite, bool ignoreAnchors)
     {
-        var separator = range.IndexOf(':');
+        var colon = match.Groups["colon"];
+        var separator = colon.Index - match.Index;
+        var range = match.Value;
+        var first = range[..separator];
+        var last = range[(separator + colon.Length)..];
         if (rewrite == ReferenceRewrite.Pattern)
         {
-            var firstAxis = range.AsSpan(0, separator);
-            var lastAxis = range.AsSpan(separator + 1);
-            return ValidAxis(firstAxis, row) && ValidAxis(lastAxis, row)
-                ? PatternToken(row ? 'R' : 'C', firstAxis[0] == '$' ? '$' : '-', lastAxis[0] == '$' ? '$' : '-', ignoreAnchors)
+            var firstAnchor = RangeAnchor(first, kind);
+            var lastAnchor = RangeAnchor(last, kind);
+            return firstAnchor.HasValue && lastAnchor.HasValue
+                ? PatternToken(kind, firstAnchor.Value, lastAnchor.Value, ignoreAnchors)
                 : range;
         }
-        var first = RewriteAxis(range[..separator], offset, row, rewrite);
-        var last = RewriteAxis(range[(separator + 1)..], offset, row, rewrite);
-        return $"{first ?? "#REF!"}:{last ?? "#REF!"}";
+        return RewriteEndpoint(first) + colon.Value + RewriteEndpoint(last);
+
+        string RewriteEndpoint(string endpoint)
+        {
+            if (endpoint[0] == '#')
+                return endpoint;
+            if (kind == 'B')
+                return RewriteCell(endpoint, rowOffset, columnOffset, rewrite, ignoreAnchors);
+            var row = kind == 'R';
+            return RewriteAxis(endpoint, row ? rowOffset : columnOffset, row, rewrite) ?? "#REF!";
+        }
+    }
+
+    private static char? RangeAnchor(string endpoint, char kind)
+    {
+        if (kind != 'B')
+        {
+            if (!ValidAxis(endpoint, kind == 'R'))
+                return null;
+            return endpoint[0] == '$' ? '$' : '-';
+        }
+        if (endpoint[0] == '#')
+            return '?';
+        return TryCellAxes(endpoint, out var columnEnd, out var rowStart)
+            ? (char)('0' + (endpoint[0] == '$' ? 2 : 0) + (rowStart != columnEnd ? 1 : 0))
+            : null;
     }
 
     private static string PatternToken(char kind, char firstAnchor, char secondAnchor, bool ignoreAnchors) =>
@@ -258,13 +284,13 @@ internal static partial class ExcelFormula
 
     [GeneratedRegex("""
         "(?:[^"]|"")*" | '(?:[^']|'')*' | \[(?:'['\[\]#@]|[^\[\]]|\[(?:'['\[\]#@]|[^\[\]])*\])*\]
-        | [\p{L}_][\p{L}\p{N}_.]*(?::[\p{L}_][\p{L}\p{N}_.]*)?\s*(?=[!(])
+        | [\p{L}_][\p{L}\p{N}_.]*(?:\s*:\s*[\p{L}_][\p{L}\p{N}_.]*)?\s*(?=[!(])
         | (?<![\p{L}\p{N}_.\\]) (?:
-            (?<broken>\#REF!)
-            | (?<rectangle>\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}:\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})
+            (?:\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}|\#REF!) (?<colon>\s*:\s*) (?:\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}|\#REF!)
+            | (?<broken>\#REF!)
             | (?<reference>\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})
-            | (?<rows>\$?[1-9][0-9]{0,6}:\$?[1-9][0-9]{0,6})
-            | (?<columns>\$?[A-Z]{1,3}:\$?[A-Z]{1,3})
+            | (?<rows>\$?[1-9][0-9]{0,6}(?<colon>\s*:\s*)\$?[1-9][0-9]{0,6})
+            | (?<columns>\$?[A-Z]{1,3}(?<colon>\s*:\s*)\$?[A-Z]{1,3})
         ) (?![\p{L}\p{N}_.])
         """, RegexOptions.IgnorePatternWhitespace | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ReferenceToken();

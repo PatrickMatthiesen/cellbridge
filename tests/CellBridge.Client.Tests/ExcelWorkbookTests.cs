@@ -279,6 +279,28 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
+    [InlineData("SUM($B1 : B$3)", "SUM($B1:B$2)", ExcelWriteStatus.StructuralConflict)]
+    [InlineData("SUM($B1:B3)", "SUM(#REF!:B2)", ExcelWriteStatus.StructuralConflict)]
+    [InlineData("SUM(B1:B$3)", "SUM(B1:#REF!)", ExcelWriteStatus.StructuralConflict)]
+    [InlineData("SUM($B1:B$3)", "SUM(#REF! : B$2)", ExcelWriteStatus.StructuralConflict)]
+    [InlineData("SUM($B1:B$3)", "SUM($B1 : #REF!)", ExcelWriteStatus.StructuralConflict)]
+    [InlineData("SUM($B1:B$3)", "SUM(#REF!:B2)", ExcelWriteStatus.Success)]
+    [InlineData("SUM($B1:B$3)", "SUM(B1:#REF!)", ExcelWriteStatus.Success)]
+    [InlineData("SUM($B1:B$3)", "SUM($B1 : $B2)", ExcelWriteStatus.Success)]
+    public void MatchesMovedFormulaRangesWithSpacesAndBrokenEndpoints(
+        string before, string after, ExcelWriteStatus expected)
+    {
+        var original = Workbook($"<row r='3'><c r='D3'><f>{before}</f></c></row>");
+        var latest = Workbook($"<row r='2'><c r='D2'><f>{after}</f></c></row>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C4", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(expected, result.Status);
+        if (expected == ExcelWriteStatus.StructuralConflict)
+            Assert.Null(result.Package);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void MovingAnEmptyCustomWidthColumnConflicts(bool reindexStyles)
@@ -346,6 +368,24 @@ public sealed class ExcelWorkbookTests
         var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C5", ExcelCellValue.Number(5))]);
 
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
+    }
+
+    [Theory]
+    [InlineData(true, ExcelWriteStatus.StructuralConflict)]
+    [InlineData(false, ExcelWriteStatus.Success)]
+    public void RowStyleShiftWithDuplicateValuesRequiresChangedRowCoverage(bool deleteRow, ExcelWriteStatus expected)
+    {
+        const string lastRow = "<row r='4'><c r='A4'><v>9</v></c></row>";
+        var original = Workbook("<row r='2'><c r='A2'><v>9</v></c></row>" +
+            "<row r='3' customFormat='1' s='1'><c r='A3'><v>9</v></c></row>" + lastRow);
+        var latest = Workbook("<row r='2' customFormat='1' s='1'><c r='A2'><v>9</v></c></row>" +
+            "<row r='3'><c r='A3'><v>9</v></c></row>" + (deleteRow ? "" : lastRow));
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C4", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(expected, result.Status);
+        if (deleteRow)
+            Assert.Null(result.Package);
     }
 
     [Fact]
@@ -586,6 +626,18 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelCellValue.Number(11), cells[0].CachedValue);
         Assert.True(cells[1].Calculated);
         Assert.Equal(ExcelCellValue.String(""), cells[1].CachedValue);
+    }
+
+    [Fact]
+    public void SharedFormulaTranslatesSpacedRangesAndPreservesBrokenEndpoints()
+    {
+        var original = Workbook("<row r='1'><c r='E1'><f t='shared' si='0' ref='E1:F2'>" +
+            "SUM($A1 : C$2, A : $B, $1 : 2, #REF! : $A1, C$2 : #REF!)</f></c></row>" +
+            "<row r='2'><c r='F2'><f t='shared' si='0'/></c></row>");
+
+        var follower = Assert.Single(ExcelWorkbook.ReadRange(original, 4, "F2"));
+
+        Assert.Equal(ExcelCellValue.Formula("SUM($A2 : D$2, B : $B, $1 : 3, #REF! : $A2, D$2 : #REF!)"), follower.Value);
     }
 
     [Fact]
