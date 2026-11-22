@@ -578,9 +578,8 @@ public sealed class DocumentSessionScenarioTests
         }
     }
 
-    private sealed class ScenarioHost : IAsyncDisposable
+    internal sealed class ScenarioHost : IAsyncDisposable
     {
-        private const string Path = "/shared/client-scenario.xlsx";
         private const string PeerHeader = "X-CellBridge-Test-Peer";
         private static readonly CellBridgeActor Actor = new(new("client-tests:owner", "scenario-owner", "Scenario owner"),
             CanCreate: true);
@@ -590,12 +589,12 @@ public sealed class DocumentSessionScenarioTests
         private readonly HttpClient? http;
         private readonly HttpClient? peerHttp;
 
-        private ScenarioHost(WebApplication app, StorageProvider storage, Uri origin, HttpClient? http)
+        private ScenarioHost(WebApplication app, StorageProvider storage, Uri origin, HttpClient? http, string documentPath)
         {
             this.app = app;
             this.storage = storage;
             this.http = http;
-            DocumentUrl = new Uri(origin, Path);
+            DocumentUrl = new Uri(origin, documentPath);
             if (http is null)
             {
                 var processor = app.Services.GetRequiredService<CellBridgeRequestProcessor>();
@@ -616,7 +615,8 @@ public sealed class DocumentSessionScenarioTests
         public ICellBridgeClientTransport Transport { get; }
         public ICellBridgeClientTransport PeerTransport { get; }
 
-        public static async Task<ScenarioHost> StartAsync(bool overHttp, bool enableRealTime = false, long? maxRequestBytes = null)
+        public static async Task<ScenarioHost> StartAsync(bool overHttp, bool enableRealTime = false,
+            long? maxRequestBytes = null, string documentPath = "/shared/client-scenario.xlsx")
         {
             var content = new InMemoryContentStore();
             var storage = new StorageProvider(new InMemoryDocumentRepository(content), content);
@@ -635,7 +635,7 @@ public sealed class DocumentSessionScenarioTests
             try
             {
                 if (!overHttp)
-                    return new ScenarioHost(app, storage, new Uri("http://localhost"), http: null);
+                    return new ScenarioHost(app, storage, new Uri("http://localhost"), http: null, documentPath);
 
                 app.Use((context, next) =>
                 {
@@ -653,7 +653,8 @@ public sealed class DocumentSessionScenarioTests
                 await app.StartAsync();
                 var server = app.Services.GetRequiredService<IServer>();
                 var origin = new Uri(server.Features.Get<IServerAddressesFeature>()!.Addresses.Single());
-                return new ScenarioHost(app, storage, origin, new HttpClient { BaseAddress = origin, Timeout = TimeSpan.FromSeconds(10) });
+                return new ScenarioHost(app, storage, origin,
+                    new HttpClient { BaseAddress = origin, Timeout = TimeSpan.FromSeconds(10) }, documentPath);
             }
             catch
             {
@@ -663,7 +664,8 @@ public sealed class DocumentSessionScenarioTests
         }
 
         public async Task<DocumentHead> CreateAsync(byte[] bytes) =>
-            Assert.IsType<DocumentHead>(await app.Services.GetRequiredService<CellBridgeDocumentService>().CreateAsync(Path, bytes, Actor));
+            Assert.IsType<DocumentHead>(await app.Services.GetRequiredService<CellBridgeDocumentService>()
+                .CreateAsync(DocumentUrl.AbsolutePath, bytes, Actor));
 
         public async Task<DocumentControlRead> ReadControlAsync(Guid resourceId) =>
             Assert.IsType<DocumentControlRead>(await storage.Documents.ReadControlAsync(resourceId));
