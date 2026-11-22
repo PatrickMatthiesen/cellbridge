@@ -110,7 +110,12 @@ public static class ExcelWorkbook
             }
             remote.CheckEditable(address);
             if (ExcelWorksheet.Equivalent(local, remoteValue))
+            {
+                // The same formula text can bind to different content in the current revision.
+                if (original is not null && local.Type == ExcelCellType.Formula)
+                    pending.Add(address, local);
                 continue;
+            }
 
             var overlap = !sameRevision && (!ExcelWorksheet.Equivalent(baseValue, remoteValue) ||
                 before.EffectiveStyle(address) != remote.EffectiveStyle(address) ||

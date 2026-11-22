@@ -436,6 +436,7 @@ public sealed class ExcelWorkbookTests
     [Theory]
     [InlineData("SUM(Table1)")]
     [InlineData("SUM([0]!Table1)")]
+    [InlineData("SUM([00]!Table1)")]
     public void StaleBareNameDoesNotBindToATableAddedByThePeer(string text)
     {
         var original = Workbook("");
@@ -447,6 +448,37 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
         Assert.Null(result.Package);
         Assert.Contains("table binding", result.Detail!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("SUM(Table1)", false)]
+    [InlineData("SUM([00]!Table1)", true)]
+    public void StaleFormulaWithMatchingTextStillChecksItsBinding(string text, bool addAnotherEdit)
+    {
+        var original = Workbook("");
+        var formula = new ExcelCellEdit("B1", ExcelCellValue.Formula(text));
+        var peer = Workbook("", tableRange: "A1:B3");
+        var latest = Assert.IsType<byte[]>(ExcelWorkbook.MergeCells(peer, peer, 9, [formula]).Package);
+        ExcelCellEdit[] edits = addAnotherEdit ? [formula, new("C1", ExcelCellValue.Number(11))] : [formula];
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, edits);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+        Assert.Contains("table binding", result.Detail!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StaleFormulaWithMatchingTextAndBindingDoesNotRewriteThePackage()
+    {
+        var original = Workbook("", tableRange: "A1:B3");
+        var formula = new ExcelCellEdit("B1", ExcelCellValue.Formula("SUM(Table1)"));
+        var latest = Assert.IsType<byte[]>(ExcelWorkbook.MergeCells(original, original, 9, [formula]).Package);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [formula]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Null(result.Package);
     }
 
     [Fact]

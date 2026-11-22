@@ -265,9 +265,7 @@ internal static partial class ExcelFormula
                 var external = false;
                 if (qualifier.Kind == TokenKind.Sheet)
                 {
-                    var prefix = formula.AsSpan(qualifier.Start, qualifier.End - qualifier.Start - 1);
-                    if (!named || prefix.Length < 3 || prefix[0] != '[' || prefix[^1] != ']' ||
-                        !uint.TryParse(prefix[1..^1], NumberStyles.None, CultureInfo.InvariantCulture, out var index))
+                    if (!named || !TryWorkbookIndex(formula, qualifier, out var index))
                         throw new ArgumentException("A structured reference only supports a workbook index as its qualifier.");
                     external = index != 0;
                 }
@@ -400,7 +398,7 @@ internal static partial class ExcelFormula
         {
             var hasNext = tokens.MoveNext();
             if (token.Kind == TokenKind.Name && (previous.Kind != TokenKind.Sheet ||
-                formula.AsSpan(previous.Start, previous.End - previous.Start).SequenceEqual("[0]!")) &&
+                TryWorkbookIndex(formula, previous, out var index) && index == 0) &&
                 (!hasNext || !IsFunctionOrStructuredReference(tokens.Current, token.End)))
             {
                 var name = formula.AsSpan(token.Start, token.End - token.Start);
@@ -416,6 +414,14 @@ internal static partial class ExcelFormula
         bool IsFunctionOrStructuredReference(Token next, int end) =>
             (next.Kind == TokenKind.Symbol && formula[next.Start] == '(') ||
             (next.Kind == TokenKind.StructuredReference && next.Start == end);
+    }
+
+    private static bool TryWorkbookIndex(string formula, Token qualifier, out uint index)
+    {
+        index = 0;
+        var prefix = formula.AsSpan(qualifier.Start, qualifier.End - qualifier.Start - 1);
+        return prefix.Length >= 3 && prefix[0] == '[' && prefix[^1] == ']' &&
+            uint.TryParse(prefix[1..^1], NumberStyles.None, CultureInfo.InvariantCulture, out index);
     }
 
     private static IEnumerable<Token> Tokens(string formula)
