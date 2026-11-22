@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Net;
 using System.Security.Claims;
+using System.Text;
 using CellBridge.AspNetCore;
 using CellBridge.Client.Excel;
 using CellBridge.FssHttp;
@@ -134,6 +135,83 @@ public sealed class DocumentSessionScenarioTests
         await first.SyncAsync();
         Assert.Equal(merged, first.GetSnapshot().Package);
         Assert.Equal(document.ContentVersion + 2, (await host.ReadControlAsync(document.ResourceId)).Head.ContentVersion);
+    }
+
+    [Fact]
+    public async Task HttpUploadsFollowWriterMembershipAndReplayTheOriginalProposal()
+    {
+        var capture = new CaptureHttpCellRequests();
+        await using var host = await ScenarioHost.StartAsync(overHttp: true, ownerHttpHandler: capture);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        var document = await host.CreateAsync(original);
+        await host.SetPeerAccessAsync(document.ResourceId, DocumentAccess.Read | DocumentAccess.Write);
+        CellBridgeDocumentSession? peer = null;
+        var transport = new InterceptSaveResponses(host.Transport, async (attempt, send) =>
+        {
+            var response = await send();
+            if (attempt == 2)
+                await peer!.DisposeAsync();
+            if (attempt is 2 or 3)
+                throw new HttpRequestException("The save response was lost.");
+            return response;
+        });
+        await using var first = await CellBridgeDocumentSession.OpenAsync(transport, host.DocumentUrl,
+            new() { Mode = CellBridgeDocumentSessionMode.LazyWriter });
+        var firstEdit = AddEntry(original, "custom/first.txt", "first"u8);
+        await using (var reader = await CellBridgeDocumentSession.OpenAsync(host.PeerTransport, host.DocumentUrl))
+        {
+            Assert.True((await first.TryCommitAsync(first.GetSnapshot().Revision, firstEdit)).Succeeded);
+        }
+
+        var secondEdit = AddEntry(firstEdit, "custom/second.txt", "second"u8);
+        var revision = first.GetSnapshot().Revision;
+        await using (peer = await CellBridgeDocumentSession.OpenAsync(host.PeerTransport, host.DocumentUrl,
+            new() { Mode = CellBridgeDocumentSessionMode.EagerWriter }))
+        {
+            await Assert.ThrowsAsync<IOException>(() => first.TryCommitAsync(revision, secondEdit));
+            Assert.Single((await host.ReadControlAsync(document.ResourceId)).Coordination.SchemaOwners);
+            Assert.True((await first.TryCommitAsync(revision, secondEdit)).Succeeded);
+        }
+
+        var finalEdit = AddEntry(secondEdit, "custom/final.txt", "final"u8);
+        Assert.True((await first.TryCommitAsync(first.GetSnapshot().Revision, finalEdit)).Succeeded);
+        Assert.Equal(document.ContentVersion + 3, (await host.ReadControlAsync(document.ResourceId)).Head.ContentVersion);
+
+        var uploads = capture.Cells.Where(cell => cell.Operation == RequestTypes.PutChanges).ToArray();
+        Assert.Equal(new[] { "false", "true", "true", "true", "false" }, uploads.Select(upload =>
+            ReadVersioning(upload.Envelope)));
+        Assert.All(uploads[2..4], replay =>
+        {
+            Assert.Equal(uploads[1].Envelope, replay.Envelope);
+            Assert.Equal(uploads[1].Payload, replay.Payload);
+        });
+        Assert.All(capture.Cells.Where(cell => cell.Operation == RequestTypes.QueryChanges), cell =>
+            Assert.Null(ReadVersioning(cell.Envelope)));
+
+        static string? ReadVersioning(string envelope)
+        {
+            var file = Assert.Single(CellStorageRequestParser.Parse(envelope).Requests);
+            return Assert.Single(file.SubRequests).SubRequestDataAttributes.GetValueOrDefault("CoauthVersioning");
+        }
+    }
+
+    [Fact]
+    public async Task RejectedLazyWriterAdmissionSendsNoUpload()
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp: true);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        var document = await host.CreateAsync(original);
+        await host.SetPeerAccessAsync(document.ResourceId, DocumentAccess.Read);
+        var transport = new InterceptSaveResponses(host.PeerTransport, (_, send) => send());
+        await using var reader = await CellBridgeDocumentSession.OpenAsync(transport, host.DocumentUrl,
+            new() { Mode = CellBridgeDocumentSessionMode.LazyWriter });
+
+        var changed = AddEntry(original, "custom/rejected.txt", "rejected"u8);
+        var error = await Assert.ThrowsAsync<CellBridgeProtocolException>(() =>
+            reader.TryCommitAsync(reader.GetSnapshot().Revision, changed));
+        Assert.Equal("FileUnauthorizedAccess", error.ErrorCode);
+        Assert.Empty(transport.Payloads);
+        Assert.Equal(document.ContentVersion, (await host.ReadControlAsync(document.ResourceId)).Head.ContentVersion);
     }
 
     [Theory]
@@ -506,6 +584,27 @@ public sealed class DocumentSessionScenarioTests
 
     private sealed record SaveExchange(byte[] Bytes, PutChangesSubRequestData Proposal, ExGuid AppliedIndex);
 
+    private sealed class CaptureHttpCellRequests() : DelegatingHandler(new HttpClientHandler())
+    {
+        public List<(RequestTypes Operation, string Envelope, byte[] Payload)> Cells { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (request.Content is { Headers.ContentType.MediaType: "multipart/related" } content)
+            {
+                var bytes = await content.ReadAsByteArrayAsync(cancellationToken);
+                var parts = MtomMessageParser.ParseViews(bytes, content.Headers.ContentType!.ToString());
+                Assert.Equal(2, parts.Count);
+                var payload = parts[1].Content;
+                var operation = Assert.Single(FsshttpbCellRequest.Deserialize(new BinaryReaderEx(payload)).SubRequests);
+                Cells.Add((operation.RequestType, Encoding.UTF8.GetString(parts[0].ContentMemory.Span), payload));
+            }
+
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
     private sealed class InterceptSaveResponses(ICellBridgeClientTransport inner,
         Func<int, Func<Task<CellStorageExecution>>, Task<CellStorageExecution>> intercept) : ICellBridgeClientTransport
     {
@@ -616,7 +715,8 @@ public sealed class DocumentSessionScenarioTests
         public ICellBridgeClientTransport PeerTransport { get; }
 
         public static async Task<ScenarioHost> StartAsync(bool overHttp, bool enableRealTime = false,
-            long? maxRequestBytes = null, string documentPath = "/shared/client-scenario.xlsx")
+            long? maxRequestBytes = null, string documentPath = "/shared/client-scenario.xlsx",
+            HttpMessageHandler? ownerHttpHandler = null)
         {
             var content = new InMemoryContentStore();
             var storage = new StorageProvider(new InMemoryDocumentRepository(content), content);
@@ -654,7 +754,8 @@ public sealed class DocumentSessionScenarioTests
                 var server = app.Services.GetRequiredService<IServer>();
                 var origin = new Uri(server.Features.Get<IServerAddressesFeature>()!.Addresses.Single());
                 return new ScenarioHost(app, storage, origin,
-                    new HttpClient { BaseAddress = origin, Timeout = TimeSpan.FromSeconds(10) }, documentPath);
+                    new HttpClient(ownerHttpHandler ?? new HttpClientHandler())
+                    { BaseAddress = origin, Timeout = TimeSpan.FromSeconds(10) }, documentPath);
             }
             catch
             {

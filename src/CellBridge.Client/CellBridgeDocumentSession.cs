@@ -181,13 +181,21 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 var bytes = package.ToArray();
                 var binary = current.File.CreateSave(current.FileCell, bytes,
                     _options.MaxGraphBytes - current.Metadata.Size - current.Editors.Size);
-                var request = CreateRequest(CreateCellRequest(Guid.Empty, binary, writing: true));
-                pending = new(expectedRevision, bytes, binary, request);
+                var upload = CreateCellRequest(Guid.Empty, binary, writing: true);
+                if (!_joinedAsWriter)
+                    await JoinWriterAsync(cancellationToken);
+
+                // Membership can change between saves. Keep the observed status in this proposal for retries.
+                var status = await SendCoauthAsync("GetCoauthoringStatus", cancellationToken);
+                upload.SubRequestDataAttributes["CoauthVersioning"] =
+                    status.SubResponseDataAttributes.GetValueOrDefault("CoauthStatus") == "Coauthoring" ? "true" : "false";
+                _pending = pending = new(expectedRevision, bytes, binary, CreateRequest(upload));
+            }
+            else if (!_joinedAsWriter)
+            {
+                await JoinWriterAsync(cancellationToken);
             }
 
-            if (!_joinedAsWriter)
-                await JoinWriterAsync(cancellationToken);
-            _pending = pending;
             return await ExecuteSaveAsync(current, pending, cancellationToken);
         }
         finally { _gate.Release(); }
@@ -315,7 +323,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 ["SchemaLockID"] = ExcelSchemaLockId,
             },
         };
-        if (operation != "ExitCoauthoring")
+        if (operation is "JoinCoauthoring" or "RefreshCoauthoring")
             request.SubRequestDataAttributes["Timeout"] = _options.LeaseTimeoutSeconds.ToString(CultureInfo.InvariantCulture);
         return SendSingleAsync(CreateRequest(request), cancellationToken);
     }
