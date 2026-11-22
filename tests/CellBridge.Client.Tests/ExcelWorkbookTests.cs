@@ -271,6 +271,43 @@ public sealed class ExcelWorkbookTests
     }
 
     [Fact]
+    public void MovingAnEmptyCustomWidthColumnConflicts()
+    {
+        var original = Workbook("", beforeData: "<cols><col min='2' max='2' width='20' customWidth='1'/></cols>");
+        var latest = Workbook("", beforeData: "<cols><col min='3' max='3' width='20' customWidth='1'/></cols>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("B2", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+    }
+
+    [Fact]
+    public void DisjointEditMergesWithFormulaReplacementAndAddition()
+    {
+        var original = Workbook("<row r='2'><c r='B2'><f>1+2</f></c></row>");
+        var latest = Edit(original, new ExcelCellEdit("B2", ExcelCellValue.Formula("2+3")),
+            new ExcelCellEdit("B3", ExcelCellValue.Formula("4+5")));
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("A1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        var package = Assert.IsType<byte[]>(result.Package);
+        Validate(package);
+        Assert.Equal(["2+3", "4+5"], ExcelWorkbook.ReadRange(package, 4, "B2:B3").Select(cell => cell.Value.RawValue));
+    }
+
+    [Fact]
+    public void SharedFormulaPreservesEscapedTableColumnName()
+    {
+        var package = Workbook("<row r='1'><c r='B1'><f t='shared' si='0' ref='B1:C1'>SUM(Table1[Cost'] A1],A1)</f></c>" +
+            "<c r='C1'><f t='shared' si='0'/></c></row>");
+
+        var follower = Assert.Single(ExcelWorkbook.ReadRange(package, 4, "C1"));
+
+        Assert.Equal(ExcelCellValue.Formula("SUM(Table1[Cost'] A1],B1)"), follower.Value);
+    }
+
+    [Fact]
     public void SortWithAThreeCellCycleConflictsAtABlankAddress()
     {
         var original = Workbook(

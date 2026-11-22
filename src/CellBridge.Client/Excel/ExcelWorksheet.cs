@@ -362,7 +362,11 @@ internal sealed class ExcelWorksheet
         bool HasDifferentFormulaChange((bool IsRow, int Index) axis, FormulaChange change)
         {
             if (formulaChanges.TryGetValue(axis, out var previous))
-                return previous != change;
+            {
+                var combined = previous | change;
+                formulaChanges[axis] = combined;
+                return (combined & FormulaChange.Removed) != 0 && combined != FormulaChange.Removed;
+            }
 
             _package.Charge(64);
             formulaChanges.Add(axis, change);
@@ -370,7 +374,8 @@ internal sealed class ExcelWorksheet
         }
     }
 
-    private enum FormulaChange { Added, Removed, Replaced }
+    [Flags]
+    private enum FormulaChange { Added = 1, Removed = 2, Replaced = 4 }
 
     private static ExcelCellValue RelativeFormula(ExcelCellValue value, CellAddress address) =>
         value.Type == ExcelCellType.Formula
@@ -546,7 +551,7 @@ internal sealed class ExcelWorksheet
         foreach (var element in _root.Elements())
             if (element.Name.Namespace == S && element.Name.LocalName is
                 "sheetProtection" or "protectedRanges" or "mergeCells" or "autoFilter" or "sortState" or
-                "rowBreaks" or "colBreaks" or "dataValidations" or "conditionalFormatting" or "hyperlinks")
+                "rowBreaks" or "colBreaks" or "dataValidations" or "conditionalFormatting" or "hyperlinks" or "cols")
                 yield return ExcelStyles.Signature(element);
 
         foreach (var range in _formulaRanges)
