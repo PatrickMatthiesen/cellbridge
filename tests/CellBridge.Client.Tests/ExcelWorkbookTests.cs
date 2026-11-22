@@ -354,6 +354,27 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
     }
 
+    [Fact]
+    public void MergeRejectsExcessiveBrokenReferenceComparisons()
+    {
+        var original = Workbook(FormulaRows(1, "A1,A1"));
+        var latest = Workbook(FormulaRows(513, "#REF!,$A$1"));
+
+        var error = Assert.Throws<InvalidDataException>(() =>
+            ExcelWorkbook.MergeCells(original, latest, 4, [new("A1", ExcelCellValue.Number(5))]));
+
+        Assert.Contains("broken-reference comparison limit", error.Message, StringComparison.Ordinal);
+
+        static string FormulaRows(int firstRow, string firstReferences) => string.Concat(
+            Enumerable.Range(0, 512).Select(index =>
+            {
+                int row = firstRow + index;
+                var anchors = string.Join(",", Enumerable.Range(0, 9)
+                    .Select(bit => (index & (1 << bit)) == 0 ? "A1" : "$A$1"));
+                return $"<row r='{row}'><c r='B{row}'><f>SUM({firstReferences},{anchors})</f></c></row>";
+            }));
+    }
+
     [Theory]
     [InlineData(false, ExcelWriteStatus.StructuralConflict)]
     [InlineData(true, ExcelWriteStatus.Success)]

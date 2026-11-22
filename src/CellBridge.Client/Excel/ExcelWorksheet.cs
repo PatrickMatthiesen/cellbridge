@@ -6,6 +6,7 @@ namespace CellBridge.Client.Excel;
 
 internal sealed class ExcelWorksheet
 {
+    private const long MaxWildcardFormulaCharacters = 16L * 1024 * 1024;
     private sealed record Row(XElement Element, SortedList<int, XElement> Cells);
     private readonly ExcelPackage _package;
     private readonly XElement _root;
@@ -319,6 +320,7 @@ internal sealed class ExcelWorksheet
         var formulaMovements = new Dictionary<ExcelCellValue, ValueMovement>();
         // A shift can adjust references that neither raw nor relative signatures match.
         var formulaChanges = new Dictionary<(bool IsRow, int Index, string Pattern, FormulaChange Change), FormulaPatterns>();
+        long wildcardCharactersRemaining = MaxWildcardFormulaCharacters;
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
@@ -392,8 +394,8 @@ internal sealed class ExcelWorksheet
             {
                 if (formulaChanges.TryGetValue((isRow, index, relaxed, opposite), out var previous) &&
                     (previous.Intact.Contains(pattern) ||
-                     previous.Broken.Any(candidate => ExcelFormula.CompatibleReferenceAnchors(pattern, candidate)) ||
-                     broken && previous.Intact.Any(candidate => ExcelFormula.CompatibleReferenceAnchors(pattern, candidate))))
+                     HasCompatibleAnchors(previous.Broken, pattern) ||
+                     broken && HasCompatibleAnchors(previous.Intact, pattern)))
                     return true;
 
                 var key = (isRow, index, relaxed, change);
@@ -406,6 +408,20 @@ internal sealed class ExcelWorksheet
                     _package.Charge(64L + pattern.Length * 2L);
                 return false;
             }
+        }
+
+        bool HasCompatibleAnchors(HashSet<string> alternatives, string pattern)
+        {
+            foreach (var candidate in alternatives)
+            {
+                // A wildcard check can scan the entire pattern, even on a mismatch.
+                wildcardCharactersRemaining -= pattern.Length;
+                if (wildcardCharactersRemaining < 0)
+                    throw new InvalidDataException("Worksheet merge exceeds the broken-reference comparison limit.");
+                if (ExcelFormula.CompatibleReferenceAnchors(pattern, candidate))
+                    return true;
+            }
+            return false;
         }
     }
 
