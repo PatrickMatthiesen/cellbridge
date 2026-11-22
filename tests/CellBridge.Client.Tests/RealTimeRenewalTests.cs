@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Threading.Channels;
 using System.Xml.Linq;
 using CellBridge.AspNetCore;
 using CellBridge.FssHttp;
@@ -20,7 +21,7 @@ namespace CellBridge.Client.Tests;
 public sealed class RealTimeRenewalTests
 {
     [Fact]
-    public async Task TicketRenewsBeforeExpiryOverWebSocketUsingCallerTlsConfiguration()
+    public async Task TicketRenewsBeforeExpiryDuringSyncOverWebSocketUsingCallerTlsConfiguration()
     {
         const string path = "/shared/rtc-renewal.xlsx";
         var identity = new SubjectIdentity("client-tests:renewal", "renewal", "Renewal test");
@@ -31,15 +32,9 @@ public sealed class RealTimeRenewalTests
         using var certificate = certificateRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddHours(-1),
             DateTimeOffset.UtcNow.AddHours(1));
 
-        var content = new InMemoryContentStore();
-        var storage = new StorageProvider(new InMemoryDocumentRepository(content), content);
-        var builder = WebApplication.CreateSlimBuilder();
-        builder.Logging.ClearProviders();
+        var builder = CreateBuilder();
         builder.WebHost.ConfigureKestrel(options =>
             options.Listen(IPAddress.Loopback, 0, endpoint => endpoint.UseHttps(certificate)));
-        builder.Services.AddAuthentication();
-        builder.Services.AddCellBridge(storage, requireDurability: false,
-            configure: options => options.EnableOfficeRealTime = true);
 
         await using var app = builder.Build();
         app.Use((context, next) =>
@@ -68,8 +63,99 @@ public sealed class RealTimeRenewalTests
         await using var session = await CellBridgeDocumentSession.OpenAsync(transport, new Uri(origin, path),
             new CellBridgeDocumentSessionOptions { LeaseRenewalInterval = TimeSpan.FromMinutes(1) }, timeout.Token);
 
-        var renewed = await transport.Renewed.Task.WaitAsync(timeout.Token);
-        Assert.True(renewed < transport.InitialExpiry);
+        var blocked = transport.BlockNext(SubRequestType.Cell);
+        var sync = session.SyncAsync(timeout.Token);
+        try
+        {
+            await blocked.Entered.Task.WaitAsync(timeout.Token);
+            var renewed = await transport.Renewed.Task.WaitAsync(timeout.Token);
+            Assert.True(renewed < transport.InitialExpiry);
+            Assert.False(sync.IsCompleted);
+        }
+        finally
+        {
+            blocked.Release.TrySetResult();
+            await sync;
+        }
+    }
+
+    [Fact]
+    public async Task EndingNotificationStreamCancelsInFlightTicketRequest()
+    {
+        var origin = new Uri("http://localhost");
+        var document = new Uri(origin, "/rtc-disconnect.xlsx");
+        var actor = new CellBridgeActor(new("client-tests:disconnect", "disconnect", "Disconnect test"), CanCreate: true);
+        await using var app = CreateBuilder().Build();
+        await app.Services.GetRequiredService<CellBridgeDocumentService>()
+            .CreateAsync(document.AbsolutePath, OfficeDocumentTemplates.CreateExcelWorkbook(), actor);
+        var processor = app.Services.GetRequiredService<CellBridgeRequestProcessor>();
+        var channel = new DisconnectableChannel();
+        var transport = new ShortFirstTicket(new InProcessCellBridgeTransport(processor, origin.GetLeftPart(UriPartial.Authority), actor),
+            channel);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var session = await CellBridgeDocumentSession.OpenAsync(transport, document, cancellationToken: timeout.Token);
+        var blocked = transport.BlockNext(SubRequestType.Properties);
+        var renewalToken = await blocked.Entered.Task.WaitAsync(timeout.Token);
+        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = renewalToken.Register(() => cancelled.TrySetResult());
+
+        channel.Disconnect();
+        await cancelled.Task.WaitAsync(timeout.Token);
+        await using var notifications = session.ReadNotificationsAsync(timeout.Token).GetAsyncEnumerator();
+        Assert.False(await notifications.MoveNextAsync());
+        await session.SyncAsync(timeout.Token);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DisposingSendsNormalCloseAndWaitsForPeerWithinDeadline(bool peerAcknowledges)
+    {
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
+        await using var app = builder.Build();
+        app.UseWebSockets();
+        app.MapGet("/signalr/negotiate", () => Results.Text(
+            """{"TryWebSockets":true,"ProtocolVersion":"1.4","ConnectionToken":"connection"}""", "application/json"));
+
+        var received = new TaskCompletionSource<WebSocketCloseStatus?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePeer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        app.MapGet("/signalr/connect", async (HttpContext context) =>
+        {
+            using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            await socket.SendAsync("""{"S":1}"""u8.ToArray().AsMemory(), WebSocketMessageType.Text, true, timeout.Token);
+            var message = await socket.ReceiveAsync(new byte[1024].AsMemory(), timeout.Token);
+            received.TrySetResult(message.MessageType == WebSocketMessageType.Close ? socket.CloseStatus : null);
+            await releasePeer.Task.WaitAsync(timeout.Token);
+            if (peerAcknowledges)
+                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, timeout.Token);
+        });
+
+        await app.StartAsync(timeout.Token);
+        var origin = new Uri(app.Urls.Single());
+        using var http = new HttpClient();
+        var transport = new HttpCellBridgeTransport(http, origin);
+        var target = new RealTimeConnectionTarget(origin, "ticket", null, Guid.NewGuid().ToString("B"));
+        var channel = Assert.IsAssignableFrom<ICellBridgeRealTimeChannel>(await transport.TryConnectRealTimeAsync(target, timeout.Token));
+
+        var disposal = channel.DisposeAsync().AsTask();
+        try
+        {
+            Assert.Equal(WebSocketCloseStatus.NormalClosure, await received.Task.WaitAsync(timeout.Token));
+            if (peerAcknowledges)
+            {
+                Assert.False(disposal.IsCompleted);
+                releasePeer.TrySetResult();
+            }
+            await disposal.WaitAsync(timeout.Token);
+        }
+        finally
+        {
+            releasePeer.TrySetResult();
+        }
     }
 
     [Fact]
@@ -106,14 +192,43 @@ public sealed class RealTimeRenewalTests
         await accepted.Task.WaitAsync(timeout.Token);
     }
 
-    private sealed class ShortFirstTicket(ICellBridgeClientTransport inner) : ICellBridgeClientTransport
+    private static WebApplicationBuilder CreateBuilder()
     {
+        var content = new InMemoryContentStore();
+        var storage = new StorageProvider(new InMemoryDocumentRepository(content), content);
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.Services.AddAuthentication();
+        builder.Services.AddCellBridge(storage, requireDurability: false,
+            configure: options => options.EnableOfficeRealTime = true);
+        return builder;
+    }
+
+    private sealed class ShortFirstTicket(ICellBridgeClientTransport inner, ICellBridgeRealTimeChannel? testChannel = null)
+        : ICellBridgeClientTransport
+    {
+        private BlockedRequest? _blocked;
         public TaskCompletionSource<DateTimeOffset> Renewed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public DateTimeOffset InitialExpiry { get; private set; }
+
+        public BlockedRequest BlockNext(SubRequestType type)
+        {
+            var blocked = new BlockedRequest(type);
+            Volatile.Write(ref _blocked, blocked);
+            return blocked;
+        }
 
         public async Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request,
             CancellationToken cancellationToken = default)
         {
+            if (Volatile.Read(ref _blocked) is { } blocked &&
+                request.Requests[0].SubRequests.Any(sub => sub.Type == blocked.Type) &&
+                Interlocked.CompareExchange(ref _blocked, null, blocked) == blocked)
+            {
+                blocked.Entered.TrySetResult(cancellationToken);
+                await blocked.Release.Task.WaitAsync(cancellationToken);
+            }
+
             var execution = await inner.ExecuteAsync(request, cancellationToken);
             var response = execution.Response.Responses.SelectMany(file => file.SubResponses)
                 .SingleOrDefault(item => item.Type == SubRequestType.Properties);
@@ -133,9 +248,35 @@ public sealed class RealTimeRenewalTests
         public async Task<ICellBridgeRealTimeChannel?> TryConnectRealTimeAsync(RealTimeConnectionTarget target,
             CancellationToken cancellationToken = default)
         {
-            var channel = Assert.IsAssignableFrom<ICellBridgeRealTimeChannel>(
+            var channel = testChannel ?? Assert.IsAssignableFrom<ICellBridgeRealTimeChannel>(
                 await inner.TryConnectRealTimeAsync(target, cancellationToken));
             return new ObserveRenewal(channel, Renewed);
+        }
+    }
+
+    private sealed class BlockedRequest(SubRequestType type)
+    {
+        public SubRequestType Type { get; } = type;
+        public TaskCompletionSource<CancellationToken> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class DisconnectableChannel : ICellBridgeRealTimeChannel
+    {
+        private readonly Channel<string> _notifications = Channel.CreateUnbounded<string>();
+
+        public void Disconnect() => _notifications.Writer.TryComplete();
+
+        public IAsyncEnumerable<string> ReadNotificationsAsync(CancellationToken cancellationToken = default) =>
+            _notifications.Reader.ReadAllAsync(cancellationToken);
+
+        public Task UpdateClientInfoAsync(RealTimeConnectionTarget target, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("No ticket update should be sent after disconnect.");
+
+        public ValueTask DisposeAsync()
+        {
+            Disconnect();
+            return ValueTask.CompletedTask;
         }
     }
 

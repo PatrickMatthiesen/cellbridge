@@ -10,6 +10,7 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
 {
     private const string Hub = "RealtimeChannelHub";
     private const int MaximumFrameBytes = 1024 * 1024;
+    private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
 
     private readonly ClientWebSocket _socket;
     private readonly RealTimeConnectionTarget _target;
@@ -22,6 +23,8 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
     });
     private readonly TaskCompletionSource _initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _receive;
+    private readonly object _closeGate = new();
+    private Task? _close;
     private long _invocationId;
     private int _disposed;
 
@@ -125,6 +128,8 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
             await _send.WaitAsync(ct).ConfigureAwait(false);
             try
             {
+                ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+                ct.ThrowIfCancellationRequested();
                 await _socket.SendAsync(payload.AsMemory(), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
             }
             finally
@@ -154,7 +159,11 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
             {
                 var part = await _socket.ReceiveAsync(buffer.AsMemory(), CancellationToken.None).ConfigureAwait(false);
                 if (part.MessageType == WebSocketMessageType.Close)
+                {
+                    using var timeout = new CancellationTokenSource(CloseTimeout);
+                    await SendCloseOutputAsync(timeout.Token).ConfigureAwait(false);
                     break;
+                }
                 if (part.MessageType != WebSocketMessageType.Text || frame.Length + part.Count > MaximumFrameBytes)
                     throw new InvalidDataException("The server sent an invalid classic SignalR message.");
 
@@ -216,12 +225,51 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        lock (_closeGate)
+        {
+            Volatile.Write(ref _disposed, 1);
+            return new(_close ??= CloseAsync());
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        using var timeout = new CancellationTokenSource(CloseTimeout);
+        try
+        {
+            if (!_receive.IsCompleted)
+            {
+                // The receive loop owns all reads, including the peer's close frame.
+                await SendCloseOutputAsync(timeout.Token).ConfigureAwait(false);
+                await _receive.WaitAsync(timeout.Token).ConfigureAwait(false);
+            }
+        }
+        catch (Exception error) when (error is WebSocketException or OperationCanceledException)
+        {
             _socket.Abort();
-        await _receive.ConfigureAwait(false);
-        _socket.Dispose();
+            await _receive.ConfigureAwait(false);
+        }
+        finally
+        {
+            _socket.Dispose();
+        }
+    }
+
+    private async Task SendCloseOutputAsync(CancellationToken cancellationToken)
+    {
+        await _send.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                await _socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, cancellationToken)
+                    .ConfigureAwait(false);
+        }
+        finally
+        {
+            _send.Release();
+        }
     }
 
     private static bool IsSameOrigin(Uri origin, Uri uri) =>

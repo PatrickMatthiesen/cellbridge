@@ -132,9 +132,9 @@ public sealed class ExcelWorkbookTests
     [Fact]
     public void SharedStringReindexingAndSheetReorderingDoNotConflict()
     {
-        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c></row>", sharedStrings: ["same", "other"]);
+        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c></row>", sharedStrings: ["<t>same</t>", "<t>other</t>"]);
         var newOrder = Workbook("<row r='1'><c r='A1' t='s'><v>1</v></c></row>",
-            sharedStrings: ["other", "same"], reverseSheets: true);
+            sharedStrings: ["<t>other</t>", "<t>same</t>"], reverseSheets: true);
         var result = ExcelWorkbook.MergeCells(original, newOrder, 4, [new("A1", ExcelCellValue.String("changed"))]);
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
         Assert.Equal((uint)9, ExcelWorkbook.ListSheets(result.Package!)[0].SheetId);
@@ -152,6 +152,40 @@ public sealed class ExcelWorkbookTests
         remote = Workbook("<row r='1'><c r='A1'><v>1</v></c></row>");
         Assert.Equal(ExcelWriteStatus.CellConflict,
             ExcelWorkbook.MergeCells(original, remote, 4, [new("A1", ExcelCellValue.Number(4))]).Status);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void RichTextFormattingChangeConflictsEvenWhenTheCellValueIsUnchanged(bool sharedBefore, bool sharedAfter)
+    {
+        var original = StringWorkbook(sharedBefore, "<r><t>sa</t></r><r><t>me</t></r>");
+        var remote = StringWorkbook(sharedAfter, "<r><t>sa</t></r><r><rPr><b/></rPr><t>me</t></r>");
+
+        var result = ExcelWorkbook.MergeCells(original, remote, 4, [new("A1", ExcelCellValue.String("changed"))]);
+
+        Assert.Equal(ExcelWriteStatus.CellConflict, result.Status);
+        var conflict = Assert.Single(result.Conflicts);
+        Assert.Equal(ExcelCellValue.String("same"), conflict.Base);
+        Assert.Equal(conflict.Base, conflict.Remote);
+        Assert.Null(result.Package);
+    }
+
+    [Theory]
+    [InlineData("<t>same</t>", "<r><t>sa</t></r><r><t>me</t></r>")]
+    [InlineData("<r><rPr><b/></rPr><t>same</t></r>",
+        "<r><rPr><b/></rPr><t>sa</t></r><r><rPr><b/></rPr><t>me</t></r>")]
+    public void EquivalentStringFormattingSurvivesStorageAndRunBoundaryChanges(string before, string after)
+    {
+        var original = StringWorkbook(false, before);
+        var remote = StringWorkbook(true, after);
+
+        var result = ExcelWorkbook.MergeCells(original, remote, 4, [new("A1", ExcelCellValue.String("changed"))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Equal(ExcelCellValue.String("changed"), Assert.Single(ExcelWorkbook.ReadRange(result.Package!, 4, "A1")).Value);
     }
 
     [Fact]
@@ -180,6 +214,37 @@ public sealed class ExcelWorkbookTests
 
         var result = ExcelWorkbook.MergeCells(insert ? shorter : longer, insert ? longer : shorter, 4,
             [new("A1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
+    [Fact]
+    public void ShiftConflictsWhenOnlyOneRemovedOccurrenceWasCleared()
+    {
+        var original = Workbook("<row r='1'><c r='A1' t='str'><v>Y</v></c></row>" +
+            "<row r='2'><c r='A2' t='str'><v>X</v></c></row><row r='3'><c r='A3' t='str'><v>Y</v></c></row>");
+        var remote = Workbook("<row r='1'><c r='A1' t='str'><v>Z</v></c></row>" +
+            "<row r='2'><c r='A2' t='str'><v>Y</v></c></row>");
+
+        var result = ExcelWorkbook.MergeCells(original, remote, 4, [new("B1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
+    [Theory]
+    [InlineData("B1", "B2", "B3")]
+    [InlineData("SUM($B1,C$1,$D$1,1:3)&amp;&quot;B1&quot;", "SUM($B2,C$1,$D$1,2:4)&amp;&quot;B1&quot;",
+        "SUM($B3,C$1,$D$1,3:5)&amp;&quot;B1&quot;")]
+    public void FormulaReferencesAdjustedByAnInsertedRowConflictAtAnUnchangedAddress(string first, string second, string third)
+    {
+        var original = Workbook($"<row r='1'><c r='A1'><f>{first}</f></c></row>" +
+            $"<row r='2'><c r='A2'><f>{second}</f></c></row>");
+        var remote = Workbook($"<row r='2'><c r='A2'><f>{second}</f></c></row>" +
+            $"<row r='3'><c r='A3'><f>{third}</f></c></row>");
+
+        var result = ExcelWorkbook.MergeCells(original, remote, 4, [new("A2", ExcelCellValue.Formula("42"))]);
 
         Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
         Assert.Null(result.Package);
@@ -274,10 +339,12 @@ public sealed class ExcelWorkbookTests
         Validate(Edit(workbook, new ExcelCellEdit("A1", ExcelCellValue.Formula("_xlfn.XLOOKUP(1,A2:A3,B2:B3)"))));
     }
 
-    [Fact]
-    public void AcceptsDottedFutureFunctions()
+    [Theory]
+    [InlineData("_xlfn.NORM.DIST(0,0,1,TRUE)")]
+    [InlineData("_xlfn.T.DIST.2T(1,10)")]
+    public void AcceptsDottedFutureFunctions(string text)
     {
-        var formula = ExcelCellValue.Formula("_xlfn.NORM.DIST(0,0,1,TRUE)");
+        var formula = ExcelCellValue.Formula(text);
         var edited = Edit(Workbook(""), new ExcelCellEdit("A1", formula));
 
         Validate(edited);
@@ -328,6 +395,10 @@ public sealed class ExcelWorkbookTests
 
     private static int ReadUInt16(byte[] bytes, int offset) => BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(offset));
     private static int ReadInt32(byte[] bytes, int offset) => BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(offset));
+
+    private static byte[] StringWorkbook(bool shared, string markup) => shared
+        ? Workbook("<row r='1'><c r='A1' t='s'><v>1</v></c></row>", sharedStrings: ["<t>other</t>", markup])
+        : Workbook($"<row r='1'><c r='A1' t='inlineStr'><is>{markup}</is></c></row>");
 
     private static byte[] Workbook(string rows, string beforeData = "", string afterData = "", bool date1904 = false,
         string? calculationChain = null, string[]? sharedStrings = null, bool nonSeekableZip = false,
@@ -398,8 +469,8 @@ public sealed class ExcelWorkbookTests
             if (calculationChain is not null)
                 Add("xl/calcChain.xml", $"<calcChain xmlns='{Main}'>" + calculationChain + "</calcChain>");
             if (sharedStrings is not null)
-                Add("xl/sharedStrings.xml", new XElement(S + "sst",
-                    sharedStrings.Select(value => new XElement(S + "si", new XElement(S + "t", value)))).ToString());
+                Add("xl/sharedStrings.xml", $"<sst xmlns='{Main}'>" +
+                    string.Concat(sharedStrings.Select(markup => $"<si>{markup}</si>")) + "</sst>");
         }
         return memory.ToArray();
     }

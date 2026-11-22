@@ -9,6 +9,35 @@ public sealed class HttpTransportTests
     private static readonly Uri Origin = new("https://client.test/");
 
     [Fact]
+    public async Task PasswordLoginUsesTheApplicationMount()
+    {
+        var paths = new List<string>();
+        using var http = new HttpClient(new Respond(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            paths.Add(path);
+            var response = path switch
+            {
+                "/demo/auth/login" when request.Method == HttpMethod.Get => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""<input name="__RequestVerificationToken" value="token">"""),
+                },
+                "/demo/auth/login" => new HttpResponseMessage(HttpStatusCode.Found),
+                "/demo/auth/complete" => new HttpResponseMessage(HttpStatusCode.OK),
+                _ => new HttpResponseMessage(HttpStatusCode.NotFound),
+            };
+            if (response.StatusCode == HttpStatusCode.Found)
+                response.Headers.Location = new Uri("/demo/auth/complete", UriKind.Relative);
+            response.RequestMessage = request;
+            return response;
+        }));
+
+        await WebDemoLogin.SignInAsync(http, Origin, "reader", "test", applicationPathBase: "/demo");
+
+        Assert.Equal(["/demo/auth/login", "/demo/auth/login", "/demo/auth/complete"], paths);
+    }
+
+    [Fact]
     public async Task NonSuccessSoapFaultPreservesTheServerReason()
     {
         using var http = new HttpClient(new Respond(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)

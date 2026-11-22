@@ -107,7 +107,9 @@ public static class ExcelWorkbook
                 continue;
 
             var overlap = !sameRevision && (!ExcelWorksheet.Equivalent(baseValue, remoteValue) ||
-                before.EffectiveStyle(address) != remote.EffectiveStyle(address));
+                before.EffectiveStyle(address) != remote.EffectiveStyle(address) ||
+                (baseValue.Type == ExcelCellType.String &&
+                 !before.StringFormatting(address).SequenceEqual(remote.StringFormatting(address))));
             if (overlap && policy != ExcelConflictPolicy.LocalWins)
             {
                 if (policy == ExcelConflictPolicy.FailWithConflict)

@@ -56,7 +56,9 @@ dotnet run --project tools/CellBridge.Emulator -- interactive "$WORKBOOK_URL"
 
 For a desktop Excel capture, use a disposable workbook and distinct accounts
 for desktop Excel and the emulator. Start the capture, open the workbook in
-desktop Excel, then save one cell with the emulator. In this example the
+desktop Excel, then save one cell with the emulator. Enable server capture
+with `Protocol:CaptureDirectory` to record the emulator request alongside
+Excel's traffic when using Windows process-local capture. In this example the
 sheet ID is `1` and the new value in `B2` is the number `42`. Start with a
 different value in `B2` so the emulator sends a `PutChanges` request.
 

@@ -7,7 +7,8 @@ using CellBridge.FssHttp;
 namespace CellBridge.Client;
 
 /// <summary>Executes SOAP and MTOM requests through a caller-owned HTTP client.</summary>
-/// <remarks>Configure bearer authentication or a cookie container on the HTTP client.</remarks>
+/// <remarks>Configure bearer authentication or a cookie container on the HTTP client.
+/// Disable automatic redirects on its handler to keep ticket requests on the configured origin.</remarks>
 public sealed class HttpCellBridgeTransport : ICellBridgeClientTransport
 {
     private readonly HttpClient _client;
@@ -27,17 +28,22 @@ public sealed class HttpCellBridgeTransport : ICellBridgeClientTransport
             publicOrigin.Query.Length != 0 || publicOrigin.Fragment.Length != 0)
             throw new ArgumentException("An HTTP(S) origin without credentials, path, query or fragment is required.", nameof(publicOrigin));
 
+        var mount = EncodeMount(applicationPathBase);
+        _client = client;
+        _origin = publicOrigin;
+        _maxResponseBytes = maxResponseBytes;
+        _endpoint = new Uri(_origin, mount + "/_vti_bin/cellstorage.svc");
+    }
+
+    internal static string EncodeMount(string applicationPathBase)
+    {
         var segments = applicationPathBase.Split('/');
         if (applicationPathBase.Length != 0 &&
             (segments[0].Length != 0 || segments.Skip(1).Any(segment =>
                 segment.Length == 0 || segment is "." or ".." || segment.Any(c => char.IsControl(c) || c is '\\' or '?' or '#'))))
             throw new ArgumentException("A decoded application mount path without a trailing slash is required.", nameof(applicationPathBase));
 
-        _client = client;
-        _origin = publicOrigin;
-        _maxResponseBytes = maxResponseBytes;
-        var mount = string.Join('/', segments.Select(Uri.EscapeDataString));
-        _endpoint = new Uri(_origin, mount + "/_vti_bin/cellstorage.svc");
+        return string.Join('/', segments.Select(Uri.EscapeDataString));
     }
 
     public async Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request,

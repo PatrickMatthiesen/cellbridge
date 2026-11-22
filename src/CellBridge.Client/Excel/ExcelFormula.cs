@@ -94,7 +94,8 @@ internal static partial class ExcelFormula
             throw new ArgumentException($"Dynamic-array function '{name}' is outside the supported formula subset.");
         var futurePrefix = token.StartsWith("_xlfn.", StringComparison.Ordinal);
         if ((FutureFunctions.Contains(name) && !futurePrefix) ||
-            (futurePrefix && pieces.Skip(1).Any(piece => piece.Length == 0 || !char.IsAsciiLetter(piece[0]))))
+            (futurePrefix && (pieces[1].Length == 0 || !char.IsAsciiLetter(pieces[1][0]) ||
+                pieces.Skip(2).Any(piece => piece.Length == 0 || !char.IsAsciiLetterOrDigit(piece[0])))))
             throw new ArgumentException($"Function '{name}' has an invalid or missing _xlfn. prefix.");
     }
 
@@ -113,57 +114,67 @@ internal static partial class ExcelFormula
     {
         if (formula.Length > 8192)
             throw new InvalidDataException("The shared formula exceeds Excel's formula length limit.");
-        var rowOffset = target.Row - master.Row;
-        var columnOffset = target.Column - master.Column;
+        return RewriteReferences(formula, target.Row - master.Row, target.Column - master.Column, relative: false);
+    }
+
+    internal static string RelativeSignature(string formula, CellAddress address) =>
+        RewriteReferences(formula, -address.Row, -address.Column, relative: true);
+
+    private static string RewriteReferences(string formula, int rowOffset, int columnOffset, bool relative)
+    {
         return ReferenceToken().Replace(formula, match =>
         {
             if (match.Groups["reference"].Success)
-                return ShiftCell(match.Value, rowOffset, columnOffset);
+                return ShiftCell(match.Value, rowOffset, columnOffset, relative);
             if (match.Groups["rows"].Success)
-                return ShiftRange(match.Value, rowOffset, row: true);
+                return ShiftRange(match.Value, rowOffset, row: true, relative);
             if (match.Groups["columns"].Success)
-                return ShiftRange(match.Value, columnOffset, row: false);
+                return ShiftRange(match.Value, columnOffset, row: false, relative);
             return match.Value;
         });
     }
 
-    private static string ShiftCell(string text, int rowOffset, int columnOffset)
+    private static string ShiftCell(string text, int rowOffset, int columnOffset, bool relative)
     {
         var separator = text[0] == '$' ? 1 : 0;
         while (separator < text.Length && char.IsAsciiLetter(text[separator]))
             separator++;
-        var column = ShiftAxis(text[..separator], columnOffset, row: false);
-        var row = ShiftAxis(text[separator..], rowOffset, row: true);
+        var column = ShiftAxis(text[..separator], columnOffset, row: false, relative);
+        var row = ShiftAxis(text[separator..], rowOffset, row: true, relative);
         return column is null || row is null ? "#REF!" : column + row;
     }
 
-    private static string ShiftRange(string range, int offset, bool row)
+    private static string ShiftRange(string range, int offset, bool row, bool relative)
     {
         var separator = range.IndexOf(':');
-        var first = ShiftAxis(range[..separator], offset, row);
-        var last = ShiftAxis(range[(separator + 1)..], offset, row);
+        var first = ShiftAxis(range[..separator], offset, row, relative);
+        var last = ShiftAxis(range[(separator + 1)..], offset, row, relative);
         return $"{first ?? "#REF!"}:{last ?? "#REF!"}";
     }
 
-    private static string? ShiftAxis(string axis, int offset, bool row)
+    private static string? ShiftAxis(string axis, int offset, bool row, bool relative)
     {
         if (axis.StartsWith('$'))
             return axis;
-        if (row)
-        {
-            var number = int.Parse(axis, CultureInfo.InvariantCulture);
-            if (number > CellAddress.LastRow)
-                return axis;
-            number += offset;
-            return number is >= 1 and <= CellAddress.LastRow ? number.ToString(CultureInfo.InvariantCulture) : null;
-        }
+        var number = row ? int.Parse(axis, CultureInfo.InvariantCulture) : ColumnNumber(axis);
+        var limit = row ? CellAddress.LastRow : CellAddress.LastColumn;
+        if (number > limit)
+            return axis;
+        number += offset;
+        // A NUL cannot occur in workbook XML. It separates offsets from literal formula text.
+        if (relative)
+            return string.Concat(row ? "\0R" : "\0C", number.ToString(CultureInfo.InvariantCulture), "\0");
+        if (number < 1 || number > limit)
+            return null;
+        return row ? number.ToString(CultureInfo.InvariantCulture) : new CellAddress(1, number).ToString()[..^1];
+    }
+
+    private static int ColumnNumber(string axis)
+    {
         var column = 0;
         foreach (var letter in axis)
             column = column * 26 + char.ToUpperInvariant(letter) - 'A' + 1;
-        if (column > CellAddress.LastColumn)
-            return axis;
-        column += offset;
-        return column is >= 1 and <= CellAddress.LastColumn ? new CellAddress(1, column).ToString()[..^1] : null;
+        return column;
     }
 
     [GeneratedRegex("""

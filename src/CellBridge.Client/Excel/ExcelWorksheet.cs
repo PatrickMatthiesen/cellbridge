@@ -74,6 +74,18 @@ internal sealed class ExcelWorksheet
 
     internal string EffectiveStyle(CellAddress address) => _package.Styles.Signature(Style(address, Find(address)));
 
+    internal IEnumerable<(int Offset, string? Properties)> StringFormatting(CellAddress address)
+    {
+        var cell = Find(address);
+        var markup = (string?)cell?.Attribute("t") switch
+        {
+            "inlineStr" => cell.Element(S + "is"),
+            "s" when cell.Element(S + "v") is { } index => _package.SharedString(index.Value).Markup,
+            _ => null
+        };
+        return ExcelPackage.StringFormatting(markup);
+    }
+
     private XElement? Find(CellAddress address) =>
         _rows.TryGetValue(address.Row, out var row) && row.Cells.TryGetValue(address.Column, out var cell) ? cell : null;
 
@@ -118,7 +130,7 @@ internal sealed class ExcelWorksheet
             return ExcelCellValue.Blank;
         return type switch
         {
-            "s" => ExcelCellValue.String(_package.SharedString(raw)),
+            "s" => ExcelCellValue.String(_package.SharedString(raw).Text),
             "str" => ExcelCellValue.String(DecodeString(raw)),
             "b" => new ExcelCellValue(ExcelCellType.Boolean, raw),
             "e" => new ExcelCellValue(ExcelCellType.Error, raw),
@@ -301,6 +313,8 @@ internal sealed class ExcelWorksheet
         // OOXML does not record the operation that produced a cell grid. Detect
         // identifiable values that moved as evidence of insertion, deletion or sorting.
         var movements = new Dictionary<ExcelCellValue, ValueMovement>();
+        // Keep raw formula matches and also look for references Excel adjusted during a shift.
+        var formulaMovements = new Dictionary<ExcelCellValue, ValueMovement>();
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
@@ -310,54 +324,103 @@ internal sealed class ExcelWorksheet
             if (Equivalent(before, after))
                 continue;
 
-            var source = FindMovement(movements, before);
-            var destination = FindMovement(movements, after);
-            if (source is not null)
-                source.Removed.Add(address);
-            if (destination is not null)
-                destination.Added.Add(address);
-            if (source is not null && destination is not null && source != destination)
-            {
-                if (source.Replacements is null)
-                {
-                    _package.Charge(64);
-                    source.Replacements = [];
-                }
-                _package.Charge(16);
-                source.Replacements.Add(destination);
-                destination.IncomingReplacements++;
-            }
+            RecordMovement(movements, before, after, address);
+            if (before.Type == ExcelCellType.Formula || after.Type == ExcelCellType.Formula)
+                RecordMovement(formulaMovements, RelativeFormula(before, address), RelativeFormula(after, address), address,
+                    formulasOnly: true);
         }
         foreach (var (row, data) in remote._rows)
         foreach (var (column, cell) in data.Cells)
         {
             var address = new CellAddress(row, column);
-            if (Find(address) is null && FindMovement(movements, remote.Value(cell, address)) is { } movement)
-                movement.Added.Add(address);
+            if (Find(address) is not null)
+                continue;
+            var after = remote.Value(cell, address);
+            RecordMovement(movements, ExcelCellValue.Blank, after, address);
+            if (after.Type == ExcelCellType.Formula)
+                RecordMovement(formulaMovements, ExcelCellValue.Blank, RelativeFormula(after, address), address);
         }
 
+        return HasMovement(movements.Values) || HasMovement(formulaMovements.Values);
+    }
+
+    private static ExcelCellValue RelativeFormula(ExcelCellValue value, CellAddress address) =>
+        value.Type == ExcelCellType.Formula
+            ? value with { RawValue = ExcelFormula.RelativeSignature(value.RawValue!, address) } : value;
+
+    private void RecordMovement(Dictionary<ExcelCellValue, ValueMovement> movements, ExcelCellValue before,
+        ExcelCellValue after, CellAddress address, bool formulasOnly = false)
+    {
+        if (Equivalent(before, after))
+            return;
+        var source = !formulasOnly || before.Type == ExcelCellType.Formula ? FindMovement(movements, before) : null;
+        var destination = !formulasOnly || after.Type == ExcelCellType.Formula ? FindMovement(movements, after) : null;
+        if (source is not null)
+        {
+            _package.Charge(48);
+            source.Removed.Add(new Occurrence(address, after.Type == ExcelCellType.Blank));
+        }
+        if (destination is not null)
+        {
+            _package.Charge(48);
+            destination.Added.Add(new Occurrence(address, before.Type == ExcelCellType.Blank));
+        }
+        if (source is null || destination is null || source == destination)
+            return;
+        if (source.Replacements is null)
+        {
+            _package.Charge(64);
+            source.Replacements = [];
+        }
+        _package.Charge(16);
+        source.Replacements.Add(destination);
+        destination.IncomingReplacements++;
+    }
+
+    private bool HasMovement(ICollection<ValueMovement> movements)
+    {
         var offsets = new HashSet<(int Row, int Column)>();
-        foreach (var movement in movements.Values)
+        foreach (var movement in movements)
         {
             var source = movement.Removed;
             var destination = movement.Added;
             if (source.Count == 0 || destination.Count == 0)
                 continue;
-            var from = source.First;
-            var to = destination.First;
-            var sourceVacated = remote.Value(from).Type == ExcelCellType.Blank;
-            var destinationWasBlank = Value(to).Type == ExcelCellType.Blank;
-            // A shift can leave just one detectable move when adjacent values repeat.
-            if ((sourceVacated && destinationWasBlank) ||
-                ((sourceVacated || destinationWasBlank) && (from.Row == to.Row || from.Column == to.Column)))
+            // An occurrence at a cleared or newly filled cell can reveal a shift
+            // even when another occurrence of the same value was overwritten.
+            if ((source.HasBlank && destination.HasBlank) ||
+                HasAlignedBlankEndpoint(source, destination) || HasAlignedBlankEndpoint(destination, source))
                 return true;
 
+            var from = source.First;
+            var to = destination.First;
             var offset = (to.Row - from.Row, to.Column - from.Column);
             if (!offsets.Add(offset) || (source.Count > 1 && destination.Count > 1 &&
                 offset == (destination.Last.Row - source.Last.Row, destination.Last.Column - source.Last.Column)))
                 return true;
         }
-        return HasReplacementCycle(movements.Values);
+        return HasReplacementCycle(movements);
+    }
+
+    private bool HasAlignedBlankEndpoint(Occurrences endpoints, Occurrences other)
+    {
+        if (!endpoints.HasBlank)
+            return false;
+        if (endpoints.Count == 1)
+            return other.AlignedWith(endpoints.First, requireBlank: false);
+        if (other.Count == 1)
+            return endpoints.AlignedWith(other.First, requireBlank: true);
+
+        _package.Charge(64L + 64L * endpoints.Count);
+        var rows = new HashSet<int>();
+        var columns = new HashSet<int>();
+        foreach (var endpoint in endpoints.Items)
+            if (endpoint.OtherIsBlank)
+            {
+                rows.Add(endpoint.Address.Row);
+                columns.Add(endpoint.Address.Column);
+            }
+        return other.Items.Any(item => rows.Contains(item.Address.Row) || columns.Contains(item.Address.Column));
     }
 
     private static bool HasReplacementCycle(ICollection<ValueMovement> movements)
@@ -390,20 +453,46 @@ internal sealed class ExcelWorksheet
         internal int IncomingReplacements;
     }
 
+    private readonly record struct Occurrence(CellAddress Address, bool OtherIsBlank);
+
     private struct Occurrences
     {
+        private Occurrence _first;
+        private List<Occurrence>? _additional;
         internal CellAddress First { get; private set; }
         internal CellAddress Last { get; private set; }
         internal int Count { get; private set; }
+        internal bool HasBlank { get; private set; }
 
-        internal void Add(CellAddress address)
+        internal void Add(Occurrence occurrence)
         {
+            var address = occurrence.Address;
+            if (Count == 0)
+                _first = occurrence;
+            else
+                (_additional ??= []).Add(occurrence);
             if (Count == 0 || address.CompareTo(First) < 0)
                 First = address;
             if (Count == 0 || address.CompareTo(Last) > 0)
                 Last = address;
             Count++;
+            HasBlank |= occurrence.OtherIsBlank;
         }
+
+        internal IEnumerable<Occurrence> Items
+        {
+            get
+            {
+                yield return _first;
+                if (_additional is not null)
+                    foreach (var occurrence in _additional)
+                        yield return occurrence;
+            }
+        }
+
+        internal bool AlignedWith(CellAddress address, bool requireBlank) =>
+            Items.Any(item => (!requireBlank || item.OtherIsBlank) &&
+                (item.Address.Row == address.Row || item.Address.Column == address.Column));
     }
 
     private ValueMovement? FindMovement(Dictionary<ExcelCellValue, ValueMovement> values, ExcelCellValue value)

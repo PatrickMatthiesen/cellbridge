@@ -188,9 +188,10 @@ public sealed class DocumentSessionScenarioTests
     }
 
     [Theory]
-    [InlineData(false, 1)]
-    [InlineData(true, 2)]
-    public async Task SupersededSaveWithALostResponseDoesNotRebase(bool overHttp, int lostReplies)
+    [InlineData(false, 1, false)]
+    [InlineData(true, 2, false)]
+    [InlineData(true, 1, true)]
+    public async Task SupersededSaveWithAnAmbiguousResponseDoesNotRebase(bool overHttp, int lostReplies, bool duplicateReply)
     {
         await using var host = await ScenarioHost.StartAsync(overHttp);
         var original = OfficeDocumentTemplates.CreateExcelWorkbook();
@@ -208,6 +209,12 @@ public sealed class DocumentSessionScenarioTests
                 var accepted = await peer.SyncAsync();
                 Assert.NotEqual(original, accepted.Package);
                 Assert.True((await peer.TryCommitAsync(accepted.Revision, original)).Succeeded);
+            }
+            if (duplicateReply)
+            {
+                var subresponses = Assert.Single(response.Response.Responses).SubResponses;
+                subresponses.Add(Assert.Single(subresponses));
+                return response;
             }
             throw new HttpRequestException("The save response was lost.");
         });

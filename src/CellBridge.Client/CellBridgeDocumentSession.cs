@@ -28,8 +28,8 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
     });
     private readonly object _closeGate = new();
     private Task? _close;
-    private Task? _renewal;
-    private Task? _notificationPump;
+    private Task? _leaseRenewal;
+    private Task? _realTimeWork;
     private ICellBridgeRealTimeChannel? _realTime;
     private bool _readerMayExist;
     private bool _writerMayExist;
@@ -90,15 +90,13 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            var leaseRenewal = session.RenewLeaseAsync();
+            session._leaseRenewal = session.RenewLeaseAsync();
             if (session._realTime is { } channel && realTimeTarget is { } connectedTarget)
             {
-                session._renewal = Task.WhenAll(leaseRenewal, session.RenewRealTimeAsync(channel, connectedTarget.ExpiresAt));
-                session._notificationPump = session.PumpNotificationsAsync(channel);
+                session._realTimeWork = session.RunRealTimeAsync(channel, connectedTarget.ExpiresAt);
             }
             else
             {
-                session._renewal = leaseRenewal;
                 session._notifications.Writer.TryComplete();
             }
             return session;
@@ -333,12 +331,13 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
     private async Task<RealTimeConnectionTarget?> GetRealTimeTargetAsync(CancellationToken cancellationToken)
     {
         string[] keys = [EndpointProperty, TokenProperty, TokenTtlProperty];
+        XNamespace protocol = CellStorageRequest.Namespace;
         var request = new FssHttpSubRequest
         {
             Type = SubRequestType.Properties,
             SubRequestDataAttributes = { ["Properties"] = "PropertyGet" },
-            SubRequestDataXml = new XElement("SubRequestData", new XElement("PropertyIds",
-                keys.Select(key => new XElement("PropertyId", new XAttribute("id", key))))).ToString(SaveOptions.DisableFormatting),
+            SubRequestDataXml = new XElement(protocol + "SubRequestData", new XElement(protocol + "PropertyIds",
+                keys.Select(key => new XElement(protocol + "PropertyId", new XAttribute("id", key))))).ToString(SaveOptions.DisableFormatting),
         };
         FssHttpSubResponse response;
         try { response = await SendSingleAsync(CreateRequest(request), cancellationToken); }
@@ -469,21 +468,30 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
-    private async Task RenewRealTimeAsync(ICellBridgeRealTimeChannel channel, DateTimeOffset? expiry)
+    private async Task RunRealTimeAsync(ICellBridgeRealTimeChannel channel, DateTimeOffset? expiry)
     {
-        var cancellationToken = _lifetime.Token;
+        using var connectionLifetime = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var pump = PumpNotificationsAsync(channel, connectionLifetime);
+        await Task.WhenAll(pump, RenewRealTimeAsync(channel, expiry, connectionLifetime.Token));
+    }
+
+    private async Task RenewRealTimeAsync(ICellBridgeRealTimeChannel channel, DateTimeOffset? expiry,
+        CancellationToken cancellationToken)
+    {
         var delay = RealTimeRenewalDelay(expiry);
         try
         {
             while (true)
             {
                 await Task.Delay(delay, cancellationToken);
-                await _gate.WaitAsync(cancellationToken);
                 try
                 {
+                    // Properties uses the session's fixed document and client IDs and does not change its lease or graphs.
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (await GetRealTimeTargetAsync(cancellationToken) is { } target &&
                         (target.ExpiresAt is null || target.ExpiresAt > DateTimeOffset.UtcNow))
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         await channel.UpdateClientInfoAsync(target, cancellationToken);
                         if (target.ExpiresAt is null || target.ExpiresAt != expiry)
                         {
@@ -497,8 +505,6 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 {
                     // A failed ticket update can be retried without refreshing the editor lease.
                 }
-                finally { _gate.Release(); }
-
                 var retryDelay = RealTimeRenewalDelay(expiry);
                 delay = retryDelay > TimeSpan.Zero
                     ? TimeSpan.FromMilliseconds(Math.Clamp(retryDelay.TotalMilliseconds, 100, 5000))
@@ -518,16 +524,22 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         return TimeSpan.FromMilliseconds(Math.Clamp(remaining.TotalMilliseconds / 2, 0, uint.MaxValue - 1));
     }
 
-    private async Task PumpNotificationsAsync(ICellBridgeRealTimeChannel channel)
+    private async Task PumpNotificationsAsync(ICellBridgeRealTimeChannel channel, CancellationTokenSource connectionLifetime)
     {
+        var cancellationToken = connectionLifetime.Token;
+        Exception? failure = null;
         try
         {
-            await foreach (var notification in channel.ReadNotificationsAsync(_lifetime.Token).WithCancellation(_lifetime.Token))
+            await foreach (var notification in channel.ReadNotificationsAsync(cancellationToken).WithCancellation(cancellationToken))
                 _notifications.Writer.TryWrite(notification);
-            _notifications.Writer.TryComplete();
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { _notifications.Writer.TryComplete(); }
-        catch (Exception error) { _notifications.Writer.TryComplete(error); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception error) { failure = error; }
+        finally
+        {
+            try { await connectionLifetime.CancelAsync(); }
+            finally { _notifications.Writer.TryComplete(failure); }
+        }
     }
 
     private async Task CloseAsync()
@@ -535,9 +547,14 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         var failures = new List<Exception>();
         try { await _lifetime.CancelAsync(); }
         catch (Exception error) { failures.Add(error); }
-        if (_renewal is { } renewal)
+        if (_leaseRenewal is { } renewal)
         {
             try { await renewal; }
+            catch (Exception error) { failures.Add(error); }
+        }
+        if (_realTimeWork is { } realTimeWork)
+        {
+            try { await realTimeWork; }
             catch (Exception error) { failures.Add(error); }
         }
 
@@ -549,8 +566,6 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 try { await channel.DisposeAsync(); }
                 catch (Exception error) { failures.Add(error); }
             }
-            if (_notificationPump is { } pump)
-                await pump;
             _notifications.Writer.TryComplete();
 
             if (_writerMayExist)
@@ -633,8 +648,8 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         if (execution.Response.Fault is { } fault)
             throw new CellBridgeProtocolException(fault.Code ?? "SoapFault", fault.Reason);
         CheckError(execution.Response.VersionErrorCode, execution.Response.VersionErrorMessage);
-        var response = execution.Response.Responses.SingleOrDefault(response => response.RequestToken == request.Requests[0].RequestToken)
-            ?? throw new InvalidDataException("The server did not return the requested response token.");
+        var response = MatchResponse(execution.Response.Responses.Where(response =>
+            response.RequestToken == request.Requests[0].RequestToken), "response token");
         CheckError(response.ErrorCode, response.ErrorMessage);
         return response;
     }
@@ -644,9 +659,8 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
 
     private static FssHttpSubResponse FindResponse(FssHttpResponse response, FssHttpSubRequest request)
     {
-        var operation = response.SubResponses.SingleOrDefault(operation =>
-            operation.Type == request.Type && operation.SubRequestToken == request.SubRequestToken)
-            ?? throw new InvalidDataException("The server did not return the requested subresponse token and type.");
+        var operation = MatchResponse(response.SubResponses.Where(operation =>
+            operation.Type == request.Type && operation.SubRequestToken == request.SubRequestToken), "subresponse token and type");
         CheckError(operation.ErrorCode, operation.ErrorMessage);
         return operation;
     }
@@ -658,9 +672,20 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         var response = outer.BinaryResponse ?? FsshttpbResponse.FromBytes(
             outer.SubResponseDataBase64 ?? throw new InvalidDataException("The Cell subresponse has no binary data."));
         CheckCellError(response.Status, response.Error);
-        var operation = response.SubResponses.SingleOrDefault(sub => sub.RequestId == 1 && sub.RequestType == type)
-            ?? throw new InvalidDataException("The Cell subresponse did not match the requested operation.");
+        var operation = MatchResponse(response.SubResponses.Where(sub => sub.RequestId == 1 && sub.RequestType == type),
+            "Cell operation");
         return (response, operation);
+    }
+
+    private static T MatchResponse<T>(IEnumerable<T> matches, string field)
+    {
+        using var enumerator = matches.GetEnumerator();
+        if (!enumerator.MoveNext())
+            throw new InvalidDataException($"The server omitted the requested {field}.");
+        var match = enumerator.Current;
+        if (enumerator.MoveNext())
+            throw new InvalidDataException($"The server duplicated the requested {field}.");
+        return match;
     }
 
     private static void CheckCellError(bool failed, ResponseError? error)

@@ -37,7 +37,7 @@ internal sealed class ExcelPackage : IDisposable
     private readonly XElement _relationships;
     private ExcelStyles? _styles;
     private string? _themeSignature;
-    private string[]? _strings;
+    private (XElement Markup, string Text)[]? _strings;
 
     internal ExcelPackage(byte[] bytes, ExcelWorkbookLimits limits, ExcelMemoryBudget budget)
     {
@@ -95,13 +95,18 @@ internal sealed class ExcelPackage : IDisposable
         return worksheet;
     }
 
-    internal string SharedString(string index)
+    internal (XElement Markup, string Text) SharedString(string index)
     {
         if (_strings is null)
         {
             var part = OptionalWorkbookPart("sharedStrings")
                 ?? throw new InvalidDataException("A cell references a missing shared string table.");
-            _strings = Root(part, S + "sst").Elements(S + "si").Select(ReadString).ToArray();
+            _strings = Root(part, S + "sst").Elements(S + "si").Select(element =>
+            {
+                var text = ReadString(element);
+                Charge(16 + text.Length * 2L);
+                return (element, text);
+            }).ToArray();
         }
         if (!int.TryParse(index, NumberStyles.None, CultureInfo.InvariantCulture, out var offset) ||
             offset >= _strings.Length)
@@ -109,9 +114,31 @@ internal sealed class ExcelPackage : IDisposable
         return _strings[offset];
     }
 
-    internal static string ReadString(XElement value) => DecodeString(string.Concat(value.Elements()
+    internal static string ReadString(XElement value) => string.Concat(value.Elements()
         .Where(element => element.Name == S + "t" || element.Name == S + "r")
-        .Select(element => element.Name == S + "t" ? element.Value : element.Element(S + "t")?.Value)));
+        .Select(element => DecodeString(element.Name == S + "t" ? element.Value : element.Element(S + "t")?.Value ?? "")));
+
+    internal static IEnumerable<(int Offset, string? Properties)> StringFormatting(XElement? value)
+    {
+        if (value is null)
+            yield break;
+
+        var offset = value.Element(S + "t") is { } plain ? DecodeString(plain.Value).Length : 0;
+        string? previous = null;
+        // Compare where the formatting changes so equivalent runs can be split or joined.
+        foreach (var run in value.Elements(S + "r"))
+        {
+            var text = run.Element(S + "t");
+            if (text is null || text.Value.Length == 0)
+                continue;
+            var properties = run.Element(S + "rPr") is { HasElements: true } format
+                ? ExcelStyles.Signature(format) : null;
+            if (properties != previous)
+                yield return (offset, properties);
+            previous = properties;
+            offset += DecodeString(text.Value).Length;
+        }
+    }
 
     internal void MarkSheetChanged(uint sheetId) => MarkChanged(_sheets[sheetId].Path);
 

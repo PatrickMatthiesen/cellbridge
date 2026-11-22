@@ -124,7 +124,7 @@ sealed class EmulatorConnection : IDisposable
                     password = await Console.In.ReadLineAsync(ct);
                 if (password is null)
                     throw new ArgumentException($"Set CELLBRIDGE_PASSWORD{suffix} to sign in to WebDemo.");
-                await WebDemoLogin.SignInAsync(http, origin, login, password, ct);
+                await WebDemoLogin.SignInAsync(http, origin, login, password, ct, applicationPathBase: mount);
             }
             else if (account is not null)
                 throw new ArgumentException($"Configure credentials for scenario account {account}.");
