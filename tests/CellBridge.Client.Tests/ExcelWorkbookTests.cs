@@ -212,7 +212,7 @@ public sealed class ExcelWorkbookTests
 
         Validate(edited);
         var strings = Part(edited, stringsPart).Root!;
-        Assert.Equal(1u, (uint?)strings.Attribute("count"));
+        Assert.Equal(2u, (uint?)strings.Attribute("count"));
         Assert.Equal(2u, (uint?)strings.Attribute("uniqueCount"));
         Assert.Equal(["retained", "unused after edit"], strings.Elements(S + "si").Select(item => item.Value));
         Assert.Equal(ExcelCellValue.String("retained"), Assert.Single(ExcelWorkbook.ReadRange(edited, 9, "A1")).Value);
@@ -220,6 +220,26 @@ public sealed class ExcelWorkbookTests
         var after = ZipRecord(edited, otherSheetPart);
         Assert.Equal(before.HeaderAndPayload, after.HeaderAndPayload);
         Assert.Equal(before.CentralDirectoryExceptOffset, after.CentralDirectoryExceptOffset);
+    }
+
+    [Fact]
+    public void InlineStringEditsAdjustTheWorkbookTextCount()
+    {
+        const string part = "xl/sharedStrings.xml";
+        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c><c r='B1'><v>1</v></c></row>",
+            sharedStrings: ["<t>existing</t>"], sharedStringAttributes: " count='1' uniqueCount='1'");
+
+        var added = Edit(original, new ExcelCellEdit("B1", ExcelCellValue.String("")),
+            new ExcelCellEdit("C1", ExcelCellValue.String("new")));
+        Assert.Equal(3u, (uint?)Part(added, part).Root!.Attribute("count"));
+        Validate(added);
+
+        var removed = Edit(added, new ExcelCellEdit("B1", ExcelCellValue.Blank),
+            new ExcelCellEdit("C1", ExcelCellValue.Number(2)));
+        var strings = Part(removed, part).Root!;
+        Assert.Equal(1u, (uint?)strings.Attribute("count"));
+        Assert.Equal(1u, (uint?)strings.Attribute("uniqueCount"));
+        Validate(removed);
     }
 
     [Fact]
@@ -266,7 +286,7 @@ public sealed class ExcelWorkbookTests
             sharedStrings: ["<t>value</t>"], sharedStringAttributes: attributes, nonSeekableZip: true);
 
         var edited = Edit(original, new ExcelCellEdit("A1",
-                clearSharedString ? ExcelCellValue.Blank : ExcelCellValue.String("value")),
+                clearSharedString ? ExcelCellValue.Blank : ExcelCellValue.String("replacement")),
             new ExcelCellEdit("B1", ExcelCellValue.Number(2)));
 
         Validate(edited);

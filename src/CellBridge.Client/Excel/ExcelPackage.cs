@@ -137,17 +137,20 @@ internal sealed class ExcelPackage : IDisposable
     private string SharedStringsPart() => OptionalWorkbookPart("sharedStrings")
         ?? throw new InvalidDataException("A cell references a missing shared string table.");
 
-    internal void RemoveSharedStringReferences(uint removed)
+    internal void AdjustTextStringCount(long delta)
     {
-        var part = SharedStringsPart();
+        if (OptionalWorkbookPart("sharedStrings") is not { } part)
+            return;
         var table = Root(part, S + "sst");
         var count = (string?)table.Attribute("count");
         if (count is null && table.Attribute("uniqueCount") is null)
             return;
 
-        if (uint.TryParse(count, NumberStyles.Integer, CultureInfo.InvariantCulture, out var previous) && previous >= removed)
+        // Count is the number of text strings in the workbook, including inline cells.
+        if (uint.TryParse(count, NumberStyles.Integer, CultureInfo.InvariantCulture, out var previous) &&
+            previous + delta is >= 0 and <= uint.MaxValue)
         {
-            table.SetAttributeValue("count", previous - removed);
+            table.SetAttributeValue("count", previous + delta);
             // Keep all items so references in other cells keep their indices.
             table.SetAttributeValue("uniqueCount", table.Elements(S + "si").Count());
         }

@@ -198,19 +198,18 @@ internal sealed class ExcelWorksheet
     internal HashSet<CellAddress> Apply(IReadOnlyDictionary<CellAddress, ExcelCellValue> edits)
     {
         var changed = new HashSet<CellAddress>();
-        var removedSharedStringReferences = 0u;
+        var textCountDelta = 0L;
         foreach (var (address, value) in edits.OrderBy(pair => pair.Key))
         {
-            var cell = Find(address);
-            if (Equivalent(Value(cell, address), value))
+            var previous = Value(address);
+            if (Equivalent(previous, value))
                 continue;
-            if ((string?)cell?.Attribute("t") == "s" && cell.Element(S + "v") is { Value.Length: > 0 })
-                removedSharedStringReferences++;
+            textCountDelta += (value.Type == ExcelCellType.String ? 1 : 0) - (previous.Type == ExcelCellType.String ? 1 : 0);
             Write(address, value);
             changed.Add(address);
         }
-        if (removedSharedStringReferences > 0)
-            _package.RemoveSharedStringReferences(removedSharedStringReferences);
+        if (textCountDelta != 0)
+            _package.AdjustTextStringCount(textCountDelta);
         foreach (var rowIndex in changed.Select(address => address.Row).Distinct())
         {
             var row = _rows[rowIndex];
