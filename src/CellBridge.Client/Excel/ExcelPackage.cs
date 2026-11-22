@@ -306,8 +306,6 @@ internal sealed class ExcelPackage : IDisposable
         return name;
     }
 
-    internal bool HasTable(string name) => TablesByName().ContainsKey(name);
-
     internal bool TableBindingDiffers(ExcelPackage current, string name)
     {
         var before = TablesByName().GetValueOrDefault(name);

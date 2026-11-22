@@ -433,6 +433,22 @@ public sealed class ExcelWorkbookTests
         Assert.Contains("table binding", result.Detail!, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("SUM(Table1)")]
+    [InlineData("SUM([0]!Table1)")]
+    public void StaleBareNameDoesNotBindToATableAddedByThePeer(string text)
+    {
+        var original = Workbook("");
+        var latest = Workbook("", tableRange: "A1:B3");
+        var formula = ExcelCellValue.Formula(text);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)], policy: ExcelConflictPolicy.LocalWins);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+        Assert.Contains("table binding", result.Detail!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void StaleUnqualifiedFormulaConflictsWhenItsTableChanges()
     {
