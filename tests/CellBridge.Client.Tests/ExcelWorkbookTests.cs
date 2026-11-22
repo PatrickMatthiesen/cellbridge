@@ -132,14 +132,34 @@ public sealed class ExcelWorkbookTests
     [Fact]
     public void SharedStringReindexingAndSheetReorderingDoNotConflict()
     {
-        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c></row>", sharedStrings: ["<t>same</t>", "<t>other</t>"]);
+        const string uid = "{9C764240-3645-4F55-8702-5DB1513E66B0}";
+        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c></row>",
+            sharedStrings: ["<t>same</t>", "<t>other</t>"], firstSheetUid: uid);
         var newOrder = Workbook("<row r='1'><c r='A1' t='s'><v>1</v></c></row>",
-            sharedStrings: ["<t>other</t>", "<t>same</t>"], reverseSheets: true);
+            sharedStrings: ["<t>other</t>", "<t>same</t>"], reverseSheets: true, firstSheetUid: uid);
         var result = ExcelWorkbook.MergeCells(original, newOrder, 4, [new("A1", ExcelCellValue.String("changed"))]);
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
         Assert.Equal((uint)9, ExcelWorkbook.ListSheets(result.Package!)[0].SheetId);
         Assert.Equal("changed", Assert.Single(ExcelWorkbook.ReadRange(result.Package!, 4, "A1")).Value.RawValue);
         Validate(result.Package!);
+    }
+
+    [Theory]
+    [InlineData("sheet3.xml", "{9C764240-3645-4F55-8702-5DB1513E66B0}")]
+    [InlineData("sheet1.xml", "{9C764240-3645-4F55-8702-5DB1513E66B1}")]
+    public void ReusedSheetIdConflictsOnlyForTheReplacedSheet(string part, string uid)
+    {
+        var original = Workbook("", firstSheetUid: "{9C764240-3645-4F55-8702-5DB1513E66B0}");
+        var latest = Workbook("", firstSheetPart: part, firstSheetUid: uid);
+        var edits = new[] { new ExcelCellEdit("B1", ExcelCellValue.Number(5)) };
+
+        var replaced = ExcelWorkbook.MergeCells(original, latest, 4, edits, policy: ExcelConflictPolicy.LocalWins);
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, replaced.Status);
+        Assert.Null(replaced.Package);
+
+        var unaffected = ExcelWorkbook.MergeCells(original, latest, 9, edits);
+        Assert.Equal(ExcelWriteStatus.Success, unaffected.Status);
+        Assert.Equal(edits[0].Value, Assert.Single(ExcelWorkbook.ReadRange(unaffected.Package!, 9, "B1")).Value);
     }
 
     [Fact]
@@ -298,6 +318,32 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(expected, result.Status);
         if (expected == ExcelWriteStatus.StructuralConflict)
             Assert.Null(result.Package);
+    }
+
+    [Theory]
+    [InlineData("B2", "$A$2", "B8", "$Z$100")]
+    [InlineData("B2", "$B$2", "H2", "$H$100")]
+    [InlineData("B2", "SUM($A1:B$3)", "B8", "SUM(#REF!:Z$9)")]
+    [InlineData("B2", "SUM(B1:$C3)", "H2", "SUM(H4:#REF!)")]
+    [InlineData("B2", "SUM(A:B)", "B8", "SUM(Z:AA)")]
+    [InlineData("B2", "SUM(1:2)", "H2", "SUM(20:21)")]
+    public void DisjointEditMergesWhenFormulaReferencesChangeAcrossTheFixedAxis(
+        string source, string before, string destination, string after)
+    {
+        var original = Workbook(FormulaRow(source, before));
+        var latest = Workbook(FormulaRow(destination, after));
+        var local = ExcelCellValue.Number(5);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("D1", local)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        var package = Assert.IsType<byte[]>(result.Package);
+        Assert.Equal(local, Assert.Single(ExcelWorkbook.ReadRange(package, 4, "D1")).Value);
+        Assert.Equal(ExcelCellValue.Blank, Assert.Single(ExcelWorkbook.ReadRange(package, 4, source)).Value);
+        Assert.Equal(ExcelCellValue.Formula(after), Assert.Single(ExcelWorkbook.ReadRange(package, 4, destination)).Value);
+
+        static string FormulaRow(string address, string formula) =>
+            $"<row r='{address[1..]}'><c r='{address}'><f>{formula}</f></c></row>";
     }
 
     [Theory]
@@ -667,6 +713,34 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelWriteStatus.StructuralConflict, ExcelWorkbook.MergeCells(before, after, 4, edits).Status);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData(1u)]
+    public void RejectsSettingOrClearingTableHeadersAndAllowsBodyEdits(uint? headerRows)
+    {
+        var workbook = Workbook("<row r='2'><c r='B2' t='inlineStr'><is><t>X</t></is></c>" +
+            "<c r='C2' t='inlineStr'><is><t>Y</t></is></c></row>", tableRange: "B2:C3", tableHeaderRows: headerRows);
+
+        var set = Assert.Throws<InvalidOperationException>(() => Edit(workbook, new ExcelCellEdit("B2", ExcelCellValue.String("New"))));
+        var clear = Assert.Throws<InvalidOperationException>(() => Edit(workbook, new ExcelCellEdit("C2", ExcelCellValue.Blank)));
+        Assert.Contains("table header", set.Message, StringComparison.Ordinal);
+        Assert.Contains("table header", clear.Message, StringComparison.Ordinal);
+
+        var edited = Edit(workbook, new ExcelCellEdit("B3", ExcelCellValue.Number(5)));
+        Assert.Equal(ExcelCellValue.Number(5), Assert.Single(ExcelWorkbook.ReadRange(edited, 4, "B3")).Value);
+        Validate(edited);
+    }
+
+    [Fact]
+    public void AllowsEditingTheFirstRowOfAHeaderlessTable()
+    {
+        var workbook = Workbook("", tableRange: "B2:C3", tableHeaderRows: 0);
+        var edited = Edit(workbook, new ExcelCellEdit("B2", ExcelCellValue.Number(5)));
+
+        Assert.Equal(ExcelCellValue.Number(5), Assert.Single(ExcelWorkbook.ReadRange(edited, 4, "B2")).Value);
+        Validate(edited);
+    }
+
     [Fact]
     public void ValidatesLimitsAddressesAndFormulaSubset()
     {
@@ -745,7 +819,8 @@ public sealed class ExcelWorkbookTests
 
     private static byte[] Workbook(string rows, string beforeData = "", string afterData = "", bool date1904 = false,
         string? calculationChain = null, string[]? sharedStrings = null, bool nonSeekableZip = false,
-        bool reverseSheets = false, string? tableRange = null, string? definedNames = null, bool swapStyles = false)
+        bool reverseSheets = false, string? tableRange = null, string? definedNames = null, bool swapStyles = false,
+        string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null)
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string workbookType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
@@ -758,6 +833,10 @@ public sealed class ExcelWorkbookTests
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml");
         const string first = "<sheet name='First' sheetId='4' r:id='rId1'/>";
         const string second = "<sheet name='Second' sheetId='9' r:id='rId2'/>";
+        var revisionNamespace = firstSheetUid is null ? "" :
+            "xmlns:xr='http://schemas.microsoft.com/office/spreadsheetml/2014/revision' ";
+        var revisionAttributes = firstSheetUid is null ? "" : $" xr:uid='{firstSheetUid}'";
+        var ignorable = firstSheetUid is null ? "x14ac" : "x14ac xr";
         using var memory = new MemoryStream();
         using var nonSeekable = new WriteOnlyStream(memory);
         using (var zip = new ZipArchive(nonSeekableZip ? nonSeekable : memory, ZipArchiveMode.Create, leaveOpen: true))
@@ -774,7 +853,7 @@ public sealed class ExcelWorkbookTests
                 "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>" +
                 "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>" +
                 "<Default Extension='xml' ContentType='application/xml'/>" +
-                Override("xl/workbook.xml", workbookType) + Override("xl/worksheets/sheet1.xml", worksheetType) +
+                Override("xl/workbook.xml", workbookType) + Override($"xl/worksheets/{firstSheetPart}", worksheetType) +
                 Override("xl/worksheets/sheet2.xml", worksheetType) +
                 Override("xl/styles.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml") +
                 chainType + sharedType + (tableRange is null ? "" : Override("xl/tables/table1.xml",
@@ -786,15 +865,15 @@ public sealed class ExcelWorkbookTests
                 "<sheets>" + (reverseSheets ? second + first : first + second) + "</sheets>" +
                 (definedNames is null ? "" : $"<definedNames>{definedNames}</definedNames>") + "</workbook>");
             Add("xl/_rels/workbook.xml.rels", $"<Relationships xmlns='{PackageRels}'>" +
-                Relationship("rId1", "worksheet", "worksheets/sheet1.xml") +
+                Relationship("rId1", "worksheet", $"worksheets/{firstSheetPart}") +
                 Relationship("rId2", "worksheet", "worksheets/sheet2.xml") +
                 Relationship("rId3", "styles", "styles.xml") +
                 (calculationChain is null ? "" : Relationship("rId4", "calcChain", "calcChain.xml")) +
                 (sharedStrings is null ? "" : Relationship("rId5", "sharedStrings", "sharedStrings.xml")) + "</Relationships>");
-            Add("xl/worksheets/sheet1.xml", $"<worksheet xmlns='{Main}' " +
+            Add($"xl/worksheets/{firstSheetPart}", $"<worksheet xmlns='{Main}' " +
                 "xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' " +
                 "xmlns:x14ac='http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac' " +
-                "mc:Ignorable='x14ac' x14ac:dyDescent='0.25'>" + beforeData +
+                revisionNamespace + $"mc:Ignorable='{ignorable}' x14ac:dyDescent='0.25'{revisionAttributes}>" + beforeData +
                 "<sheetData>" + rows + "</sheetData>" + afterData +
                 (tableRange is null ? "" :
                     $"<tableParts xmlns:r='{OfficeRels}' count='1'><tablePart r:id='rId1'/></tableParts>") + "</worksheet>");
@@ -806,9 +885,10 @@ public sealed class ExcelWorkbookTests
                 (swapStyles ? unlockedStyle + dateStyle : dateStyle + unlockedStyle) + "</cellXfs></styleSheet>");
             if (tableRange is not null)
             {
-                Add("xl/worksheets/_rels/sheet1.xml.rels", $"<Relationships xmlns='{PackageRels}'>" +
+                Add($"xl/worksheets/_rels/{firstSheetPart}.rels", $"<Relationships xmlns='{PackageRels}'>" +
                     Relationship("rId1", "table", "../tables/table1.xml") + "</Relationships>");
-                Add("xl/tables/table1.xml", $"<table xmlns='{Main}' id='1' name='Table1' displayName='Table1' ref='{tableRange}'>" +
+                var headerRows = tableHeaderRows is null ? "" : $" headerRowCount='{tableHeaderRows}'";
+                Add("xl/tables/table1.xml", $"<table xmlns='{Main}' id='1' name='Table1' displayName='Table1' ref='{tableRange}'{headerRows}>" +
                     "<tableColumns count='2'><tableColumn id='1' name='X'/><tableColumn id='2' name='Y'/></tableColumns></table>");
             }
             if (calculationChain is not null)

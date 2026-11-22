@@ -84,9 +84,14 @@ public static class ExcelWorkbook
             throw new ArgumentException($"Sheet ID {sheetId} is absent from the base workbook.", nameof(sheetId));
         if (!current.HasSheet(sheetId))
             return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], "The sheet was deleted.");
+        if (original is not null && !string.Equals(original.SheetPath(sheetId), current.SheetPath(sheetId),
+            StringComparison.OrdinalIgnoreCase))
+            return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], "The worksheet identity changed.");
 
         var remote = current.Sheet(sheetId);
         var before = original?.Sheet(sheetId) ?? remote;
+        if (!string.Equals(before.PersistentUid, remote.PersistentUid, StringComparison.OrdinalIgnoreCase))
+            return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], "The worksheet identity changed.");
         if (!sameRevision && before.StructureDiffers(remote))
             return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], "The worksheet structure changed.");
 

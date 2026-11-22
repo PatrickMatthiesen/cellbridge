@@ -381,6 +381,26 @@ public sealed class DocumentSessionScenarioTests
     }
 
     [Fact]
+    public async Task DuplicateRealTimePropertyAllowsDocumentSyncWithoutRealTime()
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp: true, enableRealTime: true);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        await host.CreateAsync(original);
+        var transport = new RememberRealTimeConnection(host.Transport, rewriteProperties: _ => """
+            <PropertyValues>
+              <PropertyValue id="RealtimeTypingEndpointUrl" value="https://example.test/rtc"/>
+              <PropertyValue id="DocumentAccessToken" value="first"/>
+              <PropertyValue id="DocumentAccessToken" value="second"/>
+            </PropertyValues>
+            """);
+
+        await using var reader = await CellBridgeDocumentSession.OpenAsync(transport, host.DocumentUrl);
+
+        Assert.Equal(original, reader.GetSnapshot().Package);
+        Assert.Null(transport.Target);
+    }
+
+    [Fact]
     public async Task ReaderConnectsToRtcWithItsEditorClientIdAndCanUpdateTheTicket()
     {
         await using var host = await ScenarioHost.StartAsync(overHttp: true, enableRealTime: true);
@@ -484,17 +504,25 @@ public sealed class DocumentSessionScenarioTests
             CancellationToken cancellationToken = default) => inner.TryConnectRealTimeAsync(target, cancellationToken);
     }
 
-    private sealed class RememberRealTimeConnection(ICellBridgeClientTransport inner, Action? discover = null)
+    private sealed class RememberRealTimeConnection(ICellBridgeClientTransport inner, Action? discover = null,
+        Func<string?, string>? rewriteProperties = null)
         : ICellBridgeClientTransport
     {
         public RealTimeConnectionTarget? Target { get; private set; }
         public ICellBridgeRealTimeChannel? Channel { get; private set; }
 
-        public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, CancellationToken cancellationToken = default)
+        public async Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, CancellationToken cancellationToken = default)
         {
-            if (discover is not null && request.Requests.Any(file => file.SubRequests.Any(sub => sub.Type == SubRequestType.Properties)))
-                discover();
-            return inner.ExecuteAsync(request, cancellationToken);
+            var isDiscovery = request.Requests.Any(file => file.SubRequests.Any(sub => sub.Type == SubRequestType.Properties));
+            if (isDiscovery)
+                discover?.Invoke();
+            var execution = await inner.ExecuteAsync(request, cancellationToken);
+            if (isDiscovery && rewriteProperties is not null)
+            {
+                var response = Assert.Single(Assert.Single(execution.Response.Responses).SubResponses);
+                response.SubResponseDataXml = rewriteProperties(response.SubResponseDataXml);
+            }
+            return execution;
         }
 
         public async Task<ICellBridgeRealTimeChannel?> TryConnectRealTimeAsync(RealTimeConnectionTarget target,

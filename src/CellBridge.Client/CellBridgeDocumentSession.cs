@@ -354,9 +354,13 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
 
         if (response.SubResponseDataXml is not { } xml)
             return null;
-        var properties = XElement.Parse(xml).Elements()
-            .Where(element => element.Name.LocalName == "PropertyValue")
-            .ToDictionary(element => (string?)element.Attribute("id") ?? "", element => (string?)element.Attribute("value"));
+        var properties = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var element in XElement.Parse(xml).Elements())
+        {
+            if (element.Name.LocalName == "PropertyValue" && (string?)element.Attribute("id") is { } id &&
+                keys.Contains(id, StringComparer.Ordinal) && !properties.TryAdd(id, (string?)element.Attribute("value")))
+                throw new InvalidDataException($"The RTC properties response duplicated '{id}'.");
+        }
         if (!properties.TryGetValue(EndpointProperty, out var address) ||
             !Uri.TryCreate(address, UriKind.Absolute, out var endpoint) ||
             endpoint.Scheme is not ("http" or "https" or "ws" or "wss") ||

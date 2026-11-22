@@ -76,6 +76,7 @@ internal sealed class ExcelPackage : IDisposable
         ? ExcelStyles.Signature(names) : "";
     internal IReadOnlyList<ExcelSheet> ListSheets() => _sheets.Values.Select(entry => entry.Sheet).ToArray();
     internal bool HasSheet(uint id) => _sheets.ContainsKey(id);
+    internal string SheetPath(uint id) => _sheets[id].Path;
     internal ExcelStyles Styles => _styles ??= new ExcelStyles(OptionalWorkbookPart("styles") is { } part
         ? Root(part, S + "styleSheet") : null, ThemeSignature);
 
@@ -222,10 +223,10 @@ internal sealed class ExcelPackage : IDisposable
 
     internal IEnumerable<XElement> Tables(XElement worksheet)
     {
-        var part = _loaded.Single(pair => ReferenceEquals(pair.Value, worksheet.Document)).Key;
         var tableIds = worksheet.Element(S + "tableParts")?.Elements(S + "tablePart");
         if (tableIds is null)
             yield break;
+        var part = _loaded.Single(pair => ReferenceEquals(pair.Value, worksheet.Document)).Key;
         var separator = part.LastIndexOf('/');
         var rels = Root(part[..(separator + 1)] + "_rels/" + part[(separator + 1)..] + ".rels", P + "Relationships");
         foreach (var table in tableIds)

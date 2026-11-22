@@ -7,6 +7,7 @@ namespace CellBridge.Client.Excel;
 internal sealed class ExcelWorksheet
 {
     private const long MaxWildcardFormulaCharacters = 16L * 1024 * 1024;
+    private static readonly XName WorksheetUid = XName.Get("uid", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision");
     private sealed record Row(XElement Element, SortedList<int, XElement> Cells);
     private readonly ExcelPackage _package;
     private readonly XElement _root;
@@ -16,6 +17,7 @@ internal sealed class ExcelWorksheet
     private readonly CellRange[] _merged;
     private readonly (CellRange Range, string Type)[] _formulaRanges;
     private readonly bool _protected;
+    private (CellRange Range, uint HeaderRows)[]? _tableHeaders;
 
     internal ExcelWorksheet(ExcelPackage package, XElement root)
     {
@@ -59,6 +61,8 @@ internal sealed class ExcelWorksheet
         }
         _formulaRanges = ranges.ToArray();
     }
+
+    internal string? PersistentUid => (string?)_root.Attribute(WorksheetUid);
 
     internal ExcelCell Read(CellAddress address)
     {
@@ -182,6 +186,10 @@ internal sealed class ExcelWorksheet
             throw new InvalidOperationException($"Cell {address} is locked on a protected worksheet.");
         if (_merged.Any(range => range.Contains(address) && range.Start != address))
             throw new InvalidOperationException($"Cell {address} is a non-origin cell in a merged range.");
+        _tableHeaders ??= _package.Tables(_root).Select(table =>
+            (CellRange.Parse(Required(table, "ref")), (uint?)table.Attribute("headerRowCount") ?? 1)).ToArray();
+        if (_tableHeaders.Any(table => table.Range.Contains(address) && address.Row - table.Range.Start.Row < table.HeaderRows))
+            throw new InvalidOperationException($"Cell {address} belongs to a table header.");
         var formulaType = (string?)cell?.Element(S + "f")?.Attribute("t");
         if (formulaType is "shared" or "array" or "dataTable" || cell?.Attribute("cm") is not null ||
             cell?.Attribute("vm") is not null || _formulaRanges.Any(range => range.Range.Contains(address)))
@@ -383,18 +391,18 @@ internal sealed class ExcelWorksheet
 
         bool HasAlignedFormulaChange(CellAddress address, ExcelCellValue formula, FormulaChange change)
         {
-            var pattern = ExcelFormula.ReferencePattern(formula.RawValue!, ignoreAnchors: false);
-            var relaxed = ExcelFormula.ReferencePattern(formula.RawValue!, ignoreAnchors: true);
-            var broken = ExcelFormula.HasBrokenReference(pattern);
+            var relaxed = ExcelFormula.ReferencePattern(formula.RawValue!);
             var opposite = change == FormulaChange.Introduced ? FormulaChange.Removed : FormulaChange.Introduced;
             return OnAxis(true, address.Row) || OnAxis(false, address.Column);
 
             bool OnAxis(bool isRow, int index)
             {
+                var pattern = ExcelFormula.ReferencePattern(formula.RawValue!, fixedRow: isRow);
+                var broken = ExcelFormula.HasBrokenReference(pattern);
                 if (formulaChanges.TryGetValue((isRow, index, relaxed, opposite), out var previous) &&
                     (previous.Intact.Contains(pattern) ||
-                     HasCompatibleAnchors(previous.Broken, pattern) ||
-                     broken && HasCompatibleAnchors(previous.Intact, pattern)))
+                     HasCompatibleReferences(previous.Broken, pattern) ||
+                     broken && HasCompatibleReferences(previous.Intact, pattern)))
                     return true;
 
                 var key = (isRow, index, relaxed, change);
@@ -409,7 +417,7 @@ internal sealed class ExcelWorksheet
             }
         }
 
-        bool HasCompatibleAnchors(HashSet<string> alternatives, string pattern)
+        bool HasCompatibleReferences(HashSet<string> alternatives, string pattern)
         {
             foreach (var candidate in alternatives)
             {
@@ -417,7 +425,7 @@ internal sealed class ExcelWorksheet
                 wildcardCharactersRemaining -= pattern.Length;
                 if (wildcardCharactersRemaining < 0)
                     throw new InvalidDataException("Worksheet merge exceeds the broken-reference comparison limit.");
-                if (ExcelFormula.CompatibleReferenceAnchors(pattern, candidate))
+                if (ExcelFormula.CompatibleReferences(pattern, candidate))
                     return true;
             }
             return false;
