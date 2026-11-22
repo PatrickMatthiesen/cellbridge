@@ -93,6 +93,20 @@ internal sealed class RawExcelZip : IDisposable
     internal bool Contains(string part) => _parts.ContainsKey(part);
     internal long PartLength(string part) => GetPart(part).Length;
 
+    internal string? ReadRootAttribute(string part, XName name)
+    {
+        var entry = GetPart(part);
+        using var stream = entry.Open();
+        using var reader = XmlReader.Create(stream, new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            MaxCharactersInDocument = entry.Length,
+        });
+        if (reader.MoveToContent() != XmlNodeType.Element)
+            throw new InvalidDataException($"'{part}' has no XML root element.");
+        return reader.GetAttribute(name.LocalName, name.NamespaceName);
+    }
+
     internal XDocument ReadXml(string part, ExcelMemoryBudget budget)
     {
         var entry = GetPart(part);

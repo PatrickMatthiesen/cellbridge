@@ -246,16 +246,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 _pending = null;
                 throw;
             }
-            catch (Exception error) when (IsAmbiguous(error))
-            {
-                pending.HadAmbiguousResponse = true;
-                if (error is OperationCanceledException && cancellationToken.IsCancellationRequested)
-                    throw;
-                if (attempt != 0 || cancellationToken.IsCancellationRequested)
-                    throw UnknownSaveOutcome(error);
-                // Resubmit the original request object, including its proposal ID and binary payload.
-            }
-            catch (CellBridgeProtocolException error)
+            catch (CellBridgeProtocolException error) when (!IsAmbiguous(error) && !error.IsSoapFault)
             {
                 if (error.ErrorCode == "InvalidCoauthSession")
                     _joinedAsWriter = false;
@@ -263,6 +254,17 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                     throw UnknownSaveOutcome(error);
                 _pending = null;
                 throw;
+            }
+            catch (Exception error)
+            {
+                // A failure without a definitive rejection can follow a committed save.
+                pending.HadAmbiguousResponse = true;
+                if (error is OutOfMemoryException ||
+                    error is OperationCanceledException && cancellationToken.IsCancellationRequested)
+                    throw;
+                if (attempt != 0 || cancellationToken.IsCancellationRequested)
+                    throw UnknownSaveOutcome(error);
+                // Resubmit the original request object, including its proposal ID and binary payload.
             }
         }
     }
@@ -659,7 +661,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         if (execution.IsCancelled)
             throw new OperationCanceledException("The response is incomplete.", cancellationToken);
         if (execution.Response.Fault is { } fault)
-            throw new CellBridgeProtocolException(fault.Code ?? "SoapFault", fault.Reason);
+            throw new CellBridgeProtocolException(fault.Code ?? "SoapFault", fault.Reason) { IsSoapFault = true };
         CheckError(execution.Response.VersionErrorCode, execution.Response.VersionErrorMessage);
         var response = MatchResponse(execution.Response.Responses.Where(response =>
             response.RequestToken == request.Requests[0].RequestToken), "response token");

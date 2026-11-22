@@ -188,12 +188,14 @@ public sealed class DocumentSessionScenarioTests
     }
 
     [Theory]
-    [InlineData(false, 1, false, false)]
-    [InlineData(true, 2, false, false)]
-    [InlineData(true, 1, true, false)]
-    [InlineData(true, 1, false, true)]
+    [InlineData(false, 1, "lost")]
+    [InlineData(true, 2, "lost")]
+    [InlineData(true, 1, "duplicate reply")]
+    [InlineData(true, 1, "duplicate index")]
+    [InlineData(true, 1, "overflow")]
+    [InlineData(true, 1, "SOAP fault")]
     public async Task SupersededSaveWithAnAmbiguousResponseDoesNotRebase(bool overHttp, int lostReplies,
-        bool duplicateReply, bool duplicateAppliedIndex)
+        string failure)
     {
         await using var host = await ScenarioHost.StartAsync(overHttp);
         var original = OfficeDocumentTemplates.CreateExcelWorkbook();
@@ -212,13 +214,13 @@ public sealed class DocumentSessionScenarioTests
                 Assert.NotEqual(original, accepted.Package);
                 Assert.True((await peer.TryCommitAsync(accepted.Revision, original)).Succeeded);
             }
-            if (duplicateReply)
+            if (failure == "duplicate reply")
             {
                 var subresponses = Assert.Single(response.Response.Responses).SubResponses;
                 subresponses.Add(Assert.Single(subresponses));
                 return response;
             }
-            if (duplicateAppliedIndex)
+            if (failure == "duplicate index")
             {
                 var subresponse = Assert.Single(Assert.Single(response.Response.Responses).SubResponses);
                 var binary = Assert.IsType<FsshttpbResponse>(subresponse.BinaryResponse);
@@ -226,6 +228,13 @@ public sealed class DocumentSessionScenarioTests
                 var elements = binary.DataElementPackage!.DataElements;
                 elements.Add(Assert.Single(elements, element =>
                     element.DataElementExtendedGuid.Equals(put.PutChangesResponse!.AppliedStorageIndexID)));
+                return response;
+            }
+            if (failure == "overflow")
+                throw new OverflowException("The save response had an invalid payload size.");
+            if (failure == "SOAP fault")
+            {
+                response.Response.Fault = new("Server", "The server could not return the save response.", "<Fault />");
                 return response;
             }
             throw new HttpRequestException("The save response was lost.");

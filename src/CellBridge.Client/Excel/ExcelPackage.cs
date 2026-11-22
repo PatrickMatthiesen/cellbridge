@@ -19,6 +19,7 @@ internal sealed class ExcelMemoryBudget(long limit)
 internal sealed class ExcelPackage : IDisposable
 {
     internal static readonly XNamespace S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    private static readonly XName WorksheetUid = XName.Get("uid", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision");
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private static readonly XNamespace P = "http://schemas.openxmlformats.org/package/2006/relationships";
     private static readonly XNamespace Ct = "http://schemas.openxmlformats.org/package/2006/content-types";
@@ -32,6 +33,7 @@ internal sealed class ExcelPackage : IDisposable
     private readonly Dictionary<string, XDocument> _changes = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _removed = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<uint, ExcelWorksheet> _worksheets = [];
+    private readonly Dictionary<uint, string?> _sheetUids = [];
     private readonly Dictionary<uint, (ExcelSheet Sheet, string Path)> _sheets = [];
     private readonly XElement _sheetList;
     private readonly XElement _relationships;
@@ -77,6 +79,20 @@ internal sealed class ExcelPackage : IDisposable
     internal IReadOnlyList<ExcelSheet> ListSheets() => _sheets.Values.Select(entry => entry.Sheet).ToArray();
     internal bool HasSheet(uint id) => _sheets.ContainsKey(id);
     internal string SheetPath(uint id) => _sheets[id].Path;
+    internal string? SheetUid(uint id)
+    {
+        var path = SheetPath(id);
+        if (_loaded.TryGetValue(path, out var document))
+            return (string?)document.Root?.Attribute(WorksheetUid);
+        if (!_sheetUids.TryGetValue(id, out var uid))
+        {
+            uid = _zip.ReadRootAttribute(path, WorksheetUid);
+            Charge(64L + (uid?.Length ?? 0) * 2L);
+            _sheetUids.Add(id, uid);
+        }
+        return uid;
+    }
+
     internal ExcelStyles Styles => _styles ??= new ExcelStyles(OptionalWorkbookPart("styles") is { } part
         ? Root(part, S + "styleSheet") : null, ThemeSignature);
 

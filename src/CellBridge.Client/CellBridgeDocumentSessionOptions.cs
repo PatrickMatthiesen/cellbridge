@@ -39,4 +39,5 @@ public sealed class CellBridgeProtocolException(string errorCode, string? detail
     : InvalidOperationException(detail is null ? errorCode : $"{errorCode}: {detail}")
 {
     public string ErrorCode { get; } = errorCode;
+    internal bool IsSoapFault { get; init; }
 }

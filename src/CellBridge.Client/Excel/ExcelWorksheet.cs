@@ -6,8 +6,7 @@ namespace CellBridge.Client.Excel;
 
 internal sealed class ExcelWorksheet
 {
-    private const long MaxWildcardFormulaCharacters = 16L * 1024 * 1024;
-    private static readonly XName WorksheetUid = XName.Get("uid", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision");
+    private const long MaxFormulaComparisonCharacters = 16L * 1024 * 1024;
     private sealed record Row(XElement Element, SortedList<int, XElement> Cells);
     private readonly ExcelPackage _package;
     private readonly XElement _root;
@@ -61,8 +60,6 @@ internal sealed class ExcelWorksheet
         }
         _formulaRanges = ranges.ToArray();
     }
-
-    internal string? PersistentUid => (string?)_root.Attribute(WorksheetUid);
 
     internal ExcelCell Read(CellAddress address)
     {
@@ -327,7 +324,8 @@ internal sealed class ExcelWorksheet
         var formulaMovements = new Dictionary<ExcelCellValue, ValueMovement>();
         // A shift can adjust references that neither raw nor relative signatures match.
         var formulaChanges = new Dictionary<(bool IsRow, int Index, string Pattern, FormulaChange Change), FormulaPatterns>();
-        long wildcardCharactersRemaining = MaxWildcardFormulaCharacters;
+        long intactCharactersRemaining = MaxFormulaComparisonCharacters;
+        long wildcardCharactersRemaining = MaxFormulaComparisonCharacters;
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
@@ -392,17 +390,20 @@ internal sealed class ExcelWorksheet
         bool HasAlignedFormulaChange(CellAddress address, ExcelCellValue formula, FormulaChange change)
         {
             var relaxed = ExcelFormula.ReferencePattern(formula.RawValue!);
+            var rowPattern = ExcelFormula.ReferencePattern(formula.RawValue!, fixedRow: true);
+            var columnPattern = ExcelFormula.ReferencePattern(formula.RawValue!, fixedRow: false);
+            var broken = ExcelFormula.HasBrokenReference(rowPattern);
             var opposite = change == FormulaChange.Introduced ? FormulaChange.Removed : FormulaChange.Introduced;
-            return OnAxis(true, address.Row) || OnAxis(false, address.Column);
+            return OnAxis(true, address.Row, address.Column, rowPattern, columnPattern) ||
+                   OnAxis(false, address.Column, address.Row, columnPattern, rowPattern);
 
-            bool OnAxis(bool isRow, int index)
+            bool OnAxis(bool isRow, int index, int position, string fixedPattern, string movingPattern)
             {
-                var pattern = ExcelFormula.ReferencePattern(formula.RawValue!, fixedRow: isRow);
-                var broken = ExcelFormula.HasBrokenReference(pattern);
+                var movement = new FormulaPosition(movingPattern, position);
                 if (formulaChanges.TryGetValue((isRow, index, relaxed, opposite), out var previous) &&
-                    (previous.Intact.Contains(pattern) ||
-                     HasCompatibleReferences(previous.Broken, pattern) ||
-                     broken && HasCompatibleReferences(previous.Intact, pattern)))
+                    ((broken ? MatchesFixedPatterns(previous.Intact, fixedPattern, movement) :
+                        previous.Intact.TryGetValue(fixedPattern, out var intact) && MatchesPositions(intact, movement)) ||
+                        MatchesFixedPatterns(previous.Broken, fixedPattern, movement)))
                     return true;
 
                 var key = (isRow, index, relaxed, change);
@@ -411,24 +412,48 @@ internal sealed class ExcelWorksheet
                     _package.Charge(192L + relaxed.Length * 2L);
                     formulaChanges.Add(key, patterns = new());
                 }
-                if ((broken ? patterns.Broken : patterns.Intact).Add(pattern))
-                    _package.Charge(64L + pattern.Length * 2L);
+                var byFixedPattern = broken ? patterns.Broken : patterns.Intact;
+                if (!byFixedPattern.TryGetValue(fixedPattern, out var positions))
+                {
+                    _package.Charge(128L + fixedPattern.Length * 2L);
+                    byFixedPattern.Add(fixedPattern, positions = []);
+                }
+                _package.Charge(64L + movingPattern.Length * 2L);
+                positions.Add(movement);
                 return false;
             }
         }
 
-        bool HasCompatibleReferences(HashSet<string> alternatives, string pattern)
+        bool MatchesFixedPatterns(Dictionary<string, List<FormulaPosition>> alternatives, string pattern,
+            FormulaPosition position)
         {
-            foreach (var candidate in alternatives)
+            foreach (var (candidate, positions) in alternatives)
             {
-                // A wildcard check can scan the entire pattern, even on a mismatch.
-                wildcardCharactersRemaining -= pattern.Length;
-                if (wildcardCharactersRemaining < 0)
-                    throw new InvalidDataException("Worksheet merge exceeds the broken-reference comparison limit.");
-                if (ExcelFormula.CompatibleReferences(pattern, candidate))
+                ChargeFormulaComparison(pattern.Length, broken: true);
+                if (ExcelFormula.CompatibleReferences(pattern, candidate) && MatchesPositions(positions, position, broken: true))
                     return true;
             }
             return false;
+        }
+
+        bool MatchesPositions(List<FormulaPosition> alternatives, FormulaPosition position, bool broken = false)
+        {
+            foreach (var candidate in alternatives)
+            {
+                ChargeFormulaComparison(position.Pattern.Length, broken);
+                if (ExcelFormula.CompatibleReferences(position.Pattern, candidate.Pattern, candidate.Index - position.Index))
+                    return true;
+            }
+            return false;
+        }
+
+        void ChargeFormulaComparison(int length, bool broken)
+        {
+            ref var remaining = ref (broken ? ref wildcardCharactersRemaining : ref intactCharactersRemaining);
+            remaining -= length;
+            if (remaining < 0)
+                throw new InvalidDataException(broken ? "Worksheet merge exceeds the broken-reference comparison limit." :
+                    "Worksheet merge exceeds the formula movement comparison limit.");
         }
     }
 
@@ -441,11 +466,12 @@ internal sealed class ExcelWorksheet
     }
 
     private enum FormulaChange { Introduced, Removed }
+    private readonly record struct FormulaPosition(string Pattern, int Index);
 
     private sealed class FormulaPatterns
     {
-        internal HashSet<string> Intact { get; } = new(StringComparer.Ordinal);
-        internal HashSet<string> Broken { get; } = new(StringComparer.Ordinal);
+        internal Dictionary<string, List<FormulaPosition>> Intact { get; } = new(StringComparer.Ordinal);
+        internal Dictionary<string, List<FormulaPosition>> Broken { get; } = new(StringComparer.Ordinal);
     }
 
     private static ExcelCellValue RelativeFormula(ExcelCellValue value, CellAddress address) =>

@@ -90,7 +90,8 @@ public static class ExcelWorkbook
 
         var remote = current.Sheet(sheetId);
         var before = original?.Sheet(sheetId) ?? remote;
-        if (!string.Equals(before.PersistentUid, remote.PersistentUid, StringComparison.OrdinalIgnoreCase))
+        if (original is not null && !string.Equals(original.SheetUid(sheetId), current.SheetUid(sheetId),
+            StringComparison.OrdinalIgnoreCase))
             return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], "The worksheet identity changed.");
         if (!sameRevision && before.StructureDiffers(remote))
             return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], "The worksheet structure changed.");
@@ -125,6 +126,9 @@ public static class ExcelWorkbook
         }
         if (conflicts.Count > 0)
             return new ExcelMergeResult(ExcelWriteStatus.CellConflict, null, conflicts);
+        if (original is not null && FormulaSheetBindingChanged(original, current, pending.Values) is { } binding)
+            return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [],
+                $"The worksheet binding for formula reference '{binding}' changed.");
 
         var changed = remote.Apply(pending);
         if (changed.Count == 0)
@@ -132,6 +136,62 @@ public static class ExcelWorkbook
         current.MarkSheetChanged(sheetId);
         current.PruneCalculationChain(sheetId, changed);
         return new ExcelMergeResult(ExcelWriteStatus.Success, current.Save(), []);
+    }
+
+    private static string? FormulaSheetBindingChanged(ExcelPackage original, ExcelPackage current,
+        IEnumerable<ExcelCellValue> pending)
+    {
+        IReadOnlyList<ExcelSheet>? originalSheets = null;
+        IReadOnlyList<ExcelSheet>? currentSheets = null;
+        Dictionary<string, int>? originalIndices = null;
+        Dictionary<string, int>? currentIndices = null;
+        var verified = new HashSet<(int First, int Last)>();
+        foreach (var value in pending)
+        {
+            if (value.Type != ExcelCellType.Formula)
+                continue;
+            foreach (var (first, last) in ExcelFormula.LocalSheetReferences(value.RawValue!))
+            {
+                originalSheets ??= original.ListSheets();
+                currentSheets ??= current.ListSheets();
+                originalIndices ??= SheetIndices(originalSheets);
+                currentIndices ??= SheetIndices(currentSheets);
+                if (!originalIndices.TryGetValue(first, out var beforeFirst) ||
+                    !currentIndices.TryGetValue(first, out var afterFirst) ||
+                    !originalIndices.TryGetValue(last ?? first, out var beforeLast) ||
+                    !currentIndices.TryGetValue(last ?? first, out var afterLast) ||
+                    beforeLast - beforeFirst != afterLast - afterFirst)
+                    return last is null ? first : $"{first}:{last}";
+                if (!verified.Add((beforeFirst, beforeLast)))
+                    continue;
+
+                var length = Math.Abs(beforeLast - beforeFirst) + 1;
+                for (var offset = 0; offset < length; offset++)
+                {
+                    var step = beforeLast < beforeFirst ? -offset : offset;
+                    var beforeSheet = originalSheets[beforeFirst + step];
+                    var afterSheet = currentSheets[afterFirst + step];
+                    if (beforeSheet.SheetId != afterSheet.SheetId ||
+                        !string.Equals(original.SheetPath(beforeSheet.SheetId), current.SheetPath(afterSheet.SheetId),
+                            StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(original.SheetUid(beforeSheet.SheetId), current.SheetUid(afterSheet.SheetId),
+                            StringComparison.OrdinalIgnoreCase))
+                        return last is null ? first : $"{first}:{last}";
+                }
+            }
+        }
+        return null;
+
+        static Dictionary<string, int> SheetIndices(IReadOnlyList<ExcelSheet> sheets)
+        {
+            var indices = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < sheets.Count; i++)
+            {
+                if (!indices.TryAdd(sheets[i].Name, i))
+                    throw new InvalidDataException("The workbook contains duplicate worksheet names.");
+            }
+            return indices;
+        }
     }
 
     internal static Dictionary<CellAddress, ExcelCellValue> ParseEdits(IEnumerable<ExcelCellEdit> edits, int maxCells,

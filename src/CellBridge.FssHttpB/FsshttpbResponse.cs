@@ -848,35 +848,17 @@ public sealed class PutChangesResponse
         if (header.Type != StreamObjectTypeHeaderStart.PutChangesResponse)
             throw new InvalidDataException($"Expected PutChangesResponse header, got {header.Type}.");
 
-        int payloadStart = reader.Position;
-        int payloadEnd = checked(payloadStart + header.Length);
-        if (payloadEnd > reader.Length)
-            throw new EndOfStreamException("PutChangesResponse payload exceeds the response boundary.");
-
+        var payload = new BinaryReaderEx(reader.ReadMemory(header.Length));
+        int payloadEnd = reader.Position;
         reader.Position = start;
-        byte[] raw = reader.ReadBytes(payloadEnd - start);
-        reader.Position = payloadStart;
-
-        var result = new PutChangesResponse { RawBytes = raw };
-        try
-        {
-            result.AppliedStorageIndexID = ExGuid.Deserialize(reader);
-            ulong count = Compact64bitInt.Deserialize(reader).Value;
-            if (count > int.MaxValue)
-                throw new InvalidDataException($"PutChangesResponse ExGUID array is too large: {count}.");
-            for (ulong i = 0; i < count; i++)
-                result.DataElementAdded.Add(ExGuid.Deserialize(reader));
-            result.TrailingPayloadBytes = reader.ReadBytes(payloadEnd - reader.Position);
-        }
-        catch
-        {
-            // Retain the complete framed object for replay even if a future
-            // server adds fields we do not yet understand.
-            reader.Position = payloadEnd;
-            throw;
-        }
-
-        reader.Position = payloadEnd;
+        var result = new PutChangesResponse { RawBytes = reader.ReadBytes(payloadEnd - start) };
+        result.AppliedStorageIndexID = ExGuid.Deserialize(payload);
+        ulong count = Compact64bitInt.Deserialize(payload).Value;
+        if (count > (ulong)payload.Remaining)
+            throw new InvalidDataException($"PutChangesResponse ExGUID array exceeds the payload: {count}.");
+        for (ulong i = 0; i < count; i++)
+            result.DataElementAdded.Add(ExGuid.Deserialize(payload));
+        result.TrailingPayloadBytes = payload.ReadBytes(payload.Remaining);
         return result;
     }
 }

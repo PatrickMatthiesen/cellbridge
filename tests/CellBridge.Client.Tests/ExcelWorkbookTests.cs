@@ -162,6 +162,52 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(edits[0].Value, Assert.Single(ExcelWorkbook.ReadRange(unaffected.Package!, 9, "B1")).Value);
     }
 
+    [Theory]
+    [InlineData("Inputs", "Inputs!A1+1")]
+    [InlineData("Inputs with space", "'Inputs with space'!A1+1")]
+    [InlineData("Sam's Inputs", "'Sam''s Inputs'!A1+1")]
+    [InlineData("Sam's Inputs", "SUM('Sam''s Inputs:Second'!A1)")]
+    public void StaleFormulaConflictsWhenAReferencedSheetWasRenamed(string name, string formula)
+    {
+        var original = Workbook("", firstSheetName: name);
+        var latest = Workbook("", firstSheetName: "Renamed");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", ExcelCellValue.Formula(formula))],
+            policy: ExcelConflictPolicy.LocalWins);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
+    [Theory]
+    [InlineData("sheet3.xml", "{9C764240-3645-4F55-8702-5DB1513E66B0}")]
+    [InlineData("sheet1.xml", "{9C764240-3645-4F55-8702-5DB1513E66B1}")]
+    public void StaleFormulaConflictsWhenAReferencedSheetWasReplaced(string part, string uid)
+    {
+        var original = Workbook("", firstSheetUid: "{9C764240-3645-4F55-8702-5DB1513E66B0}");
+        var latest = Workbook("", firstSheetPart: part, firstSheetUid: uid);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", ExcelCellValue.Formula("FIRST!A1+1"))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+    }
+
+    [Theory]
+    [InlineData("fIrSt!A1+1", "FIRST")]
+    [InlineData("\"First!A1\"&Table1[First!A1]", "Renamed")]
+    [InlineData("'[1]First'!A1+[1]First!A1", "Renamed")]
+    public void StaleFormulaMergesWithoutALocalSheetBindingChange(string text, string latestSheetName)
+    {
+        var formula = ExcelCellValue.Formula(text);
+
+        var result = ExcelWorkbook.MergeCells(Workbook(""), Workbook("", firstSheetName: latestSheetName), 9,
+            [new("B1", formula)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(result.Package!, 9, "B1")).Value);
+    }
+
     [Fact]
     public void EffectiveStyleChangeConflictsEvenWhenTheCellValueIsUnchanged()
     {
@@ -344,6 +390,23 @@ public sealed class ExcelWorkbookTests
 
         static string FormulaRow(string address, string formula) =>
             $"<row r='{address[1..]}'><c r='{address}'><f>{formula}</f></c></row>";
+    }
+
+    [Theory]
+    [InlineData("<row r='1'><c r='A1'><f>B1+C1</f></c></row>",
+        "<row r='2'><c r='A2'><f>B8+C20</f></c></row>")]
+    [InlineData("<row r='1'><c r='A1'><f>B1+C1</f></c></row>",
+        "<row r='1'><c r='B1'><f>C1+J1</f></c></row>")]
+    [InlineData("<row r='1'><c r='A1'><f>B1+C1</f></c></row>",
+        "<row r='2'><c r='A2'><f>#REF!+C20</f></c></row>")]
+    public void DisjointEditMergesWhenAnAlignedFormulaHasIncompatibleReferenceDisplacement(string before, string after)
+    {
+        var local = ExcelCellValue.Number(5);
+
+        var result = ExcelWorkbook.MergeCells(Workbook(before), Workbook(after), 4, [new("D1", local)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Equal(local, Assert.Single(ExcelWorkbook.ReadRange(result.Package!, 4, "D1")).Value);
     }
 
     [Theory]
@@ -768,6 +831,38 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(edited, 4, "A1")).Value);
     }
 
+    [Theory]
+    [InlineData("=1+")]
+    [InlineData("=1+ ")]
+    [InlineData("=SUM(1+,2)")]
+    [InlineData("=SUM(1+:2)")]
+    [InlineData("=SUM(*A1)")]
+    [InlineData("=A1<>")]
+    [InlineData("=A1:")]
+    [InlineData("=1 2")]
+    [InlineData("=Inputs!")]
+    [InlineData("=SUM({1,;2,3})")]
+    public void RejectsIncompleteFormulaExpressions(string text)
+    {
+        Assert.Throws<ArgumentException>(() => Edit(Workbook(""), new ExcelCellEdit("A1", ExcelCellValue.Formula(text))));
+    }
+
+    [Theory]
+    [InlineData("SUM(-1E-2,+.5,2^-3,100%,A1<>B1)")]
+    [InlineData("SUM((A1,B1),A1:B2 B1:C2,A1:B2 2:4,2:4 A1:B2)")]
+    [InlineData("IF(,SUM({1,2;3,-4}),)")]
+    [InlineData("SUM(Table1[[#Data],[Cost'] A1]],[@X],My.Name,\\A1,XFE1)")]
+    [InlineData("SUM(\"A1! +\",#REF!,#DIV/0!,NOW())")]
+    [InlineData("_xlfn.LAMBDA(x,x+1)(2)")]
+    public void AcceptsCompleteFormulaExpressions(string text)
+    {
+        var formula = ExcelCellValue.Formula(text);
+        var edited = Edit(Workbook(""), new ExcelCellEdit("A1", formula));
+
+        Validate(edited);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(edited, 4, "A1")).Value);
+    }
+
     private static byte[] Edit(byte[] package, params ExcelCellEdit[] edits)
     {
         var result = ExcelWorkbook.MergeCells(package, package, 4, edits);
@@ -820,7 +915,8 @@ public sealed class ExcelWorkbookTests
     private static byte[] Workbook(string rows, string beforeData = "", string afterData = "", bool date1904 = false,
         string? calculationChain = null, string[]? sharedStrings = null, bool nonSeekableZip = false,
         bool reverseSheets = false, string? tableRange = null, string? definedNames = null, bool swapStyles = false,
-        string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null)
+        string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null,
+        string firstSheetName = "First")
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string workbookType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
@@ -831,7 +927,7 @@ public sealed class ExcelWorkbookTests
             "application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml");
         var sharedType = sharedStrings is null ? "" : Override("xl/sharedStrings.xml",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml");
-        const string first = "<sheet name='First' sheetId='4' r:id='rId1'/>";
+        var first = $"<sheet {new XAttribute("name", firstSheetName)} sheetId='4' r:id='rId1'/>";
         const string second = "<sheet name='Second' sheetId='9' r:id='rId2'/>";
         var revisionNamespace = firstSheetUid is null ? "" :
             "xmlns:xr='http://schemas.microsoft.com/office/spreadsheetml/2014/revision' ";

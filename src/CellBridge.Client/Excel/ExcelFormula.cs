@@ -23,70 +23,192 @@ internal static partial class ExcelFormula
         "TEXTJOIN", "CONCAT", "TEXTBEFORE", "TEXTAFTER", "REGEXTEST", "REGEXEXTRACT", "REGEXREPLACE"
     };
 
+    private enum TokenKind { Name, Literal, Error, Sheet, RowRange, StructuredReference, Symbol }
+    private enum Expression { Empty, Incomplete, Sheet, Value, Reference }
+    private enum Group { Root, Parentheses, Function, Array }
+
+    private readonly record struct Token(TokenKind Kind, int Start, int End);
+
     internal static void Validate(string formula)
     {
         if (string.IsNullOrWhiteSpace(formula) || formula.Length > 8192 || formula.TrimStart().StartsWith('='))
             throw new ArgumentException("Expected invariant Excel formula text without the leading equals sign.");
         XmlConvert.VerifyXmlChars(formula);
-        var delimiters = new Stack<char>();
-        var quote = '\0';
-        var braces = 0;
-        var brackets = 0;
-        for (var i = 0; i < formula.Length; i++)
+
+        var groups = new Stack<Group>();
+        groups.Push(Group.Root);
+        var expression = Expression.Empty;
+        var previous = default(Token);
+        foreach (var token in Tokens(formula))
         {
-            var character = formula[i];
-            if (quote != '\0')
+            var separated = previous.End < token.Start;
+            var group = groups.Peek();
+            var symbol = formula[token.Start];
+            var hasOperand = expression is Expression.Value or Expression.Reference;
+            if (token.Kind != TokenKind.Symbol)
             {
-                if (character == quote)
-                {
-                    if (i + 1 < formula.Length && formula[i + 1] == quote)
-                        i++;
-                    else
-                        quote = '\0';
-                }
-                continue;
+                var isReference = token.Kind is not (TokenKind.Literal or TokenKind.Error);
+                var attachesToName = token.Kind == TokenKind.StructuredReference &&
+                    previous.Kind == TokenKind.Name && !separated;
+                if (hasOperand && !attachesToName && !(separated && expression == Expression.Reference && isReference) ||
+                    expression == Expression.Sheet && token.Kind == TokenKind.Sheet)
+                    throw InvalidExpression();
+                expression = token.Kind == TokenKind.Sheet ? Expression.Sheet :
+                    isReference || expression == Expression.Sheet ? Expression.Reference : Expression.Value;
             }
-            if (brackets > 0 && character == '\'' && i + 1 < formula.Length)
+            else if (symbol is '(' or '{')
+            {
+                var hasFunctionName = previous.Kind == TokenKind.Name && hasOperand;
+                var invokesResult = !separated && hasOperand && formula[previous.Start] == ')';
+                var opensFunction = symbol == '(' && (hasFunctionName || invokesResult);
+                if (opensFunction && hasFunctionName)
+                    ValidateFunction(formula[previous.Start..previous.End]);
+                if (!opensFunction && (expression == Expression.Sheet ||
+                    hasOperand && !(symbol == '(' && separated && expression == Expression.Reference)))
+                    throw InvalidExpression();
+                groups.Push(opensFunction ? Group.Function : symbol == '(' ? Group.Parentheses : Group.Array);
+                expression = Expression.Empty;
+            }
+            else if (symbol is ')' or '}')
+            {
+                if (group == Group.Root || (symbol == '}') != (group == Group.Array))
+                    throw new ArgumentException("The Excel formula delimiters are unbalanced.");
+                if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
+                    throw InvalidExpression();
+                groups.Pop();
+                expression = group == Group.Array ? Expression.Value : Expression.Reference;
+            }
+            else if (symbol is ',' or ';')
+            {
+                if (symbol == ';' && group != Group.Array)
+                    throw new ArgumentException("Use commas between arguments in invariant Excel formulas.");
+                if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
+                    throw InvalidExpression();
+                expression = group == Group.Function ? Expression.Empty : Expression.Incomplete;
+            }
+            else if (symbol == '%')
+            {
+                if (!hasOperand)
+                    throw InvalidExpression();
+                expression = Expression.Value;
+            }
+            else if (symbol is '+' or '-' or '@')
+            {
+                if (expression == Expression.Sheet || symbol == '@' && hasOperand)
+                    throw InvalidExpression();
+                expression = Expression.Incomplete;
+            }
+            else
+            {
+                if (!hasOperand || symbol is not ('*' or '/' or '^' or '&' or '=' or '<' or '>' or ':'))
+                    throw InvalidExpression();
+                expression = Expression.Incomplete;
+            }
+            previous = token;
+        }
+        if (groups.Count != 1)
+            throw new ArgumentException("The Excel formula delimiters are unbalanced.");
+        if (expression is not (Expression.Value or Expression.Reference))
+            throw InvalidExpression();
+    }
+
+    private static ArgumentException InvalidExpression() =>
+        new("The Excel formula contains an incomplete or invalid expression.");
+
+    internal static IEnumerable<(string First, string? Last)> LocalSheetReferences(string formula)
+    {
+        if (!formula.Contains('!'))
+            yield break;
+
+        foreach (var token in Tokens(formula))
+        {
+            if (token.Kind != TokenKind.Sheet)
+                continue;
+            var qualifier = formula[token.Start..(token.End - 1)];
+            if (qualifier.Contains('[') || qualifier.Equals("#REF", StringComparison.OrdinalIgnoreCase))
+                continue;
+            // Excel can quote the entire 3-D qualifier. A colon cannot be part of a local sheet name.
+            var separator = qualifier.IndexOf(':');
+            if (separator < 0)
+                yield return (Unquote(qualifier), null);
+            else
+                yield return (Unquote(qualifier[..separator]), Unquote(qualifier[(separator + 1)..]));
+        }
+
+        static string Unquote(string name) => name.Trim('\'').Replace("''", "'", StringComparison.Ordinal);
+    }
+
+    private static IEnumerable<Token> Tokens(string formula)
+    {
+        for (var i = 0; i < formula.Length;)
+        {
+            if (char.IsWhiteSpace(formula[i]))
             {
                 i++;
                 continue;
             }
-            if (brackets == 0 && character is '"' or '\'')
-                quote = character;
-            else if (character == '(' && brackets == 0)
+            var start = i;
+            var match = FormulaToken().Match(formula, i);
+            if (match.Success)
             {
-                ValidateFunction(FunctionBefore(formula, i));
-                delimiters.Push(')');
+                i += match.Length;
+                var kind = match.Groups["sheet"].Success ? TokenKind.Sheet :
+                    match.Groups["name"].Success ? TokenKind.Name :
+                    match.Groups["rowRange"].Success ? TokenKind.RowRange :
+                    match.Groups["error"].Success ? TokenKind.Error : TokenKind.Literal;
+                yield return new Token(kind, start, i);
             }
-            else if (character == '[')
+            else if (formula[i] == '[')
             {
-                delimiters.Push(']');
-                brackets++;
+                i = EndOfStructuredReference(formula, i);
+                yield return new Token(TokenKind.StructuredReference, start, i);
             }
-            else if (character == ']' || (brackets == 0 && character is ')' or '}'))
+            else
             {
-                if (!delimiters.TryPop(out var expected) || character != expected)
-                    throw new ArgumentException("The Excel formula delimiters are unbalanced.");
-                if (character == ']')
-                    brackets--;
-                if (character == '}')
-                    braces--;
+                var symbol = formula[i++];
+                if (i < formula.Length && (symbol == '<' && formula[i] is '=' or '>' ||
+                    symbol == '>' && formula[i] == '='))
+                    i++;
+                yield return new Token(TokenKind.Symbol, start, i);
             }
-            else if (brackets == 0 && character == '{')
-            {
-                delimiters.Push('}');
-                braces++;
-            }
-            else if (brackets == 0 && character == ';' && braces == 0)
-                throw new ArgumentException("Use commas between arguments in invariant Excel formulas.");
-            else if (brackets == 0 && character == '#' && i > 0 &&
-                     (char.IsAsciiDigit(formula[i - 1]) || formula[i - 1] == ')'))
-                throw new ArgumentException("Spill references are outside the supported formula subset.");
         }
-
-        if (quote != '\0' || delimiters.Count != 0)
-            throw new ArgumentException("The Excel formula delimiters are unbalanced.");
     }
+
+    private static int EndOfStructuredReference(string formula, int start)
+    {
+        var depth = 1;
+        for (var i = start + 1; i < formula.Length; i++)
+        {
+            switch (formula[i])
+            {
+                case '\'':
+                    i++;
+                    break;
+                case '[':
+                    depth++;
+                    break;
+                case ']' when --depth == 0:
+                    return i + 1;
+            }
+        }
+        throw new ArgumentException("The Excel formula delimiters are unbalanced.");
+    }
+
+    [GeneratedRegex("""
+        \G (?:
+            (?<sheet>
+                (?: '(?:[^']|'')*' | (?:\[[^\[\]]+\])?[\p{L}\p{M}\p{N}_.]+ | \[[^\[\]]+\] )
+                (?: : (?: '(?:[^']|'')*' | [\p{L}\p{M}\p{N}_.]+ ) )? !
+            )
+            | (?<sheet> \#REF! (?=[\p{L}\p{N}_$\\\[]) )
+            | "(?:[^"]|"")*"
+            | (?<error> \#(?:NULL!|DIV/0!|VALUE!|REF!|NAME\?|NUM!|N/A|GETTING_DATA|SPILL!|CALC!|FIELD!|BLOCKED!|UNKNOWN!|CONNECT!|BUSY!|PYTHON!|TIMEOUT!) )
+            | (?<rowRange> \$?[0-9]+\s*:\s*\$?[0-9]+ )(?![\p{L}\p{M}\p{N}_.$])
+            | (?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?
+            | (?<name> \$?[\p{L}_\\][\p{L}\p{M}\p{N}_.]*(?:\$[0-9]+)? | \$[0-9]+ )
+        )
+        """, RegexOptions.IgnorePatternWhitespace | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FormulaToken();
 
     private static void ValidateFunction(string token)
     {
@@ -99,17 +221,6 @@ internal static partial class ExcelFormula
             (futurePrefix && (pieces[1].Length == 0 || !char.IsAsciiLetter(pieces[1][0]) ||
                 pieces.Skip(2).Any(piece => piece.Length == 0 || !char.IsAsciiLetterOrDigit(piece[0])))))
             throw new ArgumentException($"Function '{name}' has an invalid or missing _xlfn. prefix.");
-    }
-
-    private static string FunctionBefore(string formula, int delimiter)
-    {
-        var end = delimiter;
-        while (end > 0 && char.IsWhiteSpace(formula[end - 1]))
-            end--;
-        var start = end;
-        while (start > 0 && (char.IsAsciiLetterOrDigit(formula[start - 1]) || formula[start - 1] is '_' or '.'))
-            start--;
-        return formula[start..end];
     }
 
     internal static string Translate(string formula, CellAddress master, CellAddress target)
@@ -144,9 +255,9 @@ internal static partial class ExcelFormula
         return false;
     }
 
-    // Both patterns have the same shape. A broken endpoint can match any
-    // anchor or coordinate, but a surviving endpoint still has to match.
-    internal static bool CompatibleReferences(string left, string right)
+    // On the moving axis, each intact endpoint must stay in place or move with the formula.
+    // A broken endpoint provides no anchor or coordinate evidence.
+    internal static bool CompatibleReferences(string left, string right, int displacement = 0)
     {
         int search = 0;
         while (left.IndexOf(ReferenceMarker, search, StringComparison.Ordinal) is var marker && marker >= 0)
@@ -163,8 +274,14 @@ internal static partial class ExcelFormula
                 {
                     int anchor = kind + 1 + endpoint;
                     int coordinate = kind + 3 + endpoint * CoordinateLength;
-                    if (left[anchor] != '?' && right[anchor] != '?' &&
-                        !left.AsSpan(coordinate, CoordinateLength).SequenceEqual(right.AsSpan(coordinate, CoordinateLength)))
+                    if (left[anchor] == '?' || right[anchor] == '?')
+                        continue;
+                    var from = left.AsSpan(coordinate, CoordinateLength);
+                    var to = right.AsSpan(coordinate, CoordinateLength);
+                    if (from.SequenceEqual(to))
+                        continue;
+                    if (displacement == 0 || int.Parse(to, CultureInfo.InvariantCulture) -
+                        int.Parse(from, CultureInfo.InvariantCulture) != displacement)
                         return false;
                 }
             }
