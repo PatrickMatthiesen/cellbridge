@@ -115,6 +115,16 @@ public sealed class FsshttpbResponse
     public string ToBase64(FsshttpbSerializationProfile profile) =>
         Convert.ToBase64String(ToByteArray(profile));
 
+    /// <summary>Deserializes one complete binary response, with no trailing bytes.</summary>
+    public static FsshttpbResponse FromBytes(ReadOnlyMemory<byte> bytes)
+    {
+        var reader = new BinaryReaderEx(bytes);
+        var response = Deserialize(reader);
+        if (reader.Remaining != 0)
+            throw new InvalidDataException("Unexpected bytes after the FSSHTTPB response.");
+        return response;
+    }
+
     /// <summary>Deserializes a response from the reader.</summary>
     public static FsshttpbResponse Deserialize(BinaryReaderEx reader)
     {
@@ -136,6 +146,9 @@ public sealed class FsshttpbResponse
         {
             throw new InvalidDataException($"Expected FsshttpbResponse header, got {responseStart.Type}.");
         }
+
+        if (responseStart.Length != 1)
+            throw new InvalidDataException($"FsshttpbResponse must have a one-byte fixed payload, got {responseStart.Length}.");
 
         byte statusByte = reader.ReadByte();
         response.Status = (statusByte & 0x1) == 0x1;
@@ -247,22 +260,19 @@ public sealed class FsshttpbSubResponse
             throw new InvalidDataException($"Expected FsshttpbSubResponse header, got {start.Type}.");
         }
 
-        int fixedPayloadEnd = reader.Position + start.Length;
+        var payload = new BinaryReaderEx(reader.ReadMemory(start.Length));
 
         var subResponse = new FsshttpbSubResponse
         {
-            RequestId = Compact64bitInt.Deserialize(reader).Value,
-            RequestType = (RequestTypes)Compact64bitInt.Deserialize(reader).Value,
+            RequestId = Compact64bitInt.Deserialize(payload).Value,
+            RequestType = (RequestTypes)Compact64bitInt.Deserialize(payload).Value,
         };
 
-        byte statusByte = reader.ReadByte();
+        byte statusByte = payload.ReadByte();
         subResponse.Status = (statusByte & 0x1) == 0x1;
 
-        if (reader.Position != fixedPayloadEnd)
-        {
-            throw new InvalidDataException(
-                $"FsshttpbSubResponse fixed payload over/under-read: expected {fixedPayloadEnd}, got {reader.Position}.");
-        }
+        if (payload.Remaining != 0)
+            throw new InvalidDataException("Unexpected bytes in the FsshttpbSubResponse fixed payload.");
 
         if (subResponse.Status)
         {
@@ -316,6 +326,11 @@ public static class SubResponseDataFactory
 /// </summary>
 public sealed class QueryAccessSubResponseData : ISubResponseData
 {
+    private const StreamObjectTypeHeaderStart AdditionalAccessResponseType = (StreamObjectTypeHeaderStart)0xA4;
+
+    /// <summary>The complete optional access response extension observed in SharePoint traffic.</summary>
+    public byte[]? AdditionalAccessResponseBytes { get; private set; }
+
     /// <summary>Read access error (null = access granted).</summary>
     public ResponseError? ReadAccessError { get; set; }
 
@@ -334,6 +349,8 @@ public sealed class QueryAccessSubResponseData : ISubResponseData
             .Serialize(writer);
         (WriteAccessError ?? new ResponseError(ErrorType.HResult, 0)).Serialize(writer);
         new StreamObjectHeaderEnd16Bit(StreamObjectTypeHeaderEnd.WriteAccessResponse).Serialize(writer);
+        if (AdditionalAccessResponseBytes is { } extension)
+            writer.WriteBytes(extension);
     }
 
     /// <summary>Deserializes the payload from the reader.</summary>
@@ -371,6 +388,19 @@ public sealed class QueryAccessSubResponseData : ISubResponseData
         if (writeEnd.Type != StreamObjectTypeHeaderEnd.WriteAccessResponse)
             throw new InvalidDataException($"Expected WriteAccessResponse end, got {writeEnd.Type}.");
 
+        if (reader.Remaining > 0)
+        {
+            int position = reader.Position;
+            int discriminator = reader.ReadByte() & 3;
+            reader.Position = position;
+            if (discriminator is 0 or 2)
+            {
+                var type = StreamObjectHeaderStart.Parse(reader).Type;
+                reader.Position = position;
+                if (type == AdditionalAccessResponseType)
+                    data.AdditionalAccessResponseBytes = StreamObjectHeaderStart.ReadFramedObject(reader, type);
+            }
+        }
         return data;
     }
 }
@@ -385,6 +415,9 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
 {
     private static readonly Guid CellKnowledgeGuid = new("327A35F6-0761-4414-9686-51E900667A4D");
     private static readonly Guid WaterlineKnowledgeGuid = new("3A76E90E-8032-4D0C-B9DD-F3C65029433E");
+    private static readonly Guid ContentTagKnowledgeGuid = new("10091F13-C882-40FB-9886-6533F934C21D");
+    private static readonly Guid FragmentKnowledgeGuid = new("0ABE4F35-01DF-4134-A24A-7C79F0859844");
+    private static readonly Guid VersionTokenKnowledgeGuid = new("BF12E2C1-E64F-4959-8282-73B9A24A7C44");
 
     /// <summary>The cell storage whose waterline is returned.</summary>
     public ExGuid StorageIndexExtendedGuid { get; set; } = ExGuid.Null;
@@ -395,7 +428,7 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
     /// <summary>The cell storage identifier represented in cell knowledge.</summary>
     public Guid CellKnowledgeCellGuid { get; set; }
 
-    /// <summary>The highest cell knowledge sequence returned.</summary>
+    /// <summary>The upper bound in the last decoded cell knowledge entry.</summary>
     public ulong CellKnowledgeTo { get; set; }
 
     /// <summary>Whether to emit the optional CellKnowledge block.</summary>
@@ -407,10 +440,10 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
     /// </summary>
     public byte[]? KnowledgeBytes { get; set; }
 
-    /// <summary>The cell storage identifier used by the Waterline entry.</summary>
+    /// <summary>The cell storage identifier in the first Waterline entry, if any.</summary>
     public ExGuid? WaterlineCellStorageExtendedGuid { get; set; }
 
-    /// <summary>The server waterline for the cell storage.</summary>
+    /// <summary>The server waterline in the first Waterline entry, if any.</summary>
     public ulong Waterline { get; set; }
 
     /// <summary>Serializes the payload to the writer.</summary>
@@ -476,10 +509,10 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
         new StreamObjectHeaderEnd8Bit(StreamObjectTypeHeaderEnd.Knowledge).Serialize(writer);
     }
 
-    /// <summary>Deserializes the payload from the reader (minimal parsing).</summary>
+    /// <summary>Deserializes the payload and retains the complete Knowledge object.</summary>
     public static QueryChangesSubResponseData Deserialize(BinaryReaderEx reader)
     {
-        var data = new QueryChangesSubResponseData();
+        var data = new QueryChangesSubResponseData { IncludeCellKnowledge = false };
 
         var header = StreamObjectHeaderStart.Parse(reader);
         if (header.Type != StreamObjectTypeHeaderStart.QueryChangesResponse)
@@ -498,7 +531,7 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
 
         int knowledgeStart = reader.Position;
         var knowledge = StreamObjectHeaderStart.Parse(reader);
-        if (knowledge.Type != StreamObjectTypeHeaderStart.Knowledge)
+        if (knowledge.Type != StreamObjectTypeHeaderStart.Knowledge || knowledge.Length != 0)
         {
             throw new InvalidDataException($"Expected Knowledge header, got {knowledge.Type}.");
         }
@@ -506,7 +539,7 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
         while (!IsHeaderEnd(reader))
         {
             var specialized = StreamObjectHeaderStart.Parse(reader);
-            if (specialized.Type != StreamObjectTypeHeaderStart.SpecializedKnowledge)
+            if (specialized.Type != StreamObjectTypeHeaderStart.SpecializedKnowledge || specialized.Length != 16)
             {
                 throw new InvalidDataException($"Expected SpecializedKnowledge header, got {specialized.Type}.");
             }
@@ -514,6 +547,7 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
             var specializedGuid = ExGuid.ReadGuid(reader);
             if (specializedGuid == CellKnowledgeGuid)
             {
+                data.IncludeCellKnowledge = true;
                 ParseCellKnowledge(reader, data);
             }
             else if (specializedGuid == WaterlineKnowledgeGuid)
@@ -522,7 +556,12 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
             }
             else
             {
-                throw new InvalidDataException($"Unsupported specialized knowledge GUID {specializedGuid}.");
+                // These specializations are retained in KnowledgeBytes for a subsequent query.
+                var type = specializedGuid == ContentTagKnowledgeGuid ? StreamObjectTypeHeaderStart.ContentTagKnowledge
+                    : specializedGuid == FragmentKnowledgeGuid ? StreamObjectTypeHeaderStart.FragmentKnowledge
+                    : specializedGuid == VersionTokenKnowledgeGuid ? StreamObjectTypeHeaderStart.VersionTokenKnowledge
+                    : throw new InvalidDataException($"Unsupported specialized knowledge GUID {specializedGuid}.");
+                StreamObjectHeaderStart.SkipFramedObject(reader, type);
             }
 
             var specializedEnd = StreamObjectHeaderEnd.Parse(reader);
@@ -555,27 +594,35 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
     private static void ParseCellKnowledge(BinaryReaderEx reader, QueryChangesSubResponseData data)
     {
         var cellKnowledge = StreamObjectHeaderStart.Parse(reader);
-        if (cellKnowledge.Type != StreamObjectTypeHeaderStart.CellKnowledge)
+        if (cellKnowledge.Type != StreamObjectTypeHeaderStart.CellKnowledge || cellKnowledge.Length != 0)
         {
             throw new InvalidDataException($"Expected CellKnowledge header, got {cellKnowledge.Type}.");
         }
 
         while (!IsHeaderEnd(reader))
         {
-            var range = StreamObjectHeaderStart.Parse(reader);
-            if (range.Type != StreamObjectTypeHeaderStart.CellKnowledgeRange)
+            var entry = StreamObjectHeaderStart.Parse(reader);
+            var payload = new BinaryReaderEx(reader.ReadMemory(entry.Length));
+            if (entry.Type == StreamObjectTypeHeaderStart.CellKnowledgeRange)
             {
-                throw new InvalidDataException("Expected a CellKnowledgeRange.");
+                data.CellKnowledgeCellGuid = ExGuid.ReadGuid(payload);
+                ulong from = Compact64bitInt.Deserialize(payload).Value;
+                data.CellKnowledgeTo = Compact64bitInt.Deserialize(payload).Value;
+                if (from > data.CellKnowledgeTo)
+                    throw new InvalidDataException("Invalid CellKnowledgeRange bounds.");
             }
-
-            int rangePayloadStart = reader.Position;
-            data.CellKnowledgeCellGuid = ExGuid.ReadGuid(reader);
-            _ = Compact64bitInt.Deserialize(reader);
-            data.CellKnowledgeTo = Compact64bitInt.Deserialize(reader).Value;
-            if (reader.Position - rangePayloadStart != range.Length)
+            else if (entry.Type == StreamObjectTypeHeaderStart.CellKnowledgeEntry)
             {
-                throw new InvalidDataException($"CellKnowledgeRange length {range.Length} does not match encoded payload length {reader.Position - rangePayloadStart}.");
+                var serial = SerialNumber.Deserialize(payload);
+                data.CellKnowledgeCellGuid = serial.Guid;
+                data.CellKnowledgeTo = serial.Value;
             }
+            else
+            {
+                throw new InvalidDataException("Expected a CellKnowledgeRange or CellKnowledgeEntry.");
+            }
+            if (payload.Remaining != 0)
+                throw new InvalidDataException("Unexpected bytes in the CellKnowledge entry.");
         }
 
         var cellEnd = StreamObjectHeaderEnd.Parse(reader);
@@ -588,25 +635,30 @@ public sealed class QueryChangesSubResponseData : ISubResponseData
     private static void ParseWaterlineKnowledge(BinaryReaderEx reader, QueryChangesSubResponseData data)
     {
         var waterlineKnowledge = StreamObjectHeaderStart.Parse(reader);
-        if (waterlineKnowledge.Type != StreamObjectTypeHeaderStart.WaterlineKnowledge)
+        if (waterlineKnowledge.Type != StreamObjectTypeHeaderStart.WaterlineKnowledge || waterlineKnowledge.Length != 0)
         {
             throw new InvalidDataException($"Expected WaterlineKnowledge header, got {waterlineKnowledge.Type}.");
         }
 
-        var entry = StreamObjectHeaderStart.Parse(reader);
-        if (entry.Type != StreamObjectTypeHeaderStart.WaterlineKnowledgeEntry)
+        while (!IsHeaderEnd(reader))
         {
-            throw new InvalidDataException("Expected a WaterlineKnowledgeEntry.");
+            var entry = StreamObjectHeaderStart.Parse(reader);
+            if (entry.Type != StreamObjectTypeHeaderStart.WaterlineKnowledgeEntry)
+                throw new InvalidDataException("Expected a WaterlineKnowledgeEntry.");
+
+            var payload = new BinaryReaderEx(reader.ReadMemory(entry.Length));
+            var storageId = ExGuid.Deserialize(payload);
+            ulong waterline = Compact64bitInt.Deserialize(payload).Value;
+            _ = Compact64bitInt.Deserialize(payload); // Reserved.
+            if (payload.Remaining != 0)
+                throw new InvalidDataException("Unexpected bytes in the WaterlineKnowledgeEntry.");
+            if (data.WaterlineCellStorageExtendedGuid is null)
+            {
+                data.WaterlineCellStorageExtendedGuid = storageId;
+                data.Waterline = waterline;
+            }
         }
 
-        int entryPayloadStart = reader.Position;
-        data.WaterlineCellStorageExtendedGuid = ExGuid.Deserialize(reader);
-        data.Waterline = Compact64bitInt.Deserialize(reader).Value;
-        _ = Compact64bitInt.Deserialize(reader);
-        if (reader.Position - entryPayloadStart != entry.Length)
-        {
-            throw new InvalidDataException($"WaterlineKnowledgeEntry length {entry.Length} does not match encoded payload length {reader.Position - entryPayloadStart}.");
-        }
         var waterlineEnd = StreamObjectHeaderEnd.Parse(reader);
         if (waterlineEnd.Type != StreamObjectTypeHeaderEnd.WaterlineKnowledge)
         {
@@ -681,13 +733,13 @@ public sealed class PutChangesSubResponseData : ISubResponseData
             switch (type.Value)
             {
                 case StreamObjectTypeHeaderStart.PutChangesResponseSerialNumberReassignAll:
-                    data.SerialNumberReassignAllBytes = ReadFramedObject(reader, type.Value);
+                    data.SerialNumberReassignAllBytes = StreamObjectHeaderStart.ReadFramedObject(reader, type.Value);
                     break;
 
                 case StreamObjectTypeHeaderStart.PutChangesResponseSerialNumberReassign:
                     if (data.SerialNumberReassignAllBytes is null)
                         throw new InvalidDataException("Serial reassignment entry has no reassignment header.");
-                    data.SerialNumberReassignAllBytes = [..data.SerialNumberReassignAllBytes, ..ReadFramedObject(reader, type.Value)];
+                    data.SerialNumberReassignAllBytes = [..data.SerialNumberReassignAllBytes, ..StreamObjectHeaderStart.ReadFramedObject(reader, type.Value)];
                     break;
 
                 case StreamObjectTypeHeaderStart.PutChangesResponse:
@@ -695,7 +747,7 @@ public sealed class PutChangesSubResponseData : ISubResponseData
                     break;
 
                 case StreamObjectTypeHeaderStart.Knowledge:
-                    data.KnowledgeBytes = ReadFramedObject(reader, type.Value);
+                    data.KnowledgeBytes = StreamObjectHeaderStart.ReadFramedObject(reader, type.Value);
                     break;
 
                 case StreamObjectTypeHeaderStart.DiagnosticRequestOptionOutput:
@@ -730,109 +782,6 @@ public sealed class PutChangesSubResponseData : ISubResponseData
         catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentOutOfRangeException)
         {
             return null;
-        }
-        finally
-        {
-            reader.Position = position;
-        }
-    }
-
-    /// <summary>
-    /// Reads one complete framed object, recursively consuming children of a
-    /// compound object.  This keeps unknown Knowledge specializations intact.
-    /// </summary>
-    private static byte[] ReadFramedObject(
-        BinaryReaderEx reader,
-        StreamObjectTypeHeaderStart expectedType)
-    {
-        int start = reader.Position;
-        var header = StreamObjectHeaderStart.Parse(reader);
-        if (header.Type != expectedType)
-        {
-            throw new InvalidDataException(
-                $"Expected {expectedType}, got {header.Type}.");
-        }
-
-        if (header.Length > reader.Remaining)
-            throw new EndOfStreamException("Stream object payload exceeds the response boundary.");
-        reader.Position += header.Length;
-
-        if (header.Compound == 1)
-        {
-            while (true)
-            {
-                if (reader.Remaining <= 0)
-                    throw new EndOfStreamException(
-                        $"Compound stream object {header.Type} has no end header.");
-
-                if (IsMatchingEnd(reader, header.Type))
-                {
-                    var end = StreamObjectHeaderEnd.Parse(reader);
-                    if ((int)end.Type != (int)header.Type)
-                    {
-                        throw new InvalidDataException(
-                            $"Expected {header.Type} end header, got {end.Type}.");
-                    }
-                    break;
-                }
-
-                // The child is consumed for framing only.  Its bytes remain
-                // in the outer slice returned below.
-                ReadAnyFramedObject(reader, 1);
-            }
-        }
-
-        int endPosition = reader.Position;
-        reader.Position = start;
-        byte[] result = reader.ReadBytes(endPosition - start);
-        reader.Position = endPosition;
-        return result;
-    }
-
-    private static void ReadAnyFramedObject(BinaryReaderEx reader, int depth)
-    {
-        if (depth > 32)
-            throw new InvalidDataException("Response object nesting limit exceeded.");
-        var header = StreamObjectHeaderStart.Parse(reader);
-        if (header.Length > reader.Remaining)
-            throw new EndOfStreamException("Stream object payload exceeds the response boundary.");
-        reader.Position += header.Length;
-
-        if (header.Compound == 1)
-        {
-            while (true)
-            {
-                if (reader.Remaining <= 0)
-                    throw new EndOfStreamException(
-                        $"Compound stream object {header.Type} has no end header.");
-                if (IsMatchingEnd(reader, header.Type))
-                {
-                    StreamObjectHeaderEnd.Parse(reader);
-                    break;
-                }
-                ReadAnyFramedObject(reader, depth + 1);
-            }
-        }
-    }
-
-    private static bool IsMatchingEnd(
-        BinaryReaderEx reader,
-        StreamObjectTypeHeaderStart startType)
-    {
-        int position = reader.Position;
-        try
-        {
-            int discriminator = reader.ReadByte() & 0x03;
-            reader.Position = position;
-            if (discriminator is not (0x1 or 0x3))
-                return false;
-
-            var end = StreamObjectHeaderEnd.Parse(reader);
-            return (int)end.Type == (int)startType;
-        }
-        catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentOutOfRangeException)
-        {
-            return false;
         }
         finally
         {

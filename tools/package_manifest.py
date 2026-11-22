@@ -5,7 +5,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 import zipfile
 
-PROJECTS = ["CellBridge.FssHttpB", "CellBridge", "CellBridge.Storage.InMemory",
+PROJECTS = ["CellBridge.FssHttpB", "CellBridge", "CellBridge.Client", "CellBridge.Storage.InMemory",
             "CellBridge.Storage.PostgreSql", "CellBridge.Storage.SqlServer", "CellBridge.Storage.FileSystem",
             "CellBridge.AspNetCore", "CellBridge.Lists", "CellBridge.Lists.PostgreSql",
             "CellBridge.Lists.SqlServer", "CellBridge.Lists.AspNetCore"]

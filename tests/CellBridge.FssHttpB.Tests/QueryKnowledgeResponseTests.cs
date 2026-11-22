@@ -41,7 +41,7 @@ public sealed class QueryKnowledgeResponseTests
     }
 
     [Fact]
-    public void RetentionDoesNotBypassMissingWrongOrUnsupportedKnowledgeValidation()
+    public void RetentionChecksFramingAndPreservesVersionTokenKnowledge()
     {
         var data = new QueryChangesSubResponseData { StorageIndexExtendedGuid = new(1, Guid.NewGuid()) };
         var bytes = Encode(data);
@@ -50,7 +50,10 @@ public sealed class QueryKnowledgeResponseTests
         bytes[^1] = Assert.Single(wrongEnd.ToArray());
         Assert.Throws<InvalidDataException>(() => QueryChangesSubResponseData.Deserialize(new(bytes)));
         data.KnowledgeBytes = BinaryKnowledgeBuilder.FromElements([], ExGuid.Null, 1, versionToken: [1]);
-        Assert.Throws<InvalidDataException>(() => QueryChangesSubResponseData.Deserialize(new(Encode(data))));
+        var encodedWithToken = Encode(data);
+        var decodedWithToken = QueryChangesSubResponseData.Deserialize(new(encodedWithToken));
+        Assert.Equal(data.KnowledgeBytes, decodedWithToken.KnowledgeBytes);
+        Assert.Equal(encodedWithToken, Encode(decodedWithToken));
     }
 
     private static byte[] Encode(QueryChangesSubResponseData data)

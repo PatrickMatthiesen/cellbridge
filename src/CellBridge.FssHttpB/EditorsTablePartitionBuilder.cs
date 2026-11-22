@@ -33,8 +33,9 @@ public static class EditorsTablePartitionBuilder
     public static readonly Guid PartitionId =
         new("7808F4DD-2385-49D6-B7CE-37ACA5E43602");
 
-    public static readonly byte[] ZipStreamHeader =
-        { 0x1A, 0x5A, 0x3A, 0x30, 0, 0, 0, 0 };
+    internal static ReadOnlySpan<byte> StreamHeader => [0x1A, 0x5A, 0x3A, 0x30, 0, 0, 0, 0];
+
+    public static readonly byte[] ZipStreamHeader = StreamHeader.ToArray();
 
     /// <summary>Builds a deterministic XML editors-table fragment.</summary>
     public static byte[] SerializeEditorsTable(
@@ -120,7 +121,7 @@ public static class EditorsTablePartitionBuilder
     {
         byte[] xml = SerializeEditorsTable(editors);
         using var output = new MemoryStream();
-        output.Write(ZipStreamHeader);
+        output.Write(StreamHeader);
         using (var deflate = new DeflateStream(output, CompressionLevel.Optimal, leaveOpen: true))
         {
             deflate.Write(xml);

@@ -42,6 +42,32 @@ endpoint. Word may require approval of its forms-sign-in host; see
 [Office sign-in](authentication.md#desktop-validation).
 [Client coverage](interoperability.md#client-coverage) lists tested scenarios.
 
+## Edit an Excel workbook with the emulator
+
+Copy the workbook URL from **Copy link / access**. Set `CELLBRIDGE_LOGIN` and
+`CELLBRIDGE_PASSWORD` for a WebDemo account or set `CELLBRIDGE_BEARER_TOKEN`
+for a host that accepts bearer authentication. Give the account write access
+before attempting a save. Start the interactive client and use `sheets` to find
+the sheet ID.
+
+```sh
+dotnet run --project tools/CellBridge.Emulator -- interactive "$WORKBOOK_URL"
+```
+
+For a desktop Excel capture, use a disposable workbook and distinct accounts
+for desktop Excel and the emulator. Start the capture, open the workbook in
+desktop Excel, then save one cell with the emulator. In this example the
+sheet ID is `1` and the new value in `B2` is the number `42`.
+
+```sh
+dotnet run --project tools/CellBridge.Emulator -- save "$WORKBOOK_URL" 1 B2 42
+```
+
+Record whether Excel shows the new value, prompts to reload, or reports
+repair. Check the saved value by reopening the workbook. Stop and validate
+the capture, then compare the save response with any channel 3 collaboration
+notifications. [Capture workflow](capture-kit.md)
+
 ## Import existing files
 
 After provisioning an owner, supply the admin command with the same database

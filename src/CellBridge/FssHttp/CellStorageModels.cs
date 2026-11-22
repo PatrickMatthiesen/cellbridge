@@ -1,5 +1,6 @@
 using System.Text;
 using System.Xml.Linq;
+using CellBridge.FssHttpB;
 
 namespace CellBridge.FssHttp;
 
@@ -26,7 +27,7 @@ public enum SubRequestType
 }
 
 /// <summary>
-/// A parsed cell storage service request message. [MS-FSSHTTP] section 2.2.2.1.
+/// A cell storage service request message. [MS-FSSHTTP] section 2.2.2.1.
 /// </summary>
 public sealed class CellStorageRequest
 {
@@ -61,6 +62,29 @@ public sealed class CellStorageRequest
 
     /// <summary>The SOAP envelope namespace used by the request.</summary>
     public string SoapNamespace { get; set; } = Soap11Namespace;
+
+    /// <summary>The media type for a standalone SOAP request.</summary>
+    public string SoapContentType => SoapNamespace == Soap12Namespace
+        ? $"application/soap+xml; charset=utf-8; action=\"{ExecuteAction}\""
+        : "text/xml; charset=utf-8";
+
+    /// <summary>Serializes the request with inline base64 Cell data.</summary>
+    public string ToSoapEnvelope() => CellStorageRequestSerializer.Serialize(this, null);
+
+    /// <summary>Serializes the request with Cell data in separate XOP parts.</summary>
+    public (string ContentType, byte[] Body) ToMtomMessage()
+    {
+        var message = PrepareMtomMessage();
+        return (message.ContentType, message.ToArray());
+    }
+
+    /// <summary>Prepares a streaming MTOM request. The binary buffers are borrowed until writing completes.</summary>
+    public MtomResponseMessage PrepareMtomMessage()
+    {
+        var parts = new List<ReadOnlyMemory<byte>>();
+        return MtomResponseMessage.Create(
+            CellStorageRequestSerializer.Serialize(this, parts), SoapNamespace, parts);
+    }
 }
 
 /// <summary>
@@ -84,6 +108,9 @@ public sealed class FssHttpRequest
     /// <summary>The UserAgent attribute.</summary>
     public Guid? UserAgent { get; set; }
 
+    /// <summary>Additional Request attributes, such as UserAgentClient and Build.</summary>
+    public Dictionary<string, string> RequestAttributes { get; } = new(StringComparer.Ordinal);
+
     /// <summary>The subrequests for this file.</summary>
     public List<FssHttpSubRequest> SubRequests { get; set; } = new();
 }
@@ -105,12 +132,12 @@ public sealed class FssHttpSubRequest
     /// <summary>The dependency condition, such as OnNotSupported or OnExecute.</summary>
     public string? DependencyType { get; set; }
 
-    /// <summary>The SubRequestData content (raw inner XML, if any).</summary>
+    /// <summary>The complete SubRequestData element as XML, if supplied.</summary>
     public string? SubRequestDataXml { get; set; }
 
-    /// <summary>Binary content referenced by an xop:Include element.</summary>
     private ReadOnlyMemory<byte>? _binary;
     private byte[]? _binaryArray;
+    /// <summary>The raw Cell payload to encode inline or as an XOP attachment.</summary>
     public ReadOnlyMemory<byte>? SubRequestDataBinaryMemory
     {
         get => _binaryArray is null ? _binary : _binaryArray.AsMemory();
@@ -119,7 +146,7 @@ public sealed class FssHttpSubRequest
     public byte[]? SubRequestDataBinary
     {
         get => _binaryArray ??= _binary?.ToArray();
-        set { _binaryArray = value; _binary = value; }
+        set { _binaryArray = value; _binary = value is null ? null : value.AsMemory(); }
     }
 
     /// <summary>SubRequestData attributes (e.g. CoauthID, ExclusiveLockID, BinaryDataSize).</summary>
@@ -143,8 +170,14 @@ public sealed class CellStorageResponse
     /// <summary>Optional detail for a version-level error.</summary>
     public string? VersionErrorMessage { get; set; }
 
+    /// <summary>The fault returned in place of an MS-FSSHTTP response.</summary>
+    public CellStorageSoapFault? Fault { get; set; }
+
     /// <summary>The WebUrl for the ResponseCollection.</summary>
     public string WebUrl { get; set; } = string.Empty;
+
+    /// <summary>Whether WebUrl is already URL encoded.</summary>
+    public bool WebUrlIsEncoded { get; set; }
 
     /// <summary>The per-file responses.</summary>
     public List<FssHttpResponse> Responses { get; set; } = new();
@@ -160,7 +193,7 @@ public sealed class CellStorageResponse
     /// <summary>Serializes this response to a SOAP envelope string.</summary>
     public string ToSoapEnvelope() => SerializeSoapEnvelope(null);
 
-    private string SerializeSoapEnvelope(List<(string ContentId, byte[] Data)>? binaryParts)
+    private string SerializeSoapEnvelope(List<ReadOnlyMemory<byte>>? binaryParts)
     {
         var sb = new StringBuilder();
         if (binaryParts is null)
@@ -172,12 +205,17 @@ public sealed class CellStorageResponse
             sb.Append(" xmlns:xop=\"http://www.w3.org/2004/08/xop/include\"");
         sb.Append('>');
         sb.Append("<soap:Body>");
+        if (Fault is not null)
+        {
+            sb.Append(Fault.Xml).Append("</soap:Body></soap:Envelope>");
+            return sb.ToString();
+        }
         sb.Append("<ResponseVersion xmlns=\"").Append(CellStorageRequest.Namespace)
             .Append("\" Version=\"").Append(Version)
             .Append("\" MinorVersion=\"").Append(MinorVersion).Append("\"");
         if (VersionErrorCode is not null)
         {
-            sb.Append(" ErrorCode=\"").Append(VersionErrorCode).Append("\"");
+            sb.Append(" ErrorCode=\"").Append(XmlEscape(VersionErrorCode)).Append("\"");
         }
         if (VersionErrorMessage is not null)
         {
@@ -187,22 +225,22 @@ public sealed class CellStorageResponse
         sb.Append(" />");
         sb.Append("<ResponseCollection xmlns=\"").Append(CellStorageRequest.Namespace)
             .Append("\" WebUrl=\"").Append(XmlEscape(WebUrl))
-            .Append("\" WebUrlIsEncoded=\"false\">");
+            .Append("\" WebUrlIsEncoded=\"").Append(WebUrlIsEncoded ? "true" : "false").Append("\">");
 
         foreach (var response in Responses)
         {
             // Encoded paths must not be advertised as unencoded: Office would
             // otherwise turn each '%' into '%25' on its next request.
-            var responseUrl = Uri.TryCreate(response.Url, UriKind.Absolute, out var absoluteUrl)
+            var responseUrl = response.UrlIsEncoded && Uri.TryCreate(response.Url, UriKind.Absolute, out var absoluteUrl)
                 && absoluteUrl.Scheme is "http" or "https" ? absoluteUrl.AbsoluteUri : response.Url;
             sb.Append("<Response Url=\"").Append(XmlEscape(responseUrl))
-              .Append("\" UrlIsEncoded=\"true\"");
+              .Append("\" UrlIsEncoded=\"").Append(response.UrlIsEncoded ? "true" : "false").Append('"');
             if (response.RequestToken is not null)
             {
                 sb.Append(" RequestToken=\"").Append(response.RequestToken.Value).Append("\"");
             }
 
-            sb.Append(" HealthScore=\"0\"");
+            sb.Append(" HealthScore=\"").Append(response.HealthScore).Append('"');
             if (response.IntervalOverride is not null)
             {
                 sb.Append(" IntervalOverride=\"").Append(response.IntervalOverride.Value).Append('"');
@@ -213,7 +251,7 @@ public sealed class CellStorageResponse
             }
             if (response.ErrorCode is not null)
             {
-                sb.Append(" ErrorCode=\"").Append(response.ErrorCode).Append("\"");
+                sb.Append(" ErrorCode=\"").Append(XmlEscape(response.ErrorCode)).Append("\"");
                 if (!string.Equals(response.ErrorCode, "Success", StringComparison.Ordinal))
                 {
                     sb.Append(" ErrorMessage=\"")
@@ -233,7 +271,7 @@ public sealed class CellStorageResponse
                 }
                 if (subResponse.ErrorCode is not null)
                 {
-                    sb.Append(" ErrorCode=\"").Append(subResponse.ErrorCode).Append("\"");
+                    sb.Append(" ErrorCode=\"").Append(XmlEscape(subResponse.ErrorCode)).Append("\"");
                 }
                 if (subResponse.HResult is not null)
                 {
@@ -251,23 +289,13 @@ public sealed class CellStorageResponse
                 sb.Append(">");
                 if (subResponse.SubResponseXml is not null)
                 {
-                    // GetVersions is the one standard response whose payload
-                    // is a nested XML result rather than SubResponseData.
-                    // The builder creates this fragment with LINQ to XML;
-                    // keep it as XML here so its protocol shape is preserved.
                     sb.Append(subResponse.SubResponseXml);
                 }
-                else if (subResponse.SubResponseDataXml is not null)
+                else if (subResponse.SubResponseDataXml is not null ||
+                    subResponse.SubResponseDataBase64 is not null ||
+                    subResponse.SubResponseDataAttributes.Count > 0 ||
+                    subResponse.EmitEmptySubResponseData)
                 {
-                    sb.Append("<SubResponseData>")
-                        .Append(subResponse.SubResponseDataXml)
-                        .Append("</SubResponseData>");
-                }
-                else if (subResponse.SubResponseDataBase64 is not null)
-                {
-                    // Inline the binary payload as base64 text content of
-                    // SubResponseData (non-MTOM form). Word accepts this when
-                    // the request was not sent with MTOM.
                     sb.Append("<SubResponseData");
                     foreach (var attr in subResponse.SubResponseDataAttributes)
                     {
@@ -275,33 +303,26 @@ public sealed class CellStorageResponse
                           .Append(XmlEscape(attr.Value)).Append('"');
                     }
 
-                    sb.Append(">");
-                    if (binaryParts is not null && subResponse.SubResponseDataBase64.Length > 0)
+                    if (subResponse.SubResponseDataXml is not null)
+                        sb.Append('>').Append(subResponse.SubResponseDataXml).Append("</SubResponseData>");
+                    else if (subResponse.SubResponseDataBase64 is { } binary)
                     {
-                        var contentId = $"http://tempuri.org/{binaryParts.Count + 1}";
-                        binaryParts.Add((contentId, subResponse.SubResponseDataBase64));
-                        sb.Append("<xop:Include href=\"cid:").Append(contentId).Append("\" />");
+                        sb.Append('>');
+                        if (binaryParts is not null && binary.Length > 0)
+                        {
+                            var contentId = MtomResponseMessage.ContentId(binaryParts.Count + 1);
+                            binaryParts.Add(binary);
+                            sb.Append("<xop:Include href=\"cid:").Append(contentId).Append("\" />");
+                        }
+                        else
+                            sb.Append(Convert.ToBase64String(binary));
+                        sb.Append("</SubResponseData>");
                     }
                     else
-                        sb.Append(Convert.ToBase64String(subResponse.SubResponseDataBase64));
-                    sb.Append("</SubResponseData>");
+                        sb.Append(" />");
                 }
-                else if (subResponse.SubResponseDataAttributes.Count > 0)
-                {
-                    sb.Append("<SubResponseData");
-                    foreach (var attr in subResponse.SubResponseDataAttributes)
-                    {
-                        sb.Append(' ').Append(attr.Key).Append("=\"")
-                          .Append(XmlEscape(attr.Value)).Append('"');
-                    }
-
-                    sb.Append(" />");
-                }
-                else if (subResponse.EmitEmptySubResponseData)
-                {
-                    sb.Append("<SubResponseData />");
-                }
-
+                if (subResponse.SubResponseStreamInvalid)
+                    sb.Append("<SubResponseStreamInvalid />");
                 sb.Append("</SubResponse>");
             }
 
@@ -328,34 +349,11 @@ public sealed class CellStorageResponse
     /// </summary>
     public MtomResponseMessage PrepareMtomMessage()
     {
-        var boundary = "urn:uuid:" + Guid.NewGuid().ToString().ToUpperInvariant();
-        var rootContentId = "http://tempuri.org/0";
-        var binaryParts = new List<(string ContentId, byte[] Data)>();
+        var binaryParts = new List<ReadOnlyMemory<byte>>();
         // Validate raw XML fragments before any output. Binary payloads have
         // already become XOP references, so this parses only the small envelope.
         var xml = XDocument.Parse(SerializeSoapEnvelope(binaryParts), LoadOptions.PreserveWhitespace);
-        var soapBytes = Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting));
-        var segments = new List<ReadOnlyMemory<byte>>();
-        // Match the WCF/SharePoint preamble and root-part headers captured from
-        // a successful Word exchange. Word rejected our previous framing with
-        // "Xml stream exists": false, before interpreting any subresponses.
-        AddAscii($"\r\n--{boundary}\r\n");
-        var soapMediaType = SoapNamespace == CellStorageRequest.Soap12Namespace ? "application/soap+xml" : "text/xml";
-        AddAscii($"Content-ID: <{rootContentId}>\r\nContent-Transfer-Encoding: 8bit\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"{soapMediaType}\"\r\n\r\n");
-        segments.Add(soapBytes);
-        AddAscii("\r\n");
-
-        foreach (var part in binaryParts)
-        {
-            AddAscii($"--{boundary}\r\nContent-ID: <{part.ContentId}>\r\nContent-Transfer-Encoding: binary\r\nContent-Type: application/octet-stream\r\n\r\n");
-            segments.Add(part.Data);
-            AddAscii("\r\n");
-        }
-
-        AddAscii($"--{boundary}--\r\n");
-        return new MtomResponseMessage($"multipart/related; type=\"application/xop+xml\"; boundary=\"{boundary}\"; start=\"<{rootContentId}>\"; start-info=\"{soapMediaType}\"", segments);
-
-        void AddAscii(string value) => segments.Add(Encoding.ASCII.GetBytes(value));
+        return MtomResponseMessage.Create(xml.ToString(SaveOptions.DisableFormatting), SoapNamespace, binaryParts);
     }
 
     private static string XmlEscape(string value) => value
@@ -372,6 +370,12 @@ public sealed class FssHttpResponse
 {
     /// <summary>The URL of the file (echoed from the request).</summary>
     public string Url { get; set; } = string.Empty;
+
+    /// <summary>Whether Url is already URL encoded.</summary>
+    public bool UrlIsEncoded { get; set; } = true;
+
+    /// <summary>The server health score.</summary>
+    public uint HealthScore { get; set; }
 
     /// <summary>The request token echoed from the request.</summary>
     public ulong? RequestToken { get; set; }
@@ -397,8 +401,8 @@ public sealed class FssHttpResponse
 /// </summary>
 public sealed class FssHttpSubResponse
 {
-    /// <summary>The subrequest type this response is for.</summary>
-    public SubRequestType Type { get; set; }
+    /// <summary>The subrequest type, when assigned by the server, matched by token, or inferred from the payload.</summary>
+    public SubRequestType? Type { get; set; }
 
     /// <summary>The echoed subrequest correlation token.</summary>
     public ulong? SubRequestToken { get; set; }
@@ -436,11 +440,19 @@ public sealed class FssHttpSubResponse
     public string? SubResponseDataXml { get; set; }
 
     /// <summary>
-    /// Base64-encoded binary payload for the SubResponseData (used by Cell
-    /// subresponses carrying FSSHTTPB data).
+    /// Raw binary payload carried by SubResponseData as base64 or XOP.
     /// </summary>
     public byte[]? SubResponseDataBase64 { get; set; }
+
+    /// <summary>The typed FSSHTTPB response decoded by the SOAP parser.</summary>
+    public FsshttpbResponse? BinaryResponse { get; internal set; }
+
+    /// <summary>Whether the server marked the Cell stream invalid.</summary>
+    public bool SubResponseStreamInvalid { get; set; }
 
     /// <summary>SubResponseData attributes (e.g. CoauthID, LockType, LockScope).</summary>
     public Dictionary<string, string> SubResponseDataAttributes { get; } = new(StringComparer.Ordinal);
 }
+
+/// <summary>A SOAP fault with the complete fault element, including any detail.</summary>
+public sealed record CellStorageSoapFault(string? Code, string? Reason, string Xml);
