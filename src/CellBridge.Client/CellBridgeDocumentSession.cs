@@ -102,7 +102,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             session._leaseRenewal = session.RenewLeaseAsync();
             if (session._realTime is { } channel && realTimeTarget is { } connectedTarget)
             {
-                session._realTimeWork = session.RunRealTimeAsync(channel, connectedTarget.ExpiresAt);
+                session._realTimeWork = session.RunRealTimeAsync(channel, connectedTarget);
             }
             else
             {
@@ -483,16 +483,32 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
-    private async Task RunRealTimeAsync(ICellBridgeRealTimeChannel channel, DateTimeOffset? expiry)
+    private async Task RunRealTimeAsync(ICellBridgeRealTimeChannel channel, RealTimeConnectionTarget initial)
     {
         using var connectionLifetime = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         var pump = PumpNotificationsAsync(channel, connectionLifetime);
-        await Task.WhenAll(pump, RenewRealTimeAsync(channel, expiry, connectionLifetime.Token));
+        try
+        {
+            await RenewRealTimeAsync(channel, initial, connectionLifetime.Token);
+            if (!connectionLifetime.IsCancellationRequested)
+            {
+                // The advertised endpoint changed. Stop RTC while leaving the protocol session open.
+                await connectionLifetime.CancelAsync();
+                await channel.DisposeAsync();
+                _realTime = null;
+            }
+        }
+        finally
+        {
+            await connectionLifetime.CancelAsync();
+            await pump;
+        }
     }
 
-    private async Task RenewRealTimeAsync(ICellBridgeRealTimeChannel channel, DateTimeOffset? expiry,
+    private async Task RenewRealTimeAsync(ICellBridgeRealTimeChannel channel, RealTimeConnectionTarget initial,
         CancellationToken cancellationToken)
     {
+        var expiry = initial.ExpiresAt;
         var delay = RealTimeRenewalDelay(expiry);
         try
         {
@@ -507,6 +523,8 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                         (target.ExpiresAt is null || target.ExpiresAt > DateTimeOffset.UtcNow))
                     {
                         cancellationToken.ThrowIfCancellationRequested();
+                        if (target.Endpoint != initial.Endpoint)
+                            return;
                         await channel.UpdateClientInfoAsync(target, cancellationToken);
                         if (target.ExpiresAt is null || target.ExpiresAt != expiry)
                         {

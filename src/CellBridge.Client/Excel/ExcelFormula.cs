@@ -28,6 +28,13 @@ internal static partial class ExcelFormula
     private enum Group { Root, Parentheses, Function }
 
     private readonly record struct Token(TokenKind Kind, int Start, int End);
+    private readonly record struct Frame(Group Group, bool RequiresReference, Expression FunctionResult, bool OuterValueOperator);
+
+    // These calls can return references usable by Excel's reference operators.
+    private static readonly HashSet<string> ReferenceFunctions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CHOOSE", "IF", "INDEX", "INDIRECT", "OFFSET", "_xlfn.XLOOKUP"
+    };
 
     internal static void Validate(string formula)
     {
@@ -35,31 +42,40 @@ internal static partial class ExcelFormula
             throw new ArgumentException("Expected invariant Excel formula text without the leading equals sign.");
         XmlConvert.VerifyXmlChars(formula);
 
-        var groups = new Stack<Group>();
-        groups.Push(Group.Root);
+        var groups = new Stack<Frame>();
+        groups.Push(new Frame(Group.Root, false, Expression.Empty, false));
         var expression = Expression.Empty;
-        var previous = default(Token);
+        var beforePrevious = Expression.Empty;
+        var valueOperator = false;
+        var previous = new Token(TokenKind.Symbol, 0, 0);
         using var tokens = Tokens(formula).GetEnumerator();
         while (tokens.MoveNext())
         {
             var token = tokens.Current;
             var separated = previous.End < token.Start;
-            var group = groups.Peek();
+            var frame = groups.Peek();
+            var group = frame.Group;
             var symbol = formula[token.Start];
+            var beforeToken = expression;
             var hasOperand = expression is Expression.Value or Expression.Reference;
             if (token.Kind != TokenKind.Symbol)
             {
-                var isReference = token.Kind is not (TokenKind.Literal or TokenKind.Error);
-                var brokenReference = token.Kind == TokenKind.Error &&
-                    formula.AsSpan(token.Start, token.End - token.Start).Equals("#REF!", StringComparison.OrdinalIgnoreCase);
+                var operand = formula.AsSpan(token.Start, token.End - token.Start);
+                var isReference = token.Kind switch
+                {
+                    TokenKind.Literal => false,
+                    TokenKind.Error => operand.Equals("#REF!", StringComparison.OrdinalIgnoreCase),
+                    TokenKind.Name => !IsBoolean(operand),
+                    _ => true
+                };
                 var attachesToName = token.Kind == TokenKind.StructuredReference &&
                     previous.Kind == TokenKind.Name && !separated;
                 if (hasOperand && !attachesToName && !(separated && expression == Expression.Reference && isReference) ||
                     expression == Expression.Sheet && token.Kind == TokenKind.Sheet ||
-                    expression is Expression.Sheet or Expression.Range && !isReference && !brokenReference)
+                    expression is Expression.Sheet or Expression.Range && !isReference)
                     throw InvalidExpression();
                 expression = token.Kind == TokenKind.Sheet ? Expression.Sheet :
-                    isReference || brokenReference ? Expression.Reference : Expression.Value;
+                    isReference ? Expression.Reference : Expression.Value;
             }
             else if (symbol == '{')
             {
@@ -74,13 +90,22 @@ internal static partial class ExcelFormula
                 var hasFunctionName = previous.Kind == TokenKind.Name && hasOperand;
                 var invokesResult = !separated && hasOperand && formula[previous.Start] == ')';
                 var opensFunction = hasFunctionName || invokesResult;
+                var functionResult = Expression.Value;
                 if (opensFunction && hasFunctionName)
-                    ValidateFunction(formula[previous.Start..previous.End]);
+                {
+                    var name = formula[previous.Start..previous.End];
+                    ValidateFunction(name);
+                    if (ReferenceFunctions.Contains(name))
+                        functionResult = Expression.Reference;
+                }
                 if (!opensFunction && (expression == Expression.Sheet ||
                     hasOperand && !(separated && expression == Expression.Reference)))
                     throw InvalidExpression();
-                groups.Push(opensFunction ? Group.Function : Group.Parentheses);
+                var preceding = opensFunction ? beforePrevious : expression;
+                groups.Push(new Frame(opensFunction ? Group.Function : Group.Parentheses,
+                    preceding is Expression.Reference or Expression.Range or Expression.Sheet, functionResult, valueOperator));
                 expression = Expression.Empty;
+                valueOperator = false;
             }
             else if (symbol is ')' or '}')
             {
@@ -89,7 +114,10 @@ internal static partial class ExcelFormula
                 if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
                     throw InvalidExpression();
                 groups.Pop();
-                expression = Expression.Reference;
+                expression = group == Group.Function ? frame.FunctionResult : valueOperator ? Expression.Value : expression;
+                if (frame.RequiresReference && expression != Expression.Reference)
+                    throw InvalidExpression();
+                valueOperator = frame.OuterValueOperator;
             }
             else if (symbol == ';')
             {
@@ -99,6 +127,8 @@ internal static partial class ExcelFormula
             {
                 if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
                     throw InvalidExpression();
+                if (group != Group.Function)
+                    valueOperator |= expression == Expression.Value;
                 expression = group == Group.Function ? Expression.Empty : Expression.Incomplete;
             }
             else if (symbol == '%')
@@ -106,12 +136,14 @@ internal static partial class ExcelFormula
                 if (!hasOperand)
                     throw InvalidExpression();
                 expression = Expression.Value;
+                valueOperator = true;
             }
             else if (symbol is '+' or '-' or '@')
             {
                 if (expression is Expression.Sheet or Expression.Range || symbol == '@' && hasOperand)
                     throw InvalidExpression();
                 expression = Expression.Incomplete;
+                valueOperator = true;
             }
             else
             {
@@ -119,8 +151,10 @@ internal static partial class ExcelFormula
                     symbol == ':' && expression != Expression.Reference)
                     throw InvalidExpression();
                 expression = symbol == ':' ? Expression.Range : Expression.Incomplete;
+                valueOperator |= symbol != ':';
             }
             previous = token;
+            beforePrevious = beforeToken;
         }
         if (groups.Count != 1)
             throw new ArgumentException("The Excel formula delimiters are unbalanced.");
@@ -147,9 +181,7 @@ internal static partial class ExcelFormula
             {
                 TokenKind.Literal => !signed || formula[token.Start] != '"',
                 TokenKind.Error => !signed,
-                TokenKind.Name => !signed &&
-                    (formula.AsSpan(token.Start, token.End - token.Start).Equals("TRUE", StringComparison.OrdinalIgnoreCase) ||
-                     formula.AsSpan(token.Start, token.End - token.Start).Equals("FALSE", StringComparison.OrdinalIgnoreCase)),
+                TokenKind.Name => !signed && IsBoolean(formula.AsSpan(token.Start, token.End - token.Start)),
                 _ => false
             };
             if (!constant || !tokens.MoveNext() || tokens.Current.Kind != TokenKind.Symbol)
@@ -172,6 +204,9 @@ internal static partial class ExcelFormula
     private static ArgumentException InvalidExpression() =>
         new("The Excel formula contains an incomplete or invalid expression.");
 
+    private static bool IsBoolean(ReadOnlySpan<char> token) => token.Equals("TRUE", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("FALSE", StringComparison.OrdinalIgnoreCase);
+
     internal static IEnumerable<(string First, string? Last)> LocalSheetReferences(string formula)
     {
         if (!formula.Contains('!'))
@@ -193,6 +228,27 @@ internal static partial class ExcelFormula
         }
 
         static string Unquote(string name) => name.Trim('\'').Replace("''", "'", StringComparison.Ordinal);
+    }
+
+    internal static IEnumerable<string> LocalTableReferences(string formula)
+    {
+        if (!formula.Contains('['))
+            yield break;
+
+        var previous = new Token(TokenKind.Symbol, 0, 0);
+        var qualifiedExternally = false;
+        var externalQualifier = false;
+        foreach (var token in Tokens(formula))
+        {
+            if (token.Kind == TokenKind.StructuredReference && previous.Kind == TokenKind.Name &&
+                previous.End == token.Start && !qualifiedExternally)
+                yield return formula[previous.Start..previous.End];
+
+            qualifiedExternally = externalQualifier;
+            externalQualifier = token.Kind == TokenKind.Sheet &&
+                formula.AsSpan(token.Start, token.End - token.Start).Contains('[');
+            previous = token;
+        }
     }
 
     private static IEnumerable<Token> Tokens(string formula)

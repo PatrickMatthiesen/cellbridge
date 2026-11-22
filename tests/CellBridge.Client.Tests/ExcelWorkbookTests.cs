@@ -243,6 +243,53 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(package, 9, "B1")).Value);
     }
 
+    [Theory]
+    [InlineData(null, 1u, "X", "SUM(Table1[X])")]
+    [InlineData("A1:B3", 2u, "X", "SUM(TABLE1[X])")]
+    [InlineData("A1:B3", 1u, "Z", "SUM(Table1[[#Data],[X]])")]
+    [InlineData("A1:B4", 1u, "X", "SUM(Table1[X])")]
+    public void StaleFormulaConflictsWhenItsTableBindingChanges(
+        string? latestRange, uint latestTableId, string latestColumnName, string text)
+    {
+        var original = Workbook("", tableRange: "A1:B3");
+        var latest = Workbook("", tableRange: latestRange, tableId: latestTableId, firstTableColumnName: latestColumnName);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", ExcelCellValue.Formula(text))],
+            policy: ExcelConflictPolicy.LocalWins);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
+        Assert.Contains("table binding", result.Detail!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StaleFormulaMergesWithTableDataAndPackagePartChanges()
+    {
+        var original = Workbook("<row r='2'><c r='A2'><v>11</v></c></row>", tableRange: "A1:B3");
+        var latest = Workbook("<row r='2'><c r='A2'><v>22</v></c></row>", tableRange: "A1:B3", tablePart: "table8.xml");
+        var formula = ExcelCellValue.Formula("SUM(Table1[X])");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        var package = Assert.IsType<byte[]>(result.Package);
+        Validate(package);
+        Assert.Equal(ExcelCellValue.Number(22), Assert.Single(ExcelWorkbook.ReadRange(package, 4, "A2")).Value);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(package, 9, "B1")).Value);
+    }
+
+    [Theory]
+    [InlineData("\"Table1[X]\"")]
+    [InlineData("SUM([1]!Table1[X])")]
+    public void TableDeletionDoesNotConflictWithNonlocalTableText(string text)
+    {
+        var formula = ExcelCellValue.Formula(text);
+        var result = ExcelWorkbook.MergeCells(Workbook("", tableRange: "A1:B3"), Workbook(""), 9, [new("B1", formula)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(Assert.IsType<byte[]>(result.Package), 9, "B1")).Value);
+    }
+
     [Fact]
     public void StaleFormulaMergesAcrossAChartSheetInAThreeDimensionalReference()
     {
@@ -753,6 +800,31 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
+    [InlineData("C4", false, ExcelWriteStatus.Success)]
+    [InlineData("B4", false, ExcelWriteStatus.StructuralConflict)]
+    [InlineData("C4", true, ExcelWriteStatus.StructuralConflict)]
+    public void DiagonalMovementRequiresCorroboration(string destination, bool moveSecondValue, ExcelWriteStatus expected)
+    {
+        var original = Workbook("<row r='1'><c r='A1'><v>7</v></c></row><row r='2'><c r='B2'><v>0</v></c></row>" +
+            "<row r='3'><c r='B3'><v>8</v></c></row><row r='6'><c r='B6'><v>0</v></c></row>");
+        var latest = Edit(original, new ExcelCellEdit("B2", ExcelCellValue.Blank),
+            new ExcelCellEdit(destination, ExcelCellValue.Number(0)),
+            new ExcelCellEdit("B3", moveSecondValue ? ExcelCellValue.Blank : ExcelCellValue.Number(8)),
+            new ExcelCellEdit("C5", moveSecondValue ? ExcelCellValue.Number(8) : ExcelCellValue.Blank));
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("E4", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(expected, result.Status);
+        if (expected == ExcelWriteStatus.Success)
+        {
+            var package = Assert.IsType<byte[]>(result.Package);
+            Assert.Equal(ExcelCellValue.Blank, Assert.Single(ExcelWorkbook.ReadRange(package, 4, "B2")).Value);
+            Assert.Equal(ExcelCellValue.Number(0), Assert.Single(ExcelWorkbook.ReadRange(package, 4, "C4")).Value);
+            Assert.Equal(ExcelCellValue.Number(5), Assert.Single(ExcelWorkbook.ReadRange(package, 4, "E4")).Value);
+        }
+    }
+
+    [Theory]
     [InlineData("B1+1", "B1+2")]
     [InlineData(null, "B1+1")]
     [InlineData("B1+1", null)]
@@ -910,6 +982,15 @@ public sealed class ExcelWorkbookTests
     [InlineData("=SUM(1:\"text\")")]
     [InlineData("=Second!42")]
     [InlineData("=A1:\"text\"")]
+    [InlineData("(1):A1")]
+    [InlineData("A1:(1+2)")]
+    [InlineData("A1:(B1+C1)")]
+    [InlineData("(-B1):A1")]
+    [InlineData("A1:TRUE")]
+    [InlineData("false:A1")]
+    [InlineData("A1:SUM(B1)")]
+    [InlineData("SUM(B1):A1")]
+    [InlineData("A1:(NOW())")]
     public void RejectsIncompleteFormulaExpressions(string text)
     {
         Assert.Throws<ArgumentException>(() => Edit(Workbook(""), new ExcelCellEdit("A1", ExcelCellValue.Formula(text))));
@@ -943,6 +1024,9 @@ public sealed class ExcelWorkbookTests
     [InlineData("SUM(Table1[[#Data],[Cost'] A1]],[@X],My.Name,\\A1,XFE1)")]
     [InlineData("SUM(\"A1! +\",#REF!,#DIV/0!,NOW())")]
     [InlineData("_xlfn.LAMBDA(x,x+1)(2)")]
+    [InlineData("SUM((A1):(B1), A1:(OFFSET(B1,1,0)), INDEX(B1:B5,2):A1)")]
+    [InlineData("SUM(A1:CHOOSE(1,B1,C1), A1:IF(TRUE,B1,C1), A1:INDIRECT(\"B2\"))")]
+    [InlineData("SUM(A1:_xlfn.XLOOKUP(1,A2:A3,B2:B3), TRUE, FALSE(), (B1+C1))")]
     public void AcceptsCompleteFormulaExpressions(string text)
     {
         var formula = ExcelCellValue.Formula(text);
@@ -1005,7 +1089,8 @@ public sealed class ExcelWorkbookTests
         string? calculationChain = null, string[]? sharedStrings = null, bool nonSeekableZip = false,
         bool reverseSheets = false, string? tableRange = null, string? definedNames = null, bool swapStyles = false,
         string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null,
-        string firstSheetName = "First", bool firstSheetIsChart = false)
+        string firstSheetName = "First", bool firstSheetIsChart = false, string tablePart = "table1.xml",
+        uint tableId = 1, string firstTableColumnName = "X")
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string chartSheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml";
@@ -1044,7 +1129,7 @@ public sealed class ExcelWorkbookTests
                 Override($"xl/{firstSheetTarget}", firstSheetIsChart ? chartSheetType : worksheetType) +
                 Override("xl/worksheets/sheet2.xml", worksheetType) +
                 Override("xl/styles.xml", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml") +
-                chainType + sharedType + (tableRange is null ? "" : Override("xl/tables/table1.xml",
+                chainType + sharedType + (tableRange is null ? "" : Override($"xl/tables/{tablePart}",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml")) + "</Types>");
             Add("_rels/.rels", $"<Relationships xmlns='{PackageRels}'>" +
                 Relationship("root", "officeDocument", "xl/workbook.xml") + "</Relationships>");
@@ -1074,10 +1159,11 @@ public sealed class ExcelWorkbookTests
             if (tableRange is not null)
             {
                 Add($"xl/worksheets/_rels/{firstSheetPart}.rels", $"<Relationships xmlns='{PackageRels}'>" +
-                    Relationship("rId1", "table", "../tables/table1.xml") + "</Relationships>");
+                    Relationship("rId1", "table", $"../tables/{tablePart}") + "</Relationships>");
                 var headerRows = tableHeaderRows is null ? "" : $" headerRowCount='{tableHeaderRows}'";
-                Add("xl/tables/table1.xml", $"<table xmlns='{Main}' id='1' name='Table1' displayName='Table1' ref='{tableRange}'{headerRows}>" +
-                    "<tableColumns count='2'><tableColumn id='1' name='X'/><tableColumn id='2' name='Y'/></tableColumns></table>");
+                Add($"xl/tables/{tablePart}", $"<table xmlns='{Main}' id='{tableId}' name='Table1' displayName='Table1' ref='{tableRange}'{headerRows}>" +
+                    $"<tableColumns count='2'><tableColumn id='1' {new XAttribute("name", firstTableColumnName)}/>" +
+                    "<tableColumn id='2' name='Y'/></tableColumns></table>");
             }
             if (calculationChain is not null)
                 Add("xl/calcChain.xml", $"<calcChain xmlns='{Main}'>" + calculationChain + "</calcChain>");

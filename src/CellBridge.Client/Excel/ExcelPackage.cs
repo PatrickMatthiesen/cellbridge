@@ -19,7 +19,8 @@ internal sealed class ExcelMemoryBudget(long limit)
 internal sealed class ExcelPackage : IDisposable
 {
     internal static readonly XNamespace S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-    private static readonly XName WorksheetUid = XName.Get("uid", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision");
+    private static readonly XName RevisionUid = XName.Get("uid", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision");
+    private static readonly XName TableColumnUid = XName.Get("uid", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3");
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private static readonly XNamespace P = "http://schemas.openxmlformats.org/package/2006/relationships";
     private static readonly XNamespace Ct = "http://schemas.openxmlformats.org/package/2006/content-types";
@@ -37,6 +38,7 @@ internal sealed class ExcelPackage : IDisposable
     private readonly Dictionary<uint, (ExcelSheet Sheet, string Path, bool IsWorksheet)> _sheets = [];
     private readonly XElement _sheetList;
     private readonly XElement _relationships;
+    private Dictionary<string, (uint SheetId, XElement Table)>? _tablesByName;
     private ExcelStyles? _styles;
     private string? _themeSignature;
     private (XElement Markup, string Text)[]? _strings;
@@ -85,10 +87,10 @@ internal sealed class ExcelPackage : IDisposable
     {
         var path = SheetPath(id);
         if (_loaded.TryGetValue(path, out var document))
-            return (string?)document.Root?.Attribute(WorksheetUid);
+            return (string?)document.Root?.Attribute(RevisionUid);
         if (!_sheetUids.TryGetValue(id, out var uid))
         {
-            uid = _zip.ReadRootAttribute(path, WorksheetUid);
+            uid = _zip.ReadRootAttribute(path, RevisionUid);
             Charge(64L + (uid?.Length ?? 0) * 2L);
             _sheetUids.Add(id, uid);
         }
@@ -109,7 +111,7 @@ internal sealed class ExcelPackage : IDisposable
         if (!_worksheets.TryGetValue(id, out var worksheet))
         {
             var root = Root(sheet.Path, S + "worksheet");
-            _worksheets.Add(id, worksheet = new ExcelWorksheet(this, root));
+            _worksheets.Add(id, worksheet = new ExcelWorksheet(this, root, sheet.Path));
         }
         return worksheet;
     }
@@ -239,16 +241,70 @@ internal sealed class ExcelPackage : IDisposable
         MarkChanged(ContentTypes);
     }
 
-    internal IEnumerable<XElement> Tables(XElement worksheet)
+    internal IEnumerable<XElement> Tables(XElement worksheet, string part)
     {
         var tableIds = worksheet.Element(S + "tableParts")?.Elements(S + "tablePart");
         if (tableIds is null)
             yield break;
-        var part = _loaded.Single(pair => ReferenceEquals(pair.Value, worksheet.Document)).Key;
-        var separator = part.LastIndexOf('/');
-        var rels = Root(part[..(separator + 1)] + "_rels/" + part[(separator + 1)..] + ".rels", P + "Relationships");
+        var rels = Root(RelationshipsPath(part), P + "Relationships");
         foreach (var table in tableIds)
             yield return Root(ResolvePart(part, Relationship(rels, Required(table, R + "id"))), S + "table");
+    }
+
+    internal bool TableBindingDiffers(ExcelPackage current, string name)
+    {
+        var before = TablesByName().GetValueOrDefault(name);
+        var after = current.TablesByName().GetValueOrDefault(name);
+        if (before.Table is null || after.Table is null)
+            return before.Table != after.Table;
+
+        // Relationship IDs and part paths can be reassigned when a workbook is repacked.
+        return before.SheetId != after.SheetId || !SameText(SheetUid(before.SheetId), current.SheetUid(after.SheetId)) ||
+            !SameIdentity(before.Table, after.Table, RevisionUid) ||
+            CellRange.Parse(Required(before.Table, "ref")) != CellRange.Parse(Required(after.Table, "ref")) ||
+            ((uint?)before.Table.Attribute("headerRowCount") ?? 1) != ((uint?)after.Table.Attribute("headerRowCount") ?? 1) ||
+            ((uint?)before.Table.Attribute("totalsRowCount") ?? 0) != ((uint?)after.Table.Attribute("totalsRowCount") ?? 0) ||
+            !Columns(before.Table).SequenceEqual(Columns(after.Table), EqualityComparer<XElement>.Create((left, right) =>
+                left is not null && right is not null && SameIdentity(left, right, TableColumnUid) &&
+                SameText((string?)left.Attribute("name"), (string?)right.Attribute("name"))));
+
+        static IEnumerable<XElement> Columns(XElement table) => table.Element(S + "tableColumns")?.Elements(S + "tableColumn") ?? [];
+        static bool SameIdentity(XElement left, XElement right, XName uid) =>
+            (uint?)left.Attribute("id") == (uint?)right.Attribute("id") && SameText((string?)left.Attribute(uid), (string?)right.Attribute(uid));
+        static bool SameText(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private Dictionary<string, (uint SheetId, XElement Table)> TablesByName()
+    {
+        if (_tablesByName is not null)
+            return _tablesByName;
+
+        var tables = new Dictionary<string, (uint, XElement)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (id, (_, part, isWorksheet)) in _sheets)
+        {
+            if (!isWorksheet)
+                continue;
+            var relationshipsPart = RelationshipsPath(part);
+            if (!_zip.Contains(relationshipsPart))
+                continue;
+            var relationships = Root(relationshipsPart, P + "Relationships");
+            if (!relationships.Elements(P + "Relationship").Any(rel => (string?)rel.Attribute("Type") == R.NamespaceName + "/table"))
+                continue;
+            foreach (var table in Tables(Root(part, S + "worksheet"), part))
+            {
+                var name = Required(table, "displayName");
+                Charge(96L + name.Length * 2L);
+                if (!tables.TryAdd(name, (id, table)))
+                    throw new InvalidDataException("The workbook contains duplicate table names.");
+            }
+        }
+        return _tablesByName = tables;
+    }
+
+    private static string RelationshipsPath(string part)
+    {
+        var separator = part.LastIndexOf('/');
+        return part[..(separator + 1)] + "_rels/" + part[(separator + 1)..] + ".rels";
     }
 
     internal byte[] Save()

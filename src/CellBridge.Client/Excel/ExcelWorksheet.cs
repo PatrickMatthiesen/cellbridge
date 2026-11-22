@@ -10,6 +10,7 @@ internal sealed class ExcelWorksheet
     private sealed record Row(XElement Element, SortedList<int, XElement> Cells);
     private readonly ExcelPackage _package;
     private readonly XElement _root;
+    private readonly string _part;
     private readonly XElement _data;
     private readonly SortedList<int, Row> _rows = [];
     private readonly (int Min, int Max, uint Style)[] _columns;
@@ -18,10 +19,11 @@ internal sealed class ExcelWorksheet
     private readonly bool _protected;
     private (CellRange Range, uint HeaderRows)[]? _tableHeaders;
 
-    internal ExcelWorksheet(ExcelPackage package, XElement root)
+    internal ExcelWorksheet(ExcelPackage package, XElement root, string part)
     {
         _package = package;
         _root = root;
+        _part = part;
         _data = root.Element(S + "sheetData") ?? throw new InvalidDataException("The worksheet has no sheetData.");
         _columns = root.Elements(S + "cols").SelectMany(cols => cols.Elements(S + "col")).Select(col =>
             ((int?)col.Attribute("min") ?? 0, (int?)col.Attribute("max") ?? 0, (uint?)col.Attribute("style") ?? 0)).ToArray();
@@ -183,7 +185,7 @@ internal sealed class ExcelWorksheet
             throw new InvalidOperationException($"Cell {address} is locked on a protected worksheet.");
         if (_merged.Any(range => range.Contains(address) && range.Start != address))
             throw new InvalidOperationException($"Cell {address} is a non-origin cell in a merged range.");
-        _tableHeaders ??= _package.Tables(_root).Select(table =>
+        _tableHeaders ??= _package.Tables(_root, _part).Select(table =>
             (CellRange.Parse(Required(table, "ref")), (uint?)table.Attribute("headerRowCount") ?? 1)).ToArray();
         if (_tableHeaders.Any(table => table.Range.Contains(address) && address.Row - table.Range.Start.Row < table.HeaderRows))
             throw new InvalidOperationException($"Cell {address} belongs to a table header.");
@@ -520,10 +522,10 @@ internal sealed class ExcelWorksheet
                 continue;
             // An occurrence at a cleared or newly filled cell can reveal a shift
             // even when another occurrence of the same value was overwritten.
-            if ((source.HasBlank && destination.HasBlank) ||
-                HasAlignedBlankEndpoint(source, destination) || HasAlignedBlankEndpoint(destination, source))
+            if (HasAlignedBlankEndpoint(source, destination) || HasAlignedBlankEndpoint(destination, source))
                 return true;
 
+            // Moving across both axes needs a second occurrence with the same displacement.
             var from = source.First;
             var to = destination.First;
             var offset = (to.Row - from.Row, to.Column - from.Column);
@@ -797,7 +799,7 @@ internal sealed class ExcelWorksheet
 
         foreach (var range in _formulaRanges)
             yield return $"{range.Type}:{range.Range}";
-        foreach (var table in _package.Tables(_root))
+        foreach (var table in _package.Tables(_root, _part))
             yield return ExcelStyles.Signature(table);
         foreach (var (index, row) in _rows)
             foreach (var attribute in row.Element.Attributes()

@@ -126,7 +126,7 @@ public static class ExcelWorkbook
         }
         if (conflicts.Count > 0)
             return new ExcelMergeResult(ExcelWriteStatus.CellConflict, null, conflicts);
-        if (original is not null && FormulaSheetConflict(original, current, sheetId, pending.Values) is { } detail)
+        if (original is not null && FormulaBindingConflict(original, current, sheetId, pending.Values) is { } detail)
             return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], detail);
 
         var changed = remote.Apply(pending);
@@ -137,7 +137,7 @@ public static class ExcelWorkbook
         return new ExcelMergeResult(ExcelWriteStatus.Success, current.Save(), []);
     }
 
-    private static string? FormulaSheetConflict(ExcelPackage original, ExcelPackage current, uint editedSheetId,
+    private static string? FormulaBindingConflict(ExcelPackage original, ExcelPackage current, uint editedSheetId,
         IEnumerable<ExcelCellValue> pending)
     {
         IReadOnlyList<ExcelSheet>? originalSheets = null;
@@ -146,10 +146,16 @@ public static class ExcelWorkbook
         Dictionary<string, int>? currentIndices = null;
         var verifiedRanges = new HashSet<(int First, int Last)>();
         var verifiedSheets = new HashSet<uint> { editedSheetId };
+        var verifiedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var value in pending)
         {
             if (value.Type != ExcelCellType.Formula)
                 continue;
+            foreach (var name in ExcelFormula.LocalTableReferences(value.RawValue!))
+            {
+                if (verifiedTables.Add(name) && original.TableBindingDiffers(current, name))
+                    return $"The table binding for formula reference '{name}' changed.";
+            }
             foreach (var (first, last) in ExcelFormula.LocalSheetReferences(value.RawValue!))
             {
                 var reference = last is null ? first : $"{first}:{last}";

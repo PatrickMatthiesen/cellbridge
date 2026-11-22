@@ -108,6 +108,35 @@ public sealed class RealTimeRenewalTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EndpointChangeStopsRealTimeWhileSyncAndCleanupStillSucceed(bool writer)
+    {
+        var origin = new Uri("http://localhost");
+        var document = new Uri(origin, "/rtc-endpoint-change.xlsx");
+        var actor = new CellBridgeActor(new("client-tests:endpoint", "endpoint", "Endpoint test"), CanCreate: true);
+        await using var app = CreateBuilder().Build();
+        var package = OfficeDocumentTemplates.CreateExcelWorkbook();
+        await app.Services.GetRequiredService<CellBridgeDocumentService>().CreateAsync(document.AbsolutePath, package, actor);
+        var processor = app.Services.GetRequiredService<CellBridgeRequestProcessor>();
+        var channel = new DisconnectableChannel();
+        var transport = new ShortFirstTicket(
+            new InProcessCellBridgeTransport(processor, origin.GetLeftPart(UriPartial.Authority), actor),
+            channel, changeEndpoint: true);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using (var session = await CellBridgeDocumentSession.OpenAsync(transport, document,
+            new() { Mode = writer ? CellBridgeDocumentSessionMode.EagerWriter : CellBridgeDocumentSessionMode.Reader }, timeout.Token))
+        {
+            await channel.Disposed.Task.WaitAsync(timeout.Token);
+            Assert.Equal(package, (await session.SyncAsync(timeout.Token)).Package);
+            Assert.False(transport.Renewed.Task.IsCompleted);
+        }
+        Assert.True(transport.LeftEditingSession);
+        Assert.Equal(writer, transport.ExitedCoauthoring);
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task DisposingSendsNormalCloseAndWaitsForPeerWithinDeadline(bool peerAcknowledges)
@@ -204,12 +233,15 @@ public sealed class RealTimeRenewalTests
         return builder;
     }
 
-    private sealed class ShortFirstTicket(ICellBridgeClientTransport inner, ICellBridgeRealTimeChannel? testChannel = null)
+    private sealed class ShortFirstTicket(ICellBridgeClientTransport inner, ICellBridgeRealTimeChannel? testChannel = null,
+        bool changeEndpoint = false)
         : ICellBridgeClientTransport
     {
         private BlockedRequest? _blocked;
         public TaskCompletionSource<DateTimeOffset> Renewed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public DateTimeOffset InitialExpiry { get; private set; }
+        public bool LeftEditingSession { get; private set; }
+        public bool ExitedCoauthoring { get; private set; }
 
         public BlockedRequest BlockNext(SubRequestType type)
         {
@@ -230,6 +262,13 @@ public sealed class RealTimeRenewalTests
             }
 
             var execution = await inner.ExecuteAsync(request, cancellationToken);
+            foreach (var operation in request.Requests.SelectMany(file => file.SubRequests))
+            {
+                if (operation.SubRequestDataAttributes.GetValueOrDefault("EditorsTableRequestType") == "LeaveEditingSession")
+                    LeftEditingSession = true;
+                if (operation.SubRequestDataAttributes.GetValueOrDefault("CoauthRequestType") == "ExitCoauthoring")
+                    ExitedCoauthoring = true;
+            }
             var response = execution.Response.Responses.SelectMany(file => file.SubResponses)
                 .SingleOrDefault(item => item.Type == SubRequestType.Properties);
             if (InitialExpiry == default && response is not null)
@@ -240,6 +279,14 @@ public sealed class RealTimeRenewalTests
                 var ttl = Assert.Single(xml.Elements(), element =>
                     (string?)element.Attribute("id") == "DocumentAccessTokenTtl");
                 ttl.SetAttributeValue("value", InitialExpiry.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture));
+                response.SubResponseDataXml = xml.ToString(SaveOptions.DisableFormatting);
+            }
+            else if (changeEndpoint && response is not null)
+            {
+                var xml = XElement.Parse(Assert.IsType<string>(response.SubResponseDataXml));
+                var endpoint = Assert.Single(xml.Elements(), element =>
+                    (string?)element.Attribute("id") == "RealtimeTypingEndpointUrl");
+                endpoint.SetAttributeValue("value", "https://other.example/rtc");
                 response.SubResponseDataXml = xml.ToString(SaveOptions.DisableFormatting);
             }
             return execution;
@@ -264,6 +311,7 @@ public sealed class RealTimeRenewalTests
     private sealed class DisconnectableChannel : ICellBridgeRealTimeChannel
     {
         private readonly Channel<string> _notifications = Channel.CreateUnbounded<string>();
+        public TaskCompletionSource Disposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public void Disconnect() => _notifications.Writer.TryComplete();
 
@@ -276,6 +324,7 @@ public sealed class RealTimeRenewalTests
         public ValueTask DisposeAsync()
         {
             Disconnect();
+            Disposed.TrySetResult();
             return ValueTask.CompletedTask;
         }
     }
