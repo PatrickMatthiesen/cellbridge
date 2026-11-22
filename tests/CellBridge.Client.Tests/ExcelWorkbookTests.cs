@@ -323,6 +323,33 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
+    [InlineData("<col min='2' max='2' width='12'/><col min='3' max='3' width='20'/>",
+        "<col min='2' max='2' width='20'/>", ExcelWriteStatus.StructuralConflict)]
+    [InlineData("<col min='2' max='4' width='20'/>",
+        "<col min='2' max='2' width='20'/><col min='3' max='3' width='25'/><col min='4' max='4' width='20'/>",
+        ExcelWriteStatus.Success)]
+    public void DistinguishesColumnDeletionFromWidthRangeSplit(string before, string after, ExcelWriteStatus expected)
+    {
+        var original = Workbook("", beforeData: $"<cols>{before}</cols>");
+        var latest = Workbook("", beforeData: $"<cols>{after}</cols>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C2", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(expected, result.Status);
+    }
+
+    [Fact]
+    public void UnrelatedFormulaChangesCanDifferOnlyByReferenceAnchors()
+    {
+        var original = Workbook("<row r='2'><c r='B2'><f>SUM($A$1)</f></c></row>");
+        var latest = Workbook("<row r='2'><c r='C2'><f>SUM(D5)</f></c></row>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("A1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+    }
+
+    [Theory]
     [InlineData(false, ExcelWriteStatus.StructuralConflict)]
     [InlineData(true, ExcelWriteStatus.Success)]
     public void ShiftingBlankCellsRequiresMatchingNonDefaultStyles(bool useDefaultStyle, ExcelWriteStatus expected)

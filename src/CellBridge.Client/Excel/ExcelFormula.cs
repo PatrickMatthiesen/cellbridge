@@ -122,19 +122,28 @@ internal static partial class ExcelFormula
     internal static string RelativeSignature(string formula, CellAddress address) =>
         RewriteReferences(formula, -address.Row, -address.Column, ReferenceRewrite.Relative);
 
-    internal static string ReferencePattern(string formula) =>
-        RewriteReferences(formula, 0, 0, ReferenceRewrite.Pattern);
+    internal static string ReferencePattern(string formula, bool ignoreAnchors, out bool hasBrokenReference)
+    {
+        var broken = false;
+        var pattern = RewriteReferences(formula, 0, 0, ReferenceRewrite.Pattern, ignoreAnchors, () => broken = true);
+        hasBrokenReference = broken;
+        return pattern;
+    }
 
     private const string CellReferenceMarker = "\0Cell\0";
 
-    private static string RewriteReferences(string formula, int rowOffset, int columnOffset, ReferenceRewrite rewrite)
+    private static string RewriteReferences(string formula, int rowOffset, int columnOffset, ReferenceRewrite rewrite,
+        bool ignoreAnchors = false, Action? foundBrokenReference = null)
     {
         return ReferenceToken().Replace(formula, match =>
         {
             if (match.Groups["reference"].Success)
-                return RewriteCell(match.Value, rowOffset, columnOffset, rewrite);
+                return RewriteCell(match.Value, rowOffset, columnOffset, rewrite, ignoreAnchors);
             if (match.Groups["broken"].Success && rewrite == ReferenceRewrite.Pattern)
+            {
+                foundBrokenReference?.Invoke();
                 return CellReferenceMarker;
+            }
             if (match.Groups["rows"].Success)
                 return RewriteRange(match.Value, rowOffset, row: true, rewrite);
             if (match.Groups["columns"].Success)
@@ -143,7 +152,7 @@ internal static partial class ExcelFormula
         });
     }
 
-    private static string RewriteCell(string text, int rowOffset, int columnOffset, ReferenceRewrite rewrite)
+    private static string RewriteCell(string text, int rowOffset, int columnOffset, ReferenceRewrite rewrite, bool ignoreAnchors)
     {
         var columnStart = text[0] == '$' ? 1 : 0;
         var separator = columnStart;
@@ -155,7 +164,8 @@ internal static partial class ExcelFormula
             return text;
 
         if (rewrite == ReferenceRewrite.Pattern)
-            return CellReferenceMarker;
+            return ignoreAnchors ? CellReferenceMarker :
+                string.Concat(CellReferenceMarker, columnStart == 1 ? "$" : "-", rowStart != separator ? "$" : "-");
         var column = RewriteAxis(text[..separator], columnOffset, row: false, rewrite);
         var row = RewriteAxis(text[separator..], rowOffset, row: true, rewrite);
         return column is null || row is null ? "#REF!" : column + row;
