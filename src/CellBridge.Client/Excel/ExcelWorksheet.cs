@@ -309,7 +309,7 @@ internal sealed class ExcelWorksheet
     {
         if (!StructuralMarkup().SequenceEqual(remote.StructuralMarkup()) ||
             _package.Date1904 != remote._package.Date1904 || _package.DefinedNames != remote._package.DefinedNames ||
-            ColumnLayoutMoved(remote))
+            ColumnLayoutMoved(remote) || RowStyleMoved(remote))
             return true;
 
         // OOXML does not record the operation that produced a cell grid. Detect
@@ -614,6 +614,37 @@ internal sealed class ExcelWorksheet
         movement = new ValueMovement();
         values.Add(value, movement);
         return movement;
+    }
+
+    private bool RowStyleMoved(ExcelWorksheet remote)
+    {
+        var before = RowStyles();
+        var after = remote.RowStyles();
+        if (before.Keys.ToHashSet().SetEquals(after.Keys))
+            return false;
+        var removed = before.Where(row => after.GetValueOrDefault(row.Key) != row.Value).Select(row => row.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        var added = after.Where(row => before.GetValueOrDefault(row.Key) != row.Value).Select(row => row.Value)
+            .ToHashSet(StringComparer.Ordinal);
+        return before.Any(row => !after.ContainsKey(row.Key) && added.Contains(row.Value)) ||
+            after.Any(row => !before.ContainsKey(row.Key) && removed.Contains(row.Value));
+    }
+
+    private Dictionary<int, string> RowStyles()
+    {
+        var styles = new Dictionary<int, string>();
+        var defaultStyle = _package.Styles.Signature(0);
+        foreach (var (index, row) in _rows)
+        {
+            if ((uint?)row.Element.Attribute("s") is not { } style || style == 0)
+                continue;
+            var signature = _package.Styles.Signature(style);
+            if (signature == defaultStyle)
+                continue;
+            _package.Charge(64);
+            styles.Add(index, signature);
+        }
+        return styles;
     }
 
     private bool ColumnLayoutMoved(ExcelWorksheet remote)

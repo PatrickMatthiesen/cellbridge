@@ -261,6 +261,10 @@ public sealed class ExcelWorkbookTests
         "<row r='2'><c r='B2'><f>A1+A3</f></c></row>", "C3")]
     [InlineData("<row r='3'><c r='B3'><f>A2+A4</f></c></row>",
         "<row r='2'><c r='B2'><f>#REF!+A3</f></c></row>", "C3")]
+    [InlineData("<row r='1'><c r='D1'><f>SUM(B:B)</f></c></row>",
+        "<row r='1'><c r='C1'><f>SUM(#REF!)</f></c></row>", "E2")]
+    [InlineData("<row r='1'><c r='A1'><f>SUM(B3:B4)</f></c></row><row r='3' customFormat='1' s='1'/>",
+        "<row r='1'><c r='A1'><f>SUM(B4:B5)</f></c></row><row r='4' customFormat='1' s='1'/>", "B5")]
     [InlineData("<row r='2' ht='30' customHeight='1'/>", "<row r='3' ht='30' customHeight='1'/>", "C2")]
     public void RowOrColumnShiftsConflictAtABlankAddress(
         string before, string after, string address)
@@ -298,6 +302,21 @@ public sealed class ExcelWorkbookTests
         var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C2", ExcelCellValue.Number(5))]);
 
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
+    }
+
+    [Theory]
+    [InlineData("<row r='3' customFormat='1' s='2'/><row r='4' customFormat='1' s='1'/>",
+        true, ExcelWriteStatus.StructuralConflict)]
+    [InlineData("<row r='2' customFormat='1' s='2'/><row r='3' customFormat='1' s='2'/>",
+        false, ExcelWriteStatus.Success)]
+    public void DistinguishesShiftedEmptyRowStylesFromInPlaceRestyling(string rows, bool reindex, ExcelWriteStatus expected)
+    {
+        var original = Workbook("<row r='2' customFormat='1' s='1'/><row r='3' customFormat='1' s='2'/>");
+        var latest = Workbook(rows, swapStyles: reindex);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C5", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(expected, result.Status);
     }
 
     [Fact]

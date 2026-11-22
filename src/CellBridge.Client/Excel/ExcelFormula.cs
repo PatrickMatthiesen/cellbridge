@@ -125,8 +125,8 @@ internal static partial class ExcelFormula
     internal static string ReferencePattern(string formula, bool ignoreAnchors) =>
         RewriteReferences(formula, 0, 0, ReferenceRewrite.Pattern, ignoreAnchors);
 
-    private const string CellReferenceMarker = "\0Cell\0";
-    private const string BrokenReferenceMarker = CellReferenceMarker + "??";
+    private const string ReferenceMarker = "\0Ref\0";
+    private const string BrokenReferenceMarker = ReferenceMarker + "???";
 
     internal static bool HasBrokenReference(string pattern) =>
         pattern.Contains(BrokenReferenceMarker, StringComparison.Ordinal);
@@ -135,13 +135,13 @@ internal static partial class ExcelFormula
     internal static bool CompatibleReferenceAnchors(string left, string right)
     {
         int search = 0;
-        while (left.IndexOf(CellReferenceMarker, search, StringComparison.Ordinal) is var marker && marker >= 0)
+        while (left.IndexOf(ReferenceMarker, search, StringComparison.Ordinal) is var marker && marker >= 0)
         {
-            int anchors = marker + CellReferenceMarker.Length;
-            if (left[anchors] != '?' && right[anchors] != '?' &&
-                (left[anchors] != right[anchors] || left[anchors + 1] != right[anchors + 1]))
+            int kind = marker + ReferenceMarker.Length;
+            if (left[kind] != '?' && right[kind] != '?' &&
+                !left.AsSpan(kind, 3).SequenceEqual(right.AsSpan(kind, 3)))
                 return false;
-            search = anchors + 2;
+            search = kind + 3;
         }
         return true;
     }
@@ -154,11 +154,11 @@ internal static partial class ExcelFormula
             if (match.Groups["reference"].Success)
                 return RewriteCell(match.Value, rowOffset, columnOffset, rewrite, ignoreAnchors);
             if (match.Groups["broken"].Success && rewrite == ReferenceRewrite.Pattern)
-                return ignoreAnchors ? CellReferenceMarker : BrokenReferenceMarker;
+                return ignoreAnchors ? ReferenceMarker : BrokenReferenceMarker;
             if (match.Groups["rows"].Success)
-                return RewriteRange(match.Value, rowOffset, row: true, rewrite);
+                return RewriteRange(match.Value, rowOffset, row: true, rewrite, ignoreAnchors);
             if (match.Groups["columns"].Success)
-                return RewriteRange(match.Value, columnOffset, row: false, rewrite);
+                return RewriteRange(match.Value, columnOffset, row: false, rewrite, ignoreAnchors);
             return match.Value;
         });
     }
@@ -175,25 +175,43 @@ internal static partial class ExcelFormula
             return text;
 
         if (rewrite == ReferenceRewrite.Pattern)
-            return ignoreAnchors ? CellReferenceMarker :
-                string.Concat(CellReferenceMarker, columnStart == 1 ? "$" : "-", rowStart != separator ? "$" : "-");
+            return PatternToken('A', columnStart == 1, rowStart != separator, ignoreAnchors);
         var column = RewriteAxis(text[..separator], columnOffset, row: false, rewrite);
         var row = RewriteAxis(text[separator..], rowOffset, row: true, rewrite);
         return column is null || row is null ? "#REF!" : column + row;
     }
 
-    private static string RewriteRange(string range, int offset, bool row, ReferenceRewrite rewrite)
+    private static string RewriteRange(string range, int offset, bool row, ReferenceRewrite rewrite, bool ignoreAnchors)
     {
         var separator = range.IndexOf(':');
+        if (rewrite == ReferenceRewrite.Pattern)
+        {
+            var firstAxis = range.AsSpan(0, separator);
+            var lastAxis = range.AsSpan(separator + 1);
+            return ValidAxis(firstAxis, row) && ValidAxis(lastAxis, row)
+                ? PatternToken(row ? 'R' : 'C', firstAxis[0] == '$', lastAxis[0] == '$', ignoreAnchors)
+                : range;
+        }
         var first = RewriteAxis(range[..separator], offset, row, rewrite);
         var last = RewriteAxis(range[(separator + 1)..], offset, row, rewrite);
         return $"{first ?? "#REF!"}:{last ?? "#REF!"}";
     }
 
+    private static string PatternToken(char kind, bool firstAbsolute, bool secondAbsolute, bool ignoreAnchors) =>
+        ignoreAnchors ? ReferenceMarker : $"{ReferenceMarker}{kind}{(firstAbsolute ? '$' : '-')}{(secondAbsolute ? '$' : '-')}";
+
+    private static bool ValidAxis(ReadOnlySpan<char> axis, bool row)
+    {
+        if (axis[0] == '$')
+            axis = axis[1..];
+        return row ? int.Parse(axis, CultureInfo.InvariantCulture) <= CellAddress.LastRow
+            : ColumnNumber(axis) <= CellAddress.LastColumn;
+    }
+
     private static string? RewriteAxis(string axis, int offset, bool row, ReferenceRewrite rewrite)
     {
         var absolute = axis.StartsWith('$');
-        if (absolute && rewrite != ReferenceRewrite.Pattern)
+        if (absolute)
             return axis;
         var coordinate = axis.AsSpan(absolute ? 1 : 0);
         var number = row ? int.Parse(coordinate, CultureInfo.InvariantCulture) : ColumnNumber(coordinate);
@@ -201,8 +219,6 @@ internal static partial class ExcelFormula
         if (number > limit)
             return axis;
         // A NUL cannot occur in workbook XML, so it separates reference markers from literal text.
-        if (rewrite == ReferenceRewrite.Pattern)
-            return string.Concat(absolute ? "\0$" : "\0", row ? "R\0" : "C\0");
         number += offset;
         if (rewrite == ReferenceRewrite.Relative)
             return string.Concat(row ? "\0R" : "\0C", number.ToString(CultureInfo.InvariantCulture), "\0");
