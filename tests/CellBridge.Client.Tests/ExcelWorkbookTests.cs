@@ -144,6 +144,84 @@ public sealed class ExcelWorkbookTests
         Validate(result.Package!);
     }
 
+    [Fact]
+    public void ClearingAndReplacingSharedStringsUpdatesCountAcrossWorksheets()
+    {
+        const string stringsPart = "xl/sharedStrings.xml";
+        const string otherSheetPart = "xl/worksheets/sheet2.xml";
+        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c><c r='B1' t='s'><v>1</v></c></row>",
+            sharedStrings: ["<t>retained</t>", "<t>unused after edit</t>"], sharedStringAttributes: " count='3' uniqueCount='2'",
+            secondSheetRows: "<row r='1'><c r='A1' t='s'><v>0</v></c></row>");
+
+        var edited = Edit(original, new ExcelCellEdit("A1", ExcelCellValue.Blank),
+            new ExcelCellEdit("B1", ExcelCellValue.String("replacement")));
+
+        Validate(edited);
+        var strings = Part(edited, stringsPart).Root!;
+        Assert.Equal(1u, (uint?)strings.Attribute("count"));
+        Assert.Equal(2u, (uint?)strings.Attribute("uniqueCount"));
+        Assert.Equal(["retained", "unused after edit"], strings.Elements(S + "si").Select(item => item.Value));
+        Assert.Equal(ExcelCellValue.String("retained"), Assert.Single(ExcelWorkbook.ReadRange(edited, 9, "A1")).Value);
+        var before = ZipRecord(original, otherSheetPart);
+        var after = ZipRecord(edited, otherSheetPart);
+        Assert.Equal(before.HeaderAndPayload, after.HeaderAndPayload);
+        Assert.Equal(before.CentralDirectoryExceptOffset, after.CentralDirectoryExceptOffset);
+    }
+
+    [Fact]
+    public void ClearingTheLastSharedStringReferenceWritesZeroCount()
+    {
+        var original = Workbook("<row r='1'><c r='A1' s='2' t='s'><v>0</v></c></row>",
+            sharedStrings: ["<t>value</t>"], sharedStringAttributes: " count='1' uniqueCount='1'");
+
+        var edited = Edit(original, new ExcelCellEdit("A1", ExcelCellValue.Blank));
+
+        Validate(edited);
+        var strings = Part(edited, "xl/sharedStrings.xml").Root!;
+        Assert.Equal(0u, (uint?)strings.Attribute("count"));
+        Assert.Equal(1u, (uint?)strings.Attribute("uniqueCount"));
+        Assert.Equal("value", Assert.Single(strings.Elements(S + "si")).Value);
+        Assert.Equal(ExcelCellValue.Blank, Assert.Single(ExcelWorkbook.ReadRange(edited, 4, "A1")).Value);
+    }
+
+    [Theory]
+    [InlineData(" count='1'", "0", "1")]
+    [InlineData(" uniqueCount='1'", null, null)]
+    [InlineData(" count='0' uniqueCount='1'", null, null)]
+    public void EditingSharedStringsKeepsCountAttributesPaired(string attributes, string? count, string? uniqueCount)
+    {
+        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c></row>",
+            sharedStrings: ["<t>value</t>"], sharedStringAttributes: attributes);
+
+        var edited = Edit(original, new ExcelCellEdit("A1", ExcelCellValue.Blank));
+
+        Validate(edited);
+        var strings = Part(edited, "xl/sharedStrings.xml").Root!;
+        Assert.Equal(count, (string?)strings.Attribute("count"));
+        Assert.Equal(uniqueCount, (string?)strings.Attribute("uniqueCount"));
+        Assert.Equal("value", Assert.Single(strings.Elements(S + "si")).Value);
+    }
+
+    [Theory]
+    [InlineData("", true)]
+    [InlineData(" count='1' uniqueCount='1'", false)]
+    public void EditsWithoutACountChangePreserveTheSharedStringsZipRecord(string attributes, bool clearSharedString)
+    {
+        const string stringsPart = "xl/sharedStrings.xml";
+        var original = Workbook("<row r='1'><c r='A1' t='s'><v>0</v></c><c r='B1'><v>1</v></c></row>",
+            sharedStrings: ["<t>value</t>"], sharedStringAttributes: attributes, nonSeekableZip: true);
+
+        var edited = Edit(original, new ExcelCellEdit("A1",
+                clearSharedString ? ExcelCellValue.Blank : ExcelCellValue.String("value")),
+            new ExcelCellEdit("B1", ExcelCellValue.Number(2)));
+
+        Validate(edited);
+        var before = ZipRecord(original, stringsPart);
+        var after = ZipRecord(edited, stringsPart);
+        Assert.Equal(before.HeaderAndPayload, after.HeaderAndPayload);
+        Assert.Equal(before.CentralDirectoryExceptOffset, after.CentralDirectoryExceptOffset);
+    }
+
     [Theory]
     [InlineData("sheet3.xml", "{9C764240-3645-4F55-8702-5DB1513E66B0}")]
     [InlineData("sheet1.xml", "{9C764240-3645-4F55-8702-5DB1513E66B1}")]
@@ -1090,7 +1168,8 @@ public sealed class ExcelWorkbookTests
         bool reverseSheets = false, string? tableRange = null, string? definedNames = null, bool swapStyles = false,
         string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null,
         string firstSheetName = "First", bool firstSheetIsChart = false, string tablePart = "table1.xml",
-        uint tableId = 1, string firstTableColumnName = "X")
+        uint tableId = 1, string firstTableColumnName = "X", string sharedStringAttributes = "",
+        string secondSheetRows = "<row r='1'><c r='A1'><f>5+5</f><v>10</v></c></row>")
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string chartSheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml";
@@ -1150,8 +1229,7 @@ public sealed class ExcelWorkbookTests
                 "<sheetData>" + rows + "</sheetData>" + afterData +
                 (tableRange is null ? "" :
                     $"<tableParts xmlns:r='{OfficeRels}' count='1'><tablePart r:id='rId1'/></tableParts>") + "</worksheet>");
-            Add("xl/worksheets/sheet2.xml", $"<worksheet xmlns='{Main}'><sheetData><row r='1'>" +
-                "<c r='A1'><f>5+5</f><v>10</v></c></row></sheetData></worksheet>");
+            Add("xl/worksheets/sheet2.xml", $"<worksheet xmlns='{Main}'><sheetData>{secondSheetRows}</sheetData></worksheet>");
             const string dateStyle = "<xf numFmtId='14' applyNumberFormat='1'/>";
             const string unlockedStyle = "<xf applyProtection='1'><protection locked='0'/></xf>";
             Add("xl/styles.xml", $"<styleSheet xmlns='{Main}'><cellXfs count='3'><xf/>" +
@@ -1168,7 +1246,7 @@ public sealed class ExcelWorkbookTests
             if (calculationChain is not null)
                 Add("xl/calcChain.xml", $"<calcChain xmlns='{Main}'>" + calculationChain + "</calcChain>");
             if (sharedStrings is not null)
-                Add("xl/sharedStrings.xml", $"<sst xmlns='{Main}'>" +
+                Add("xl/sharedStrings.xml", $"<sst xmlns='{Main}'{sharedStringAttributes}>" +
                     string.Concat(sharedStrings.Select(markup => $"<si>{markup}</si>")) + "</sst>");
         }
         return memory.ToArray();

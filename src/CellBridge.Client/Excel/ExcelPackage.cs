@@ -120,9 +120,7 @@ internal sealed class ExcelPackage : IDisposable
     {
         if (_strings is null)
         {
-            var part = OptionalWorkbookPart("sharedStrings")
-                ?? throw new InvalidDataException("A cell references a missing shared string table.");
-            _strings = Root(part, S + "sst").Elements(S + "si").Select(element =>
+            _strings = Root(SharedStringsPart(), S + "sst").Elements(S + "si").Select(element =>
             {
                 var text = ReadString(element);
                 Charge(16 + text.Length * 2L);
@@ -133,6 +131,32 @@ internal sealed class ExcelPackage : IDisposable
             offset >= _strings.Length)
             throw new InvalidDataException("A cell references an invalid shared string index.");
         return _strings[offset];
+    }
+
+    private string SharedStringsPart() => OptionalWorkbookPart("sharedStrings")
+        ?? throw new InvalidDataException("A cell references a missing shared string table.");
+
+    internal void RemoveSharedStringReferences(uint removed)
+    {
+        var part = SharedStringsPart();
+        var table = Root(part, S + "sst");
+        var count = (string?)table.Attribute("count");
+        if (count is null && table.Attribute("uniqueCount") is null)
+            return;
+
+        if (uint.TryParse(count, NumberStyles.Integer, CultureInfo.InvariantCulture, out var previous) && previous >= removed)
+        {
+            table.SetAttributeValue("count", previous - removed);
+            // Keep all items so references in other cells keep their indices.
+            table.SetAttributeValue("uniqueCount", table.Elements(S + "si").Count());
+        }
+        else
+        {
+            // The optional attributes must be paired. Omit both if the delta cannot produce a count.
+            table.SetAttributeValue("count", null);
+            table.SetAttributeValue("uniqueCount", null);
+        }
+        MarkChanged(part);
     }
 
     internal static string ReadString(XElement value) => string.Concat(value.Elements()
