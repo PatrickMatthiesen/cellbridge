@@ -259,6 +259,8 @@ public sealed class ExcelWorkbookTests
         "<row r='2'><c r='C2'><f>A1+D1</f></c></row>", "B3")]
     [InlineData("<row r='2'><c r='B2'><f>99+1</f></c></row><row r='3'><c r='B3'><f>A1+A4</f></c></row>",
         "<row r='2'><c r='B2'><f>A1+A3</f></c></row>", "C3")]
+    [InlineData("<row r='3'><c r='B3'><f>A2+A4</f></c></row>",
+        "<row r='2'><c r='B2'><f>#REF!+A3</f></c></row>", "C3")]
     [InlineData("<row r='2' ht='30' customHeight='1'/>", "<row r='3' ht='30' customHeight='1'/>", "C2")]
     public void RowOrColumnShiftsConflictAtABlankAddress(
         string before, string after, string address)
@@ -283,6 +285,41 @@ public sealed class ExcelWorkbookTests
         var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("B2", ExcelCellValue.Number(5))]);
 
         Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+    }
+
+    [Fact]
+    public void FillingAndClearingCellsWithUnchangedStylesDoesNotMoveTheirStyles()
+    {
+        var original = Workbook("<row r='2'><c r='A2' s='1'/><c r='B2' s='1'><v>11</v></c></row>" +
+            "<row r='3'><c r='A3' s='2'/><c r='B3' s='2'><v>12</v></c></row>");
+        var latest = Workbook("<row r='2'><c r='A2' s='1'><v>22</v></c><c r='B2' s='1'/></row>" +
+            "<row r='3'><c r='A3' s='2'><v>23</v></c><c r='B3' s='2'/></row>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C2", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+    }
+
+    [Fact]
+    public void CoalescingAnExpandedWidthRangeConflicts()
+    {
+        var original = Workbook("", beforeData: "<cols><col min='2' max='3' width='20'/></cols>");
+        var latest = Workbook("", beforeData: "<cols><col min='2' max='4' width='20'/></cols>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C2", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+    }
+
+    [Fact]
+    public void ExchangingColumnWidthsAtUnchangedBoundsAllowsADisjointEdit()
+    {
+        var original = Workbook("", beforeData: "<cols><col min='2' max='2' width='12'/><col min='3' max='3' width='20'/></cols>");
+        var latest = Workbook("", beforeData: "<cols><col min='2' max='2' width='20'/><col min='3' max='3' width='12'/></cols>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("A1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
     }
 
     [Theory]

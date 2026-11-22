@@ -125,12 +125,16 @@ internal static partial class ExcelFormula
     internal static string ReferencePattern(string formula) =>
         RewriteReferences(formula, 0, 0, ReferenceRewrite.Pattern);
 
+    private const string CellReferenceMarker = "\0Cell\0";
+
     private static string RewriteReferences(string formula, int rowOffset, int columnOffset, ReferenceRewrite rewrite)
     {
         return ReferenceToken().Replace(formula, match =>
         {
             if (match.Groups["reference"].Success)
                 return RewriteCell(match.Value, rowOffset, columnOffset, rewrite);
+            if (match.Groups["broken"].Success && rewrite == ReferenceRewrite.Pattern)
+                return CellReferenceMarker;
             if (match.Groups["rows"].Success)
                 return RewriteRange(match.Value, rowOffset, row: true, rewrite);
             if (match.Groups["columns"].Success)
@@ -150,6 +154,8 @@ internal static partial class ExcelFormula
             int.Parse(text.AsSpan(rowStart), CultureInfo.InvariantCulture) is < 1 or > CellAddress.LastRow)
             return text;
 
+        if (rewrite == ReferenceRewrite.Pattern)
+            return CellReferenceMarker;
         var column = RewriteAxis(text[..separator], columnOffset, row: false, rewrite);
         var row = RewriteAxis(text[separator..], rowOffset, row: true, rewrite);
         return column is null || row is null ? "#REF!" : column + row;
@@ -196,7 +202,8 @@ internal static partial class ExcelFormula
         "(?:[^"]|"")*" | '(?:[^']|'')*' | \[(?:'['\[\]#@]|[^\[\]]|\[(?:'['\[\]#@]|[^\[\]])*\])*\]
         | [\p{L}_][\p{L}\p{N}_.]*(?::[\p{L}_][\p{L}\p{N}_.]*)?\s*(?=[!(])
         | (?<![\p{L}\p{N}_.\\]) (?:
-            (?<reference>\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})
+            (?<broken>\#REF!)
+            | (?<reference>\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})
             | (?<rows>\$?[1-9][0-9]{0,6}:\$?[1-9][0-9]{0,6})
             | (?<columns>\$?[A-Z]{1,3}:\$?[A-Z]{1,3})
         ) (?![\p{L}\p{N}_.])

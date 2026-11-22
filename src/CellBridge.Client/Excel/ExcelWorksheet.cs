@@ -326,7 +326,10 @@ internal sealed class ExcelWorksheet
             var before = Value(cell, address);
             var remoteCell = remote.Find(address);
             var after = remote.Value(remoteCell, address);
-            RecordStyledBlankMovement(ExplicitBlankStyle(cell, before), remote.ExplicitBlankStyle(remoteCell, after), address);
+            var beforeBlankStyle = ExplicitBlankStyle(cell, before);
+            var afterBlankStyle = remote.ExplicitBlankStyle(remoteCell, after);
+            if (beforeBlankStyle != afterBlankStyle && EffectiveStyle(address) != remote.EffectiveStyle(address))
+                RecordStyledBlankMovement(beforeBlankStyle, afterBlankStyle, address);
             if (Equivalent(before, after))
                 continue;
 
@@ -583,9 +586,12 @@ internal sealed class ExcelWorksheet
     {
         var before = ColumnLayouts().ToHashSet();
         var after = remote.ColumnLayouts().ToHashSet();
-        // A moved range loses its old location and gains a new one with matching layout.
-        var removed = before.Except(after).Select(range => (range.Max - range.Min, range.Signature)).ToHashSet();
-        return after.Except(before).Any(range => removed.Contains((range.Max - range.Min, range.Signature)));
+        var beforeBounds = before.Select(range => (range.Min, range.Max)).ToHashSet();
+        var afterBounds = after.Select(range => (range.Min, range.Max)).ToHashSet();
+        // Column ranges can be coalesced when inserted columns inherit the adjacent layout.
+        var removed = before.Where(range => !afterBounds.Contains((range.Min, range.Max)))
+            .Select(range => range.Signature).ToHashSet(StringComparer.Ordinal);
+        return after.Any(range => !beforeBounds.Contains((range.Min, range.Max)) && removed.Contains(range.Signature));
     }
 
     private IEnumerable<(int Min, int Max, string Signature)> ColumnLayouts()
