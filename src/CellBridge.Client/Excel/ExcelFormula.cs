@@ -388,6 +388,36 @@ internal static partial class ExcelFormula
         static ArgumentException InvalidSelector() => new("The Excel formula contains an invalid structured reference selector.");
     }
 
+    internal static IEnumerable<string> LocalBareNames(string formula)
+    {
+        using var tokens = Tokens(formula).GetEnumerator();
+        if (!tokens.MoveNext())
+            yield break;
+
+        var previous = new Token(TokenKind.Symbol, 0, 0);
+        var token = tokens.Current;
+        while (true)
+        {
+            var hasNext = tokens.MoveNext();
+            if (token.Kind == TokenKind.Name && (previous.Kind != TokenKind.Sheet ||
+                formula.AsSpan(previous.Start, previous.End - previous.Start).SequenceEqual("[0]!")) &&
+                (!hasNext || !IsFunctionOrStructuredReference(tokens.Current, token.End)))
+            {
+                var name = formula.AsSpan(token.Start, token.End - token.Start);
+                if (!IsBoolean(name) && !TryCellAxes(name, out _, out _, out _))
+                    yield return name.ToString();
+            }
+            if (!hasNext)
+                yield break;
+            previous = token;
+            token = tokens.Current;
+        }
+
+        bool IsFunctionOrStructuredReference(Token next, int end) =>
+            (next.Kind == TokenKind.Symbol && formula[next.Start] == '(') ||
+            (next.Kind == TokenKind.StructuredReference && next.Start == end);
+    }
+
     private static IEnumerable<Token> Tokens(string formula)
     {
         for (var i = 0; i < formula.Length;)
@@ -455,7 +485,8 @@ internal static partial class ExcelFormula
             | "(?:[^"]|"")*"
             | (?<rowRange> (?: \$?[0-9]+\s*:\s*(?:\$?[0-9]+|\#REF!) | \#REF!\s*:\s*\$?[0-9]+ ) )
                 (?![\p{L}\p{M}\p{N}_.$])
-            | (?<columnRange> (?: \$[A-Z]+\s*:\s*(?:\$?[A-Z]+|\#REF!) | (?:[A-Z]+|\#REF!)\s*:\s*\$[A-Z]+ ) )
+            | (?<columnRange> (?: \$[A-Z]+\s*:\s*(?:\$?[A-Z]+|\#REF!) | (?:[A-Z]+|\#REF!)\s*:\s*\$[A-Z]+
+                | (?:[A-Z]{1,2}|[A-W][A-Z]{2}|X[A-E][A-Z]|XF[A-D])\s*:\s*(?:[A-Z]{1,2}|[A-W][A-Z]{2}|X[A-E][A-Z]|XF[A-D]) ) )
                 (?![\p{L}\p{M}\p{N}_.$]|\s*[!(])
             | (?<error> \#(?:NULL!|DIV/0!|VALUE!|REF!|NAME\?|NUM!|N/A|GETTING_DATA|SPILL!|CALC!|FIELD!|BLOCKED!|UNKNOWN!|CONNECT!|BUSY!|PYTHON!|TIMEOUT!) )
             | (?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?

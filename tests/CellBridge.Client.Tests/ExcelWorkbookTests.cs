@@ -416,6 +416,9 @@ public sealed class ExcelWorkbookTests
     [InlineData("A1:B3", 2u, "X", "SUM(TABLE1[X])")]
     [InlineData("A1:B3", 1u, "Z", "SUM(Table1[[#Data],[X]])")]
     [InlineData("A1:B4", 1u, "X", "SUM(Table1[X])")]
+    [InlineData(null, 1u, "X", "SUM(Table1)")]
+    [InlineData("A1:B4", 1u, "X", "SUM(tAbLe1)")]
+    [InlineData("A1:B4", 1u, "X", "SUM([0]!Table1)")]
     public void StaleFormulaConflictsWhenItsTableBindingChanges(
         string? latestRange, uint latestTableId, string latestColumnName, string text)
     {
@@ -443,12 +446,14 @@ public sealed class ExcelWorkbookTests
         Assert.Null(result.Package);
     }
 
-    [Fact]
-    public void StaleFormulaMergesWithTableDataAndPackagePartChanges()
+    [Theory]
+    [InlineData("SUM(Table1[X])")]
+    [InlineData("SUM(Table1)")]
+    public void StaleFormulaMergesWithTableDataAndPackagePartChanges(string text)
     {
         var original = Workbook("<row r='2'><c r='A2'><v>11</v></c></row>", tableRange: "A1:B3");
         var latest = Workbook("<row r='2'><c r='A2'><v>22</v></c></row>", tableRange: "A1:B3", tablePart: "table8.xml");
-        var formula = ExcelCellValue.Formula("SUM(Table1[X])");
+        var formula = ExcelCellValue.Formula(text);
 
         var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]);
 
@@ -462,13 +467,31 @@ public sealed class ExcelWorkbookTests
     [Theory]
     [InlineData("\"Table1[X]\"")]
     [InlineData("SUM([1]!Table1[X])")]
+    [InlineData("\"Table1\"")]
+    [InlineData("SUM([1]!Table1)")]
+    [InlineData("SUM(DefinedName)")]
     public void TableDeletionDoesNotConflictWithNonlocalTableText(string text)
     {
+        const string definedNames = "<definedName name='DefinedName'>1</definedName>";
         var formula = ExcelCellValue.Formula(text);
-        var result = ExcelWorkbook.MergeCells(Workbook("", tableRange: "A1:B3"), Workbook(""), 9, [new("B1", formula)]);
+        var original = Workbook("", tableRange: "A1:B3", definedNames: definedNames);
+        var latest = Workbook("", definedNames: definedNames);
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]);
 
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
         Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(Assert.IsType<byte[]>(result.Package), 9, "B1")).Value);
+    }
+
+    [Fact]
+    public void TableDeletionDoesNotConflictWithAWholeColumnReference()
+    {
+        var original = Workbook("", tableRange: "A1:B3", tableName: "A");
+        var formula = ExcelCellValue.Formula("SUM(A:B)");
+
+        var result = ExcelWorkbook.MergeCells(original, Workbook(""), 9, [new("C1", formula)]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(Assert.IsType<byte[]>(result.Package), 9, "C1")).Value);
     }
 
     [Fact]
@@ -1273,7 +1296,7 @@ public sealed class ExcelWorkbookTests
         string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null,
         string firstSheetName = "First", bool firstSheetIsChart = false, string tablePart = "table1.xml",
         uint tableId = 1, string firstTableColumnName = "X", string sharedStringAttributes = "",
-        string secondSheetRows = "<row r='1'><c r='A1'><f>5+5</f><v>10</v></c></row>")
+        string secondSheetRows = "<row r='1'><c r='A1'><f>5+5</f><v>10</v></c></row>", string tableName = "Table1")
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string chartSheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml";
@@ -1343,7 +1366,7 @@ public sealed class ExcelWorkbookTests
                 Add($"xl/worksheets/_rels/{firstSheetPart}.rels", $"<Relationships xmlns='{PackageRels}'>" +
                     Relationship("rId1", "table", $"../tables/{tablePart}") + "</Relationships>");
                 var headerRows = tableHeaderRows is null ? "" : $" headerRowCount='{tableHeaderRows}'";
-                Add($"xl/tables/{tablePart}", $"<table xmlns='{Main}' id='{tableId}' name='Table1' displayName='Table1' ref='{tableRange}'{headerRows}>" +
+                Add($"xl/tables/{tablePart}", $"<table xmlns='{Main}' id='{tableId}' name='{tableName}' displayName='{tableName}' ref='{tableRange}'{headerRows}>" +
                     $"<tableColumns count='2'><tableColumn id='1' {new XAttribute("name", firstTableColumnName)}/>" +
                     "<tableColumn id='2' name='Y'/></tableColumns></table>");
             }

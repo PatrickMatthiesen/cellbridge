@@ -157,6 +157,10 @@ public static class ExcelWorkbook
                 if (original is not null && verifiedTables.Add(boundName) && original.TableBindingDiffers(current, boundName))
                     return $"The table binding for formula reference '{boundName}' changed.";
             }
+            if (original is not null)
+                foreach (var name in ExcelFormula.LocalBareNames(value.RawValue!))
+                    if (original.HasTable(name) && verifiedTables.Add(name) && original.TableBindingDiffers(current, name))
+                        return $"The table binding for formula reference '{name}' changed.";
             foreach (var (first, last) in ExcelFormula.LocalSheetReferences(value.RawValue!))
             {
                 var reference = last is null ? first : $"{first}:{last}";
