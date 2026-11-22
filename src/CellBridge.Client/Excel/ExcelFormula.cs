@@ -23,7 +23,7 @@ internal static partial class ExcelFormula
         "TEXTJOIN", "CONCAT", "TEXTBEFORE", "TEXTAFTER", "REGEXTEST", "REGEXEXTRACT", "REGEXREPLACE"
     };
 
-    private enum TokenKind { Name, Literal, Error, Sheet, RowRange, StructuredReference, Symbol }
+    private enum TokenKind { Name, Literal, Error, Sheet, RowRange, ColumnRange, StructuredReference, Symbol }
     private enum Expression { Empty, Incomplete, Sheet, Range, Value, Reference }
     private enum Group { Root, Parentheses, Function }
 
@@ -61,6 +61,11 @@ internal static partial class ExcelFormula
             if (token.Kind != TokenKind.Symbol)
             {
                 var operand = formula.AsSpan(token.Start, token.End - token.Start);
+                if ((token.Kind is TokenKind.RowRange or TokenKind.ColumnRange) &&
+                    !IsGridRange(operand, token.Kind == TokenKind.RowRange) ||
+                    token.Kind == TokenKind.Name && operand.Contains('$') && !TryCellAxes(operand, out _, out _, out _))
+                    throw InvalidExpression();
+
                 var isReference = token.Kind switch
                 {
                     TokenKind.Literal => false,
@@ -268,6 +273,7 @@ internal static partial class ExcelFormula
                 var kind = match.Groups["sheet"].Success ? TokenKind.Sheet :
                     match.Groups["name"].Success ? TokenKind.Name :
                     match.Groups["rowRange"].Success ? TokenKind.RowRange :
+                    match.Groups["columnRange"].Success ? TokenKind.ColumnRange :
                     match.Groups["error"].Success ? TokenKind.Error : TokenKind.Literal;
                 yield return new Token(kind, start, i);
             }
@@ -315,10 +321,13 @@ internal static partial class ExcelFormula
             )
             | (?<sheet> \#REF! (?=[\p{L}\p{N}_$\\\[]) )
             | "(?:[^"]|"")*"
+            | (?<rowRange> (?: \$?[0-9]+\s*:\s*(?:\$?[0-9]+|\#REF!) | \#REF!\s*:\s*\$?[0-9]+ ) )
+                (?![\p{L}\p{M}\p{N}_.$])
+            | (?<columnRange> (?: \$[A-Z]+\s*:\s*(?:\$?[A-Z]+|\#REF!) | (?:[A-Z]+|\#REF!)\s*:\s*\$[A-Z]+ ) )
+                (?![\p{L}\p{M}\p{N}_.$]|\s*[!(])
             | (?<error> \#(?:NULL!|DIV/0!|VALUE!|REF!|NAME\?|NUM!|N/A|GETTING_DATA|SPILL!|CALC!|FIELD!|BLOCKED!|UNKNOWN!|CONNECT!|BUSY!|PYTHON!|TIMEOUT!) )
-            | (?<rowRange> \$?[0-9]+\s*:\s*\$?[0-9]+ )(?![\p{L}\p{M}\p{N}_.$])
             | (?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?
-            | (?<name> \$?[\p{L}_\\][\p{L}\p{M}\p{N}_.]*(?:\$[0-9]+)? | \$[0-9]+ )
+            | (?<name> \$?[\p{L}_\\][\p{L}\p{M}\p{N}_.]*(?:\$[0-9]+)? )
         )
         """, RegexOptions.IgnorePatternWhitespace | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex FormulaToken();
@@ -435,15 +444,15 @@ internal static partial class ExcelFormula
         return column is null || row is null ? "#REF!" : column + row;
     }
 
-    private static bool TryCellAxes(string text, out int separator, out int rowStart, out CellAddress address)
+    private static bool TryCellAxes(ReadOnlySpan<char> text, out int separator, out int rowStart, out CellAddress address)
     {
         var columnStart = text[0] == '$' ? 1 : 0;
         separator = columnStart;
         while (separator < text.Length && char.IsAsciiLetter(text[separator]))
             separator++;
-        rowStart = text[separator] == '$' ? separator + 1 : separator;
-        var column = ColumnNumber(text.AsSpan(columnStart, separator - columnStart));
-        var row = int.Parse(text.AsSpan(rowStart), CultureInfo.InvariantCulture);
+        rowStart = separator < text.Length && text[separator] == '$' ? separator + 1 : separator;
+        var column = AxisNumber(text[columnStart..separator], row: false);
+        var row = AxisNumber(text[separator..], row: true);
         address = new CellAddress(row, column);
         return column is >= 1 and <= CellAddress.LastColumn && row is >= 1 and <= CellAddress.LastRow;
     }
@@ -454,6 +463,9 @@ internal static partial class ExcelFormula
         var colon = match.Groups["colon"];
         var separator = colon.Index - match.Index;
         var range = match.Value;
+        if (kind != 'B' && !IsGridRange(range, kind == 'R'))
+            return range;
+
         var first = range[..separator];
         var last = range[(separator + colon.Length)..];
         if (rewrite == ReferenceRewrite.Pattern)
@@ -479,17 +491,14 @@ internal static partial class ExcelFormula
 
     private static (char Anchor, int Coordinate)? RangeReference(string endpoint, char kind, bool? fixedRow)
     {
-        if (kind != 'B')
-        {
-            var axis = endpoint.AsSpan(endpoint[0] == '$' ? 1 : 0);
-            var row = kind == 'R';
-            var coordinate = row ? int.Parse(axis, CultureInfo.InvariantCulture) : ColumnNumber(axis);
-            if (coordinate > (row ? CellAddress.LastRow : CellAddress.LastColumn))
-                return null;
-            return (endpoint[0] == '$' ? '$' : '-', fixedRow == row ? coordinate : 0);
-        }
         if (endpoint[0] == '#')
             return ('?', 0);
+        if (kind != 'B')
+        {
+            var row = kind == 'R';
+            var coordinate = AxisNumber(endpoint, row);
+            return (endpoint[0] == '$' ? '$' : '-', fixedRow == row ? coordinate : 0);
+        }
         if (!TryCellAxes(endpoint, out var columnEnd, out var rowStart, out var address))
             return null;
         var anchor = (char)('0' + (endpoint[0] == '$' ? 2 : 0) + (rowStart != columnEnd ? 1 : 0));
@@ -503,16 +512,11 @@ internal static partial class ExcelFormula
 
     private static string? RewriteAxis(string axis, int offset, bool row, ReferenceRewrite rewrite)
     {
-        var absolute = axis.StartsWith('$');
-        if (absolute)
+        if (axis[0] == '$')
             return axis;
-        var coordinate = axis.AsSpan(absolute ? 1 : 0);
-        var number = row ? int.Parse(coordinate, CultureInfo.InvariantCulture) : ColumnNumber(coordinate);
+        var number = AxisNumber(axis, row) + offset;
         var limit = row ? CellAddress.LastRow : CellAddress.LastColumn;
-        if (number > limit)
-            return axis;
         // A NUL cannot occur in workbook XML, so it separates reference markers from literal text.
-        number += offset;
         if (rewrite == ReferenceRewrite.Relative)
             return string.Concat(row ? "\0R" : "\0C", number.ToString(CultureInfo.InvariantCulture), "\0");
         if (number < 1 || number > limit)
@@ -520,24 +524,56 @@ internal static partial class ExcelFormula
         return row ? number.ToString(CultureInfo.InvariantCulture) : new CellAddress(1, number).ToString()[..^1];
     }
 
+    private static bool IsGridRange(ReadOnlySpan<char> range, bool row)
+    {
+        var separator = range.IndexOf(':');
+        return IsGridEndpoint(range[..separator].TrimEnd(), row) &&
+            IsGridEndpoint(range[(separator + 1)..].TrimStart(), row);
+    }
+
+    private static bool IsGridEndpoint(ReadOnlySpan<char> endpoint, bool row)
+    {
+        if (endpoint[0] == '#')
+            return true;
+        var coordinate = AxisNumber(endpoint, row);
+        return coordinate >= 1 && coordinate <= (row ? CellAddress.LastRow : CellAddress.LastColumn);
+    }
+
+    private static int AxisNumber(ReadOnlySpan<char> axis, bool row)
+    {
+        if (!axis.IsEmpty && axis[0] == '$')
+            axis = axis[1..];
+        if (!row)
+            return axis.Length <= 3 ? ColumnNumber(axis) : 0;
+        return int.TryParse(axis, NumberStyles.None, CultureInfo.InvariantCulture, out var number) ? number : 0;
+    }
+
     private static int ColumnNumber(ReadOnlySpan<char> axis)
     {
         var column = 0;
         foreach (var letter in axis)
+        {
+            if (!char.IsAsciiLetter(letter))
+                return 0;
             column = column * 26 + char.ToUpperInvariant(letter) - 'A' + 1;
+        }
         return column;
     }
 
+    // A colon can join sheet names before !, or join references before a function call.
     [GeneratedRegex("""
-        "(?:[^"]|"")*" | '(?:[^']|'')*' | \[(?:'['\[\]#@]|[^\[\]]|\[(?:'['\[\]#@]|[^\[\]])*\])*\]
-        | [\p{L}_][\p{L}\p{N}_.]*(?:\s*:\s*[\p{L}_][\p{L}\p{N}_.]*)?\s*(?=[!(])
-        | (?<![\p{L}\p{N}_.\\]) (?:
+        (?<![\p{L}\p{M}\p{N}_.$\\]) (?: '(?:[^']|'')*' | (?:\[[^\[\]]+\])?[\p{L}\p{M}\p{N}_.]+ | \[[^\[\]]+\] )
+            (?: \s*:\s* (?: '(?:[^']|'')*' | [\p{L}\p{M}\p{N}_.]+ ) )? \s* !
+        | "(?:[^"]|"")*" | '(?:[^']|'')*' | \[(?:'['\[\]#@]|[^\[\]]|\[(?:'['\[\]#@]|[^\[\]])*\])*\]
+        | (?<![\p{L}\p{M}\p{N}_.$\\]) [\p{L}_][\p{L}\p{M}\p{N}_.]*\s*(?=\()
+        | (?<![\p{L}\p{M}\p{N}_.$\\]) (?:
             (?:\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}|\#REF!) (?<colon>\s*:\s*) (?:\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}|\#REF!)
-            | (?<broken>\#REF!)
+                (?!\s*[!(])
             | (?<reference>\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})
-            | (?<rows>\$?[1-9][0-9]{0,6}(?<colon>\s*:\s*)\$?[1-9][0-9]{0,6})
-            | (?<columns>\$?[A-Z]{1,3}(?<colon>\s*:\s*)\$?[A-Z]{1,3})
-        ) (?![\p{L}\p{N}_.])
+            | (?<rows>\$?[0-9]+(?<colon>\s*:\s*)(?:\$?[0-9]+|\#REF!)|\#REF!(?<colon>\s*:\s*)\$?[0-9]+)
+            | (?<columns>\$?[A-Z]{1,3}(?<colon>\s*:\s*)(?:\$?[A-Z]{1,3}|\#REF!)|\#REF!(?<colon>\s*:\s*)\$?[A-Z]{1,3})(?!\s*[!(])
+            | (?<broken>\#REF!)
+        ) (?![\p{L}\p{M}\p{N}_.$\\])
         """, RegexOptions.IgnorePatternWhitespace | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ReferenceToken();
 }
