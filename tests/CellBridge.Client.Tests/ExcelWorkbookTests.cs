@@ -242,9 +242,13 @@ public sealed class ExcelWorkbookTests
 
     [Theory]
     [InlineData("Inputs", "Inputs!A1+1")]
+    [InlineData("Inputs", "[0]Inputs!A1+1")]
+    [InlineData("Inputs", "SUM([00]Inputs:Second!A1)")]
     [InlineData("Inputs with space", "'Inputs with space'!A1+1")]
+    [InlineData("Inputs with space", "'[0]Inputs with space'!A1+1")]
     [InlineData("Sam's Inputs", "'Sam''s Inputs'!A1+1")]
     [InlineData("Sam's Inputs", "SUM('Sam''s Inputs:Second'!A1)")]
+    [InlineData("Sam's Inputs", "SUM('[00]Sam''s Inputs:Second'!A1)")]
     public void StaleFormulaConflictsWhenAReferencedSheetWasRenamed(string name, string formula)
     {
         var original = Workbook("", firstSheetName: name);
@@ -324,6 +328,7 @@ public sealed class ExcelWorkbookTests
     [Theory]
     [InlineData("Missing!A1")]
     [InlineData("'Missing sheet'!A1")]
+    [InlineData("'[0]Missing sheet'!A1")]
     [InlineData("SUM(First:Missing!A1)")]
     public void CurrentFormulaRejectsUnknownLocalWorksheets(string text)
     {
@@ -559,6 +564,7 @@ public sealed class ExcelWorkbookTests
     [InlineData("fIrSt!A1+1", "FIRST")]
     [InlineData("\"First!A1\"&Table1[First!A1]", "Renamed")]
     [InlineData("'[1]First'!A1+[1]First!A1", "Renamed")]
+    [InlineData("'[01]First'!A1+[01]First!A1", "Renamed")]
     public void StaleFormulaMergesWithoutALocalSheetBindingChange(string text, string latestSheetName)
     {
         var formula = ExcelCellValue.Formula(text);
@@ -1244,6 +1250,12 @@ public sealed class ExcelWorkbookTests
     [InlineData("A1:SUM(B1)")]
     [InlineData("SUM(B1):A1")]
     [InlineData("A1:(NOW())")]
+    [InlineData("SUM((1,2))")]
+    [InlineData("SUM((A1,2))")]
+    [InlineData("SUM((1,A1))")]
+    [InlineData("SUM((A1,(2)))")]
+    [InlineData("SUM((NOW(),A1))")]
+    [InlineData("SUM((A1,NOW()))")]
     public void RejectsIncompleteFormulaExpressions(string text)
     {
         Assert.Throws<ArgumentException>(() => Edit(Workbook(""), new ExcelCellEdit("A1", ExcelCellValue.Formula(text))));
@@ -1271,6 +1283,7 @@ public sealed class ExcelWorkbookTests
     [Theory]
     [InlineData("SUM(-1E-2,+.5,2^-3,100%,A1<>B1)")]
     [InlineData("SUM((A1,B1),A1:B2 B1:C2,A1:B2 2:4,2:4 A1:B2)")]
+    [InlineData("SUM((A1,(B1,C1)),INDEX((A1:A2,C1:C2),2,,2))")]
     [InlineData("IF(,SUM({1,2;3,-4}),)")]
     [InlineData("SUM({-1E-2,+.5; 3, -4}, {1;2})")]
     [InlineData("SUM({TRUE,false;#N/A,#REF!;\"a,\"\"b\"\";}\",\"\"})")]

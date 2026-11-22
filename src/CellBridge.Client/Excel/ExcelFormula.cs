@@ -145,10 +145,14 @@ internal static partial class ExcelFormula
                 {
                     groups.Pop();
                     groups.Push(frame with { ArgumentSeparators = frame.ArgumentSeparators + 1 });
+                    expression = Expression.Empty;
                 }
                 else
-                    valueOperator |= expression == Expression.Value;
-                expression = group == Group.Function ? Expression.Empty : Expression.Incomplete;
+                {
+                    if (expression != Expression.Reference)
+                        throw InvalidExpression();
+                    expression = Expression.Range;
+                }
             }
             else if (symbol == '%')
             {
@@ -236,7 +240,15 @@ internal static partial class ExcelFormula
             if (token.Kind != TokenKind.Sheet)
                 continue;
             var qualifier = formula[token.Start..(token.End - 1)];
-            if (qualifier.Contains('[') || qualifier.Equals("#REF", StringComparison.OrdinalIgnoreCase))
+            var bookStart = qualifier[0] == '\'' ? 1 : 0;
+            if (qualifier.AsSpan(bookStart).StartsWith("[", StringComparison.Ordinal))
+            {
+                var bookEnd = qualifier.IndexOf(']', bookStart);
+                if (bookEnd < 0 || !TryWorkbookIndex(qualifier.AsSpan(bookStart, bookEnd - bookStart + 1), out var index) || index != 0)
+                    continue;
+                qualifier = qualifier.Remove(bookStart, bookEnd - bookStart + 1);
+            }
+            if (qualifier.Length == 0 || qualifier.Contains('[') || qualifier.Equals("#REF", StringComparison.OrdinalIgnoreCase))
                 continue;
             // Excel can quote the entire 3-D qualifier. A colon cannot be part of a local sheet name.
             var separator = qualifier.IndexOf(':');
@@ -265,7 +277,7 @@ internal static partial class ExcelFormula
                 var external = false;
                 if (qualifier.Kind == TokenKind.Sheet)
                 {
-                    if (!named || !TryWorkbookIndex(formula, qualifier, out var index))
+                    if (!named || !TryWorkbookIndex(formula.AsSpan(qualifier.Start, qualifier.End - qualifier.Start - 1), out var index))
                         throw new ArgumentException("A structured reference only supports a workbook index as its qualifier.");
                     external = index != 0;
                 }
@@ -398,7 +410,7 @@ internal static partial class ExcelFormula
         {
             var hasNext = tokens.MoveNext();
             if (token.Kind == TokenKind.Name && (previous.Kind != TokenKind.Sheet ||
-                TryWorkbookIndex(formula, previous, out var index) && index == 0) &&
+                TryWorkbookIndex(formula.AsSpan(previous.Start, previous.End - previous.Start - 1), out var index) && index == 0) &&
                 (!hasNext || !IsFunctionOrStructuredReference(tokens.Current, token.End)))
             {
                 var name = formula.AsSpan(token.Start, token.End - token.Start);
@@ -416,10 +428,9 @@ internal static partial class ExcelFormula
             (next.Kind == TokenKind.StructuredReference && next.Start == end);
     }
 
-    private static bool TryWorkbookIndex(string formula, Token qualifier, out uint index)
+    private static bool TryWorkbookIndex(ReadOnlySpan<char> prefix, out uint index)
     {
         index = 0;
-        var prefix = formula.AsSpan(qualifier.Start, qualifier.End - qualifier.Start - 1);
         return prefix.Length >= 3 && prefix[0] == '[' && prefix[^1] == ']' &&
             uint.TryParse(prefix[1..^1], NumberStyles.None, CultureInfo.InvariantCulture, out index);
     }
