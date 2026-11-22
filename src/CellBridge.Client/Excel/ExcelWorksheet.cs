@@ -94,8 +94,7 @@ internal sealed class ExcelWorksheet
     {
         if ((uint?)cell?.Attribute("s") is { } explicitStyle)
             return explicitStyle;
-        if (_rows.TryGetValue(address.Row, out var row) && IsTrue(row.Element.Attribute("customFormat")) &&
-            (uint?)row.Element.Attribute("s") is { } rowStyle)
+        if (_rows.TryGetValue(address.Row, out var row) && CustomRowStyle(row) is { } rowStyle)
             return rowStyle;
         return _columns.LastOrDefault(column => address.Column >= column.Min && address.Column <= column.Max).Style;
     }
@@ -626,26 +625,30 @@ internal sealed class ExcelWorksheet
             .ToHashSet(StringComparer.Ordinal);
         var added = after.Where(row => before.GetValueOrDefault(row.Key) != row.Value).Select(row => row.Value)
             .ToHashSet(StringComparer.Ordinal);
-        return before.Any(row => !after.ContainsKey(row.Key) && added.Contains(row.Value)) ||
-            after.Any(row => !before.ContainsKey(row.Key) && removed.Contains(row.Value));
+        return before.Any(row => !remote._rows.ContainsKey(row.Key) && added.Contains(row.Value)) ||
+            after.Any(row => !_rows.ContainsKey(row.Key) && removed.Contains(row.Value));
     }
 
     private Dictionary<int, string> RowStyles()
     {
         var styles = new Dictionary<int, string>();
         var defaultStyle = _package.Styles.Signature(0);
+        bool hasStyledColumn = _columns.Any(column => _package.Styles.Signature(column.Style) != defaultStyle);
         foreach (var (index, row) in _rows)
         {
-            if ((uint?)row.Element.Attribute("s") is not { } style || style == 0)
+            if (CustomRowStyle(row) is not { } style)
                 continue;
             var signature = _package.Styles.Signature(style);
-            if (signature == defaultStyle)
+            if (signature == defaultStyle && !hasStyledColumn)
                 continue;
             _package.Charge(64);
             styles.Add(index, signature);
         }
         return styles;
     }
+
+    private static uint? CustomRowStyle(Row row) => IsTrue(row.Element.Attribute("customFormat"))
+        ? (uint?)row.Element.Attribute("s") : null;
 
     private bool ColumnLayoutMoved(ExcelWorksheet remote)
     {

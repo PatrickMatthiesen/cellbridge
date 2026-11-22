@@ -151,6 +151,20 @@ internal static partial class ExcelFormula
     {
         return ReferenceToken().Replace(formula, match =>
         {
+            if (match.Groups["rectangle"].Success)
+            {
+                var separator = match.Value.IndexOf(':');
+                var first = match.Value[..separator];
+                var last = match.Value[(separator + 1)..];
+                if (rewrite == ReferenceRewrite.Pattern)
+                    return TryCellAxes(first, out var firstColumnEnd, out var firstRowStart) &&
+                        TryCellAxes(last, out var lastColumnEnd, out var lastRowStart)
+                        ? PatternToken('B', CellAnchors(first, firstColumnEnd, firstRowStart),
+                            CellAnchors(last, lastColumnEnd, lastRowStart), ignoreAnchors)
+                        : match.Value;
+                return RewriteCell(first, rowOffset, columnOffset, rewrite, ignoreAnchors) + ":" +
+                    RewriteCell(last, rowOffset, columnOffset, rewrite, ignoreAnchors);
+            }
             if (match.Groups["reference"].Success)
                 return RewriteCell(match.Value, rowOffset, columnOffset, rewrite, ignoreAnchors);
             if (match.Groups["broken"].Success && rewrite == ReferenceRewrite.Pattern)
@@ -165,21 +179,28 @@ internal static partial class ExcelFormula
 
     private static string RewriteCell(string text, int rowOffset, int columnOffset, ReferenceRewrite rewrite, bool ignoreAnchors)
     {
-        var columnStart = text[0] == '$' ? 1 : 0;
-        var separator = columnStart;
-        while (separator < text.Length && char.IsAsciiLetter(text[separator]))
-            separator++;
-        var rowStart = text[separator] == '$' ? separator + 1 : separator;
-        if (ColumnNumber(text.AsSpan(columnStart, separator - columnStart)) is < 1 or > CellAddress.LastColumn ||
-            int.Parse(text.AsSpan(rowStart), CultureInfo.InvariantCulture) is < 1 or > CellAddress.LastRow)
+        if (!TryCellAxes(text, out var separator, out var rowStart))
             return text;
-
         if (rewrite == ReferenceRewrite.Pattern)
-            return PatternToken('A', columnStart == 1, rowStart != separator, ignoreAnchors);
+            return PatternToken('A', text[0] == '$' ? '$' : '-', rowStart != separator ? '$' : '-', ignoreAnchors);
         var column = RewriteAxis(text[..separator], columnOffset, row: false, rewrite);
         var row = RewriteAxis(text[separator..], rowOffset, row: true, rewrite);
         return column is null || row is null ? "#REF!" : column + row;
     }
+
+    private static bool TryCellAxes(string text, out int separator, out int rowStart)
+    {
+        var columnStart = text[0] == '$' ? 1 : 0;
+        separator = columnStart;
+        while (separator < text.Length && char.IsAsciiLetter(text[separator]))
+            separator++;
+        rowStart = text[separator] == '$' ? separator + 1 : separator;
+        return ColumnNumber(text.AsSpan(columnStart, separator - columnStart)) is >= 1 and <= CellAddress.LastColumn &&
+            int.Parse(text.AsSpan(rowStart), CultureInfo.InvariantCulture) is >= 1 and <= CellAddress.LastRow;
+    }
+
+    private static char CellAnchors(string text, int columnEnd, int rowStart) =>
+        (char)('0' + (text[0] == '$' ? 2 : 0) + (rowStart != columnEnd ? 1 : 0));
 
     private static string RewriteRange(string range, int offset, bool row, ReferenceRewrite rewrite, bool ignoreAnchors)
     {
@@ -189,7 +210,7 @@ internal static partial class ExcelFormula
             var firstAxis = range.AsSpan(0, separator);
             var lastAxis = range.AsSpan(separator + 1);
             return ValidAxis(firstAxis, row) && ValidAxis(lastAxis, row)
-                ? PatternToken(row ? 'R' : 'C', firstAxis[0] == '$', lastAxis[0] == '$', ignoreAnchors)
+                ? PatternToken(row ? 'R' : 'C', firstAxis[0] == '$' ? '$' : '-', lastAxis[0] == '$' ? '$' : '-', ignoreAnchors)
                 : range;
         }
         var first = RewriteAxis(range[..separator], offset, row, rewrite);
@@ -197,8 +218,8 @@ internal static partial class ExcelFormula
         return $"{first ?? "#REF!"}:{last ?? "#REF!"}";
     }
 
-    private static string PatternToken(char kind, bool firstAbsolute, bool secondAbsolute, bool ignoreAnchors) =>
-        ignoreAnchors ? ReferenceMarker : $"{ReferenceMarker}{kind}{(firstAbsolute ? '$' : '-')}{(secondAbsolute ? '$' : '-')}";
+    private static string PatternToken(char kind, char firstAnchor, char secondAnchor, bool ignoreAnchors) =>
+        ignoreAnchors ? ReferenceMarker : $"{ReferenceMarker}{kind}{firstAnchor}{secondAnchor}";
 
     private static bool ValidAxis(ReadOnlySpan<char> axis, bool row)
     {
@@ -240,6 +261,7 @@ internal static partial class ExcelFormula
         | [\p{L}_][\p{L}\p{N}_.]*(?::[\p{L}_][\p{L}\p{N}_.]*)?\s*(?=[!(])
         | (?<![\p{L}\p{N}_.\\]) (?:
             (?<broken>\#REF!)
+            | (?<rectangle>\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}:\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})
             | (?<reference>\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})
             | (?<rows>\$?[1-9][0-9]{0,6}:\$?[1-9][0-9]{0,6})
             | (?<columns>\$?[A-Z]{1,3}:\$?[A-Z]{1,3})

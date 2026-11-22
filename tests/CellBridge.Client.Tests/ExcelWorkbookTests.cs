@@ -263,6 +263,8 @@ public sealed class ExcelWorkbookTests
         "<row r='2'><c r='B2'><f>#REF!+A3</f></c></row>", "C3")]
     [InlineData("<row r='1'><c r='D1'><f>SUM(B:B)</f></c></row>",
         "<row r='1'><c r='C1'><f>SUM(#REF!)</f></c></row>", "E2")]
+    [InlineData("<row r='1'><c r='D1'><f>SUM(B1:B2)</f></c></row>",
+        "<row r='1'><c r='C1'><f>SUM(#REF!)</f></c></row>", "E2")]
     [InlineData("<row r='1'><c r='A1'><f>SUM(B3:B4)</f></c></row><row r='3' customFormat='1' s='1'/>",
         "<row r='1'><c r='A1'><f>SUM(B4:B5)</f></c></row><row r='4' customFormat='1' s='1'/>", "B5")]
     [InlineData("<row r='2' ht='30' customHeight='1'/>", "<row r='3' ht='30' customHeight='1'/>", "C2")]
@@ -317,6 +319,33 @@ public sealed class ExcelWorkbookTests
         var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C5", ExcelCellValue.Number(5))]);
 
         Assert.Equal(expected, result.Status);
+    }
+
+    [Theory]
+    [InlineData("customFormat='1' s='0'", ExcelWriteStatus.StructuralConflict)]
+    [InlineData("customFormat='0' s='1'", ExcelWriteStatus.Success)]
+    public void TracksOnlyRowStylesThatAffectCellFormatting(string attributes, ExcelWriteStatus expected)
+    {
+        const string column = "<cols><col min='2' max='2' style='1'/></cols>";
+        var original = Workbook($"<row r='2' {attributes}/>", beforeData: column);
+        var latest = Workbook($"<row r='3' {attributes}/>", beforeData: column);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C5", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(expected, result.Status);
+    }
+
+    [Fact]
+    public void TransferringARowStyleBetweenUnmovedRowsAllowsADisjointEdit()
+    {
+        var original = Workbook("<row r='2' customFormat='1' s='1'><c r='A2'><v>12</v></c></row>" +
+            "<row r='3'><c r='A3'><v>13</v></c></row>");
+        var latest = Workbook("<row r='2'><c r='A2'><v>12</v></c></row>" +
+            "<row r='3' customFormat='1' s='1'><c r='A3'><v>13</v></c></row>");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("C5", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
     }
 
     [Fact]
