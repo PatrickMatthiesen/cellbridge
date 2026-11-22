@@ -270,15 +270,76 @@ public sealed class ExcelWorkbookTests
         Assert.Null(result.Package);
     }
 
-    [Fact]
-    public void MovingAnEmptyCustomWidthColumnConflicts()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MovingAnEmptyCustomWidthColumnConflicts(bool reindexStyles)
     {
-        var original = Workbook("", beforeData: "<cols><col min='2' max='2' width='20' customWidth='1'/></cols>");
-        var latest = Workbook("", beforeData: "<cols><col min='3' max='3' width='20' customWidth='1'/></cols>");
+        var original = Workbook("", beforeData: "<cols><col min='2' max='2' width='20' customWidth='1' style='1'/></cols>");
+        var latestStyle = reindexStyles ? 2 : 1;
+        var latest = Workbook("", beforeData:
+            $"<cols><col min='3' max='3' width='20' customWidth='1' style='{latestStyle}'/></cols>", swapStyles: reindexStyles);
 
         var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("B2", ExcelCellValue.Number(5))]);
 
         Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+    }
+
+    [Theory]
+    [InlineData(false, ExcelWriteStatus.StructuralConflict)]
+    [InlineData(true, ExcelWriteStatus.Success)]
+    public void ShiftingBlankCellsRequiresMatchingNonDefaultStyles(bool useDefaultStyle, ExcelWriteStatus expected)
+    {
+        var firstStyle = useDefaultStyle ? 0 : 1;
+        var secondStyle = useDefaultStyle ? 0 : 2;
+        var original = Workbook($"<row r='2'><c r='A2' s='{firstStyle}'/></row>" +
+            $"<row r='3'><c r='A3' s='{secondStyle}'/></row>");
+        var latest = Workbook($"<row r='3'><c r='A3' s='{secondStyle}'/></row>" +
+            $"<row r='4'><c r='A4' s='{firstStyle}'/></row>", swapStyles: true);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("B2", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(expected, result.Status);
+    }
+
+    [Theory]
+    [InlineData(12, 1)]
+    [InlineData(20, 2)]
+    public void DisjointEditMergesWithAnInPlaceColumnChange(int originalWidth, int latestStyle)
+    {
+        var original = Workbook("", beforeData:
+            $"<cols><col min='26' max='26' width='{originalWidth}' customWidth='1' style='1'/></cols>");
+        var latest = Workbook("", beforeData:
+            $"<cols><col min='26' max='26' width='20' customWidth='1' style='{latestStyle}'/></cols>",
+            swapStyles: latestStyle == 2);
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("A1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        var package = Assert.IsType<byte[]>(result.Package);
+        Validate(package);
+        Assert.Equal("20", (string?)Part(package, "xl/worksheets/sheet1.xml")
+            .Root!.Element(S + "cols")!.Element(S + "col")!.Attribute("width"));
+        Assert.Equal(ExcelCellValue.Number(5), Assert.Single(ExcelWorkbook.ReadRange(package, 4, "A1")).Value);
+    }
+
+    [Theory]
+    [InlineData("1+2", "7*8")]
+    [InlineData("$A$2+2", "$A$3+3")]
+    [InlineData("$A$2+2", "$A$3*2")]
+    public void DisjointEditMergesWithAnUnrelatedAlignedFormulaAddition(string before, string added)
+    {
+        var original = Workbook($"<row r='2'><c r='B2'><f>{before}</f></c></row>");
+        var latest = Edit(original, new ExcelCellEdit("B2", ExcelCellValue.Number(9)),
+            new ExcelCellEdit("B3", ExcelCellValue.Formula(added)));
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("A1", ExcelCellValue.Number(5))]);
+
+        Assert.Equal(ExcelWriteStatus.Success, result.Status);
+        var package = Assert.IsType<byte[]>(result.Package);
+        Validate(package);
+        Assert.Equal([ExcelCellValue.Number(9), ExcelCellValue.Formula(added)],
+            ExcelWorkbook.ReadRange(package, 4, "B2:B3").Select(cell => cell.Value));
     }
 
     [Fact]
@@ -494,7 +555,7 @@ public sealed class ExcelWorkbookTests
 
     private static byte[] Workbook(string rows, string beforeData = "", string afterData = "", bool date1904 = false,
         string? calculationChain = null, string[]? sharedStrings = null, bool nonSeekableZip = false,
-        bool reverseSheets = false, string? tableRange = null, string? definedNames = null)
+        bool reverseSheets = false, string? tableRange = null, string? definedNames = null, bool swapStyles = false)
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string workbookType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
@@ -549,9 +610,10 @@ public sealed class ExcelWorkbookTests
                     $"<tableParts xmlns:r='{OfficeRels}' count='1'><tablePart r:id='rId1'/></tableParts>") + "</worksheet>");
             Add("xl/worksheets/sheet2.xml", $"<worksheet xmlns='{Main}'><sheetData><row r='1'>" +
                 "<c r='A1'><f>5+5</f><v>10</v></c></row></sheetData></worksheet>");
-            Add("xl/styles.xml", $"<styleSheet xmlns='{Main}'>" +
-                "<cellXfs count='3'><xf/><xf numFmtId='14' applyNumberFormat='1'/>" +
-                "<xf applyProtection='1'><protection locked='0'/></xf></cellXfs></styleSheet>");
+            const string dateStyle = "<xf numFmtId='14' applyNumberFormat='1'/>";
+            const string unlockedStyle = "<xf applyProtection='1'><protection locked='0'/></xf>";
+            Add("xl/styles.xml", $"<styleSheet xmlns='{Main}'><cellXfs count='3'><xf/>" +
+                (swapStyles ? unlockedStyle + dateStyle : dateStyle + unlockedStyle) + "</cellXfs></styleSheet>");
             if (tableRange is not null)
             {
                 Add("xl/worksheets/_rels/sheet1.xml.rels", $"<Relationships xmlns='{PackageRels}'>" +

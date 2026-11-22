@@ -307,29 +307,33 @@ internal sealed class ExcelWorksheet
     internal bool StructureDiffers(ExcelWorksheet remote)
     {
         if (!StructuralMarkup().SequenceEqual(remote.StructuralMarkup()) ||
-            _package.Date1904 != remote._package.Date1904 || _package.DefinedNames != remote._package.DefinedNames)
+            _package.Date1904 != remote._package.Date1904 || _package.DefinedNames != remote._package.DefinedNames ||
+            ColumnLayoutMoved(remote))
             return true;
 
         // OOXML does not record the operation that produced a cell grid. Detect
         // identifiable values that moved as evidence of insertion, deletion or sorting.
         var movements = new Dictionary<ExcelCellValue, ValueMovement>();
+        var styledBlankMovements = new Dictionary<string, ValueMovement>(StringComparer.Ordinal);
         // Keep raw formula matches and also look for references Excel adjusted during a shift.
         var formulaMovements = new Dictionary<ExcelCellValue, ValueMovement>();
-        // A shifted formula can replace another formula and change both signatures.
-        var formulaChanges = new Dictionary<(bool IsRow, int Index), FormulaChange>();
+        // A shift can adjust references that neither raw nor relative signatures match.
+        var formulaChanges = new Dictionary<(bool IsRow, int Index, string Pattern), FormulaChange>();
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
             var address = new CellAddress(row, column);
             var before = Value(cell, address);
-            var after = remote.Value(address);
+            var remoteCell = remote.Find(address);
+            var after = remote.Value(remoteCell, address);
+            RecordStyledBlankMovement(ExplicitBlankStyle(cell, before), remote.ExplicitBlankStyle(remoteCell, after), address);
             if (Equivalent(before, after))
                 continue;
 
             var hadFormula = before.Type == ExcelCellType.Formula;
             var hasFormula = after.Type == ExcelCellType.Formula;
-            if ((hadFormula || hasFormula) && HasAlignedFormulaChange(address, hadFormula && hasFormula
-                ? FormulaChange.Replaced : hasFormula ? FormulaChange.Added : FormulaChange.Removed))
+            if ((hadFormula || hasFormula) && HasAlignedFormulaChange(address, hasFormula ? after : before,
+                hasFormula ? FormulaChange.Introduced : FormulaChange.Removed))
                 return true;
 
             RecordMovement(movements, before, after, address);
@@ -344,8 +348,9 @@ internal sealed class ExcelWorksheet
             if (Find(address) is not null)
                 continue;
             var after = remote.Value(cell, address);
+            RecordStyledBlankMovement(null, remote.ExplicitBlankStyle(cell, after), address);
             var hasFormula = after.Type == ExcelCellType.Formula;
-            if (hasFormula && HasAlignedFormulaChange(address, FormulaChange.Added))
+            if (hasFormula && HasAlignedFormulaChange(address, after, FormulaChange.Introduced))
                 return true;
 
             RecordMovement(movements, ExcelCellValue.Blank, after, address);
@@ -353,29 +358,51 @@ internal sealed class ExcelWorksheet
                 RecordMovement(formulaMovements, ExcelCellValue.Blank, RelativeFormula(after, address), address);
         }
 
-        return HasMovement(movements.Values) || HasMovement(formulaMovements.Values);
+        return HasMovement(movements.Values) || HasMovement(formulaMovements.Values) || HasMovement(styledBlankMovements.Values);
 
-        bool HasAlignedFormulaChange(CellAddress address, FormulaChange change) =>
-            HasDifferentFormulaChange((true, address.Row), change) ||
-            HasDifferentFormulaChange((false, address.Column), change);
+        void RecordStyledBlankMovement(string? before, string? after, CellAddress address)
+        {
+            if (before == after)
+                return;
+            // Styling or unstyling one blank is common. Require corroborating movements.
+            if (before is not null)
+            {
+                _package.Charge(48);
+                FindMovement(styledBlankMovements, before, before.Length).Removed.Add(new Occurrence(address, false));
+            }
+            if (after is not null)
+            {
+                _package.Charge(48);
+                FindMovement(styledBlankMovements, after, after.Length).Added.Add(new Occurrence(address, false));
+            }
+        }
 
-        bool HasDifferentFormulaChange((bool IsRow, int Index) axis, FormulaChange change)
+        bool HasAlignedFormulaChange(CellAddress address, ExcelCellValue formula, FormulaChange change)
+        {
+            var pattern = ExcelFormula.ReferencePattern(formula.RawValue!);
+            return HasDifferentFormulaChange((true, address.Row, pattern), change) ||
+                HasDifferentFormulaChange((false, address.Column, pattern), change);
+        }
+
+        bool HasDifferentFormulaChange((bool IsRow, int Index, string Pattern) axis, FormulaChange change)
         {
             if (formulaChanges.TryGetValue(axis, out var previous))
-            {
-                var combined = previous | change;
-                formulaChanges[axis] = combined;
-                return (combined & FormulaChange.Removed) != 0 && combined != FormulaChange.Removed;
-            }
-
-            _package.Charge(64);
+                return previous != change;
+            _package.Charge(64L + axis.Pattern.Length * 2L);
             formulaChanges.Add(axis, change);
             return false;
         }
     }
 
-    [Flags]
-    private enum FormulaChange { Added = 1, Removed = 2, Replaced = 4 }
+    private string? ExplicitBlankStyle(XElement? cell, ExcelCellValue value)
+    {
+        if (value.Type != ExcelCellType.Blank || (uint?)cell?.Attribute("s") is not { } index || index == 0)
+            return null;
+        var signature = _package.Styles.Signature(index);
+        return signature != _package.Styles.Signature(0) ? signature : null;
+    }
+
+    private enum FormulaChange { Introduced, Removed }
 
     private static ExcelCellValue RelativeFormula(ExcelCellValue value, CellAddress address) =>
         value.Type == ExcelCellType.Formula
@@ -386,8 +413,8 @@ internal sealed class ExcelWorksheet
     {
         if (Equivalent(before, after))
             return;
-        var source = !formulasOnly || before.Type == ExcelCellType.Formula ? FindMovement(movements, before) : null;
-        var destination = !formulasOnly || after.Type == ExcelCellType.Formula ? FindMovement(movements, after) : null;
+        var source = !formulasOnly || before.Type == ExcelCellType.Formula ? FindValueMovement(movements, before) : null;
+        var destination = !formulasOnly || after.Type == ExcelCellType.Formula ? FindValueMovement(movements, after) : null;
         if (source is not null)
         {
             _package.Charge(48);
@@ -528,7 +555,7 @@ internal sealed class ExcelWorksheet
                 (item.Address.Row == address.Row || item.Address.Column == address.Column));
     }
 
-    private ValueMovement? FindMovement(Dictionary<ExcelCellValue, ValueMovement> values, ExcelCellValue value)
+    private ValueMovement? FindValueMovement(Dictionary<ExcelCellValue, ValueMovement> values, ExcelCellValue value)
     {
         if (value.Type == ExcelCellType.Blank)
             return null;
@@ -537,13 +564,48 @@ internal sealed class ExcelWorksheet
             value = ExcelCellValue.Number(number == 0 ? 0 : number);
         else if (value.Type == ExcelCellType.Boolean)
             value = ExcelCellValue.Boolean(BooleanValue(value.RawValue));
+        return FindMovement(values, value, value.RawValue?.Length ?? 0);
+    }
+
+    private ValueMovement FindMovement<TKey>(Dictionary<TKey, ValueMovement> values, TKey value, int textLength)
+        where TKey : notnull
+    {
         if (values.TryGetValue(value, out var movement))
             return movement;
 
-        _package.Charge(144L + (value.RawValue?.Length ?? 0) * 2L);
+        _package.Charge(144L + textLength * 2L);
         movement = new ValueMovement();
         values.Add(value, movement);
         return movement;
+    }
+
+    private bool ColumnLayoutMoved(ExcelWorksheet remote)
+    {
+        var before = ColumnLayouts().ToHashSet();
+        var after = remote.ColumnLayouts().ToHashSet();
+        // A moved range loses its old location and gains a new one with matching layout.
+        var removed = before.Except(after).Select(range => (range.Max - range.Min, range.Signature)).ToHashSet();
+        return after.Except(before).Any(range => removed.Contains((range.Max - range.Min, range.Signature)));
+    }
+
+    private IEnumerable<(int Min, int Max, string Signature)> ColumnLayouts()
+    {
+        foreach (var column in _root.Elements(S + "cols").SelectMany(cols => cols.Elements(S + "col")))
+        {
+            var min = (int?)column.Attribute("min") ?? 0;
+            var max = (int?)column.Attribute("max") ?? 0;
+            if (min < 1 || max < min || max > CellAddress.LastColumn)
+                continue;
+            var properties = new XElement(column);
+            properties.Attribute("min")?.Remove();
+            properties.Attribute("max")?.Remove();
+            var style = _package.Styles.Signature((uint?)column.Attribute("style") ?? 0);
+            properties.SetAttributeValue("style", style == _package.Styles.Signature(0) ? null : style);
+            if (!properties.HasElements && !properties.Attributes().Any(attribute => !attribute.IsNamespaceDeclaration))
+                continue;
+            _package.Charge(256);
+            yield return (min, max, ExcelStyles.Signature(properties));
+        }
     }
 
     private IEnumerable<string> StructuralMarkup()
@@ -551,7 +613,7 @@ internal sealed class ExcelWorksheet
         foreach (var element in _root.Elements())
             if (element.Name.Namespace == S && element.Name.LocalName is
                 "sheetProtection" or "protectedRanges" or "mergeCells" or "autoFilter" or "sortState" or
-                "rowBreaks" or "colBreaks" or "dataValidations" or "conditionalFormatting" or "hyperlinks" or "cols")
+                "rowBreaks" or "colBreaks" or "dataValidations" or "conditionalFormatting" or "hyperlinks")
                 yield return ExcelStyles.Signature(element);
 
         foreach (var range in _formulaRanges)

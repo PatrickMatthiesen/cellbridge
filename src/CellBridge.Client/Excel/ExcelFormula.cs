@@ -6,6 +6,8 @@ namespace CellBridge.Client.Excel;
 
 internal static partial class ExcelFormula
 {
+    private enum ReferenceRewrite { Translate, Relative, Pattern }
+
     // Known dynamic-array producers are excluded because their metadata and spill ranges
     // cannot be authored by this editor.
     private static readonly HashSet<string> SpillFunctions = new(StringComparer.OrdinalIgnoreCase)
@@ -114,27 +116,30 @@ internal static partial class ExcelFormula
     {
         if (formula.Length > 8192)
             throw new InvalidDataException("The shared formula exceeds Excel's formula length limit.");
-        return RewriteReferences(formula, target.Row - master.Row, target.Column - master.Column, relative: false);
+        return RewriteReferences(formula, target.Row - master.Row, target.Column - master.Column, ReferenceRewrite.Translate);
     }
 
     internal static string RelativeSignature(string formula, CellAddress address) =>
-        RewriteReferences(formula, -address.Row, -address.Column, relative: true);
+        RewriteReferences(formula, -address.Row, -address.Column, ReferenceRewrite.Relative);
 
-    private static string RewriteReferences(string formula, int rowOffset, int columnOffset, bool relative)
+    internal static string ReferencePattern(string formula) =>
+        RewriteReferences(formula, 0, 0, ReferenceRewrite.Pattern);
+
+    private static string RewriteReferences(string formula, int rowOffset, int columnOffset, ReferenceRewrite rewrite)
     {
         return ReferenceToken().Replace(formula, match =>
         {
             if (match.Groups["reference"].Success)
-                return ShiftCell(match.Value, rowOffset, columnOffset, relative);
+                return RewriteCell(match.Value, rowOffset, columnOffset, rewrite);
             if (match.Groups["rows"].Success)
-                return ShiftRange(match.Value, rowOffset, row: true, relative);
+                return RewriteRange(match.Value, rowOffset, row: true, rewrite);
             if (match.Groups["columns"].Success)
-                return ShiftRange(match.Value, columnOffset, row: false, relative);
+                return RewriteRange(match.Value, columnOffset, row: false, rewrite);
             return match.Value;
         });
     }
 
-    private static string ShiftCell(string text, int rowOffset, int columnOffset, bool relative)
+    private static string RewriteCell(string text, int rowOffset, int columnOffset, ReferenceRewrite rewrite)
     {
         var columnStart = text[0] == '$' ? 1 : 0;
         var separator = columnStart;
@@ -145,30 +150,34 @@ internal static partial class ExcelFormula
             int.Parse(text.AsSpan(rowStart), CultureInfo.InvariantCulture) is < 1 or > CellAddress.LastRow)
             return text;
 
-        var column = ShiftAxis(text[..separator], columnOffset, row: false, relative);
-        var row = ShiftAxis(text[separator..], rowOffset, row: true, relative);
+        var column = RewriteAxis(text[..separator], columnOffset, row: false, rewrite);
+        var row = RewriteAxis(text[separator..], rowOffset, row: true, rewrite);
         return column is null || row is null ? "#REF!" : column + row;
     }
 
-    private static string ShiftRange(string range, int offset, bool row, bool relative)
+    private static string RewriteRange(string range, int offset, bool row, ReferenceRewrite rewrite)
     {
         var separator = range.IndexOf(':');
-        var first = ShiftAxis(range[..separator], offset, row, relative);
-        var last = ShiftAxis(range[(separator + 1)..], offset, row, relative);
+        var first = RewriteAxis(range[..separator], offset, row, rewrite);
+        var last = RewriteAxis(range[(separator + 1)..], offset, row, rewrite);
         return $"{first ?? "#REF!"}:{last ?? "#REF!"}";
     }
 
-    private static string? ShiftAxis(string axis, int offset, bool row, bool relative)
+    private static string? RewriteAxis(string axis, int offset, bool row, ReferenceRewrite rewrite)
     {
-        if (axis.StartsWith('$'))
+        var absolute = axis.StartsWith('$');
+        if (absolute && rewrite != ReferenceRewrite.Pattern)
             return axis;
-        var number = row ? int.Parse(axis, CultureInfo.InvariantCulture) : ColumnNumber(axis);
+        var coordinate = axis.AsSpan(absolute ? 1 : 0);
+        var number = row ? int.Parse(coordinate, CultureInfo.InvariantCulture) : ColumnNumber(coordinate);
         var limit = row ? CellAddress.LastRow : CellAddress.LastColumn;
         if (number > limit)
             return axis;
+        // A NUL cannot occur in workbook XML, so it separates reference markers from literal text.
+        if (rewrite == ReferenceRewrite.Pattern)
+            return string.Concat(absolute ? "\0$" : "\0", row ? "R\0" : "C\0");
         number += offset;
-        // A NUL cannot occur in workbook XML. It separates offsets from literal formula text.
-        if (relative)
+        if (rewrite == ReferenceRewrite.Relative)
             return string.Concat(row ? "\0R" : "\0C", number.ToString(CultureInfo.InvariantCulture), "\0");
         if (number < 1 || number > limit)
             return null;

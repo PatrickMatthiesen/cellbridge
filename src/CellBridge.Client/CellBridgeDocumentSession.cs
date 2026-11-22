@@ -75,7 +75,16 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 await session.SendEditorsAsync("JoinEditingSession", cancellationToken);
             }
 
-            var realTimeTarget = options.EnableRealTime ? await session.GetRealTimeTargetAsync(cancellationToken) : null;
+            RealTimeConnectionTarget? realTimeTarget = null;
+            if (options.EnableRealTime)
+            {
+                try { realTimeTarget = await session.GetRealTimeTargetAsync(cancellationToken); }
+                catch (Exception error) when (IsAmbiguous(error) && !cancellationToken.IsCancellationRequested)
+                {
+                    // RTC discovery is optional. Continue with protocol sync.
+                }
+            }
+            cancellationToken.ThrowIfCancellationRequested();
             await session.SyncCoreAsync(cancellationToken);
             if (realTimeTarget is { } target)
             {

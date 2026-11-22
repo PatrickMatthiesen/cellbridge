@@ -346,6 +346,40 @@ public sealed class DocumentSessionScenarioTests
         Assert.True((await session.TryCommitAsync(revision, changed)).Succeeded);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RealTimeDiscoveryTimeoutAllowsOpenUnlessCallerCancelled(bool cancel)
+    {
+        await using var host = await ScenarioHost.StartAsync(overHttp: false);
+        var original = OfficeDocumentTemplates.CreateExcelWorkbook();
+        var document = await host.CreateAsync(original);
+        using var cancellation = new CancellationTokenSource();
+        var transport = new RememberRealTimeConnection(host.Transport, () =>
+        {
+            if (cancel)
+            {
+                cancellation.Cancel();
+                cancellation.Token.ThrowIfCancellationRequested();
+            }
+            throw new TimeoutException("RTC discovery timed out.");
+        });
+
+        if (cancel)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CellBridgeDocumentSession.OpenAsync(
+                transport, host.DocumentUrl, cancellationToken: cancellation.Token));
+            Assert.Empty((await host.ReadControlAsync(document.ResourceId)).Editors);
+        }
+        else
+        {
+            await using var reader = await CellBridgeDocumentSession.OpenAsync(transport, host.DocumentUrl);
+            Assert.Equal(original, reader.GetSnapshot().Package);
+            Assert.Null(transport.Target);
+            Assert.Single((await host.ReadControlAsync(document.ResourceId)).Editors);
+        }
+    }
+
     [Fact]
     public async Task ReaderConnectsToRtcWithItsEditorClientIdAndCanUpdateTheTicket()
     {
@@ -450,13 +484,18 @@ public sealed class DocumentSessionScenarioTests
             CancellationToken cancellationToken = default) => inner.TryConnectRealTimeAsync(target, cancellationToken);
     }
 
-    private sealed class RememberRealTimeConnection(ICellBridgeClientTransport inner) : ICellBridgeClientTransport
+    private sealed class RememberRealTimeConnection(ICellBridgeClientTransport inner, Action? discover = null)
+        : ICellBridgeClientTransport
     {
         public RealTimeConnectionTarget? Target { get; private set; }
         public ICellBridgeRealTimeChannel? Channel { get; private set; }
 
-        public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, CancellationToken cancellationToken = default) =>
-            inner.ExecuteAsync(request, cancellationToken);
+        public Task<CellStorageExecution> ExecuteAsync(CellStorageRequest request, CancellationToken cancellationToken = default)
+        {
+            if (discover is not null && request.Requests.Any(file => file.SubRequests.Any(sub => sub.Type == SubRequestType.Properties)))
+                discover();
+            return inner.ExecuteAsync(request, cancellationToken);
+        }
 
         public async Task<ICellBridgeRealTimeChannel?> TryConnectRealTimeAsync(RealTimeConnectionTarget target,
             CancellationToken cancellationToken = default)
