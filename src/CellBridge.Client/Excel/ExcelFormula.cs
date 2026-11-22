@@ -24,7 +24,7 @@ internal static partial class ExcelFormula
     };
 
     private enum TokenKind { Name, Literal, Error, Sheet, RowRange, StructuredReference, Symbol }
-    private enum Expression { Empty, Incomplete, Sheet, Value, Reference }
+    private enum Expression { Empty, Incomplete, Sheet, Range, Value, Reference }
     private enum Group { Root, Parentheses, Function }
 
     private readonly record struct Token(TokenKind Kind, int Start, int End);
@@ -50,17 +50,20 @@ internal static partial class ExcelFormula
             if (token.Kind != TokenKind.Symbol)
             {
                 var isReference = token.Kind is not (TokenKind.Literal or TokenKind.Error);
+                var brokenReference = token.Kind == TokenKind.Error &&
+                    formula.AsSpan(token.Start, token.End - token.Start).Equals("#REF!", StringComparison.OrdinalIgnoreCase);
                 var attachesToName = token.Kind == TokenKind.StructuredReference &&
                     previous.Kind == TokenKind.Name && !separated;
                 if (hasOperand && !attachesToName && !(separated && expression == Expression.Reference && isReference) ||
-                    expression == Expression.Sheet && token.Kind == TokenKind.Sheet)
+                    expression == Expression.Sheet && token.Kind == TokenKind.Sheet ||
+                    expression is Expression.Sheet or Expression.Range && !isReference && !brokenReference)
                     throw InvalidExpression();
                 expression = token.Kind == TokenKind.Sheet ? Expression.Sheet :
-                    isReference || expression == Expression.Sheet ? Expression.Reference : Expression.Value;
+                    isReference || brokenReference ? Expression.Reference : Expression.Value;
             }
             else if (symbol == '{')
             {
-                if (expression == Expression.Sheet || hasOperand)
+                if (expression is Expression.Sheet or Expression.Range || hasOperand)
                     throw InvalidExpression();
                 ValidateArrayConstant(formula, tokens);
                 token = tokens.Current;
@@ -106,15 +109,16 @@ internal static partial class ExcelFormula
             }
             else if (symbol is '+' or '-' or '@')
             {
-                if (expression == Expression.Sheet || symbol == '@' && hasOperand)
+                if (expression is Expression.Sheet or Expression.Range || symbol == '@' && hasOperand)
                     throw InvalidExpression();
                 expression = Expression.Incomplete;
             }
             else
             {
-                if (!hasOperand || symbol is not ('*' or '/' or '^' or '&' or '=' or '<' or '>' or ':'))
+                if (!hasOperand || symbol is not ('*' or '/' or '^' or '&' or '=' or '<' or '>' or ':') ||
+                    symbol == ':' && expression != Expression.Reference)
                     throw InvalidExpression();
-                expression = Expression.Incomplete;
+                expression = symbol == ':' ? Expression.Range : Expression.Incomplete;
             }
             previous = token;
         }

@@ -213,6 +213,21 @@ public sealed class ExcelWorkbookTests
         Assert.Null(result.Package);
     }
 
+    [Theory]
+    [InlineData("First!B2")]
+    [InlineData("SUM(Second:Third!B2)")]
+    public void FormulaReplacementDoesNotHideShiftOnReferencedWorksheet(string text)
+    {
+        var original = ExcelWorkbook.AddSheet(Workbook("<row r='2'><c r='B2'><f>$A$2</f></c></row>",
+            reverseSheets: true), "Third").Package;
+        var latest = ExcelWorkbook.AddSheet(Workbook("<row r='2'><c r='B2'><f>42</f></c></row>" +
+            "<row r='3'><c r='B3'><f>$A$3</f></c></row>", reverseSheets: true), "Third").Package;
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", ExcelCellValue.Formula(text))]);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+    }
+
     [Fact]
     public void StaleFormulaMergesWhenAReferencedCellValueChanges()
     {
@@ -369,6 +384,8 @@ public sealed class ExcelWorkbookTests
         "<row r='3'><c r='B3'><f>A1+A4</f></c></row>", "C2")]
     [InlineData("<row r='2'><c r='A2'><f>$B$2</f></c></row>",
         "<row r='3'><c r='A3'><f>$B$3</f></c></row>", "C2")]
+    [InlineData("<row r='2'><c r='B2'><f>$A$2</f></c></row>",
+        "<row r='2'><c r='B2'><f>42</f></c></row><row r='3'><c r='B3'><f>$A$3</f></c></row>", "C2")]
     [InlineData("<row r='2'><c r='B2'><f>A1+C1</f></c></row>",
         "<row r='2'><c r='C2'><f>A1+D1</f></c></row>", "B3")]
     [InlineData("<row r='2'><c r='B2'><f>99+1</f></c></row><row r='3'><c r='B3'><f>A1+A4</f></c></row>",
@@ -890,6 +907,9 @@ public sealed class ExcelWorkbookTests
     [InlineData("=1 2")]
     [InlineData("=Inputs!")]
     [InlineData("=SUM({1,;2,3})")]
+    [InlineData("=SUM(1:\"text\")")]
+    [InlineData("=Second!42")]
+    [InlineData("=A1:\"text\"")]
     public void RejectsIncompleteFormulaExpressions(string text)
     {
         Assert.Throws<ArgumentException>(() => Edit(Workbook(""), new ExcelCellEdit("A1", ExcelCellValue.Formula(text))));

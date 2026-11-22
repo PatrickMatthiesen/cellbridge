@@ -342,8 +342,8 @@ internal sealed class ExcelWorksheet
 
             var hadFormula = before.Type == ExcelCellType.Formula;
             var hasFormula = after.Type == ExcelCellType.Formula;
-            if ((hadFormula || hasFormula) && HasAlignedFormulaChange(address, hasFormula ? after : before,
-                hasFormula ? FormulaChange.Introduced : FormulaChange.Removed))
+            if (hadFormula && HasAlignedFormulaChange(address, before, FormulaChange.Removed) ||
+                hasFormula && HasAlignedFormulaChange(address, after, FormulaChange.Introduced))
                 return true;
 
             RecordMovement(movements, before, after, address);
@@ -440,6 +440,8 @@ internal sealed class ExcelWorksheet
         {
             foreach (var candidate in alternatives)
             {
+                if (candidate.Index == position.Index)
+                    continue;
                 ChargeFormulaComparison(position.Pattern.Length, broken);
                 if (ExcelFormula.CompatibleReferences(position.Pattern, candidate.Pattern, candidate.Index - position.Index))
                     return true;
