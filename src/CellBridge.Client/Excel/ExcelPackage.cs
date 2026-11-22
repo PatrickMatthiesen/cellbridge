@@ -38,7 +38,8 @@ internal sealed class ExcelPackage : IDisposable
     private readonly Dictionary<uint, (ExcelSheet Sheet, string Path, bool IsWorksheet)> _sheets = [];
     private readonly XElement _sheetList;
     private readonly XElement _relationships;
-    private Dictionary<string, (uint SheetId, XElement Table)>? _tablesByName;
+    private Dictionary<string, (uint SheetId, XElement Table, CellRange Range)>? _tablesByName;
+    private Dictionary<XElement, HashSet<string>>? _tableColumnNames;
     private ExcelStyles? _styles;
     private string? _themeSignature;
     private (XElement Markup, string Text)[]? _strings;
@@ -275,6 +276,36 @@ internal sealed class ExcelPackage : IDisposable
             yield return Root(ResolvePart(part, Relationship(rels, Required(table, R + "id"))), S + "table");
     }
 
+    internal string ValidateTableReference(uint sheetId, CellAddress address, string? name,
+        string? firstColumn, string? lastColumn)
+    {
+        var tables = TablesByName();
+        name ??= tables.SingleOrDefault(entry => entry.Value.SheetId == sheetId && entry.Value.Range.Contains(address)).Key
+            ?? throw new ArgumentException($"Cell {address} must belong to a table to use an unqualified structured reference.");
+        if (!tables.TryGetValue(name, out var binding))
+            throw new ArgumentException($"The formula in cell {address} references unknown table '{name}'.");
+        if (firstColumn is null)
+            return name;
+
+        _tableColumnNames ??= [];
+        if (!_tableColumnNames.TryGetValue(binding.Table, out var columns))
+        {
+            columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var column in TableColumns(binding.Table))
+            {
+                var columnName = DecodeString(Required(column, "name"));
+                Charge(64L + columnName.Length * 2L);
+                columns.Add(columnName);
+            }
+            _tableColumnNames.Add(binding.Table, columns);
+        }
+        var missing = !columns.Contains(firstColumn) ? firstColumn :
+            lastColumn is not null && !columns.Contains(lastColumn) ? lastColumn : null;
+        if (missing is not null)
+            throw new ArgumentException($"The formula in cell {address} references unknown column '{missing}' in table '{name}'.");
+        return name;
+    }
+
     internal bool TableBindingDiffers(ExcelPackage current, string name)
     {
         var before = TablesByName().GetValueOrDefault(name);
@@ -285,25 +316,27 @@ internal sealed class ExcelPackage : IDisposable
         // Relationship IDs and part paths can be reassigned when a workbook is repacked.
         return before.SheetId != after.SheetId || !SameText(SheetUid(before.SheetId), current.SheetUid(after.SheetId)) ||
             !SameIdentity(before.Table, after.Table, RevisionUid) ||
-            CellRange.Parse(Required(before.Table, "ref")) != CellRange.Parse(Required(after.Table, "ref")) ||
+            before.Range != after.Range ||
             ((uint?)before.Table.Attribute("headerRowCount") ?? 1) != ((uint?)after.Table.Attribute("headerRowCount") ?? 1) ||
             ((uint?)before.Table.Attribute("totalsRowCount") ?? 0) != ((uint?)after.Table.Attribute("totalsRowCount") ?? 0) ||
-            !Columns(before.Table).SequenceEqual(Columns(after.Table), EqualityComparer<XElement>.Create((left, right) =>
+            !TableColumns(before.Table).SequenceEqual(TableColumns(after.Table), EqualityComparer<XElement>.Create((left, right) =>
                 left is not null && right is not null && SameIdentity(left, right, TableColumnUid) &&
                 SameText((string?)left.Attribute("name"), (string?)right.Attribute("name"))));
 
-        static IEnumerable<XElement> Columns(XElement table) => table.Element(S + "tableColumns")?.Elements(S + "tableColumn") ?? [];
         static bool SameIdentity(XElement left, XElement right, XName uid) =>
             (uint?)left.Attribute("id") == (uint?)right.Attribute("id") && SameText((string?)left.Attribute(uid), (string?)right.Attribute(uid));
         static bool SameText(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
     }
 
-    private Dictionary<string, (uint SheetId, XElement Table)> TablesByName()
+    private static IEnumerable<XElement> TableColumns(XElement table) =>
+        table.Element(S + "tableColumns")?.Elements(S + "tableColumn") ?? [];
+
+    private Dictionary<string, (uint SheetId, XElement Table, CellRange Range)> TablesByName()
     {
         if (_tablesByName is not null)
             return _tablesByName;
 
-        var tables = new Dictionary<string, (uint, XElement)>(StringComparer.OrdinalIgnoreCase);
+        var tables = new Dictionary<string, (uint, XElement, CellRange)>(StringComparer.OrdinalIgnoreCase);
         foreach (var (id, (_, part, isWorksheet)) in _sheets)
         {
             if (!isWorksheet)
@@ -317,8 +350,8 @@ internal sealed class ExcelPackage : IDisposable
             foreach (var table in Tables(Root(part, S + "worksheet"), part))
             {
                 var name = Required(table, "displayName");
-                Charge(96L + name.Length * 2L);
-                if (!tables.TryAdd(name, (id, table)))
+                Charge(112L + name.Length * 2L);
+                if (!tables.TryAdd(name, (id, table, CellRange.Parse(Required(table, "ref")))))
                     throw new InvalidDataException("The workbook contains duplicate table names.");
             }
         }

@@ -322,6 +322,96 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
+    [InlineData("Missing!A1")]
+    [InlineData("'Missing sheet'!A1")]
+    [InlineData("SUM(First:Missing!A1)")]
+    public void CurrentFormulaRejectsUnknownLocalWorksheets(string text)
+    {
+        var package = Workbook("");
+        var edit = new ExcelCellEdit("B1", ExcelCellValue.Formula(text));
+
+        var error = Assert.Throws<ArgumentException>(() => ExcelWorkbook.MergeCells(package, package, 9, [edit]));
+
+        Assert.Contains("references unknown worksheet", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("SUM(NoSuchTable[Amount])", 9u, "B1", null, "unknown table 'NoSuchTable'")]
+    [InlineData("SUM([Amount])", 9u, "B1", null, "must belong to a table")]
+    [InlineData("SUM([X])", 9u, "B1", "A1:B3", "must belong to a table")]
+    [InlineData("SUM([X])", 4u, "C2", "A1:B3", "must belong to a table")]
+    [InlineData("SUM(Table1[Amount])", 9u, "B1", "A1:B3", "unknown column 'Amount'")]
+    [InlineData("SUM([Amount])", 4u, "B2", "A1:B3", "unknown column 'Amount'")]
+    [InlineData("SUM(Table1[[#Data],[X]:[Amount]])", 9u, "B1", "A1:B3", "unknown column 'Amount'")]
+    [InlineData("SUM([@[Amount]:[Y]])", 4u, "B2", "A1:B3", "unknown column 'Amount'")]
+    [InlineData("SUM([0]!NoSuchTable[Amount])", 9u, "B1", "A1:B3", "unknown table 'NoSuchTable'")]
+    public void FormulaRejectsUnboundLocalStructuredReferences(
+        string text, uint sheetId, string address, string? tableRange, string message)
+    {
+        var original = Workbook("<row r='2'><c r='A2'><v>11</v></c></row>", tableRange: tableRange);
+        var latest = Edit(original, new ExcelCellEdit("A2", ExcelCellValue.Number(22)));
+        var edit = new ExcelCellEdit(address, ExcelCellValue.Formula(text));
+
+        foreach (var current in new[] { original, latest })
+        {
+            var error = Assert.Throws<ArgumentException>(() => ExcelWorkbook.MergeCells(original, current, sheetId, [edit]));
+            Assert.Contains(message, error.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("SUM(Table1[X])", 9u, "B1", "X")]
+    [InlineData("SUM([X])", 4u, "B2", "X")]
+    [InlineData("SUM(Table1[ [#headers], [#data], [x]:[y] ])", 9u, "B1", "X")]
+    [InlineData("SUM(Table1[[#Data],[#Totals]])", 9u, "B1", "X")]
+    [InlineData("SUM(Table1[], Table1[#All], Table1[[X]])", 9u, "B1", "X")]
+    [InlineData("SUM([[#This Row],[X]],[@X],[@[X]:[Y]])", 4u, "B2", "X")]
+    [InlineData("SUM(Table1[[#Data],[Cost'] A1]])", 9u, "B1", "Cost] A1")]
+    [InlineData("SUM(Table1['#Data])", 9u, "B1", "#Data")]
+    [InlineData("SUM(Table1[Owner''s '[Plan']])", 9u, "B1", "Owner's [Plan]")]
+    public void FormulaMergesWithBoundLocalStructuredReferences(string text, uint sheetId, string address, string columnName)
+    {
+        var original = Workbook("<row r='2'><c r='A2'><v>11</v></c></row>", tableRange: "A1:B3",
+            firstTableColumnName: columnName);
+        var latest = Edit(original, new ExcelCellEdit("A2", ExcelCellValue.Number(22)));
+        var formula = ExcelCellValue.Formula(text);
+
+        foreach (var current in new[] { original, latest })
+        {
+            var result = ExcelWorkbook.MergeCells(original, current, sheetId, [new(address, formula)]);
+            Assert.Equal(ExcelWriteStatus.Success, result.Status);
+            var package = Assert.IsType<byte[]>(result.Package);
+            Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(package, sheetId, address)).Value);
+        }
+    }
+
+    [Theory]
+    [InlineData("SUM(Table1[#Unknown])")]
+    [InlineData("SUM(Table1[[#This Row],[#Totals],[X]])")]
+    [InlineData("SUM(Table1[[X],[Y]])")]
+    [InlineData("SUM(Table1[O'wner])")]
+    [InlineData("SUM(First!Table1[X])")]
+    public void FormulaRejectsUnsupportedStructuredReferenceSyntax(string text)
+    {
+        var package = Workbook("", tableRange: "A1:B3");
+        Assert.Throws<ArgumentException>(() =>
+            ExcelWorkbook.MergeCells(package, package, 9, [new("B1", ExcelCellValue.Formula(text))]));
+    }
+
+    [Fact]
+    public void StaleFormulaCannotBindToATableAddedByThePeer()
+    {
+        var original = Workbook("");
+        var latest = Workbook("", tableRange: "A1:B3");
+        var formula = ExcelCellValue.Formula("SUM(Table1[X])");
+
+        var error = Assert.Throws<ArgumentException>(() =>
+            ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]));
+
+        Assert.Contains("unknown table 'Table1'", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(null, 1u, "X", "SUM(Table1[X])")]
     [InlineData("A1:B3", 2u, "X", "SUM(TABLE1[X])")]
     [InlineData("A1:B3", 1u, "Z", "SUM(Table1[[#Data],[X]])")]
@@ -338,6 +428,19 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
         Assert.Null(result.Package);
         Assert.Contains("table binding", result.Detail!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StaleUnqualifiedFormulaConflictsWhenItsTableChanges()
+    {
+        var original = Workbook("", tableRange: "A1:B3");
+        var latest = Workbook("", tableRange: "A1:B3", firstTableColumnName: "Amount");
+
+        var result = ExcelWorkbook.MergeCells(original, latest, 4, [new("B2", ExcelCellValue.Formula("SUM([X])"))],
+            policy: ExcelConflictPolicy.LocalWins);
+
+        Assert.Equal(ExcelWriteStatus.StructuralConflict, result.Status);
+        Assert.Null(result.Package);
     }
 
     [Fact]
@@ -388,9 +491,10 @@ public sealed class ExcelWorkbookTests
     public void StaleFormulaMergesWithoutALocalSheetBindingChange(string text, string latestSheetName)
     {
         var formula = ExcelCellValue.Formula(text);
+        var original = Workbook("", tableRange: "A1:B3", firstTableColumnName: "First!A1");
+        var latest = Workbook("", tableRange: "A1:B3", firstTableColumnName: "First!A1", firstSheetName: latestSheetName);
 
-        var result = ExcelWorkbook.MergeCells(Workbook(""), Workbook("", firstSheetName: latestSheetName), 9,
-            [new("B1", formula)]);
+        var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]);
 
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
         Assert.Equal(formula, Assert.Single(ExcelWorkbook.ReadRange(result.Package!, 9, "B1")).Value);
@@ -1099,7 +1203,7 @@ public sealed class ExcelWorkbookTests
     [InlineData("IF(,SUM({1,2;3,-4}),)")]
     [InlineData("SUM({-1E-2,+.5; 3, -4}, {1;2})")]
     [InlineData("SUM({TRUE,false;#N/A,#REF!;\"a,\"\"b\"\";}\",\"\"})")]
-    [InlineData("SUM(Table1[[#Data],[Cost'] A1]],[@X],My.Name,\\A1,XFE1)")]
+    [InlineData("SUM(My.Name,\\A1,XFE1)")]
     [InlineData("SUM(\"A1! +\",#REF!,#DIV/0!,NOW())")]
     [InlineData("_xlfn.LAMBDA(x,x+1)(2)")]
     [InlineData("SUM((A1):(B1), A1:(OFFSET(B1,1,0)), INDEX(B1:B5,2):A1)")]

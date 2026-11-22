@@ -28,7 +28,8 @@ internal static partial class ExcelFormula
     private enum Group { Root, Parentheses, Function }
 
     private readonly record struct Token(TokenKind Kind, int Start, int End);
-    private readonly record struct Frame(Group Group, bool RequiresReference, Expression FunctionResult, bool OuterValueOperator);
+    private readonly record struct Frame(Group Group, bool RequiresReference, Expression FunctionResult,
+        bool OuterValueOperator, string? FunctionName = null, int ArgumentSeparators = 0);
 
     // These calls can return references usable by Excel's reference operators.
     private static readonly HashSet<string> ReferenceFunctions = new(StringComparer.OrdinalIgnoreCase)
@@ -95,12 +96,13 @@ internal static partial class ExcelFormula
                 var hasFunctionName = previous.Kind == TokenKind.Name && hasOperand;
                 var invokesResult = !separated && hasOperand && formula[previous.Start] == ')';
                 var opensFunction = hasFunctionName || invokesResult;
+                string? functionName = null;
                 var functionResult = Expression.Value;
-                if (opensFunction && hasFunctionName)
+                if (hasFunctionName)
                 {
-                    var name = formula[previous.Start..previous.End];
-                    ValidateFunction(name);
-                    if (ReferenceFunctions.Contains(name))
+                    functionName = formula[previous.Start..previous.End];
+                    ValidateFunction(functionName);
+                    if (ReferenceFunctions.Contains(functionName))
                         functionResult = Expression.Reference;
                 }
                 if (!opensFunction && (expression == Expression.Sheet ||
@@ -108,7 +110,8 @@ internal static partial class ExcelFormula
                     throw InvalidExpression();
                 var preceding = opensFunction ? beforePrevious : expression;
                 groups.Push(new Frame(opensFunction ? Group.Function : Group.Parentheses,
-                    preceding is Expression.Reference or Expression.Range or Expression.Sheet, functionResult, valueOperator));
+                    preceding is Expression.Reference or Expression.Range or Expression.Sheet, functionResult,
+                    valueOperator, functionName));
                 expression = Expression.Empty;
                 valueOperator = false;
             }
@@ -118,6 +121,12 @@ internal static partial class ExcelFormula
                     throw new ArgumentException("The Excel formula delimiters are unbalanced.");
                 if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
                     throw InvalidExpression();
+                if (group == Group.Function)
+                {
+                    // With a separator, both sides count even when an argument is omitted.
+                    var argumentCount = hasOperand || frame.ArgumentSeparators > 0 ? frame.ArgumentSeparators + 1 : 0;
+                    ValidateFunctionArity(frame.FunctionName, argumentCount);
+                }
                 groups.Pop();
                 expression = group == Group.Function ? frame.FunctionResult : valueOperator ? Expression.Value : expression;
                 if (frame.RequiresReference && expression != Expression.Reference)
@@ -132,7 +141,12 @@ internal static partial class ExcelFormula
             {
                 if (!hasOperand && !(group == Group.Function && expression == Expression.Empty))
                     throw InvalidExpression();
-                if (group != Group.Function)
+                if (group == Group.Function)
+                {
+                    groups.Pop();
+                    groups.Push(frame with { ArgumentSeparators = frame.ArgumentSeparators + 1 });
+                }
+                else
                     valueOperator |= expression == Expression.Value;
                 expression = group == Group.Function ? Expression.Empty : Expression.Incomplete;
             }
@@ -235,25 +249,143 @@ internal static partial class ExcelFormula
         static string Unquote(string name) => name.Trim('\'').Replace("''", "'", StringComparison.Ordinal);
     }
 
-    internal static IEnumerable<string> LocalTableReferences(string formula)
+    internal static IEnumerable<(string? Name, string? FirstColumn, string? LastColumn)> LocalTableReferences(string formula)
     {
         if (!formula.Contains('['))
             yield break;
 
         var previous = new Token(TokenKind.Symbol, 0, 0);
-        var qualifiedExternally = false;
-        var externalQualifier = false;
+        var beforePrevious = previous;
         foreach (var token in Tokens(formula))
         {
-            if (token.Kind == TokenKind.StructuredReference && previous.Kind == TokenKind.Name &&
-                previous.End == token.Start && !qualifiedExternally)
-                yield return formula[previous.Start..previous.End];
+            if (token.Kind == TokenKind.StructuredReference)
+            {
+                var named = previous.Kind == TokenKind.Name && previous.End == token.Start;
+                var qualifier = named ? beforePrevious : previous;
+                var external = false;
+                if (qualifier.Kind == TokenKind.Sheet)
+                {
+                    var prefix = formula.AsSpan(qualifier.Start, qualifier.End - qualifier.Start - 1);
+                    if (!named || prefix.Length < 3 || prefix[0] != '[' || prefix[^1] != ']' ||
+                        !uint.TryParse(prefix[1..^1], NumberStyles.None, CultureInfo.InvariantCulture, out var index))
+                        throw new ArgumentException("A structured reference only supports a workbook index as its qualifier.");
+                    external = index != 0;
+                }
 
-            qualifiedExternally = externalQualifier;
-            externalQualifier = token.Kind == TokenKind.Sheet &&
-                formula.AsSpan(token.Start, token.End - token.Start).Contains('[');
+                var (first, last) = ReadColumns(formula.AsSpan(token.Start + 1, token.End - token.Start - 2));
+                if (!external)
+                    yield return (named ? formula[previous.Start..previous.End] : null, first, last);
+            }
+
+            beforePrevious = previous;
             previous = token;
         }
+
+        // MS-XLSX permits a simple column, a row specifier, or nested selectors.
+        // Excel also uses @ as shorthand for #This Row.
+        static (string? First, string? Last) ReadColumns(ReadOnlySpan<char> inner)
+        {
+            var thisRow = inner.StartsWith("@", StringComparison.Ordinal);
+            if (thisRow)
+                inner = inner[1..];
+            if (inner.IsEmpty)
+                return default;
+            if (!inner.TrimStart(' ').StartsWith("[", StringComparison.Ordinal))
+            {
+                var (column, keyword) = ReadSelector(inner);
+                if (thisRow && keyword is not null)
+                    throw InvalidSelector();
+                return (column, null);
+            }
+
+            inner = inner.Trim(' ');
+            var (first, row) = ReadBracketedSelector(ref inner);
+            if (row is not null)
+            {
+                if (thisRow)
+                    throw InvalidSelector();
+                if (inner.IsEmpty)
+                    return default;
+                ReadComma(ref inner);
+                (first, var nextRow) = ReadBracketedSelector(ref inner);
+                if (nextRow is not null)
+                {
+                    if ((row, nextRow) is not (("#HEADERS", "#DATA") or ("#DATA", "#TOTALS")))
+                        throw InvalidSelector();
+                    if (inner.IsEmpty)
+                        return default;
+                    ReadComma(ref inner);
+                    (first, _) = ReadBracketedSelector(ref inner);
+                }
+            }
+
+            if (first is null)
+                throw InvalidSelector();
+            if (inner.IsEmpty)
+                return (first, null);
+            if (inner[0] != ':')
+                throw InvalidSelector();
+            inner = inner[1..].TrimStart(' ');
+            var (last, _) = ReadBracketedSelector(ref inner);
+            if (last is null || !inner.IsEmpty)
+                throw InvalidSelector();
+            return (first, last);
+        }
+
+        static void ReadComma(ref ReadOnlySpan<char> text)
+        {
+            if (text[0] != ',')
+                throw InvalidSelector();
+            text = text[1..].TrimStart(' ');
+        }
+
+        static (string? Column, string? Keyword) ReadBracketedSelector(ref ReadOnlySpan<char> text)
+        {
+            if (text.IsEmpty || text[0] != '[')
+                throw InvalidSelector();
+            for (var i = 1; i < text.Length; i++)
+            {
+                if (text[i] == '\'')
+                    i++;
+                else if (text[i] == ']')
+                {
+                    var selector = ReadSelector(text[1..i].Trim(' '));
+                    text = text[(i + 1)..].TrimStart(' ');
+                    return selector;
+                }
+            }
+            throw InvalidSelector();
+        }
+
+        static (string? Column, string? Keyword) ReadSelector(ReadOnlySpan<char> text)
+        {
+            if (text.IsEmpty || text[0] == ' ' || text[^1] == ' ')
+                throw InvalidSelector();
+            if (text[0] == '#')
+            {
+                var keyword = text.ToString().ToUpperInvariant();
+                if (keyword is not ("#ALL" or "#DATA" or "#HEADERS" or "#TOTALS" or "#THIS ROW"))
+                    throw InvalidSelector();
+                return (null, keyword);
+            }
+
+            var column = new System.Text.StringBuilder(text.Length);
+            for (var i = 0; i < text.Length; i++)
+            {
+                if (text[i] == '\'')
+                {
+                    i++;
+                    if (i == text.Length || text[i] is not ('\'' or '[' or ']' or '#' or '@'))
+                        throw InvalidSelector();
+                }
+                else if (text[i] is '[' or ']' or '#')
+                    throw InvalidSelector();
+                column.Append(text[i]);
+            }
+            return (column.ToString(), null);
+        }
+
+        static ArgumentException InvalidSelector() => new("The Excel formula contains an invalid structured reference selector.");
     }
 
     private static IEnumerable<Token> Tokens(string formula)
@@ -343,6 +475,54 @@ internal static partial class ExcelFormula
             (futurePrefix && (pieces[1].Length == 0 || !char.IsAsciiLetter(pieces[1][0]) ||
                 pieces.Skip(2).Any(piece => piece.Length == 0 || !char.IsAsciiLetterOrDigit(piece[0])))))
             throw new ArgumentException($"Function '{name}' has an invalid or missing _xlfn. prefix.");
+    }
+
+    private const int MaxFunctionArguments = 255;
+
+    // Selected worksheet signatures from MS-XLSX 2.2.2 and Excel's function reference.
+    // Match the full stored name so qualified calls can have their own signatures.
+    private static readonly Dictionary<string, (int Min, int Max)> FunctionArities = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ABS"] = (1, 1),
+        ["CHOOSE"] = (2, MaxFunctionArguments),
+        ["COLUMN"] = (0, 1),
+        ["DATE"] = (3, 3),
+        ["FALSE"] = (0, 0),
+        ["HLOOKUP"] = (3, 4),
+        ["IF"] = (1, 3),
+        ["IFERROR"] = (2, 2),
+        ["INDEX"] = (2, 4),
+        ["INDIRECT"] = (1, 2),
+        ["LEFT"] = (1, 2),
+        ["LEN"] = (1, 1),
+        ["LOG10"] = (1, 1),
+        ["MATCH"] = (2, 3),
+        ["MID"] = (3, 3),
+        ["NA"] = (0, 0),
+        ["NOW"] = (0, 0),
+        ["OFFSET"] = (3, 5),
+        ["PI"] = (0, 0),
+        ["RAND"] = (0, 0),
+        ["RIGHT"] = (1, 2),
+        ["ROUND"] = (2, 2),
+        ["ROW"] = (0, 1),
+        ["SQRT"] = (1, 1),
+        ["SUM"] = (1, MaxFunctionArguments),
+        ["SUMIF"] = (2, 3),
+        ["TEXT"] = (2, 2),
+        ["TODAY"] = (0, 0),
+        ["TRUE"] = (0, 0),
+        ["VLOOKUP"] = (3, 4),
+        ["_xlfn.XLOOKUP"] = (3, 6)
+    };
+
+    private static void ValidateFunctionArity(string? name, int argumentCount)
+    {
+        if (argumentCount > MaxFunctionArguments)
+            throw new ArgumentException($"An Excel function call cannot have more than {MaxFunctionArguments} arguments.");
+        if (name is not null && FunctionArities.TryGetValue(name, out var arity) &&
+            (argumentCount < arity.Min || argumentCount > arity.Max))
+            throw new ArgumentException($"Function '{name}' has an invalid number of arguments.");
     }
 
     internal static string Translate(string formula, CellAddress master, CellAddress target)

@@ -126,7 +126,7 @@ public static class ExcelWorkbook
         }
         if (conflicts.Count > 0)
             return new ExcelMergeResult(ExcelWriteStatus.CellConflict, null, conflicts);
-        if (original is not null && FormulaBindingConflict(original, current, sheetId, pending.Values) is { } detail)
+        if (FormulaBindingConflict(original, current, sheetId, pending) is { } detail)
             return new ExcelMergeResult(ExcelWriteStatus.StructuralConflict, null, [], detail);
 
         var changed = remote.Apply(pending);
@@ -137,8 +137,8 @@ public static class ExcelWorkbook
         return new ExcelMergeResult(ExcelWriteStatus.Success, current.Save(), []);
     }
 
-    private static string? FormulaBindingConflict(ExcelPackage original, ExcelPackage current, uint editedSheetId,
-        IEnumerable<ExcelCellValue> pending)
+    private static string? FormulaBindingConflict(ExcelPackage? original, ExcelPackage current, uint editedSheetId,
+        Dictionary<CellAddress, ExcelCellValue> pending)
     {
         IReadOnlyList<ExcelSheet>? originalSheets = null;
         IReadOnlyList<ExcelSheet>? currentSheets = null;
@@ -147,26 +147,34 @@ public static class ExcelWorkbook
         var verifiedRanges = new HashSet<(int First, int Last)>();
         var verifiedSheets = new HashSet<uint> { editedSheetId };
         var verifiedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var value in pending)
+        foreach (var (address, value) in pending)
         {
             if (value.Type != ExcelCellType.Formula)
                 continue;
-            foreach (var name in ExcelFormula.LocalTableReferences(value.RawValue!))
+            foreach (var (name, firstColumn, lastColumn) in ExcelFormula.LocalTableReferences(value.RawValue!))
             {
-                if (verifiedTables.Add(name) && original.TableBindingDiffers(current, name))
-                    return $"The table binding for formula reference '{name}' changed.";
+                var boundName = (original ?? current).ValidateTableReference(editedSheetId, address, name, firstColumn, lastColumn);
+                if (original is not null && verifiedTables.Add(boundName) && original.TableBindingDiffers(current, boundName))
+                    return $"The table binding for formula reference '{boundName}' changed.";
             }
             foreach (var (first, last) in ExcelFormula.LocalSheetReferences(value.RawValue!))
             {
                 var reference = last is null ? first : $"{first}:{last}";
-                originalSheets ??= original.ListSheets();
                 currentSheets ??= current.ListSheets();
-                originalIndices ??= SheetIndices(originalSheets);
                 currentIndices ??= SheetIndices(currentSheets);
+                var afterFirst = currentIndices.GetValueOrDefault(first, -1);
+                var afterLast = currentIndices.GetValueOrDefault(last ?? first, -1);
+                if (original is null)
+                {
+                    if (afterFirst < 0 || afterLast < 0)
+                        throw new ArgumentException($"The formula in cell {address} references unknown worksheet '{reference}'.");
+                    continue;
+                }
+                originalSheets ??= original.ListSheets();
+                originalIndices ??= SheetIndices(originalSheets);
                 if (!originalIndices.TryGetValue(first, out var beforeFirst) ||
-                    !currentIndices.TryGetValue(first, out var afterFirst) ||
                     !originalIndices.TryGetValue(last ?? first, out var beforeLast) ||
-                    !currentIndices.TryGetValue(last ?? first, out var afterLast) ||
+                    afterFirst < 0 || afterLast < 0 ||
                     beforeLast - beforeFirst != afterLast - afterFirst)
                     return $"The worksheet binding for formula reference '{reference}' changed.";
                 if (!verifiedRanges.Add((beforeFirst, beforeLast)))
