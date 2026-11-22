@@ -257,7 +257,10 @@ public sealed class ExcelWorkbookTests
         "<row r='3'><c r='A3'><f>$B$3</f></c></row>", "C2")]
     [InlineData("<row r='2'><c r='B2'><f>A1+C1</f></c></row>",
         "<row r='2'><c r='C2'><f>A1+D1</f></c></row>", "B3")]
-    public void InsertingARowOrColumnThatMovesAFormulaConflictsAtABlankAddress(
+    [InlineData("<row r='2'><c r='B2'><f>99+1</f></c></row><row r='3'><c r='B3'><f>A1+A4</f></c></row>",
+        "<row r='2'><c r='B2'><f>A1+A3</f></c></row>", "C3")]
+    [InlineData("<row r='2' ht='30' customHeight='1'/>", "<row r='3' ht='30' customHeight='1'/>", "C2")]
+    public void RowOrColumnShiftsConflictAtABlankAddress(
         string before, string after, string address)
     {
         var result = ExcelWorkbook.MergeCells(Workbook(before), Workbook(after), 4,
@@ -353,14 +356,14 @@ public sealed class ExcelWorkbookTests
     public void SharedFormulaFollowerPreservesDefinedNamesOutsideTheCellGrid()
     {
         var original = Workbook(
-            "<row r='1'><c r='B1'><f t='shared' si='0' ref='B1:C2'>SUM(XFE1,A1048577,A1,$A$1)</f></c></row>" +
+            @"<row r='1'><c r='B1'><f t='shared' si='0' ref='B1:C2'>SUM(XFE1,A1048577,\A1,A1,$A$1)</f></c></row>" +
             "<row r='2'><c r='C2'><f t='shared' si='0'/></c></row>",
-            definedNames: "<definedName name='XFE1'>1</definedName><definedName name='A1048577'>2</definedName>");
+            definedNames: @"<definedName name='XFE1'>1</definedName><definedName name='A1048577'>2</definedName><definedName name='\A1'>42</definedName>");
         Validate(original);
 
         var follower = Assert.Single(ExcelWorkbook.ReadRange(original, 4, "C2"));
 
-        Assert.Equal(ExcelCellValue.Formula("SUM(XFE1,A1048577,B2,$A$1)"), follower.Value);
+        Assert.Equal(ExcelCellValue.Formula(@"SUM(XFE1,A1048577,\A1,B2,$A$1)"), follower.Value);
     }
 
     [Fact]

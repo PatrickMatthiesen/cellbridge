@@ -294,6 +294,13 @@ public sealed class CellStorageCodecTests
     }
 
     [Fact]
+    public void UnsupportedResponseCharsetIsMalformedResponseData()
+    {
+        Assert.Throws<InvalidDataException>(() => CellStorageResponseParser.Parse(
+            Encoding.UTF8.GetBytes(WrapSubResponseData("")), "text/xml; charset=invalid-charset"));
+    }
+
+    [Fact]
     public void ReadsVersionErrorWithoutResponseCollection()
     {
         var response = CellStorageResponseParser.Parse($"""

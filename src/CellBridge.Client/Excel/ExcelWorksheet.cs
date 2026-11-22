@@ -315,8 +315,8 @@ internal sealed class ExcelWorksheet
         var movements = new Dictionary<ExcelCellValue, ValueMovement>();
         // Keep raw formula matches and also look for references Excel adjusted during a shift.
         var formulaMovements = new Dictionary<ExcelCellValue, ValueMovement>();
-        // A shift can change both signatures. Track formula additions and removals by row and column.
-        var formulaChanges = new Dictionary<(bool IsRow, int Index), bool>();
+        // A shifted formula can replace another formula and change both signatures.
+        var formulaChanges = new Dictionary<(bool IsRow, int Index), FormulaChange>();
         foreach (var (row, data) in _rows)
         foreach (var (column, cell) in data.Cells)
         {
@@ -328,7 +328,8 @@ internal sealed class ExcelWorksheet
 
             var hadFormula = before.Type == ExcelCellType.Formula;
             var hasFormula = after.Type == ExcelCellType.Formula;
-            if (hadFormula != hasFormula && HasAlignedFormulaChange(address, added: hasFormula))
+            if ((hadFormula || hasFormula) && HasAlignedFormulaChange(address, hadFormula && hasFormula
+                ? FormulaChange.Replaced : hasFormula ? FormulaChange.Added : FormulaChange.Removed))
                 return true;
 
             RecordMovement(movements, before, after, address);
@@ -344,7 +345,7 @@ internal sealed class ExcelWorksheet
                 continue;
             var after = remote.Value(cell, address);
             var hasFormula = after.Type == ExcelCellType.Formula;
-            if (hasFormula && HasAlignedFormulaChange(address, added: true))
+            if (hasFormula && HasAlignedFormulaChange(address, FormulaChange.Added))
                 return true;
 
             RecordMovement(movements, ExcelCellValue.Blank, after, address);
@@ -354,20 +355,22 @@ internal sealed class ExcelWorksheet
 
         return HasMovement(movements.Values) || HasMovement(formulaMovements.Values);
 
-        bool HasAlignedFormulaChange(CellAddress address, bool added) =>
-            HasOppositeFormulaChange((true, address.Row), added) ||
-            HasOppositeFormulaChange((false, address.Column), added);
+        bool HasAlignedFormulaChange(CellAddress address, FormulaChange change) =>
+            HasDifferentFormulaChange((true, address.Row), change) ||
+            HasDifferentFormulaChange((false, address.Column), change);
 
-        bool HasOppositeFormulaChange((bool IsRow, int Index) axis, bool added)
+        bool HasDifferentFormulaChange((bool IsRow, int Index) axis, FormulaChange change)
         {
-            if (formulaChanges.TryGetValue(axis, out var previouslyAdded))
-                return previouslyAdded != added;
+            if (formulaChanges.TryGetValue(axis, out var previous))
+                return previous != change;
 
             _package.Charge(64);
-            formulaChanges.Add(axis, added);
+            formulaChanges.Add(axis, change);
             return false;
         }
     }
+
+    private enum FormulaChange { Added, Removed, Replaced }
 
     private static ExcelCellValue RelativeFormula(ExcelCellValue value, CellAddress address) =>
         value.Type == ExcelCellType.Formula
@@ -550,6 +553,12 @@ internal sealed class ExcelWorksheet
             yield return $"{range.Type}:{range.Range}";
         foreach (var table in _package.Tables(_root))
             yield return ExcelStyles.Signature(table);
+        foreach (var (index, row) in _rows)
+            foreach (var attribute in row.Element.Attributes()
+                .Where(attribute => attribute.Name.Namespace == XNamespace.None &&
+                    attribute.Name.LocalName is "ht" or "customHeight" or "hidden" or "outlineLevel" or "collapsed")
+                .OrderBy(attribute => attribute.Name.LocalName, StringComparer.Ordinal))
+                yield return $"row:{index}:{attribute.Name}={attribute.Value}";
         if ((string?)_root.Element(S + "dimension")?.Attribute("ref") is { } declared &&
             CellRange.Parse(declared).ToString() != ActualDimension())
             yield return "dimension:" + CellRange.Parse(declared);

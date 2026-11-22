@@ -34,8 +34,10 @@ public static class CellStorageResponseParser
                 string.Equals(p.ContentId, start, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidDataException("MTOM root Content-ID does not identify a MIME part.");
             body = root.ContentMemory;
-            attachments = parts.Where(p => p != root && !string.IsNullOrEmpty(p.ContentId))
-                .ToDictionary(p => p.ContentId!, StringComparer.OrdinalIgnoreCase);
+            attachments = new Dictionary<string, MtomPart>(StringComparer.OrdinalIgnoreCase);
+            foreach (var part in parts)
+                if (part != root && !string.IsNullOrEmpty(part.ContentId) && !attachments.TryAdd(part.ContentId, part))
+                    throw new InvalidDataException("The MTOM response contains a duplicate attachment Content-ID.");
             mediaType = MediaTypeHeaderValue.Parse(root.ContentType);
         }
 
@@ -44,7 +46,13 @@ public static class CellStorageResponseParser
             : new MemoryStream(body.ToArray(), writable: false);
         if (mediaType.CharSet is { } charset)
         {
-            using var text = new StreamReader(source, System.Text.Encoding.GetEncoding(charset.Trim('"')));
+            System.Text.Encoding encoding;
+            try { encoding = System.Text.Encoding.GetEncoding(charset.Trim('"')); }
+            catch (Exception error) when (error is ArgumentException or NotSupportedException)
+            {
+                throw new InvalidDataException("The SOAP response declares an unsupported charset.", error);
+            }
+            using var text = new StreamReader(source, encoding);
             using var textReader = XmlReader.Create(text, ReaderSettings());
             return Parse(textReader, request, attachments);
         }
