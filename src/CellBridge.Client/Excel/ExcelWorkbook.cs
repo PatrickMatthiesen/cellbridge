@@ -139,6 +139,7 @@ public static class ExcelWorkbook
             return new ExcelMergeResult(ExcelWriteStatus.Success, null, []);
         current.MarkSheetChanged(sheetId);
         current.PruneCalculationChain(sheetId, changed);
+        current.RequestRecalculation();
         return new ExcelMergeResult(ExcelWriteStatus.Success, current.Save(), []);
     }
 
@@ -152,10 +153,25 @@ public static class ExcelWorkbook
         var verifiedRanges = new HashSet<(int First, int Last)>();
         var verifiedSheets = new HashSet<uint> { editedSheetId };
         var verifiedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var verifiedExternalWorkbooks = new HashSet<uint>();
         foreach (var (address, value) in pending)
         {
             if (value.Type != ExcelCellType.Formula)
                 continue;
+            foreach (var index in ExcelFormula.ExternalWorkbookReferences(value.RawValue!))
+            {
+                if (!verifiedExternalWorkbooks.Add(index))
+                    continue;
+                var target = current.ExternalWorkbookTarget(index);
+                if (original is null)
+                {
+                    if (target is null)
+                        throw new ArgumentException($"The formula in cell {address} references unknown external workbook '[{index}]'.");
+                    continue;
+                }
+                if (target is null || !string.Equals(original.ExternalWorkbookTarget(index), target, StringComparison.Ordinal))
+                    return $"The external workbook binding for formula reference '[{index}]' changed or could not be resolved.";
+            }
             foreach (var (name, firstColumn, lastColumn) in ExcelFormula.LocalTableReferences(value.RawValue!))
             {
                 var boundName = (original ?? current).ValidateTableReference(editedSheetId, address, name, firstColumn, lastColumn);

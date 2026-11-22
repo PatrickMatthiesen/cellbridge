@@ -36,6 +36,13 @@ public sealed record ExcelCellValue(ExcelCellType Type, string? RawValue)
     public static ExcelCellValue Formula(string formula) => new(ExcelCellType.Formula, formula.StartsWith('=') ? formula[1..] : formula);
 }
 
+/// <summary>A worksheet cell. The client does not calculate formulas.</summary>
+/// <param name="Address">The cell address.</param>
+/// <param name="Value">The cell value or formula.</param>
+/// <param name="CachedValue">The formula result stored in the workbook, if present.</param>
+/// <param name="Calculated">Whether the workbook stores a formula result. That result may be stale.</param>
+/// <param name="StyleIndex">The effective style index.</param>
+/// <param name="DateValue">The decoded date and time, if present.</param>
 public sealed record ExcelCell(
     string Address,
     ExcelCellValue Value,

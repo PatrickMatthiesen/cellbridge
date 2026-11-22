@@ -67,6 +67,15 @@ internal static partial class ExcelFormula
                     token.Kind == TokenKind.Name && operand.Contains('$') && !TryCellAxes(operand, out _, out _, out _))
                     throw InvalidExpression();
 
+                // A workbook-only prefix qualifies a name or table. A1 references require a sheet.
+                if (previous.Kind == TokenKind.Sheet &&
+                    TryWorkbookIndex(formula.AsSpan(previous.Start, previous.End - previous.Start - 1), out _) &&
+                    (token.Kind != TokenKind.Name || TryCellAxes(operand, out _, out _, out _)))
+                    throw InvalidExpression();
+                if (token.Kind == TokenKind.Sheet && operand[0] == '\'' && operand[^2] == '\'' &&
+                    TryWorkbookIndex(operand[1..^2], out _))
+                    throw InvalidExpression();
+
                 var isReference = token.Kind switch
                 {
                     TokenKind.Literal => false,
@@ -240,13 +249,13 @@ internal static partial class ExcelFormula
             if (token.Kind != TokenKind.Sheet)
                 continue;
             var qualifier = formula[token.Start..(token.End - 1)];
-            var bookStart = qualifier[0] == '\'' ? 1 : 0;
-            if (qualifier.AsSpan(bookStart).StartsWith("[", StringComparison.Ordinal))
+            var bookEnd = WorkbookIndexPrefixEnd(qualifier, out var index);
+            if (bookEnd != 0)
             {
-                var bookEnd = qualifier.IndexOf(']', bookStart);
-                if (bookEnd < 0 || !TryWorkbookIndex(qualifier.AsSpan(bookStart, bookEnd - bookStart + 1), out var index) || index != 0)
+                if (index != 0)
                     continue;
-                qualifier = qualifier.Remove(bookStart, bookEnd - bookStart + 1);
+                var bookStart = qualifier[0] == '\'' ? 1 : 0;
+                qualifier = qualifier.Remove(bookStart, bookEnd - bookStart);
             }
             if (qualifier.Length == 0 || qualifier.Contains('[') || qualifier.Equals("#REF", StringComparison.OrdinalIgnoreCase))
                 continue;
@@ -259,6 +268,30 @@ internal static partial class ExcelFormula
         }
 
         static string Unquote(string name) => name.Trim('\'').Replace("''", "'", StringComparison.Ordinal);
+    }
+
+    internal static IEnumerable<uint> ExternalWorkbookReferences(string formula)
+    {
+        if (!formula.Contains('['))
+            yield break;
+
+        foreach (var token in Tokens(formula))
+            if (token.Kind == TokenKind.Sheet &&
+                WorkbookIndexPrefixEnd(formula.AsSpan(token.Start, token.End - token.Start - 1), out var index) != 0 &&
+                index != 0)
+                yield return index;
+    }
+
+    private static int WorkbookIndexPrefixEnd(ReadOnlySpan<char> qualifier, out uint index)
+    {
+        index = 0;
+        var start = qualifier[0] == '\'' ? 1 : 0;
+        if (!qualifier[start..].StartsWith("[", StringComparison.Ordinal))
+            return 0;
+        var length = qualifier[start..].IndexOf(']') + 1;
+        if (!TryWorkbookIndex(qualifier.Slice(start, length), out index))
+            throw new ArgumentException("The Excel formula contains an invalid workbook index.");
+        return start + length;
     }
 
     internal static IEnumerable<(string? Name, string? FirstColumn, string? LastColumn)> LocalTableReferences(string formula)

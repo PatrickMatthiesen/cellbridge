@@ -188,6 +188,28 @@ internal sealed class ExcelPackage : IDisposable
 
     internal void MarkSheetChanged(uint sheetId) => MarkChanged(_sheets[sheetId].Path);
 
+    internal void RequestRecalculation()
+    {
+        var workbook = Root(WorkbookPart, S + "workbook");
+        var calculation = workbook.Element(S + "calcPr");
+        if (calculation is null)
+        {
+            calculation = new XElement(S + "calcPr");
+            var preceding = workbook.Element(S + "definedNames") ?? workbook.Element(S + "externalReferences")
+                ?? workbook.Element(S + "functionGroups") ?? _sheetList;
+            preceding.AddAfterSelf(calculation);
+        }
+        else if (IsTrue(calculation.Attribute("fullCalcOnLoad")) &&
+            (string?)calculation.Attribute("calcCompleted") is "0" or "false")
+        {
+            return;
+        }
+
+        calculation.SetAttributeValue("fullCalcOnLoad", true);
+        calculation.SetAttributeValue("calcCompleted", false);
+        MarkChanged(WorkbookPart);
+    }
+
     internal uint AddSheet(string name)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
@@ -330,6 +352,40 @@ internal sealed class ExcelPackage : IDisposable
 
     private static IEnumerable<XElement> TableColumns(XElement table) =>
         table.Element(S + "tableColumns")?.Elements(S + "tableColumn") ?? [];
+
+    internal string? ExternalWorkbookTarget(uint index)
+    {
+        if (index is 0 or > int.MaxValue)
+            return null;
+
+        // Formula indices address the ordered list, independently of relationship IDs and part names.
+        var reference = _sheetList.Parent?.Element(S + "externalReferences")?
+            .Elements(S + "externalReference").ElementAtOrDefault((int)index - 1);
+        if ((string?)reference?.Attribute(R + "id") is not { Length: > 0 } referenceId)
+            return null;
+
+        var relationship = _relationships.Elements(P + "Relationship").SingleOrDefault(rel =>
+            (string?)rel.Attribute("Id") == referenceId);
+        if (relationship is null || (string?)relationship.Attribute("Type") != R.NamespaceName + "/externalLink" ||
+            (string?)relationship.Attribute("TargetMode") == "External" ||
+            (string?)relationship.Attribute("Target") is not { Length: > 0 })
+            return null;
+
+        var part = ResolvePart(WorkbookPart, relationship);
+        if (!_zip.Contains(part))
+            return null;
+        var externalBook = Root(part, S + "externalLink").Element(S + "externalBook");
+        var relationshipsPart = RelationshipsPath(part);
+        if ((string?)externalBook?.Attribute(R + "id") is not { Length: > 0 } bookId || !_zip.Contains(relationshipsPart))
+            return null;
+
+        var path = Root(relationshipsPart, P + "Relationships").Elements(P + "Relationship").SingleOrDefault(rel =>
+            (string?)rel.Attribute("Id") == bookId);
+        // The target is package metadata. External workbooks are never opened here.
+        return path is not null && (string?)path.Attribute("Type") == R.NamespaceName + "/externalLinkPath" &&
+            (string?)path.Attribute("TargetMode") == "External" &&
+            (string?)path.Attribute("Target") is { Length: > 0 } target ? target : null;
+    }
 
     private Dictionary<string, (uint SheetId, XElement Table, CellRange Range)> TablesByName()
     {

@@ -18,6 +18,7 @@ public sealed class ExcelWorkbookTests
     [Fact]
     public void EditsKeepOriginalZipRecordsAndWorkbookMarkup()
     {
+        const string workbookPart = "xl/workbook.xml";
         var original = Workbook("<row r='4'><c r='C4'><v>3</v></c></row>", nonSeekableZip: true);
         var edited = Edit(original, new ExcelCellEdit("B4", ExcelCellValue.Number(2)),
             new ExcelCellEdit("A3", ExcelCellValue.String("  <hello>  ")),
@@ -33,7 +34,14 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(["B4", "C4", "XFD4"], rows[^1].Elements(S + "c").Select(cell => (string?)cell.Attribute("r")));
         Assert.Equal("dyDescent", sheet.Root.Attributes().Single(attribute => attribute.Name.LocalName == "dyDescent").Name.LocalName);
 
-        foreach (var name in new[] { "[Content_Types].xml", "_rels/.rels", "xl/workbook.xml",
+        var workbook = Part(edited, workbookPart).Root!;
+        var calculation = Assert.Single(workbook.Elements(S + "calcPr"));
+        Assert.True((bool?)calculation.Attribute("fullCalcOnLoad"));
+        Assert.False((bool?)calculation.Attribute("calcCompleted"));
+        calculation.Remove();
+        Assert.True(XNode.DeepEquals(Part(original, workbookPart).Root, workbook));
+
+        foreach (var name in new[] { "[Content_Types].xml", "_rels/.rels",
                      "xl/_rels/workbook.xml.rels", "xl/styles.xml", "xl/worksheets/sheet2.xml" })
         {
             var before = ZipRecord(original, name);
@@ -48,6 +56,52 @@ public sealed class ExcelWorkbookTests
         Assert.Equal(ExcelCellValue.Formula("SUM(B4:C4)"), formula.Value);
         Assert.Null(formula.CachedValue);
         Assert.False(formula.Calculated);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("<calcPr calcMode='manual' calcId='191029' calcOnSave='0' iterate='1' iterateCount='42' " +
+                "fullPrecision='0' forceFullCalc='0' fullCalcOnLoad='0' calcCompleted='1'/>")]
+    public void EditingAPrecedentRequestsRecalculationAndPreservesItsDependentCache(string calculationMarkup)
+    {
+        const string workbookPart = "xl/workbook.xml";
+        const string chainPart = "xl/calcChain.xml";
+        var original = Workbook("<row r='1'><c r='A1'><v>10</v></c><c r='B1'><f>A1*2</f><v>20</v></c></row>",
+            definedNames: "<definedName name='Input'>First!$A$1</definedName>",
+            calculationChain: "<c r='B1' i='4'/><c r='A1' i='9'/>", nonSeekableZip: true,
+            workbookTail: calculationMarkup + "<extLst/>");
+        Validate(original);
+
+        var unchanged = ExcelWorkbook.MergeCells(original, original, 4, [new("A1", ExcelCellValue.Number(10))]);
+        Assert.Equal(ExcelWriteStatus.Success, unchanged.Status);
+        Assert.Null(unchanged.Package);
+
+        var edited = Edit(original, new ExcelCellEdit("A1", ExcelCellValue.Number(30)));
+
+        Validate(edited);
+        var cells = ExcelWorkbook.ReadRange(edited, 4, "A1:B1");
+        Assert.Equal(ExcelCellValue.Number(30), cells[0].Value);
+        Assert.Equal(ExcelCellValue.Formula("A1*2"), cells[1].Value);
+        Assert.Equal(ExcelCellValue.Number(20), cells[1].CachedValue);
+        Assert.True(cells[1].Calculated);
+
+        var workbook = Part(edited, workbookPart).Root!;
+        Assert.Equal(["sheets", "definedNames", "calcPr", "extLst"],
+            workbook.Elements().Select(element => element.Name.LocalName));
+        var calculation = workbook.Element(S + "calcPr")!;
+        Assert.True((bool?)calculation.Attribute("fullCalcOnLoad"));
+        Assert.False((bool?)calculation.Attribute("calcCompleted"));
+        calculation.SetAttributeValue("fullCalcOnLoad", null);
+        calculation.SetAttributeValue("calcCompleted", null);
+        var originalCalculation = Part(original, workbookPart).Root!.Element(S + "calcPr");
+        originalCalculation?.SetAttributeValue("fullCalcOnLoad", null);
+        originalCalculation?.SetAttributeValue("calcCompleted", null);
+        Assert.True(XNode.DeepEquals(originalCalculation ?? new XElement(S + "calcPr"), calculation));
+
+        var before = ZipRecord(original, chainPart);
+        var after = ZipRecord(edited, chainPart);
+        Assert.Equal(before.HeaderAndPayload, after.HeaderAndPayload);
+        Assert.Equal(before.CentralDirectoryExceptOffset, after.CentralDirectoryExceptOffset);
     }
 
     [Fact]
@@ -518,17 +572,22 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
-    [InlineData("\"Table1[X]\"")]
-    [InlineData("SUM([1]!Table1[X])")]
-    [InlineData("\"Table1\"")]
-    [InlineData("SUM([1]!Table1)")]
-    [InlineData("SUM(DefinedName)")]
-    public void TableDeletionDoesNotConflictWithNonlocalTableText(string text)
+    [InlineData("\"Table1[X]\"", false)]
+    [InlineData("SUM([1]!Table1[X])", true)]
+    [InlineData("\"Table1\"", false)]
+    [InlineData("SUM([1]!Table1)", true)]
+    [InlineData("SUM(DefinedName)", false)]
+    public void TableDeletionDoesNotConflictWithNonlocalTableText(string text, bool external)
     {
         const string definedNames = "<definedName name='DefinedName'>1</definedName>";
         var formula = ExcelCellValue.Formula(text);
         var original = Workbook("", tableRange: "A1:B3", definedNames: definedNames);
         var latest = Workbook("", definedNames: definedNames);
+        if (external)
+        {
+            original = ExcelExternalReferenceTests.WithExternalWorkbooks(original, 1, "https://example.invalid/Other.xlsx");
+            latest = ExcelExternalReferenceTests.WithExternalWorkbooks(latest, 1, "https://example.invalid/Other.xlsx");
+        }
         var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]);
 
         Assert.Equal(ExcelWriteStatus.Success, result.Status);
@@ -561,15 +620,20 @@ public sealed class ExcelWorkbookTests
     }
 
     [Theory]
-    [InlineData("fIrSt!A1+1", "FIRST")]
-    [InlineData("\"First!A1\"&Table1[First!A1]", "Renamed")]
-    [InlineData("'[1]First'!A1+[1]First!A1", "Renamed")]
-    [InlineData("'[01]First'!A1+[01]First!A1", "Renamed")]
-    public void StaleFormulaMergesWithoutALocalSheetBindingChange(string text, string latestSheetName)
+    [InlineData("fIrSt!A1+1", "FIRST", false)]
+    [InlineData("\"First!A1\"&Table1[First!A1]", "Renamed", false)]
+    [InlineData("'[1]First'!A1+[1]First!A1", "Renamed", true)]
+    [InlineData("'[01]First'!A1+[01]First!A1", "Renamed", true)]
+    public void StaleFormulaMergesWithoutALocalSheetBindingChange(string text, string latestSheetName, bool external)
     {
         var formula = ExcelCellValue.Formula(text);
         var original = Workbook("", tableRange: "A1:B3", firstTableColumnName: "First!A1");
         var latest = Workbook("", tableRange: "A1:B3", firstTableColumnName: "First!A1", firstSheetName: latestSheetName);
+        if (external)
+        {
+            original = ExcelExternalReferenceTests.WithExternalWorkbooks(original, 1, "https://example.invalid/Other.xlsx");
+            latest = ExcelExternalReferenceTests.WithExternalWorkbooks(latest, 1, "https://example.invalid/Other.xlsx");
+        }
 
         var result = ExcelWorkbook.MergeCells(original, latest, 9, [new("B1", formula)]);
 
@@ -1357,7 +1421,8 @@ public sealed class ExcelWorkbookTests
         string firstSheetPart = "sheet1.xml", string? firstSheetUid = null, uint? tableHeaderRows = null,
         string firstSheetName = "First", bool firstSheetIsChart = false, string tablePart = "table1.xml",
         uint tableId = 1, string firstTableColumnName = "X", string sharedStringAttributes = "",
-        string secondSheetRows = "<row r='1'><c r='A1'><f>5+5</f><v>10</v></c></row>", string tableName = "Table1")
+        string secondSheetRows = "<row r='1'><c r='A1'><f>5+5</f><v>10</v></c></row>", string tableName = "Table1",
+        string workbookTail = "")
     {
         const string worksheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
         const string chartSheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml";
@@ -1403,7 +1468,7 @@ public sealed class ExcelWorkbookTests
             Add("xl/workbook.xml", $"<workbook xmlns='{Main}' xmlns:r='{OfficeRels}'>" +
                 (date1904 ? "<workbookPr date1904='1'/>" : "") +
                 "<sheets>" + (reverseSheets ? second + first : first + second) + "</sheets>" +
-                (definedNames is null ? "" : $"<definedNames>{definedNames}</definedNames>") + "</workbook>");
+                (definedNames is null ? "" : $"<definedNames>{definedNames}</definedNames>") + workbookTail + "</workbook>");
             Add("xl/_rels/workbook.xml.rels", $"<Relationships xmlns='{PackageRels}'>" +
                 Relationship("rId1", firstSheetIsChart ? "chartsheet" : "worksheet", firstSheetTarget) +
                 Relationship("rId2", "worksheet", "worksheets/sheet2.xml") +
