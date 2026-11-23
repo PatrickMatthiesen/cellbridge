@@ -97,15 +97,18 @@ public sealed class McpLifecycleTests
         await agentMcp.InitializeAsync();
     }
 
-    [Fact]
-    public async Task GracefulShutdownReleasesSameSubjectWritersAcrossDocuments()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GracefulShutdownReleasesSameSubjectWritersAcrossDocuments(bool transientReleaseFailure)
     {
+        LifecycleRepository? repository = null;
         await using var host = await McpTestHost.StartAsync(enableRealTime: true, configureProtocol: options =>
         {
             options.MaxConcurrentRequestsPerSubject = 1;
             options.MaxQueuedRequestsPerSubject = 0;
             options.MaxQueuedRequests = 0;
-        });
+        }, wrapRepository: inner => repository = new(inner));
         var first = await host.CreateWorkbookAsync();
         var second = await host.CreateWorkbookAsync("/shared/second.xlsx");
         using var http = host.CreateHttp("owner");
@@ -120,6 +123,11 @@ public sealed class McpLifecycleTests
             Assert.Equal(McpTestHost.Owner.Identity.Subject, Assert.Single(control.Coordination.SchemaOwners).OwnerSubject);
         }
 
+        if (transientReleaseFailure)
+        {
+            repository!.FailReleaseForResource = first.ResourceId;
+            repository.TransientReleaseFailures = 2;
+        }
         await host.StopAsync();
 
         foreach (var resourceId in resourceIds)
@@ -260,6 +268,8 @@ public sealed class McpLifecycleTests
     {
         public Func<CancellationToken, Task>? PauseNextFind;
         public volatile bool FailRelease;
+        public Guid? FailReleaseForResource;
+        public int TransientReleaseFailures;
 
         public override async ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken ct = default)
         {
@@ -271,9 +281,11 @@ public sealed class McpLifecycleTests
         public override ValueTask<ControlResult> ExecuteControlAsync(DocumentControlCommand command,
             CancellationToken ct = default)
         {
-            if (FailRelease && command is DocumentControlCommand.Office office &&
+            if (command is DocumentControlCommand.Office office &&
                 (office.Request.SubRequestDataAttributes.GetValueOrDefault("CoauthRequestType") == "ExitCoauthoring" ||
-                 office.Request.SubRequestDataAttributes.GetValueOrDefault("EditorsTableRequestType") == "LeaveEditingSession"))
+                 office.Request.SubRequestDataAttributes.GetValueOrDefault("EditorsTableRequestType") == "LeaveEditingSession") &&
+                (FailRelease || command.ResourceId == FailReleaseForResource &&
+                    Interlocked.Decrement(ref TransientReleaseFailures) >= 0))
                 throw new IOException("Test storage release failure.");
             return base.ExecuteControlAsync(command, ct);
         }

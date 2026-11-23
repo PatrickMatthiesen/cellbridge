@@ -15,6 +15,7 @@ internal sealed class McpWorkbookRegistry(
     TimeProvider clock, ILogger<McpWorkbookRegistry> logger)
     : BackgroundService
 {
+    private static readonly TimeSpan ReleaseRetryDelay = TimeSpan.FromSeconds(1);
     private readonly object _gate = new();
     private readonly Dictionary<string, McpWorkbookEntry> _handles = new(StringComparer.Ordinal);
     private readonly Dictionary<WorkbookKey, McpWorkbookEntry> _workbooks = [];
@@ -218,14 +219,31 @@ internal sealed class McpWorkbookRegistry(
             foreach (var entry in entries)
                 entry.Closing = true;
         }
-        await base.StopAsync(cancellationToken);
-        await Parallel.ForEachAsync(entries.GroupBy(entry => entry.Key.Subject),
-            new ParallelOptions
+        try
+        {
+            await base.StopAsync(cancellationToken);
+            var parallel = new ParallelOptions
             {
                 MaxDegreeOfParallelism = protocolOptions.MaxConcurrentRequests,
                 CancellationToken = cancellationToken,
-            },
-            (group, token) => CloseEntriesWhenIdleAsync(group, token));
+            };
+            while (entries.Length > 0)
+            {
+                await Parallel.ForEachAsync(entries.GroupBy(entry => entry.Key.Subject), parallel,
+                    (group, token) => CloseEntriesWhenIdleAsync(group, token));
+                entries = entries.Where(entry => !entry.Removed).ToArray();
+                if (entries.Length > 0)
+                    await Task.Delay(ReleaseRetryDelay, clock, cancellationToken);
+            }
+        }
+        finally
+        {
+            int pending;
+            lock (_gate)
+                pending = _handles.Count;
+            if (pending > 0)
+                logger.LogWarning("Shutdown did not confirm participation release for {WorkbookCount} MCP workbooks.", pending);
+        }
     }
 
     private Task WaitForRequestAsync(McpWorkbookEntry entry, CancellationToken cancellationToken) =>
@@ -334,7 +352,7 @@ internal sealed class McpWorkbookRegistry(
             if (!entry.Transport.LeaseExpired)
             {
                 // Keep the owner and client in their existing workbook slot until cleanup can retry.
-                entry.RetryReleaseAt = clock.GetUtcNow().AddSeconds(1);
+                entry.RetryReleaseAt = clock.GetUtcNow() + ReleaseRetryDelay;
                 return false;
             }
             confirmed = false;
