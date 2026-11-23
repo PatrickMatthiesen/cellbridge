@@ -8,10 +8,17 @@ public sealed class MtomResponseMessage
     private readonly ReadOnlyMemory<byte>[] _segments;
     public string ContentType { get; }
     public long ContentLength { get; }
+    /// <summary>The root part and all binary attachments.</summary>
+    public int PartCount { get; }
+    /// <summary>The largest part header, excluding the blank line before its body.</summary>
+    public int MaxPartHeaderBytes { get; }
 
-    internal MtomResponseMessage(string contentType, IEnumerable<ReadOnlyMemory<byte>> segments)
+    private MtomResponseMessage(string contentType, IEnumerable<ReadOnlyMemory<byte>> segments,
+        int partCount, int maxPartHeaderBytes)
     {
         ContentType = contentType;
+        PartCount = partCount;
+        MaxPartHeaderBytes = maxPartHeaderBytes;
         _segments = segments.ToArray();
         foreach (var segment in _segments)
             ContentLength = checked(ContentLength + segment.Length);
@@ -26,16 +33,18 @@ public sealed class MtomResponseMessage
         var rootContentId = ContentId(0);
         var soapMediaType = soapNamespace == CellStorageRequest.Soap12Namespace ? "application/soap+xml" : "text/xml";
         var segments = new List<ReadOnlyMemory<byte>>();
+        int maxPartHeaderBytes = 0;
 
         // Keep the WCF/SharePoint preamble and root headers accepted by Word.
-        AddAscii($"\r\n--{boundary}\r\n");
-        AddAscii($"Content-ID: <{rootContentId}>\r\nContent-Transfer-Encoding: 8bit\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"{soapMediaType}\"\r\n\r\n");
+        AddHeader($"\r\n--{boundary}\r\n",
+            $"Content-ID: <{rootContentId}>\r\nContent-Transfer-Encoding: 8bit\r\nContent-Type: application/xop+xml;charset=utf-8;type=\"{soapMediaType}\"");
         segments.Add(Encoding.UTF8.GetBytes(soapXml));
         AddAscii("\r\n");
 
         for (int i = 0; i < binaryParts.Count; i++)
         {
-            AddAscii($"--{boundary}\r\nContent-ID: <{ContentId(i + 1)}>\r\nContent-Transfer-Encoding: binary\r\nContent-Type: application/octet-stream\r\n\r\n");
+            AddHeader($"--{boundary}\r\n",
+                $"Content-ID: <{ContentId(i + 1)}>\r\nContent-Transfer-Encoding: binary\r\nContent-Type: application/octet-stream");
             segments.Add(binaryParts[i]);
             AddAscii("\r\n");
         }
@@ -43,9 +52,14 @@ public sealed class MtomResponseMessage
         AddAscii($"--{boundary}--\r\n");
         return new MtomResponseMessage(
             $"multipart/related; type=\"application/xop+xml\"; boundary=\"{boundary}\"; start=\"<{rootContentId}>\"; start-info=\"{soapMediaType}\"",
-            segments);
+            segments, binaryParts.Count + 1, maxPartHeaderBytes);
 
         void AddAscii(string value) => segments.Add(Encoding.ASCII.GetBytes(value));
+        void AddHeader(string prefix, string value)
+        {
+            maxPartHeaderBytes = Math.Max(maxPartHeaderBytes, Encoding.ASCII.GetByteCount(value));
+            AddAscii(prefix + value + "\r\n\r\n");
+        }
     }
 
     /// <summary>Returns an independent copy of the complete message.</summary>

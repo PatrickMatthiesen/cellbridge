@@ -31,6 +31,9 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
     private Task? _leaseRenewal;
     private Task? _realTimeWork;
     private ICellBridgeRealTimeChannel? _realTime;
+    private CancellationTokenSource? _manualRealTimeCancellation;
+    private Uri? _manualRealTimeEndpoint;
+    private DateTimeOffset _nextManualRealTimeRenewal;
     private bool _readerMayExist;
     private bool _writerMayExist;
     private bool _joinedAsWriter;
@@ -99,12 +102,16 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            session._leaseRenewal = session.RenewLeaseAsync();
+            if (options.AutomaticallyRenewParticipation)
+                session._leaseRenewal = session.RenewLeaseAsync();
             if (session._realTime is { } channel && realTimeTarget is { } connectedTarget)
             {
-                session._realTimeWork = session.RunRealTimeAsync(channel, connectedTarget);
+                if (options.AutomaticallyRenewParticipation)
+                    session._realTimeWork = session.RunRealTimeAsync(channel, connectedTarget);
+                else
+                    session.StartManualRealTime(channel, connectedTarget);
             }
-            else
+            else if (options.AutomaticallyRenewParticipation || !options.EnableRealTime)
             {
                 session._notifications.Writer.TryComplete();
             }
@@ -133,9 +140,42 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         return EditorsTableStreamParser.Parse(stream);
     }
 
+    /// <summary>Queries the editors table without changing the workbook snapshot.</summary>
+    public async Task<IReadOnlyList<EditorsTableEditor>> RefreshEditorsAsync(CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ThrowIfClosing();
+            var current = State;
+            var editors = await QueryPartitionAsync(StoredDocument.EditorsTablePartitionId, null,
+                _options.MaxGraphBytes - current.File.Size - current.Metadata.Size, cancellationToken);
+            Volatile.Write(ref _state, current with { Editors = editors });
+            return GetEditors();
+        }
+        finally { _gate.Release(); }
+    }
+
     /// <summary>Reads coalesced RTC notifications. Call SyncAsync to obtain the current graph.</summary>
     public IAsyncEnumerable<string> ReadNotificationsAsync(CancellationToken cancellationToken = default) =>
         _notifications.Reader.ReadAllAsync(cancellationToken);
+
+    /// <summary>Refreshes participation with the caller's current transport authorization.</summary>
+    public async Task RenewParticipationAsync(CancellationToken cancellationToken = default)
+    {
+        if (_options.AutomaticallyRenewParticipation)
+            throw new InvalidOperationException("This session renews participation automatically.");
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            ThrowIfClosing();
+            await RefreshLeaseAsync(cancellationToken);
+            if (_options.EnableRealTime && _nextManualRealTimeRenewal <= DateTimeOffset.UtcNow)
+                await RefreshManualRealTimeAsync(cancellationToken);
+        }
+        finally { _gate.Release(); }
+    }
 
     /// <summary>Queries current partition graphs and publishes their state together.</summary>
     public async Task<CellBridgeDocumentSnapshot> SyncAsync(CancellationToken cancellationToken = default)
@@ -467,19 +507,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 await _gate.WaitAsync(cancellationToken);
                 try
                 {
-                    if (_writerMayExist)
-                    {
-                        await SendCoauthAsync("RefreshCoauthoring", cancellationToken);
-                        _joinedAsWriter = true;
-                    }
-                    else
-                    {
-                        try { await SendEditorsAsync("RefreshEditingSession", cancellationToken); }
-                        catch (CellBridgeProtocolException error) when (error.ErrorCode == "EditorClientIdNotFound")
-                        {
-                            await SendEditorsAsync("JoinEditingSession", cancellationToken);
-                        }
-                    }
+                    await RefreshLeaseAsync(cancellationToken);
                 }
                 catch (Exception error) when (error is CellBridgeProtocolException || IsAmbiguous(error))
                 {
@@ -489,6 +517,32 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private async Task RefreshLeaseAsync(CancellationToken cancellationToken)
+    {
+        if (_writerMayExist)
+        {
+            try
+            {
+                await SendCoauthAsync("RefreshCoauthoring", cancellationToken);
+                _joinedAsWriter = true;
+                return;
+            }
+            catch (CellBridgeProtocolException error) when (!_options.AutomaticallyRenewParticipation &&
+                error.ErrorCode is "FileUnauthorizedAccess" or "InvalidCoauthSession" or "FileNotLockedOnServer" or
+                    "FileAlreadyLockedOnServer")
+            {
+                // An expired or downgraded writer can continue reading. The next write must join again.
+                _joinedAsWriter = false;
+            }
+        }
+
+        try { await SendEditorsAsync("RefreshEditingSession", cancellationToken); }
+        catch (CellBridgeProtocolException error) when (error.ErrorCode == "EditorClientIdNotFound")
+        {
+            await SendEditorsAsync("JoinEditingSession", cancellationToken);
+        }
     }
 
     private async Task RunRealTimeAsync(ICellBridgeRealTimeChannel channel, RealTimeConnectionTarget initial)
@@ -511,6 +565,71 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
             await connectionLifetime.CancelAsync();
             await pump;
         }
+    }
+
+    private void StartManualRealTime(ICellBridgeRealTimeChannel channel, RealTimeConnectionTarget target)
+    {
+        _realTime = channel;
+        _manualRealTimeEndpoint = target.Endpoint;
+        _nextManualRealTimeRenewal = DateTimeOffset.UtcNow + RealTimeRenewalDelay(target.ExpiresAt);
+        _manualRealTimeCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        // The pump only receives notifications. Do not retain request-scoped transport authorization.
+        using (ExecutionContext.SuppressFlow())
+            _realTimeWork = PumpManualRealTimeAsync(channel, _manualRealTimeCancellation.Token);
+    }
+
+    private async Task RefreshManualRealTimeAsync(CancellationToken cancellationToken)
+    {
+        _nextManualRealTimeRenewal = DateTimeOffset.UtcNow.AddSeconds(30);
+        try
+        {
+            if (await GetRealTimeTargetAsync(cancellationToken) is not { } target)
+                return;
+
+            if (_realTime is { } active && _realTimeWork is { IsCompleted: false } &&
+                target.Endpoint == _manualRealTimeEndpoint)
+            {
+                try
+                {
+                    await active.UpdateClientInfoAsync(target, cancellationToken);
+                    _nextManualRealTimeRenewal = DateTimeOffset.UtcNow + RealTimeRenewalDelay(target.ExpiresAt);
+                    return;
+                }
+                catch (Exception error) when (IsAmbiguous(error) && !cancellationToken.IsCancellationRequested)
+                {
+                    // A different current access ceiling requires a new connection.
+                }
+            }
+
+            if (_realTime is { } old && _manualRealTimeCancellation is { } stopping)
+            {
+                await stopping.CancelAsync();
+                await _realTimeWork!;
+                await old.DisposeAsync();
+                stopping.Dispose();
+                _manualRealTimeCancellation = null;
+                _realTime = null;
+                _realTimeWork = null;
+            }
+
+            if (await _transport.TryConnectRealTimeAsync(target, cancellationToken) is { } channel)
+                StartManualRealTime(channel, target);
+        }
+        catch (Exception error) when ((error is CellBridgeProtocolException || IsAmbiguous(error)) &&
+            !cancellationToken.IsCancellationRequested)
+        {
+            // RTC is optional. A later caller can retry with current authorization.
+        }
+    }
+
+    private async Task PumpManualRealTimeAsync(ICellBridgeRealTimeChannel channel, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var notification in channel.ReadNotificationsAsync(cancellationToken).WithCancellation(cancellationToken))
+                _notifications.Writer.TryWrite(notification);
+        }
+        catch (Exception error) when (error is CellBridgeProtocolException || IsAmbiguous(error)) { }
     }
 
     private async Task RenewRealTimeAsync(ICellBridgeRealTimeChannel channel, RealTimeConnectionTarget initial,
@@ -631,6 +750,7 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
         finally
         {
             _gate.Release();
+            _manualRealTimeCancellation?.Dispose();
             _lifetime.Dispose();
         }
 

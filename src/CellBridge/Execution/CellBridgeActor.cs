@@ -36,6 +36,11 @@ public sealed class DocumentAccessLimit
 {
     public Guid ResourceId { get; }
     public DocumentAccess Access { get; }
+    /// <summary>Optional fence that prevents access to a replacement of the same resource.</summary>
+    public long? LifecycleGeneration { get; init; }
+
+    internal bool Matches(Guid resourceId, long lifecycleGeneration) =>
+        ResourceId == resourceId && (LifecycleGeneration is null || LifecycleGeneration == lifecycleGeneration);
 
     public DocumentAccessLimit(Guid resourceId, DocumentAccess access)
     {

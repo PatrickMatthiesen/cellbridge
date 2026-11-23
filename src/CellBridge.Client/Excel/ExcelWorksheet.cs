@@ -76,6 +76,13 @@ internal sealed class ExcelWorksheet
 
     internal ExcelCellValue Value(CellAddress address) => Value(Find(address), address);
 
+    internal IEnumerable<CellAddress> Addresses()
+    {
+        foreach (var (row, contents) in _rows)
+            foreach (var column in contents.Cells.Keys)
+                yield return new CellAddress(row, column);
+    }
+
     internal string EffectiveStyle(CellAddress address) => _package.Styles.Signature(Style(address, Find(address)));
 
     internal IEnumerable<(int Offset, string? Properties)> StringFormatting(CellAddress address)

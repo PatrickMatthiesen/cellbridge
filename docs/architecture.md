@@ -56,8 +56,8 @@ See [authentication and permissions](authentication.md).
 
 ## Libraries and executables
 
-The eleven shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
-`CellBridge.AspNetCore`, `CellBridge.Storage.InMemory`,
+The thirteen shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
+`CellBridge.Client`, `CellBridge.AspNetCore`, `CellBridge.Mcp.AspNetCore`, `CellBridge.Storage.InMemory`,
 `CellBridge.Storage.PostgreSql`, `CellBridge.Storage.SqlServer`,
 `CellBridge.Storage.FileSystem`, `CellBridge.Lists`,
 `CellBridge.Lists.PostgreSql`, `CellBridge.Lists.SqlServer` and
@@ -72,6 +72,8 @@ The eleven shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
 | `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory flushes |
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
 | `CellBridge.AspNetCore` | HTTP endpoints, native Entra authentication, login integration and dependency registration |
+| `CellBridge.Client` | Stateful document sessions, protocol transports and Excel workbook edits |
+| `CellBridge.Mcp.AspNetCore` | Bearer-protected MCP workbook sessions and tools |
 | `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
 | `CellBridge.Lists.PostgreSql` | Independent EF Core list persistence and migrations, JSONB records, workspace isolation and grants |
 | `CellBridge.Lists.SqlServer` | List persistence, migrations, SQL queries, workspace authorization, views and audit |

@@ -61,6 +61,7 @@ public sealed partial class CellBridgeDocumentService
             return actor;
         actor = actor with { Authorization = null };
         if (isDeleted || !IsExternalBinding(observedBinding) ||
+            actor.AccessLimit is { } limit && !limit.Matches(resourceId, lifecycleGeneration) ||
             string.IsNullOrWhiteSpace(actor.Identity.Subject) || actor.Identity.Subject.Length > 1024)
             return actor with { Authorization = new(actor.Identity.Subject, resourceId, lifecycleGeneration,
                 observedBinding, DocumentAccess.None) };

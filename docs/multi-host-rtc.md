@@ -172,6 +172,11 @@ Co-located collaborators still use Redis coordination. Bypassing it would requir
 a separate room ownership and failover design. A global user cookie also cannot
 place each of that user's open documents independently.
 
+MCP sessions require separate sticky routing. Route requests with a given
+`Mcp-Session-Id` to the process that initialized the MCP session. Redis
+coordinates RTC delivery while each process holds its own MCP workbook state.
+See [MCP workbook hosting](mcp-workbooks.md#session-routing-and-lifetime).
+
 ## Qualification
 
 Simulated protocol and SignalR traffic can verify server authorization, room

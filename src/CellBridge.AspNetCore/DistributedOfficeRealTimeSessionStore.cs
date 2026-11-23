@@ -259,7 +259,7 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
     public async Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket,
         OfficeRealTimeTicket renewedTicket, string connectionId, CancellationToken cancellationToken)
     {
-        if (IsStopping || !CanRenew(currentTicket, renewedTicket) || IsExpired(currentTicket) || IsExpired(renewedTicket) ||
+        if (IsStopping || !currentTicket.CanRenewWith(renewedTicket) || IsExpired(currentTicket) || IsExpired(renewedTicket) ||
             string.IsNullOrEmpty(connectionId)) return false;
         using var deadline = CreateDeadline(cancellationToken);
         cancellationToken = deadline.Token;
@@ -1098,13 +1098,6 @@ internal sealed class DistributedOfficeRealTimeSessionStore : IOfficeRealTimeSes
     }
 
     private bool IsExpired(OfficeRealTimeTicket ticket) => ticket.ExpiresUtc <= _time.GetUtcNow();
-    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
-        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
-        current.ClientId == renewed.ClientId &&
-        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
-        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
-    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
-        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
     private bool IsStopping => Volatile.Read(ref _stopRequested) != 0 ||
         _stopping?.IsCancellationRequested == true || Volatile.Read(ref _disposed) != 0;
     private ValueTask<bool> AuthorizeAsync(OfficeRealTimeTicket ticket, DocumentAccess access, bool owns, CancellationToken token) =>
