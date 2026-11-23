@@ -68,12 +68,18 @@ Clients send an `Authorization: Bearer` header on each endpoint request and
 omit the `Cookie` header. If a client sends `Origin`, it must match the
 endpoint's public origin. Set `CellBridgeOptions.PublicOrigin` to the public
 HTTPS origin when hosting behind a proxy. `BearerScheme` defaults to
-`"Bearer"`. Set `AuthorizationPolicy` to require a named host policy in
-addition to a valid bearer token. Set `AuthorizationServer` to the HTTPS issuer
-URI to advertise RFC 9728 protected-resource metadata. With the route above,
-clients can fetch it at `/.well-known/oauth-protected-resource/mcp`.
+`"Bearer"`. Set `AuthorizationServer` to the HTTPS issuer URI to advertise
+RFC 9728 protected-resource metadata. With the route above, clients can fetch
+it at `/.well-known/oauth-protected-resource/mcp`.
 
 ## Identity and authorization
+
+Every MCP request checks the host's ASP.NET Core `DefaultPolicy` requirements
+against the principal authenticated by `BearerScheme`. Set
+`AuthorizationPolicy` to add a named policy whose requirements apply to the same
+principal. MCP uses `BearerScheme` for authentication even if the host's
+`DefaultPolicy` lists other schemes. If the named policy lists an authentication
+scheme, it must be `BearerScheme`.
 
 For interactive access, authenticate with the user's bearer token and use
 `AuthorizationPolicy` to require the issuer's MCP access scope. Map the token

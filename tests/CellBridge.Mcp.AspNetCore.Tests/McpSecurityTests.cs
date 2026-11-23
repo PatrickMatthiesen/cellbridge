@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using CellBridge.Client;
 using CellBridge.Storage.Abstractions;
+using Microsoft.AspNetCore.Authorization;
 using static CellBridge.Mcp.AspNetCore.Tests.McpWorkbookTests;
 
 namespace CellBridge.Mcp.AspNetCore.Tests;
@@ -121,6 +122,28 @@ public sealed class McpSecurityTests
     }
 
     [Fact]
+    public async Task HostDefaultPolicyRequiresClaimEvenWithWorkbookGrant()
+    {
+        await using var host = await McpTestHost.StartAsync(configureAuthorization: options =>
+            options.DefaultPolicy = new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .RequireClaim("scope", McpTestHost.WorkbookScope)
+                .Build());
+        var document = await host.CreateWorkbookAsync();
+        await host.SetPeerAccessAsync(document.ResourceId, DocumentAccess.Read);
+        using var unscoped = host.CreateHttp("peer");
+        using var scoped = host.CreateHttp("peer-mcp");
+
+        using var denied = await new McpHttpSession(unscoped).SendAsync(McpHttpSession.InitializeMethod,
+            McpHttpSession.InitializeArguments);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+
+        var mcp = new McpHttpSession(scoped);
+        await mcp.InitializeAsync();
+        await OpenAsync(mcp, new { resourceId = document.ResourceId });
+    }
+
+    [Fact]
     public async Task ScopedUserBearerUsesUserGrantsAndJoinsWithASeparateClientId()
     {
         await using var host = await McpTestHost.StartAsync(
@@ -141,6 +164,10 @@ public sealed class McpSecurityTests
         await ErrorAsync(mcp, "open_workbook", new { resourceId = privateDocument.ResourceId });
         var opened = await OpenAsync(mcp, new { resourceId = document.ResourceId });
         var workbookHandle = Handle(opened);
+
+        using var unscopedCall = await mcp.SendAsync("tools/call",
+            new { name = "list_sheets", arguments = new { workbookHandle } }, requestClient: officeHttp);
+        Assert.Equal(HttpStatusCode.Forbidden, unscopedCall.StatusCode);
 
         var editors = (await host.ReadControlAsync(document.ResourceId)).Editors;
         Assert.Equal(2, editors.Length);

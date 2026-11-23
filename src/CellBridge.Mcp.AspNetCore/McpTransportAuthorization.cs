@@ -27,16 +27,20 @@ internal static class McpTransportAuthorization
         if (CellBridgeActor.FromPrincipal(principal) is not { } caller)
             return Results.StatusCode(StatusCodes.Status403Forbidden);
 
+        var policyProvider = context.RequestServices.GetRequiredService<IAuthorizationPolicyProvider>();
+        var authorizationService = context.RequestServices.GetRequiredService<IAuthorizationService>();
+        var defaultPolicy = await policyProvider.GetDefaultPolicyAsync();
+        var defaultAuthorization = await authorizationService.AuthorizeAsync(principal, context, defaultPolicy.Requirements);
+        if (!defaultAuthorization.Succeeded) return Results.StatusCode(StatusCodes.Status403Forbidden);
+
         var options = context.RequestServices.GetRequiredService<CellBridgeMcpOptions>();
         if (options.AuthorizationPolicy is { } policyName)
         {
-            var policy = await context.RequestServices.GetRequiredService<IAuthorizationPolicyProvider>()
-                .GetPolicyAsync(policyName)
+            var policy = await policyProvider.GetPolicyAsync(policyName)
                 ?? throw new InvalidOperationException($"The MCP authorization policy '{policyName}' is not registered.");
             if (policy.AuthenticationSchemes.Any(scheme => scheme != options.BearerScheme))
                 throw new InvalidOperationException("The MCP authorization policy must use the selected bearer scheme.");
-            var authorization = await context.RequestServices.GetRequiredService<IAuthorizationService>()
-                .AuthorizeAsync(principal, context, policy.Requirements);
+            var authorization = await authorizationService.AuthorizeAsync(principal, context, policy.Requirements);
             if (!authorization.Succeeded) return Results.StatusCode(StatusCodes.Status403Forbidden);
         }
 

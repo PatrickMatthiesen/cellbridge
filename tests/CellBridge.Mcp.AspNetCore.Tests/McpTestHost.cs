@@ -7,6 +7,7 @@ using CellBridge.Client;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -21,7 +22,7 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
     private const string CookieScheme = "TestCookie";
     private const string BearerScheme = "TestBearer";
     public const string WorkbookScopePolicy = "WorkbookScope";
-    private const string WorkbookScope = "workbooks.access";
+    public const string WorkbookScope = "workbooks.access";
     public const string WorkbookPath = "/shared/planning.xlsx";
     public static readonly CellBridgeActor Owner = CreateActor("owner", canCreate: true);
     public static readonly CellBridgeActor Peer = CreateActor("peer");
@@ -32,7 +33,8 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
     public Uri WorkbookUrl => new(Origin, WorkbookPath);
 
     public static async Task<McpTestHost> StartAsync(bool enableRealTime = false,
-        Action<CellBridgeMcpOptions>? configure = null, Action<CellBridgeOptions>? configureProtocol = null)
+        Action<CellBridgeMcpOptions>? configure = null, Action<CellBridgeOptions>? configureProtocol = null,
+        Action<AuthorizationOptions>? configureAuthorization = null)
     {
         var content = new InMemoryContentStore();
         var storage = new StorageProvider(new InMemoryDocumentRepository(content), content);
@@ -43,8 +45,11 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
             .AddScheme<AuthenticationSchemeOptions, TestBearerHandler>(BearerScheme, _ => { })
             .AddCookie(CookieScheme, options => options.ForwardDefaultSelector =
                 context => context.Request.Headers.ContainsKey("Authorization") ? BearerScheme : null);
-        builder.Services.AddAuthorization(options => options.AddPolicy(WorkbookScopePolicy,
-            policy => policy.RequireClaim("scope", WorkbookScope)));
+        builder.Services.AddAuthorization(options =>
+        {
+            options.AddPolicy(WorkbookScopePolicy, policy => policy.RequireClaim("scope", WorkbookScope));
+            configureAuthorization?.Invoke(options);
+        });
         builder.Services.AddCellBridge(storage, requireDurability: false,
             configure: options =>
             {
