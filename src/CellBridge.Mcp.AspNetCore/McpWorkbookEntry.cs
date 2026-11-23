@@ -18,6 +18,7 @@ internal sealed class McpWorkbookEntry(
     private readonly Dictionary<string, string> _revisions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SheetOperation> _sheetOperations = new(StringComparer.Ordinal);
     private string? _pendingWrite;
+    private int _queuedRequests;
 
     public McpWorkbookRegistry.WorkbookKey Key { get; } = key;
     public long LifecycleGeneration { get; } = lifecycleGeneration;
@@ -27,11 +28,42 @@ internal sealed class McpWorkbookEntry(
     public SemaphoreSlim Gate { get; } = new(1, 1);
     public volatile bool Closing;
     public bool Closed { get; set; }
+    public bool Removed { get; set; }
+    public DateTimeOffset RetryReleaseAt { get; set; }
     public DateTimeOffset LastUsed { get; set; } = openedAt;
     public CellBridgeDocumentSession? Document { get; set; }
     public ExcelWorkbookSession? Workbook { get; set; }
 
     public bool IsExpired(DateTimeOffset now) => ExpiresAt <= now || now - LastUsed >= idleTimeout;
+
+    public async Task WaitForRequestAsync(int queueLimit, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Gate.Wait(0))
+            return;
+
+        var queued = Interlocked.Increment(ref _queuedRequests);
+        try
+        {
+            if (queued > queueLimit)
+                throw new McpException("The workbook is busy. Retry the request.");
+            if (!await Gate.WaitAsync(timeout, cancellationToken))
+                throw new McpException("The request timed out waiting for the workbook.");
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _queuedRequests);
+        }
+    }
+
+    public void ClearWorkbook()
+    {
+        Document = null;
+        Workbook = null;
+        _revisions.Clear();
+        _sheetOperations.Clear();
+        _pendingWrite = null;
+    }
 
     public string TokenFor(string revision)
     {

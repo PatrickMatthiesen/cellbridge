@@ -11,12 +11,14 @@ using System.Security.Cryptography;
 namespace CellBridge.Mcp.AspNetCore;
 
 internal sealed class McpWorkbookRegistry(
-    CellBridgeInProcessHost host, CellBridgeMcpOptions options, TimeProvider clock, ILogger<McpWorkbookRegistry> logger)
+    CellBridgeInProcessHost host, CellBridgeMcpOptions options, CellBridgeOptions protocolOptions,
+    TimeProvider clock, ILogger<McpWorkbookRegistry> logger)
     : BackgroundService
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, McpWorkbookEntry> _handles = new(StringComparer.Ordinal);
     private readonly Dictionary<WorkbookKey, McpWorkbookEntry> _workbooks = [];
+    private readonly int _leaseTimeoutSeconds = (int)Math.Clamp(Math.Ceiling(options.IdleSessionTimeout.TotalSeconds), 60, 120000);
     private bool _stopping;
 
     public int MaxReadCells => options.MaxReadCells;
@@ -48,7 +50,8 @@ internal sealed class McpWorkbookRegistry(
                     entry = new McpWorkbookEntry(key, document.LifecycleGeneration,
                         invocation.ExpiresAt, options.IdleSessionTimeout, clock.GetUtcNow(),
                         Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
-                        new McpWorkbookTransport(host, key.ResourceId, document.LifecycleGeneration, key.Subject));
+                        new McpWorkbookTransport(host, key.ResourceId, document.LifecycleGeneration, key.Subject,
+                            _leaseTimeoutSeconds, clock));
                     entry.Gate.Wait(0);
                     _workbooks.Add(key, entry);
                     _handles.Add(entry.Handle, entry);
@@ -56,18 +59,21 @@ internal sealed class McpWorkbookRegistry(
             }
 
             if (!opening)
-                await entry.Gate.WaitAsync(requestToken);
+                await WaitForRequestAsync(entry, requestToken);
 
             try
             {
                 requestToken.ThrowIfCancellationRequested();
                 if (entry.Closing)
                     throw Unavailable();
-                if (entry.Closed)
+                if (entry.Removed)
                     continue;
+                if (entry.Closed)
+                    throw Unavailable();
                 if (entry.LifecycleGeneration != document.LifecycleGeneration || entry.IsExpired(clock.GetUtcNow()))
                 {
-                    await CloseEntryAsync(entry);
+                    if (!await CloseEntryAsync(entry))
+                        throw Unavailable();
                     continue;
                 }
 
@@ -88,7 +94,7 @@ internal sealed class McpWorkbookRegistry(
                         {
                             Mode = CellBridgeDocumentSessionMode.LazyWriter,
                             AutomaticallyRenewParticipation = false,
-                            LeaseTimeoutSeconds = (int)Math.Clamp(Math.Ceiling(options.IdleSessionTimeout.TotalSeconds), 60, 120000),
+                            LeaseTimeoutSeconds = _leaseTimeoutSeconds,
                             MaxPackageBytes = checked((int)bytes),
                             MaxGraphBytes = bytes * 4,
                         }, token);
@@ -139,12 +145,12 @@ internal sealed class McpWorkbookRegistry(
         }
 
         // An expired session can still be closed promptly and never reaches a tool callback.
-        await entry.Gate.WaitAsync(cancellationToken);
+        await WaitForRequestAsync(entry, cancellationToken);
         try
         {
-            if (entry.Closing)
+            if (entry.Closing || entry.Removed || (entry.Closed && !closing))
                 throw Unavailable();
-            if (entry.Closed || entry.IsExpired(clock.GetUtcNow()) || invocation.IsExpired)
+            if (entry.IsExpired(clock.GetUtcNow()) || invocation.IsExpired)
             {
                 await CloseEntryAsync(entry);
                 throw Unavailable();
@@ -157,9 +163,13 @@ internal sealed class McpWorkbookRegistry(
             await EnsureAccessAsync(entry, current, access, token);
             entry.Transport.Invocation = current.Bind(entry);
             if (closing)
-                await CloseEntryAsync(entry);
+            {
+                if (!await CloseEntryAsync(entry))
+                    throw new McpException("Workbook participation release could not be confirmed. Retry close_workbook.");
+            }
             else
                 await entry.Document!.RenewParticipationAsync(token);
+
             var result = await use(entry, token);
             token.ThrowIfCancellationRequested();
             entry.LastUsed = clock.GetUtcNow();
@@ -177,6 +187,8 @@ internal sealed class McpWorkbookRegistry(
         McpWorkbookEntry[] entries;
         lock (_gate)
         {
+            if (_stopping)
+                return;
             entries = _workbooks.Values.Where(entry => entry.Key.SessionId == sessionId).ToArray();
             foreach (var entry in entries)
                 entry.Closing = true;
@@ -194,7 +206,7 @@ internal sealed class McpWorkbookRegistry(
             lock (_gate)
                 entries = _handles.Values.ToArray();
             foreach (var entry in entries)
-                await CloseIfExpiredAsync(entry);
+                await MaintainEntryAsync(entry, stoppingToken);
         }
     }
 
@@ -209,8 +221,18 @@ internal sealed class McpWorkbookRegistry(
                 entry.Closing = true;
         }
         await base.StopAsync(cancellationToken);
-        await CloseEntriesWhenIdleAsync(entries).WaitAsync(cancellationToken);
+        await Parallel.ForEachAsync(entries.GroupBy(entry => entry.Key.Subject),
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = protocolOptions.MaxConcurrentRequests,
+                CancellationToken = cancellationToken,
+            },
+            (group, token) => CloseEntriesWhenIdleAsync(group, token));
     }
+
+    private Task WaitForRequestAsync(McpWorkbookEntry entry, CancellationToken cancellationToken) =>
+        entry.WaitForRequestAsync(protocolOptions.MaxQueuedRequestsPerSubject, protocolOptions.RequestTimeout,
+            cancellationToken);
 
     private async Task EnsureAccessAsync(McpWorkbookEntry entry, McpWorkbookInvocation invocation,
         DocumentAccess access, CancellationToken cancellationToken)
@@ -253,52 +275,80 @@ internal sealed class McpWorkbookRegistry(
         return invocation;
     }
 
-    private async Task CloseIfExpiredAsync(McpWorkbookEntry entry)
+    private async Task MaintainEntryAsync(McpWorkbookEntry entry, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (!entry.Gate.Wait(0))
             return;
         try
         {
-            if (entry.IsExpired(clock.GetUtcNow()))
-                await CloseEntryAsync(entry);
+            var now = clock.GetUtcNow();
+            if (entry.Closed ? entry.RetryReleaseAt <= now : entry.IsExpired(now))
+                await CloseEntryAsync(entry, cancellationToken);
         }
         finally { entry.Gate.Release(); }
     }
 
-    private async Task CloseEntriesWhenIdleAsync(McpWorkbookEntry[] entries)
+    private async ValueTask CloseEntriesWhenIdleAsync(IEnumerable<McpWorkbookEntry> entries,
+        CancellationToken cancellationToken = default)
     {
         foreach (var entry in entries)
         {
-            await entry.Gate.WaitAsync();
-            try { await CloseEntryAsync(entry); }
+            await entry.Gate.WaitAsync(cancellationToken);
+            try { await CloseEntryAsync(entry, cancellationToken); }
             finally { entry.Gate.Release(); }
         }
     }
 
-    private async Task CloseEntryAsync(McpWorkbookEntry entry)
+    private async Task<bool> CloseEntryAsync(McpWorkbookEntry entry, CancellationToken cancellationToken = default)
     {
-        if (entry.Closed)
-            return;
-        entry.Closed = true;
+        if (entry.Removed)
+            return true;
+        if (!entry.Closed)
+        {
+            entry.Closed = true;
+            var document = entry.Document;
+            entry.ClearWorkbook();
+            try
+            {
+                if (document is not null)
+                    await document.DisposeAsync();
+            }
+            catch (Exception error)
+            {
+                logger.LogWarning(error, "Failed to dispose a CellBridge MCP workbook session.");
+            }
+        }
+
+        bool confirmed;
         try
         {
-            if (entry.Document is { } document)
-                await document.DisposeAsync();
+            await entry.Transport.ReleaseAsync(cancellationToken);
+            confirmed = true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return false;
         }
         catch (Exception error)
         {
-            logger.LogWarning(error, "Failed to dispose a CellBridge MCP workbook session.");
-        }
-        finally
-        {
-            try { await entry.Transport.ReleaseAsync(); }
-            catch (Exception error) { logger.LogWarning(error, "Failed to release CellBridge MCP workbook participation."); }
-            lock (_gate)
+            logger.LogWarning(error, "Failed to release CellBridge MCP workbook participation.");
+            if (!entry.Transport.LeaseExpired)
             {
-                _workbooks.Remove(entry.Key);
-                _handles.Remove(entry.Handle);
+                // Keep the owner and client in their existing workbook slot until cleanup can retry.
+                entry.RetryReleaseAt = clock.GetUtcNow().AddSeconds(1);
+                return false;
             }
+            confirmed = false;
         }
+
+        lock (_gate)
+        {
+            entry.Removed = true;
+            _workbooks.Remove(entry.Key);
+            _handles.Remove(entry.Handle);
+        }
+        return confirmed;
     }
 
     private void ThrowIfStopping()

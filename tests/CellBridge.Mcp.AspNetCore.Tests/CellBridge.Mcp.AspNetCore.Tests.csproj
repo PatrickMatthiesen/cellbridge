@@ -12,6 +12,9 @@
     <Using Include="Xunit" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="../CellBridge.Storage.Tests/RepositoryTestProxy.cs" Link="RepositoryTestProxy.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/CellBridge.Client/CellBridge.Client.csproj" />
     <ProjectReference Include="../../src/CellBridge.Mcp.AspNetCore/CellBridge.Mcp.AspNetCore.csproj" />

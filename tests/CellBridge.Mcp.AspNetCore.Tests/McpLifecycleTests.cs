@@ -1,5 +1,6 @@
 using System.Net;
 using CellBridge.Storage.Abstractions;
+using CellBridge.Storage.Tests;
 using static CellBridge.Mcp.AspNetCore.Tests.McpWorkbookTests;
 
 namespace CellBridge.Mcp.AspNetCore.Tests;
@@ -116,6 +117,95 @@ public sealed class McpLifecycleTests
         await OpenAsync(peerMcp, new { resourceId = first.ResourceId });
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BusyWorkbookRejectsAnotherRequestWhenItsQueueIsDisabled(bool reopen)
+    {
+        var findEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumeFind = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        LifecycleRepository? repository = null;
+        await using var host = await McpTestHost.StartAsync(configureProtocol: options =>
+        {
+            options.MaxConcurrentRequestsPerSubject = 2;
+            options.MaxQueuedRequestsPerSubject = 0;
+        }, wrapRepository: inner => repository = new(inner));
+        var document = await host.CreateWorkbookAsync();
+        using var http = host.CreateHttp("owner");
+        var mcp = new McpHttpSession(http);
+        await mcp.InitializeAsync();
+        var workbookHandle = Handle(await OpenAsync(mcp, new { resourceId = document.ResourceId }));
+
+        repository!.PauseNextFind = async token =>
+        {
+            findEntered.SetResult();
+            await resumeFind.Task.WaitAsync(token);
+        };
+        var active = SuccessAsync(mcp, "list_sheets", new { workbookHandle });
+        var tool = reopen ? "open_workbook" : "list_sheets";
+        object arguments = reopen ? new { resourceId = document.ResourceId } : new { workbookHandle };
+        try
+        {
+            await findEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var error = await ErrorAsync(mcp, tool, arguments).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Contains("The workbook is busy.", error);
+        }
+        finally
+        {
+            resumeFind.TrySetResult();
+            await active;
+        }
+        await SuccessAsync(mcp, tool, arguments);
+    }
+
+    [Fact]
+    public async Task FailedCloseRetainsItsSlotUntilParticipationReleaseSucceeds()
+    {
+        LifecycleRepository? repository = null;
+        await using var host = await McpTestHost.StartAsync(configure: options =>
+            options.MaxConcurrentSessionsPerActor = 2, wrapRepository: inner => repository = new(inner));
+        var first = await host.CreateWorkbookAsync();
+        var second = await host.CreateWorkbookAsync("/shared/second.xlsx");
+        var third = await host.CreateWorkbookAsync("/shared/third.xlsx");
+        using var http = host.CreateHttp("owner");
+        var mcp = new McpHttpSession(http);
+        var otherSession = new McpHttpSession(http);
+        await mcp.InitializeAsync();
+        await otherSession.InitializeAsync();
+        var workbookHandle = await OpenWriterAsync(mcp, first.ResourceId);
+        await OpenAsync(mcp, new { resourceId = second.ResourceId });
+
+        var proxy = Assert.IsType<LifecycleRepository>(repository);
+        proxy.FailRelease = true;
+        try
+        {
+            var error = await ErrorAsync(mcp, "close_workbook", new { workbookHandle });
+            Assert.Contains("Workbook participation release could not be confirmed.", error);
+            var control = await host.ReadControlAsync(first.ResourceId);
+            Assert.Single(control.Editors);
+            Assert.Single(control.Coordination.SchemaOwners);
+
+            Assert.Contains("Workbook unavailable.", await ErrorAsync(otherSession, "close_workbook", new { workbookHandle }));
+            Assert.Contains("Workbook unavailable.", await ErrorAsync(mcp, "list_sheets", new { workbookHandle }));
+            Assert.Contains("Workbook unavailable.", await ErrorAsync(mcp, "open_workbook", new { resourceId = first.ResourceId }));
+            Assert.Contains("session limit was reached", await ErrorAsync(mcp, "open_workbook", new { resourceId = third.ResourceId }));
+            Assert.Contains("Workbook participation release could not be confirmed.",
+                await ErrorAsync(mcp, "close_workbook", new { workbookHandle }));
+        }
+        finally
+        {
+            proxy.FailRelease = false;
+        }
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while ((await host.ReadControlAsync(first.ResourceId)).Editors.Length > 0)
+            await Task.Delay(TimeSpan.FromMilliseconds(50), deadline.Token);
+        await AssertReleasedAsync(host, first.ResourceId);
+        // A repeated open waits for the same entry if the release is finishing after its last storage command.
+        var reopened = await OpenAsync(mcp, new { resourceId = first.ResourceId });
+        Assert.NotEqual(workbookHandle, Handle(reopened));
+    }
+
     private static async Task<string> OpenWriterAsync(McpHttpSession mcp, Guid resourceId)
     {
         var opened = await OpenAsync(mcp, new { resourceId });
@@ -124,5 +214,28 @@ public sealed class McpLifecycleTests
         var sheetId = Assert.Single(sheets.GetProperty("sheets").EnumerateArray()).GetProperty("sheetId").GetUInt32();
         AssertWriteStatus(await SetNumberAsync(mcp, handle, sheetId, "A1", "10", Revision(opened)), "Success");
         return handle;
+    }
+
+    private sealed class LifecycleRepository(IDocumentRepository inner) : RepositoryTestProxy(inner)
+    {
+        public Func<CancellationToken, Task>? PauseNextFind;
+        public volatile bool FailRelease;
+
+        public override async ValueTask<DocumentHead?> FindAsync(DocumentIdentity identity, CancellationToken ct = default)
+        {
+            if (Interlocked.Exchange(ref PauseNextFind, null) is { } pause)
+                await pause(ct);
+            return await base.FindAsync(identity, ct);
+        }
+
+        public override ValueTask<ControlResult> ExecuteControlAsync(DocumentControlCommand command,
+            CancellationToken ct = default)
+        {
+            if (FailRelease && command is DocumentControlCommand.Office office &&
+                (office.Request.SubRequestDataAttributes.GetValueOrDefault("CoauthRequestType") == "ExitCoauthoring" ||
+                 office.Request.SubRequestDataAttributes.GetValueOrDefault("EditorsTableRequestType") == "LeaveEditingSession"))
+                throw new IOException("Test storage release failure.");
+            return base.ExecuteControlAsync(command, ct);
+        }
     }
 }

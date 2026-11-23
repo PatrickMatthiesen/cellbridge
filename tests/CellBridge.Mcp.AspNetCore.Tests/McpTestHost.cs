@@ -34,10 +34,12 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
 
     public static async Task<McpTestHost> StartAsync(bool enableRealTime = false,
         Action<CellBridgeMcpOptions>? configure = null, Action<CellBridgeOptions>? configureProtocol = null,
-        Action<AuthorizationOptions>? configureAuthorization = null)
+        Action<AuthorizationOptions>? configureAuthorization = null,
+        Func<IDocumentRepository, IDocumentRepository>? wrapRepository = null)
     {
         var content = new InMemoryContentStore();
-        var storage = new StorageProvider(new InMemoryDocumentRepository(content), content);
+        var repository = new InMemoryDocumentRepository(content);
+        var storage = new StorageProvider(wrapRepository?.Invoke(repository) ?? repository, content);
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
