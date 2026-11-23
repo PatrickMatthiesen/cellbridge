@@ -12,7 +12,7 @@ public sealed class McpSecurityTests
     [Fact]
     public async Task McpRejectsHostCookieAndUntrustedOrigin()
     {
-        await using var host = await McpTestHost.StartAsync();
+        await using var host = await McpTestHost.StartAsync(configure: ConfigureOAuthDiscovery);
         await host.CreateWorkbookAsync();
         using var browser = host.CreateHttp();
         using var signedIn = await browser.PostAsync("/test/sign-in", content: null);
@@ -32,9 +32,41 @@ public sealed class McpSecurityTests
         using var untrusted = await mcp.SendAsync(McpHttpSession.InitializeMethod, McpHttpSession.InitializeArguments,
             origin: "https://foreign.example");
         Assert.Equal(HttpStatusCode.Forbidden, untrusted.StatusCode);
+        Assert.Empty(untrusted.Headers.WwwAuthenticate);
         using var sameOrigin = await mcp.SendAsync(McpHttpSession.InitializeMethod, McpHttpSession.InitializeArguments,
             origin: host.Origin.GetLeftPart(UriPartial.Authority));
         sameOrigin.EnsureSuccessStatusCode();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("invalid")]
+    [InlineData("owner:0")]
+    public async Task MissingInvalidAndExpiredCredentialsReceiveABearerChallenge(string? token)
+    {
+        await using var host = await McpTestHost.StartAsync();
+        using var http = host.CreateHttp(token);
+        using var response = await new McpHttpSession(http).SendAsync(McpHttpSession.InitializeMethod,
+            McpHttpSession.InitializeArguments);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        var challenge = Assert.Single(response.Headers.WwwAuthenticate);
+        Assert.Equal("Bearer", challenge.Scheme);
+        Assert.Null(challenge.Parameter);
+    }
+
+    [Theory]
+    [InlineData(null, "https://foreign.example")]
+    [InlineData("no-actor", null)]
+    public async Task ForbiddenRequestsOutsidePolicyEvaluationDoNotReceiveABearerChallenge(string? token, string? origin)
+    {
+        await using var host = await McpTestHost.StartAsync(configure: ConfigureOAuthDiscovery);
+        using var http = host.CreateHttp(token);
+        using var response = await new McpHttpSession(http).SendAsync(McpHttpSession.InitializeMethod,
+            McpHttpSession.InitializeArguments, origin: origin);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Empty(response.Headers.WwwAuthenticate);
     }
 
     [Fact]
@@ -124,8 +156,9 @@ public sealed class McpSecurityTests
     [Fact]
     public async Task HostDefaultPolicyRequiresClaimEvenWithWorkbookGrant()
     {
-        await using var host = await McpTestHost.StartAsync(configureAuthorization: options =>
-            options.DefaultPolicy = new AuthorizationPolicyBuilder()
+        await using var host = await McpTestHost.StartAsync(
+            configure: ConfigureOAuthDiscovery,
+            configureAuthorization: options => options.DefaultPolicy = new AuthorizationPolicyBuilder()
                 .RequireAuthenticatedUser()
                 .RequireClaim("scope", McpTestHost.WorkbookScope)
                 .Build());
@@ -136,7 +169,7 @@ public sealed class McpSecurityTests
 
         using var denied = await new McpHttpSession(unscoped).SendAsync(McpHttpSession.InitializeMethod,
             McpHttpSession.InitializeArguments);
-        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        AssertInsufficientScope(denied, host);
 
         var mcp = new McpHttpSession(scoped);
         await mcp.InitializeAsync();
@@ -146,8 +179,11 @@ public sealed class McpSecurityTests
     [Fact]
     public async Task ScopedUserBearerUsesUserGrantsAndJoinsWithASeparateClientId()
     {
-        await using var host = await McpTestHost.StartAsync(
-            configure: options => options.AuthorizationPolicy = McpTestHost.WorkbookScopePolicy);
+        await using var host = await McpTestHost.StartAsync(configure: options =>
+        {
+            ConfigureOAuthDiscovery(options);
+            options.AuthorizationPolicy = McpTestHost.WorkbookScopePolicy;
+        });
         var document = await host.CreateWorkbookAsync();
         var privateDocument = await host.CreateWorkbookAsync("/shared/private.xlsx");
         await host.SetPeerAccessAsync(document.ResourceId, DocumentAccess.Read | DocumentAccess.Write);
@@ -156,7 +192,7 @@ public sealed class McpSecurityTests
 
         using var missingScope = await new McpHttpSession(officeHttp).SendAsync(McpHttpSession.InitializeMethod,
             McpHttpSession.InitializeArguments);
-        Assert.Equal(HttpStatusCode.Forbidden, missingScope.StatusCode);
+        AssertInsufficientScope(missingScope, host);
 
         await using var office = await CellBridgeDocumentSession.OpenAsync(host.CreateTransport(officeHttp), host.WorkbookUrl);
         var mcp = new McpHttpSession(mcpHttp);
@@ -167,7 +203,7 @@ public sealed class McpSecurityTests
 
         using var unscopedCall = await mcp.SendAsync("tools/call",
             new { name = "list_sheets", arguments = new { workbookHandle } }, requestClient: officeHttp);
-        Assert.Equal(HttpStatusCode.Forbidden, unscopedCall.StatusCode);
+        AssertInsufficientScope(unscopedCall, host);
 
         var editors = (await host.ReadControlAsync(document.ResourceId)).Editors;
         Assert.Equal(2, editors.Length);
@@ -210,5 +246,23 @@ public sealed class McpSecurityTests
         await ReadAsync(mcp, workbookHandle, sheetId, "A1");
         await ErrorAsync(mcp, "set_cells", SetNumberArguments(workbookHandle, sheetId, "A1", "20", Revision(sheets)));
         Assert.Empty((await host.ReadControlAsync(document.ResourceId)).Coordination.SchemaOwners);
+    }
+
+    private static void ConfigureOAuthDiscovery(CellBridgeMcpOptions options)
+    {
+        options.AuthorizationServer = new Uri("https://issuer.example/tenant");
+        options.ScopesSupported = [McpTestHost.WorkbookScope];
+    }
+
+    private static void AssertInsufficientScope(HttpResponseMessage response, McpTestHost host)
+    {
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var challenge = Assert.Single(response.Headers.WwwAuthenticate);
+        Assert.Equal("Bearer", challenge.Scheme);
+        var parameters = Assert.IsType<string>(challenge.Parameter);
+        var metadata = new Uri(host.Origin, "/.well-known/oauth-protected-resource/mcp");
+        Assert.Contains("error=\"insufficient_scope\"", parameters);
+        Assert.Contains($"scope=\"{McpTestHost.WorkbookScope}\"", parameters);
+        Assert.Contains($"resource_metadata=\"{metadata.AbsoluteUri}\"", parameters);
     }
 }

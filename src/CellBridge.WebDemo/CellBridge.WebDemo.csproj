@@ -8,6 +8,7 @@
     <ProjectReference Include="../CellBridge.Lists.AspNetCore/CellBridge.Lists.AspNetCore.csproj" />
     <ProjectReference Include="../CellBridge.Lists.PostgreSql/CellBridge.Lists.PostgreSql.csproj" />
     <ProjectReference Include="../CellBridge.Lists.SqlServer/CellBridge.Lists.SqlServer.csproj" />
+    <ProjectReference Include="../CellBridge.Mcp.AspNetCore/CellBridge.Mcp.AspNetCore.csproj" />
     <ProjectReference Include="../CellBridge.Storage.SqlServer/CellBridge.Storage.SqlServer.csproj" />
     <ProjectReference Include="..\CellBridge\CellBridge.csproj" />
     <ProjectReference Include="..\CellBridge.FssHttpB\CellBridge.FssHttpB.csproj" />

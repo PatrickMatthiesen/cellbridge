@@ -1,8 +1,11 @@
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
+using Microsoft.AspNetCore.Routing.Template;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using ModelContextProtocol.AspNetCore;
@@ -19,6 +22,7 @@ public static class CellBridgeMcpExtensions
         options.Validate();
 
         services.AddSingleton(options);
+        services.TryAddSingleton(_ => new RootMetadataMapping());
         services.TryAddSingleton(TimeProvider.System);
         services.AddHttpContextAccessor();
         services.AddScoped<McpRequestIdentity>();
@@ -69,28 +73,82 @@ public static class CellBridgeMcpExtensions
             throw new ArgumentException("The MCP endpoint requires a literal absolute path.", nameof(pattern));
 
         var options = endpoints.ServiceProvider.GetRequiredService<CellBridgeMcpOptions>();
-        var resource = new McpProtectedResource(pattern);
         if (options.AuthorizationServer is { } authorizationServer)
         {
-            endpoints.MapGet(resource.MetadataPath, (HttpContext context) =>
+            if (options.MapRootProtectedResourceMetadata)
+                endpoints.ServiceProvider.GetRequiredService<RootMetadataMapping>().Claim(pattern);
+
+            var rootPattern = RoutePatternFactory.Parse(McpProtectedResource.RootMetadataPath);
+            var binderFactory = endpoints.ServiceProvider.GetRequiredService<TemplateBinderFactory>();
+            var scopes = options.ScopesSupported;
+            IResult GetMetadata(HttpContext context)
             {
                 var origin = McpProtectedResource.GetOrigin(context);
-                if (origin is null) return Results.BadRequest();
-                return Results.Json(new
+                var endpointPath = McpProtectedResource.ResolveEndpointPath(context);
+                if (origin is null || endpointPath is null) return Results.BadRequest();
+                return Results.Json(new ProtectedResourceMetadata(
+                    origin + context.Request.PathBase.ToUriComponent() + endpointPath,
+                    [authorizationServer.OriginalString], ["header"], scopes.Count > 0 ? scopes : null));
+            }
+
+            endpoints.MapGet(pattern, GetMetadata).AllowAnonymous().Finally(builder =>
+            {
+                var endpoint = (RouteEndpointBuilder)builder;
+                endpoint.Metadata.Add(new McpProtectedResource(endpoint.RoutePattern, binderFactory));
+                // Discovery inserts the well-known path before the full resource path.
+                endpoint.RoutePattern = RoutePatternFactory.Combine(rootPattern, endpoint.RoutePattern);
+            });
+            if (options.MapRootProtectedResourceMetadata)
+            {
+                endpoints.MapGet(pattern, GetMetadata).AllowAnonymous().Finally(builder =>
                 {
-                    resource = origin + context.Request.PathBase.ToUriComponent() + resource.EndpointPath,
-                    authorization_servers = new[] { authorizationServer.OriginalString },
-                    bearer_methods_supported = new[] { "header" },
+                    var endpoint = (RouteEndpointBuilder)builder;
+                    if (endpoint.RoutePattern.Parameters.Count > 0)
+                        throw new InvalidOperationException("The root MCP protected resource metadata alias requires a literal route group prefix.");
+                    var resource = new McpProtectedResource(endpoint.RoutePattern, binderFactory);
+                    var literalPath = resource.BindPath(new RouteValueDictionary());
+                    if (string.Equals(literalPath, McpProtectedResource.RootMetadataPath, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("The MCP endpoint and its root protected resource metadata alias require different paths.");
+                    endpoint.Metadata.Add(resource);
+                    endpoint.RoutePattern = rootPattern;
                 });
-            }).AllowAnonymous();
+            }
         }
 
         var group = endpoints.MapGroup(string.Empty);
-        group.WithMetadata(resource);
         group.RequireAuthorization(new AuthorizationPolicyBuilder(McpBearerAuthentication.SchemeName)
             .RequireAuthenticatedUser()
             .Build());
         group.AddEndpointFilter(McpTransportAuthorization.InvokeAsync);
-        return group.MapMcp(pattern);
+        var transport = group.MapMcp(pattern);
+        if (options.AuthorizationServer is not null)
+        {
+            var binderFactory = endpoints.ServiceProvider.GetRequiredService<TemplateBinderFactory>();
+            transport.Finally(builder =>
+            {
+                var endpoint = (RouteEndpointBuilder)builder;
+                endpoint.Metadata.Add(new McpProtectedResource(endpoint.RoutePattern, binderFactory));
+            });
+        }
+        return transport;
+    }
+
+    private sealed record ProtectedResourceMetadata(
+        [property: JsonPropertyName("resource")] string Resource,
+        [property: JsonPropertyName("authorization_servers")] string[] AuthorizationServers,
+        [property: JsonPropertyName("bearer_methods_supported")] string[] BearerMethodsSupported,
+        [property: JsonPropertyName("scopes_supported"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<string>? ScopesSupported);
+
+    private sealed class RootMetadataMapping
+    {
+        private string? _owner;
+
+        public void Claim(string pattern)
+        {
+            if (Interlocked.CompareExchange(ref _owner, pattern, null) is { } existing)
+                throw new InvalidOperationException(
+                    $"The root MCP protected resource metadata alias is already mapped by the MCP endpoint '{existing}'.");
+        }
     }
 }

@@ -90,6 +90,7 @@ builder.Services.AddCellBridge(provider, requireDurability: !storageKind.Equals(
         options.CaptureDirectory = builder.Configuration["Protocol:CaptureDirectory"];
     }, configureHosting: hosting => AuthenticationServices.ConfigureCellBridgeOffice(hosting, builder.Configuration));
 builder.Services.AddCellBridgeAuthentication(builder.Configuration);
+var mcpConfigurationError = builder.Services.AddWebDemoMcp(builder.Configuration);
 builder.Services.AddWebDemoSharingRecipients();
 var listsConnection = builder.Configuration.GetConnectionString("lists");
 Func<IServiceProvider, Task>? checkListsHealth = null;
@@ -149,6 +150,7 @@ if (!provider.Capabilities.Durable)
 
 app.MapCellBridgeAuthentication();
 app.MapCellBridge();
+app.MapWebDemoMcp(mcpConfigurationError);
 if (!string.IsNullOrWhiteSpace(listsConnection)) app.MapCellBridgeLists();
 app.MapWebDemo();
 app.MapDefaultEndpoints();

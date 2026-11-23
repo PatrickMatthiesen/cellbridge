@@ -36,7 +36,8 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
         Action<CellBridgeMcpOptions>? configure = null, Action<CellBridgeOptions>? configureProtocol = null,
         Action<AuthorizationOptions>? configureAuthorization = null,
         Func<IDocumentRepository, IDocumentRepository>? wrapRepository = null,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null, string? pathBase = null, string mcpPath = "/mcp", string? routeGroup = null,
+        Action<IServiceCollection>? configureServices = null)
     {
         var content = new InMemoryContentStore();
         var repository = new InMemoryDocumentRepository(content);
@@ -68,13 +69,20 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
             configure?.Invoke(options);
         });
 
+        configureServices?.Invoke(builder.Services);
         var app = builder.Build();
         try
         {
+            if (pathBase is not null)
+            {
+                app.UsePathBase(pathBase);
+                app.UseRouting();
+            }
             app.UseAuthentication();
             app.UseAuthorization();
             app.MapCellBridge();
-            app.MapCellBridgeMcp();
+            if (routeGroup is null) app.MapCellBridgeMcp(mcpPath);
+            else app.MapGroup(routeGroup).MapCellBridgeMcp(mcpPath);
             app.MapPost("/test/sign-in", (HttpContext context) =>
                 context.SignInAsync(CookieScheme, Principal(Owner, CookieScheme)));
             await app.StartAsync();
@@ -147,6 +155,14 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
         protected override Task<AuthenticateResult> HandleAuthenticateAsync()
         {
             var token = Request.Headers.Authorization.ToString();
+            if (token == "Bearer invalid")
+                return Task.FromResult(AuthenticateResult.Fail("Invalid test credential."));
+            if (token == "Bearer no-actor")
+            {
+                var authenticated = new ClaimsPrincipal(new ClaimsIdentity(Scheme.Name));
+                return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(authenticated, Scheme.Name)));
+            }
+
             var expirationSeparator = token.IndexOf(':');
             var expiration = expirationSeparator < 0 ? null : token[(expirationSeparator + 1)..];
             if (expirationSeparator >= 0)

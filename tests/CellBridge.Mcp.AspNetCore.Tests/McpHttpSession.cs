@@ -4,9 +4,8 @@ using System.Text.Json;
 
 namespace CellBridge.Mcp.AspNetCore.Tests;
 
-internal sealed class McpHttpSession(HttpClient http)
+internal sealed class McpHttpSession(HttpClient http, string endpoint = "/mcp")
 {
-    private const string Endpoint = "/mcp";
     private const string SessionHeader = "Mcp-Session-Id";
     private const string ProtocolHeader = "MCP-Protocol-Version";
     private const string RequestedProtocolVersion = "2025-06-18";
@@ -87,7 +86,7 @@ internal sealed class McpHttpSession(HttpClient http)
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, HttpContent? content = null,
         HttpClient? requestClient = null, string? origin = null)
     {
-        using var request = new HttpRequestMessage(method, Endpoint) { Content = content };
+        using var request = new HttpRequestMessage(method, endpoint) { Content = content };
         request.Headers.Accept.ParseAdd("application/json");
         request.Headers.Accept.ParseAdd("text/event-stream");
         if (sessionId is not null)
