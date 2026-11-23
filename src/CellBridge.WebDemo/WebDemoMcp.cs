@@ -7,37 +7,51 @@ namespace CellBridge.WebDemo;
 
 public static class WebDemoMcp
 {
+    private const string McpPath = "/mcp";
     private const string BearerScheme = "CellBridge.WebDemo.Mcp.Entra";
     private const string ScopePolicy = "CellBridge.WebDemo.Mcp.Scope";
     private static readonly object VerifiedScopeKey = new();
 
-    public static bool AddWebDemoMcp(this IServiceCollection services, IConfiguration configuration)
+    public static string? AddWebDemoMcp(this IServiceCollection services, IConfiguration configuration)
     {
-        var mcp = configuration.GetSection("Mcp");
-        if (!mcp.GetValue<bool>("Enabled")) return false;
-
         var entra = configuration.GetSection("Authentication:Entra");
-        if (!entra.GetValue<bool>("Enabled"))
-            throw new InvalidOperationException("Mcp:Enabled requires Authentication:Entra:Enabled.");
+        if (!bool.TryParse(entra["Enabled"], out var entraEnabled) || !entraEnabled)
+            return "MCP requires Authentication:Entra:Enabled to be true.";
         if (!Guid.TryParse(entra["TenantId"], out var tenantId) || tenantId == Guid.Empty)
-            throw new InvalidOperationException("Authentication:Entra:TenantId must be a nonempty tenant GUID.");
-        if (!Guid.TryParse(mcp["ClientId"], out var clientId) || clientId == Guid.Empty ||
-            (Guid.TryParse(entra["ClientId"], out var officeClientId) && clientId == officeClientId))
-            throw new InvalidOperationException("Mcp:ClientId must be a nonempty application GUID distinct from Authentication:Entra:ClientId.");
+            return "Authentication:Entra:TenantId must be a nonempty tenant GUID.";
 
-        if (!Uri.TryCreate(mcp["AuthorizationServer"], UriKind.Absolute, out var issuer))
-            throw new InvalidOperationException("Mcp:AuthorizationServer must be an HTTPS issuer URI.");
-        var requiredScope = mcp["RequiredScope"];
-        if (string.IsNullOrEmpty(requiredScope) || requiredScope.Any(c =>
-            c is not ('!' or (>= '#' and <= '[') or (>= ']' and <= '~')) || c is ':' or '/'))
-            throw new InvalidOperationException("Mcp:RequiredScope must be a short delegated scope name.");
-        var scopesSupported = mcp.GetSection("ScopesSupported").Get<string[]>();
+        var mcp = configuration.GetSection("Mcp");
+        var clientIdOverride = mcp["ClientId"];
+        if (!Guid.TryParse(clientIdOverride ?? entra["ClientId"], out var clientId) || clientId == Guid.Empty)
+            return clientIdOverride is null
+                ? "Authentication:Entra:ClientId must be a nonempty application GUID."
+                : "Mcp:ClientId must be a nonempty application GUID.";
+
+        var tenantAuthority = $"https://login.microsoftonline.com/{tenantId:D}";
+        var authorizationServer = mcp["AuthorizationServer"] ?? tenantAuthority + "/oauth21/2026-08";
+        if (!Uri.TryCreate(authorizationServer, UriKind.Absolute, out var issuer) ||
+            issuer.Scheme != Uri.UriSchemeHttps || issuer.Host.Length == 0 || issuer.UserInfo.Length != 0 ||
+            issuer.Query.Length != 0 || issuer.Fragment.Length != 0)
+            return "Mcp:AuthorizationServer must be an HTTPS issuer URI without credentials, a query or a fragment.";
+        var requiredScope = mcp["RequiredScope"] ?? "mcp.access";
+        if (string.IsNullOrEmpty(requiredScope) || requiredScope.Any(c => !IsScopeCharacter(c) || c is ':' or '/'))
+            return "Mcp:RequiredScope must be a short delegated scope name.";
+        var scopeSection = mcp.GetSection("ScopesSupported");
+        // The Office forms registration supplies the origin used by protected-resource discovery.
+        var publicOrigin = configuration["Authentication:PublicOrigin"] ?? configuration["Protocol:PublicOrigin"];
+        var scopeResource = Uri.TryCreate(publicOrigin, UriKind.Absolute, out var origin)
+            ? origin.GetLeftPart(UriPartial.Authority) + McpPath
+            : $"api://{clientId:D}";
+        var scopesSupported = scopeSection.Exists()
+            ? scopeSection.Get<string[]>()
+            : [$"{scopeResource}/{requiredScope}"];
         if (scopesSupported is not { Length: > 0 } || scopesSupported.Any(scope =>
-            !Uri.TryCreate(scope, UriKind.Absolute, out var uri) || uri.Host.Length == 0 || uri.AbsolutePath == "/" ||
+            !Uri.TryCreate(scope, UriKind.Absolute, out var uri) || scope.Any(c => !IsScopeCharacter(c)) ||
+            uri.Host.Length == 0 || uri.AbsolutePath == "/" ||
             uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0))
-            throw new InvalidOperationException("Mcp:ScopesSupported must contain fully qualified OAuth scopes.");
+            return "Mcp:ScopesSupported must contain fully qualified OAuth scopes.";
 
-        var authority = $"https://login.microsoftonline.com/{tenantId:D}/v2.0";
+        var authority = tenantAuthority + "/v2.0";
         var audience = clientId.ToString("D");
         services.AddAuthentication().AddJwtBearer(BearerScheme, options =>
         {
@@ -71,8 +85,24 @@ public static class WebDemoMcp
             options.ScopesSupported = scopesSupported;
             options.MapRootProtectedResourceMetadata = true;
         });
-        return true;
+        return null;
     }
+
+    public static void MapWebDemoMcp(this WebApplication app, string? configurationError)
+    {
+        if (configurationError is null)
+        {
+            app.MapCellBridgeMcp(McpPath);
+            return;
+        }
+
+        app.Map(McpPath, () => Results.Problem(
+            title: "MCP is not configured.",
+            detail: configurationError,
+            statusCode: StatusCodes.Status503ServiceUnavailable)).AllowAnonymous();
+    }
+
+    private static bool IsScopeCharacter(char c) => c is '!' or (>= '#' and <= '[') or (>= ']' and <= '~');
 
     private static async Task MapAsync(TokenValidatedContext context, Guid homeTenant, string requiredScope)
     {

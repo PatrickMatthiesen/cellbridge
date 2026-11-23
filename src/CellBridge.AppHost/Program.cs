@@ -63,7 +63,7 @@ if (!isTesting)
     }
 
     var mcp = builder.Configuration.GetSection("Parameters:Mcp");
-    foreach (var setting in new[] { "Enabled", "ClientId", "AuthorizationServer", "RequiredScope" })
+    foreach (var setting in new[] { "ClientId", "AuthorizationServer", "RequiredScope" })
         if (mcp[setting] is { } value)
             webdemo.WithEnvironment("Mcp__" + setting, value);
     foreach (var scope in mcp.GetSection("ScopesSupported").GetChildren())

@@ -101,44 +101,49 @@ parameter in the `WWW-Authenticate` Bearer header. An empty list omits both
 fields. See [RFC 6749, section 3.3](https://www.rfc-editor.org/rfc/rfc6749.html#section-3.3).
 Use the host authorization policy to enforce scope requirements.
 
-## Opt-in WebDemo testing with Microsoft Entra ID
+## WebDemo setup with Microsoft Entra ID
 
-WebDemo disables MCP by default. To enable it, start with a working Entra
-configuration where `Authentication:Entra:Enabled` is `true`. Use an Entra
-user linked to an existing local WebDemo account with access to an `.xlsx`
-workbook. MCP uses the configured `Authentication:Entra:TenantId` and maps
-the token to that same account, so the user's existing workbook grants apply.
+WebDemo enables the MCP transport and OAuth discovery at startup with its
+existing [Microsoft Entra configuration](authentication.md). When Entra is
+disabled or MCP settings are invalid, `/mcp` returns `503 Service
+Unavailable` with a configuration diagnostic and both protected-resource
+metadata URLs return `404 Not Found`.
 
-In that tenant, create a dedicated MCP API app registration with a client ID
-distinct from the browser and Office app registrations. Set
-`api.requestedAccessTokenVersion` to `2` in its manifest. Set the Application
-ID URI to the canonical MCP endpoint, such as `https://mcp.example.com/mcp`,
-with the `/mcp` path and no trailing slash. Expose a delegated scope such
-as `mcp.access` and obtain consent for the MCP client to request it. The token
-audience (`aud`) is the MCP API application's client GUID. The token's `scp`
-claim must contain the exact, case-sensitive short scope name `mcp.access`.
+In the existing WebDemo app registration, keep the Application ID URIs that
+Office uses. Add the canonical MCP endpoint, such as
+`https://mcp.example.com/mcp`, as an additional Application ID URI. Include
+the `/mcp` path and omit the trailing slash. Set
+`api.requestedAccessTokenVersion` to `2` in the manifest. Expose the delegated
+scope `mcp.access` and obtain consent for the MCP client to request it.
+The token audience (`aud`) is the app registration's client GUID. The token's
+`scp` claim must contain the exact, case-sensitive scope name `mcp.access`.
+WebDemo returns `403 Forbidden` for a valid token with only Office's
+`access_as_user` scope. Sign in as an Entra user linked to a local WebDemo
+account. That account's existing workbook grants apply.
 See [Microsoft's MCP server registration instructions](https://learn.microsoft.com/en-us/entra/agent-id/secure-mcp-server-with-entra-id).
 
 For a Client ID Metadata Document (CIMD) test, confirm that the MCP client
 supports CIMD. Append `/.well-known/openid-configuration` to the tenant-specific
 `/oauth21/2026-08` URL and check that `client_id_metadata_document_supported`
-is `true`. Set `AuthorizationServer` to the `/oauth21/2026-08` URL for
-discovery. WebDemo validates Entra v2 tokens against the tenant-specific
-`/v2.0` issuer.
+is `true`. WebDemo advertises that URL by default and validates Entra v2
+tokens against the tenant-specific `/v2.0` issuer.
 See [Microsoft's CIMD setup and consent instructions](https://learn.microsoft.com/en-us/entra/agent-id/configure-client-id-metadata-document).
 
-Merge these settings into the ignored `src/CellBridge.AppHost/apphost.settings.json`.
-Replace the example host and IDs. `Parameters:PublicOrigin` must be an HTTPS
-origin reachable by the client. AppHost forwards `Parameters:Mcp` to WebDemo
-as `Mcp`. Set `RequiredScope` to the short scope name and list the fully
-qualified scope URI in `ScopesSupported`.
+Set `Parameters:PublicOrigin` to the HTTPS origin reachable by the client.
+WebDemo uses `Authentication:PublicOrigin` for the resource URL and the
+advertised scope, such as `https://mcp.example.com/mcp/mcp.access`.
+
+For a dedicated MCP API registration or a custom scope, set the fields you
+want to override in `Mcp`. AppHost forwards `Parameters:Mcp` from
+`src/CellBridge.AppHost/apphost.settings.json` as `Mcp`. This example sets all
+four overrides. `RequiredScope` takes a short scope name and
+`ScopesSupported` takes fully qualified scope URIs.
 
 ```json
 {
   "Parameters": {
     "PublicOrigin": "https://mcp.example.com",
     "Mcp": {
-      "Enabled": true,
       "ClientId": "<mcp-api-application-client-id>",
       "AuthorizationServer": "https://login.microsoftonline.com/<home-tenant-id>/oauth21/2026-08",
       "RequiredScope": "mcp.access",
