@@ -115,7 +115,7 @@ internal sealed class RedisOfficeRealTimeBackplane : IOfficeRealTimeBackplane, I
         ArgumentNullException.ThrowIfNull(renewedMember);
         if (currentMember.Incarnation == Guid.Empty || currentMember.Room != renewedMember.Room ||
             currentMember.ConnectionId != renewedMember.ConnectionId || currentMember.HostId != renewedMember.HostId ||
-            !CanRenew(currentMember.Ticket, renewedMember.Ticket))
+            !currentMember.Ticket.CanRenewWith(renewedMember.Ticket))
             return new(OfficeRealTimeBackplaneStatus.Denied, null, 0, 0);
         currentMember = Enrich(currentMember);
         renewedMember = Enrich(renewedMember);
@@ -287,13 +287,6 @@ internal sealed class RedisOfficeRealTimeBackplane : IOfficeRealTimeBackplane, I
     };
     private static string IndexMember(OfficeRealTimeBackplaneMember member) =>
         $"{member.Room.ResourceId:N}:{member.Room.LifecycleGeneration}:{member.ConnectionId}:{member.Incarnation:N}";
-    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
-        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
-        current.ClientId == renewed.ClientId &&
-        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
-        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
-    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
-        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
     private static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Json);
 
     private static OfficeRealTimeBackplaneConnectResult ParseConnect(RedisResult result)

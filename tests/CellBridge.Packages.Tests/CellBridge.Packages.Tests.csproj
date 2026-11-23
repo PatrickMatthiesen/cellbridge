@@ -8,6 +8,7 @@
   <ItemGroup>
     <PackageReference Include="CellBridge.AspNetCore" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="CellBridge.Client" Version="$(CellBridgePackageVersion)" />
+    <PackageReference Include="CellBridge.Mcp.AspNetCore" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="CellBridge.Storage.InMemory" Version="$(CellBridgePackageVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="11.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />

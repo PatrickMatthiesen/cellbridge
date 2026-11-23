@@ -312,7 +312,7 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
             { throw new InvalidDataException("The collaboration ticket metadata is invalid."); }
 
             if (!access.TryReadRenewalTicket(pending.PublicBase, signature, current.ClientId, out var renewed) ||
-                renewed is null || !CanRenew(current, renewed) ||
+                renewed is null || !current.CanRenewWith(renewed) ||
                 !await sessions.RenewTicketAsync(current, renewed, connectionId, deadline.Token).ConfigureAwait(false) ||
                 !pending.TryUpdateTicket(current, renewed))
                 throw new InvalidDataException("The collaboration ticket renewal was rejected.");
@@ -321,14 +321,6 @@ internal sealed class OfficeClassicSignalR(IOfficeRealTimeSessionStore sessions,
         finally { pending.Gate.Release(); }
     }
 
-    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
-        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
-        current.ClientId == renewed.ClientId &&
-        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
-        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
-
-    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
-        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
 
     private async Task<object?> SendNotificationAsync(OfficeRealTimeTicket ticket, string connectionId,
         int channel, string payload, CancellationToken cancellationToken)

@@ -34,7 +34,8 @@ public sealed partial class CellBridgeDocumentService(StorageProvider provider, 
 
     public DocumentAccess Access(CellBridgeActor actor, DocumentHead state)
     {
-        if (state.IsDeleted || actor.AccessLimit is { } limit && limit.ResourceId != state.ResourceId) return DocumentAccess.None;
+        if (state.IsDeleted ||
+            actor.AccessLimit is { } limit && !limit.Matches(state.ResourceId, state.LifecycleGeneration)) return DocumentAccess.None;
         var access = _externalAuthorization is null ? SubjectAccess(actor, state) : AdmittedAccess(actor, state);
         return actor.AccessLimit is { } ceiling ? access & ceiling.Access : access;
     }

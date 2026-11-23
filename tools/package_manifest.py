@@ -8,7 +8,7 @@ import zipfile
 PROJECTS = ["CellBridge.FssHttpB", "CellBridge", "CellBridge.Client", "CellBridge.Storage.InMemory",
             "CellBridge.Storage.PostgreSql", "CellBridge.Storage.SqlServer", "CellBridge.Storage.FileSystem",
             "CellBridge.AspNetCore", "CellBridge.Lists", "CellBridge.Lists.PostgreSql",
-            "CellBridge.Lists.SqlServer", "CellBridge.Lists.AspNetCore"]
+            "CellBridge.Lists.SqlServer", "CellBridge.Lists.AspNetCore", "CellBridge.Mcp.AspNetCore"]
 
 
 def build_manifest(output, version, source_commit, source_dirty):

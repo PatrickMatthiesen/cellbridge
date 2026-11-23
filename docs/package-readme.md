@@ -48,6 +48,14 @@ revision they read. `ExcelWorkbookSession` reads and edits `.xlsx` cells
 and reports conflicts when edits overlap. Automatic refresh in desktop Excel
 after a client save still needs desktop interoperability testing.
 
+`CellBridge.Mcp.AspNetCore` adds opt-in Model Context Protocol tools for
+existing `.xlsx` files. Register them with `AddCellBridgeMcp` and expose
+the Streamable HTTP endpoint with `MapCellBridgeMcp("/mcp")`. Configure a
+host-validated bearer scheme. Workbook tools use the current document grants
+of the authenticated user or dedicated agent account. Session state lives in
+the serving process and requires sticky routing across replicas. See
+[MCP workbook hosting](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/mcp-workbooks.md).
+
 `CellBridge.Storage.SqlServer` supplies document state and content. It is
 independent of PostgreSQL and `CellBridge.Lists.SqlServer`. Use the same version
 for all CellBridge packages. Configure

@@ -36,7 +36,7 @@ public sealed partial class CellBridgeDocumentService
                     var check = checks[i];
                     if (string.IsNullOrWhiteSpace(check.Actor.Identity.Subject) ||
                         check.RequiredAccess is not (DocumentAccess.Read or DocumentAccess.Write) ||
-                        check.Actor.AccessLimit is { } limit && limit.ResourceId != resourceId) continue;
+                        check.Actor.AccessLimit is { } limit && !limit.Matches(resourceId, generation)) continue;
                     var access = NormalizeAccess(snapshot.Evaluate(check.Actor.Identity.Subject));
                     if (check.Actor.AccessLimit is { } ceiling) access &= ceiling.Access;
                     allowed[i] = access.HasFlag(check.RequiredAccess);

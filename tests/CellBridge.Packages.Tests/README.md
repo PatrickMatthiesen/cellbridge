@@ -4,6 +4,8 @@ The document and Lists tests use NuGet package references only. Document checks
 cover custom-provider conformance and HTTP hosting for discovery, download, HEAD
 and SOAP Cell QueryAccess. The client package test opens and syncs an Excel
 workbook over HTTP against the packaged host and reads a cell from the snapshot.
+The MCP package test authenticates with a signed bearer token, opens an existing
+workbook over Streamable HTTP, lists its sheets and closes it.
 Native Entra checks use locally signed test tokens
 and a host-owned account mapper to exercise cookie exchange, capability discovery,
 credential rejection and session expiry without the demo account database.

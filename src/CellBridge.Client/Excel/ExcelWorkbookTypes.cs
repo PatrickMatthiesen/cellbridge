@@ -11,6 +11,7 @@ public sealed record ExcelWorkbookLimits
     public int MaxCellsPerOperation { get; init; } = 10_000;
     public int MaxRetainedRevisions { get; init; } = 8;
     public int MaxCommitAttempts { get; init; } = 4;
+    public bool TrackSyncChanges { get; init; }
 
     internal void Validate()
     {

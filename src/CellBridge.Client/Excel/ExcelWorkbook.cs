@@ -40,6 +40,47 @@ public static class ExcelWorkbook
         return result;
     }
 
+    internal static (IReadOnlyList<ExcelWorkbookCellChange> Changes, bool Truncated) DiffValues(
+        byte[] beforeBytes, byte[] afterBytes, int maxChanges, ExcelWorkbookLimits limits,
+        ExcelMemoryBudget budget, CancellationToken cancellationToken)
+    {
+        using var before = new ExcelPackage(beforeBytes, limits, budget);
+        using var after = new ExcelPackage(afterBytes, limits, budget);
+        var changes = new List<ExcelWorkbookCellChange>();
+        var sheetIds = before.ListSheets().Concat(after.ListSheets()).Select(sheet => sheet.SheetId).Distinct();
+        foreach (var sheetId in sheetIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var previous = before.HasSheet(sheetId) && before.IsWorksheet(sheetId) ? before.Sheet(sheetId) : null;
+            var current = after.HasSheet(sheetId) && after.IsWorksheet(sheetId) ? after.Sheet(sheetId) : null;
+            foreach (var address in MergeAddresses(previous?.Addresses() ?? [], current?.Addresses() ?? []))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var oldValue = previous?.Value(address) ?? ExcelCellValue.Blank;
+                var newValue = current?.Value(address) ?? ExcelCellValue.Blank;
+                if (ExcelWorksheet.Equivalent(oldValue, newValue)) continue;
+                if (changes.Count == maxChanges) return (changes, true);
+                budget.Charge(200L + 2L * ((oldValue.RawValue?.Length ?? 0L) + (newValue.RawValue?.Length ?? 0L)));
+                changes.Add(new ExcelWorkbookCellChange(sheetId, address.ToString(), oldValue, newValue));
+            }
+        }
+        return (changes, false);
+    }
+
+    private static IEnumerable<CellAddress> MergeAddresses(IEnumerable<CellAddress> before, IEnumerable<CellAddress> after)
+    {
+        using var left = before.GetEnumerator();
+        using var right = after.GetEnumerator();
+        bool hasLeft = left.MoveNext(), hasRight = right.MoveNext();
+        while (hasLeft || hasRight)
+        {
+            var order = !hasLeft ? 1 : !hasRight ? -1 : left.Current.CompareTo(right.Current);
+            yield return order <= 0 ? left.Current : right.Current;
+            if (order <= 0) hasLeft = left.MoveNext();
+            if (order >= 0) hasRight = right.MoveNext();
+        }
+    }
+
     /// <summary>Merges edit intent against the specified base and current packages.</summary>
     /// <remarks>A successful result has a null package when the current package already has the requested values.</remarks>
     public static ExcelMergeResult MergeCells(byte[] basePackage, byte[] currentPackage, uint sheetId,

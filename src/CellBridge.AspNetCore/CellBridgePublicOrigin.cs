@@ -8,21 +8,23 @@ namespace CellBridge.AspNetCore;
 
 internal static class CellBridgePublicOrigin
 {
-    public static string? Resolve(HttpContext context)
+    public static string? Resolve(HttpContext context) =>
+        Resolve(context.RequestServices, context.Request.Scheme, context.Request.Host);
+
+    internal static string? Resolve(IServiceProvider services, string scheme, HostString requestHost)
     {
-        var fixedOrigin = context.RequestServices.GetService<CellBridgeOfficeFormsAuthentication.OfficeFormsRegistration>()?.PublicOrigin
-            ?? context.RequestServices.GetRequiredService<CellBridgeOptions>().PublicOrigin;
+        var fixedOrigin = services.GetService<CellBridgeOfficeFormsAuthentication.OfficeFormsRegistration>()?.PublicOrigin
+            ?? services.GetRequiredService<CellBridgeOptions>().PublicOrigin;
         if (fixedOrigin is not null) return fixedOrigin.TrimEnd('/');
-        var host = context.Request.Host.Host;
-        var configured = context.RequestServices.GetService<IConfiguration>()?["AllowedHosts"]?
+        var host = requestHost.Host;
+        var configured = services.GetService<IConfiguration>()?["AllowedHosts"]?
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(h => h != "*").ToArray() ?? [];
         var allowed = configured.Length > 0
-            ? HostString.MatchesAny(context.Request.Host.Value, configured.Select(h => new StringSegment(h)).ToArray())
+            ? HostString.MatchesAny(requestHost.Value, configured.Select(h => new StringSegment(h)).ToArray())
             : host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
               IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
-        return allowed && context.Request.Scheme is "http" or "https"
-            ? $"{context.Request.Scheme}://{context.Request.Host}" : null;
+        return allowed && scheme is "http" or "https" ? $"{scheme}://{requestHost}" : null;
     }
 
     public static void Validate(string? value)

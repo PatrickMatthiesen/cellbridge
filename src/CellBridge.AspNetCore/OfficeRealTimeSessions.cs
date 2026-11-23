@@ -116,7 +116,7 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
     public async Task<bool> RenewTicketAsync(OfficeRealTimeTicket currentTicket,
         OfficeRealTimeTicket renewedTicket, string connectionId, CancellationToken cancellationToken)
     {
-        if (!CanRenew(currentTicket, renewedTicket) || IsExpired(currentTicket) || IsExpired(renewedTicket) ||
+        if (!currentTicket.CanRenewWith(renewedTicket) || IsExpired(currentTicket) || IsExpired(renewedTicket) ||
             string.IsNullOrEmpty(connectionId))
             return false;
         using var deadline = CreateDeadline(cancellationToken);
@@ -621,13 +621,6 @@ internal sealed class OfficeRealTimeSessionStore : IOfficeRealTimeSessionStore
         _connections.TryGetValue(connection.Context.ConnectionId, out var current) && ReferenceEquals(current, connection);
 
     private bool IsExpired(OfficeRealTimeTicket ticket) => ticket.ExpiresUtc <= time.GetUtcNow();
-    private static bool CanRenew(OfficeRealTimeTicket current, OfficeRealTimeTicket renewed) =>
-        current.ResourceId == renewed.ResourceId && current.LifecycleGeneration == renewed.LifecycleGeneration &&
-        current.ClientId == renewed.ClientId &&
-        StringComparer.Ordinal.Equals(current.Actor.Identity.Subject, renewed.Actor.Identity.Subject) &&
-        AccessLimitEquals(current.Actor.AccessLimit, renewed.Actor.AccessLimit) && renewed.ExpiresUtc >= current.ExpiresUtc;
-    private static bool AccessLimitEquals(DocumentAccessLimit? left, DocumentAccessLimit? right) =>
-        left is null ? right is null : right is not null && left.ResourceId == right.ResourceId && left.Access == right.Access;
     private static string ClientKey(Guid clientId) => clientId.ToString("B").ToLowerInvariant();
     private static CancellationTokenSource CreateDeadline(CancellationToken token)
     {

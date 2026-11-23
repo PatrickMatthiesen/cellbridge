@@ -4,6 +4,10 @@ public sealed record ExcelWorkbookSummary(string Revision, IReadOnlyList<ExcelSh
 
 public sealed record ExcelRangeSnapshot(string Revision, IReadOnlyList<ExcelCell> Cells);
 
+public sealed record ExcelWorkbookCellChange(uint SheetId, string Address, ExcelCellValue Before, ExcelCellValue After);
+
+public sealed record ExcelWorkbookSyncResult(string Revision, IReadOnlyList<ExcelWorkbookCellChange> Changes, bool Truncated);
+
 /// <summary>Applies revision-based Excel edits through a caller-owned document session.</summary>
 public sealed class ExcelWorkbookSession
 {
@@ -14,6 +18,7 @@ public sealed class ExcelWorkbookSession
     private readonly LinkedList<CellBridgeDocumentSnapshot> _history = [];
     private long _retainedBytes;
     private Proposal? _unresolved;
+    private CellBridgeDocumentSnapshot? _syncBaseline;
 
     public ExcelWorkbookSession(CellBridgeDocumentSession documentSession, ExcelWorkbookLimits? limits = null)
     {
@@ -21,8 +26,11 @@ public sealed class ExcelWorkbookSession
         _document = documentSession;
         _limits = limits ?? new ExcelWorkbookLimits();
         _limits.Validate();
-        Remember(_document.GetSnapshot());
+        var initial = Remember(_document.GetSnapshot());
+        if (_limits.TrackSyncChanges) _syncBaseline = initial;
     }
+
+    public bool HasPendingCommit => Volatile.Read(ref _unresolved) is not null;
 
     public ExcelWorkbookSummary GetWorkbookSummary() => Read(snapshot =>
     {
@@ -46,7 +54,33 @@ public sealed class ExcelWorkbookSession
         try
         {
             ThrowIfUnresolved();
-            return Remember(await _document.SyncAsync(cancellationToken)).Revision;
+            var latest = Remember(await _document.SyncAsync(cancellationToken));
+            if (_syncBaseline is not null) _syncBaseline = latest;
+            TrimHistory();
+            return latest.Revision;
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>Reports changes in cell values since opening or the last explicit sync.</summary>
+    /// <remarks>Enable <see cref="ExcelWorkbookLimits.TrackSyncChanges"/> to retain the comparison revision.</remarks>
+    public async Task<ExcelWorkbookSyncResult> SyncWithChangesAsync(int maxChanges,
+        CancellationToken cancellationToken = default)
+    {
+        if (maxChanges < 1 || maxChanges > _limits.MaxCellsPerOperation)
+            throw new ArgumentOutOfRangeException(nameof(maxChanges));
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        try
+        {
+            ThrowIfUnresolved();
+            var before = _syncBaseline ?? throw new InvalidOperationException("Enable workbook sync change tracking first.");
+            var latest = Remember(await _document.SyncAsync(cancellationToken));
+            var (changes, truncated) = before.Revision == latest.Revision
+                ? (Array.Empty<ExcelWorkbookCellChange>(), false)
+                : ExcelWorkbook.DiffValues(before.Package, latest.Package, maxChanges, _limits, Budget(), cancellationToken);
+            _syncBaseline = latest;
+            TrimHistory();
+            return new(latest.Revision, changes, truncated);
         }
         finally { _gate.Release(); }
     }
@@ -180,7 +214,8 @@ public sealed class ExcelWorkbookSession
             return old;
         if (snapshot.Package.LongLength > Math.Min(_limits.MaxPackageBytes, _limits.MaxSessionBytes))
             throw new InvalidDataException("The workbook exceeds the Excel session package limit.");
-        var protectedBytes = _history.FirstOrDefault(entry => entry.Revision == keep)?.Package.LongLength ?? 0;
+        var protectedBytes = _history.Where(entry => entry.Revision == keep || entry == _syncBaseline)
+            .Sum(entry => entry.Package.LongLength);
         if (snapshot.Package.LongLength + protectedBytes + (_unresolved?.Package.LongLength ?? 0) > _limits.MaxSessionBytes)
             throw new InvalidDataException("The workbook exceeds the Excel session memory budget.");
         _history.AddLast(snapshot);
@@ -191,11 +226,13 @@ public sealed class ExcelWorkbookSession
 
     private void TrimHistory(string? keep = null)
     {
+        var latest = _history.Last?.Value;
+        var retainedCount = _history.Count(entry => entry == latest || entry == _syncBaseline || entry.Revision == keep);
         while (_retainedBytes + (_unresolved?.Package.LongLength ?? 0) > _limits.MaxSessionBytes ||
-               _history.Count > Math.Max(_limits.MaxRetainedRevisions, keep is null ? 1 : 2))
+               _history.Count > Math.Max(_limits.MaxRetainedRevisions, retainedCount))
         {
             var eviction = _history.First!;
-            if (eviction.Value.Revision == keep)
+            while (eviction.Value.Revision == keep || eviction.Value == _syncBaseline || eviction.Value == latest)
                 eviction = eviction.Next!;
             _retainedBytes -= eviction.Value.Package.LongLength;
             _history.Remove(eviction);

@@ -206,7 +206,7 @@ python3 tools/check_release.py --version <version> --commit <sha>
 
 The verifier packs the shipping libraries, builds package-only examples and runs
 [consumer checks](../tests/CellBridge.Packages.Tests/README.md) against an isolated
-local feed and cache. It validates the eleven shipping packages and symbols, readmes,
+local feed and cache. It validates the thirteen shipping packages and symbols, readmes,
 license, repository metadata and package versions, then writes
 `artifacts/packages/manifest.json`.
 

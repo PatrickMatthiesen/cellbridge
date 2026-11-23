@@ -95,7 +95,7 @@ internal sealed class OfficeRealTimeAccess(CellBridgeDocumentService documents,
                 data.Identity.DisplayName is null || data.Identity.DisplayName.Length > 1024 ||
                 data.Identity.EmailAddress is { Length: > 1024 } ||
                 data.Identity.SipAddress is { Length: > 1024 } ||
-                data.AccessLimit is { } limit && (limit.ResourceId != data.ResourceId ||
+                data.AccessLimit is { } limit && (!limit.Matches(data.ResourceId, data.LifecycleGeneration) ||
                     (limit.Access & ~(DocumentAccess.Read | DocumentAccess.Write)) != 0)) return false;
             if (validateMetadataTtl && metadataTtl != data.ExpiresUnixMilliseconds) return false;
             var expires = DateTimeOffset.FromUnixTimeMilliseconds(data.ExpiresUnixMilliseconds);

@@ -10,14 +10,14 @@ Edit Microsoft Office documents in their desktop apps and save them to your own
 ASP.NET Core server. CellBridge implements MS-FSSHTTP and MS-FSSHTTPB, the
 protocols Office uses to open documents, send changes and coordinate editing.
 
-The repository ships eleven NuGet packages, one development AppHost and three
+The repository ships thirteen NuGet packages, one development AppHost and three
 examples. The shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
-`CellBridge.AspNetCore`, `CellBridge.Storage.InMemory`,
-`CellBridge.Storage.PostgreSql`, `CellBridge.Storage.SqlServer`,
+`CellBridge.AspNetCore`, `CellBridge.Client`, `CellBridge.Mcp.AspNetCore`,
+`CellBridge.Storage.InMemory`, `CellBridge.Storage.PostgreSql`, `CellBridge.Storage.SqlServer`,
 `CellBridge.Storage.FileSystem`, `CellBridge.Lists`,
 `CellBridge.Lists.PostgreSql`, `CellBridge.Lists.SqlServer` and
-`CellBridge.Lists.AspNetCore`. The `CellBridge` core package contains SOAP/MTOM handling, document
-execution and storage contracts. `CellBridge.AspNetCore` adds HTTP endpoints,
+`CellBridge.Lists.AspNetCore`. The `CellBridge` core package contains SOAP/MTOM
+handling, document execution and storage contracts. `CellBridge.AspNetCore` adds HTTP endpoints,
 login integration and dependency registration. Storage providers depend on
 core, not the HTTP package. `CellBridge.FssHttpB` remains standalone.
 
@@ -48,6 +48,7 @@ provide their own customer lifecycle and user interface.
 | Incremental transfers | Reuse stored file parts and send parts the client does not already have. |
 | Coauthoring | Two Windows desktops exchanged Word, Excel and PowerPoint changes under distinct accounts with AutoSave. Independent downloads retained both editors' changes. See the bounded [client coverage](docs/interoperability.md#client-coverage). |
 | Real-time collaboration | RTC is enabled by default. Multiple hosts require [Redis coordination](docs/multi-host-rtc.md). Set `CellBridgeOptions.EnableOfficeRealTime = false` to disable it, or `Protocol:EnableOfficeRealTime=false` in WebDemo. Remote Excel selections and Word cursor indicators were observed on a single host. Participant names, typing latency and reliable startup across all three apps remain unqualified. OCS is not implemented. |
+| Excel workbook tools | Hosts can opt into a bearer-authenticated MCP endpoint for opening, reading and editing existing `.xlsx` files. See [MCP workbook hosting](docs/mcp-workbooks.md). |
 
 Direct personal Microsoft accounts are currently unsupported in CellBridge's
 native Office integration. Got a personal account through the maze? Send us a

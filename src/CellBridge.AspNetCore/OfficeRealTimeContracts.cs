@@ -7,7 +7,15 @@ internal sealed class OfficeRealTimeBusyException()
     : HubException("Office collaboration is busy. Retry the request.");
 
 internal sealed record OfficeRealTimeTicket(Guid ResourceId, long LifecycleGeneration,
-    CellBridgeActor Actor, Guid ClientId, DateTimeOffset ExpiresUtc);
+    CellBridgeActor Actor, Guid ClientId, DateTimeOffset ExpiresUtc)
+{
+    internal bool CanRenewWith(OfficeRealTimeTicket renewed) =>
+        ResourceId == renewed.ResourceId && LifecycleGeneration == renewed.LifecycleGeneration &&
+        ClientId == renewed.ClientId && Actor.Identity.Subject == renewed.Actor.Identity.Subject &&
+        Actor.AccessLimit?.ResourceId == renewed.Actor.AccessLimit?.ResourceId &&
+        Actor.AccessLimit?.LifecycleGeneration == renewed.Actor.AccessLimit?.LifecycleGeneration &&
+        Actor.AccessLimit?.Access == renewed.Actor.AccessLimit?.Access && renewed.ExpiresUtc >= ExpiresUtc;
+}
 internal sealed record OfficeRealTimeTicketCheck(OfficeRealTimeTicket Ticket,
     DocumentAccess RequiredAccess, bool RequireOwnedClient);
 

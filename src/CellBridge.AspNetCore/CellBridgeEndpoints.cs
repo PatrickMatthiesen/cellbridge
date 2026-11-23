@@ -83,6 +83,7 @@ public static class CellBridgeEndpoints
         services.TryAddSingleton<ICellBridgeAuthorizationPolicy, StoredGrantAuthorizationPolicy>();
         services.AddSingleton<CellBridgeDocumentService>();
         services.AddSingleton<CellBridgeRequestProcessor>();
+        services.AddSingleton(sp => new CellBridgeInProcessHost(sp));
         if (options.EnableOfficeRealTime) services.AddOfficeRealTime(multipleInstances);
         services.AddHealthChecks().AddCheck<CellBridgeStorageHealthCheck>("cellbridge-storage");
         return services;

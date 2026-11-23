@@ -11,6 +11,8 @@ public sealed class CellBridgeDocumentSessionOptions
 {
     public CellBridgeDocumentSessionMode Mode { get; init; } = CellBridgeDocumentSessionMode.Reader;
     public bool EnableRealTime { get; init; } = true;
+    /// <summary>Renews participation in the background. Disable when transport authorization is request-scoped.</summary>
+    public bool AutomaticallyRenewParticipation { get; init; } = true;
     public int LeaseTimeoutSeconds { get; init; } = 3600;
     public TimeSpan LeaseRenewalInterval { get; init; } = TimeSpan.FromMinutes(5);
     public ulong QueryPageBytes { get; init; } = 4 * 1024 * 1024;
