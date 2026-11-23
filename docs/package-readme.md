@@ -39,6 +39,15 @@ Microsoft accounts are currently unsupported in CellBridge's native Office
 integration.
 The sample account database is not packaged.
 
+`CellBridge.Client` opens stateful document sessions over MS-FSSHTTP and
+MS-FSSHTTPB. Use `HttpCellBridgeTransport` with an authenticated `HttpClient`
+and the host's public origin. Use `InProcessCellBridgeTransport` with a
+`CellBridgeRequestProcessor` and a host-resolved actor. Reader sessions can
+sync document snapshots. Writer sessions can submit a package against the
+revision they read. `ExcelWorkbookSession` reads and edits `.xlsx` cells
+and reports conflicts when edits overlap. Automatic refresh in desktop Excel
+after a client save still needs desktop interoperability testing.
+
 `CellBridge.Storage.SqlServer` supplies document state and content. It is
 independent of PostgreSQL and `CellBridge.Lists.SqlServer`. Use the same version
 for all CellBridge packages. Configure

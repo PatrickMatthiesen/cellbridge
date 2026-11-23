@@ -42,6 +42,38 @@ endpoint. Word may require approval of its forms-sign-in host; see
 [Office sign-in](authentication.md#desktop-validation).
 [Client coverage](interoperability.md#client-coverage) lists tested scenarios.
 
+## Edit an Excel workbook with the emulator
+
+Copy the workbook URL from **Copy link / access**. Set `CELLBRIDGE_LOGIN` and
+`CELLBRIDGE_PASSWORD` for a WebDemo account or set `CELLBRIDGE_BEARER_TOKEN`
+for a host that accepts bearer authentication. Give the account write access
+before attempting a save. Start the interactive client and use `sheets` to find
+the sheet ID.
+
+```sh
+dotnet run --project tools/CellBridge.Emulator -- interactive "$WORKBOOK_URL"
+```
+
+For a desktop Excel capture, use a disposable workbook and distinct accounts
+for desktop Excel and the emulator. Start the capture, open the workbook in
+desktop Excel, then save one cell with the emulator. Enable server capture
+with `Protocol:CaptureDirectory` to record the emulator request alongside
+Excel's traffic when using Windows process-local capture. In this example the
+sheet ID is `1` and the new value in `B2` is the number `42`. Start with a
+different value in `B2` so the emulator sends a `PutChanges` request.
+
+```sh
+dotnet run --project tools/CellBridge.Emulator -- save "$WORKBOOK_URL" 1 B2 42
+```
+
+Before reopening, record whether Excel shows the new value, prompts to reload,
+or reports repair. Save a disjoint edit from desktop Excel and reopen the
+workbook to check that both values survived. Close Excel and let the RTC
+connection close before stopping and validating the capture.
+Confirm the emulator sent `PutChanges` and record any channel 3 notifications
+and their `FullSaveId` or `SavRev` fields. Record if no matching notification
+appeared. [Capture workflow](capture-kit.md)
+
 ## Import existing files
 
 After provisioning an owner, supply the admin command with the same database

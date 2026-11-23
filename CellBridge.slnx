@@ -9,6 +9,7 @@
     <Project Path="src/CellBridge.Authentication/CellBridge.Authentication.csproj" />
     <Project Path="src/CellBridge.AspNetCore/CellBridge.AspNetCore.csproj" />
     <Project Path="src/CellBridge/CellBridge.csproj" />
+    <Project Path="src/CellBridge.Client/CellBridge.Client.csproj" />
     <Project Path="src/CellBridge.Storage.InMemory/CellBridge.Storage.InMemory.csproj" />
     <Project Path="src/CellBridge.Storage.PostgreSql/CellBridge.Storage.PostgreSql.csproj" />
     <Project Path="src/CellBridge.Storage.FileSystem/CellBridge.Storage.FileSystem.csproj" />
@@ -28,6 +29,7 @@
     <Project Path="tests/CellBridge.SqlServer.Tests/CellBridge.SqlServer.Tests.csproj" />
     <Project Path="tests/CellBridge.Storage.Tests/CellBridge.Storage.Tests.csproj" />
     <Project Path="tests/CellBridge.FssHttp.Tests/CellBridge.FssHttp.Tests.csproj" />
+    <Project Path="tests/CellBridge.Client.Tests/CellBridge.Client.Tests.csproj" />
     <Project Path="tests/CellBridge.FssHttpB.Tests/CellBridge.FssHttpB.Tests.csproj" />
     <Project Path="tests/CellBridge.Interop.Tests/CellBridge.Interop.Tests.csproj" />
     <Project Path="tests/OfficeInspectors.Adapter/OfficeInspectors.Adapter.csproj" />
@@ -36,6 +38,7 @@
     <Project Path="tools/CellBridge.Lists.Setup/CellBridge.Lists.Setup.csproj" />
     <Project Path="tools/OfficeInspectors.Dump/OfficeInspectors.Dump.csproj" />
     <Project Path="tools/CellBridge.Admin/CellBridge.Admin.csproj" />
+    <Project Path="tools/CellBridge.Emulator/CellBridge.Emulator.csproj" />
     <Project Path="tools/CellBridge.Storage.Setup/CellBridge.Storage.Setup.csproj" />
     <Project Path="tools/CellBridge.Storage.ProcessProbe/CellBridge.Storage.ProcessProbe.csproj" />
     <Project Path="tools/CellBridge.Storage.Portability/CellBridge.Storage.Portability.csproj" />

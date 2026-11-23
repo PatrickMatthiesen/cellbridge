@@ -53,6 +53,50 @@ public sealed class EditorsTablePartitionTests
     }
 
     [Fact]
+    public void StreamParserRoundTripsEditorsAndBinaryMetadata()
+    {
+        var stream = EditorsTablePartitionBuilder.BuildEditorsTableStream([
+            new EditorsTableEditor("client-a", 638923456000000000, "Name & Co.  ", "a-user",
+                "sip:a-user@example.test", "a-user@example.test", true,
+                new Dictionary<string, byte[]> { ["Capabilities"] = [0, 127, 255], ["Empty"] = [] }),
+            new EditorsTableEditor("client-b", 1, HasEditorPermission: false),
+            new EditorsTableEditor("client-c", 2, FriendlyName: " "),
+        ]);
+        var editors = EditorsTableStreamParser.Parse(stream);
+        Assert.Equal(3, editors.Count);
+        Assert.Equal("client-a", editors[0].CacheId);
+        Assert.Equal(638923456000000000, editors[0].Timeout);
+        Assert.Equal("Name & Co.  ", editors[0].FriendlyName);
+        Assert.Equal("a-user", editors[0].LoginName);
+        Assert.Equal("sip:a-user@example.test", editors[0].SipAddress);
+        Assert.Equal("a-user@example.test", editors[0].EmailAddress);
+        Assert.True(editors[0].HasEditorPermission);
+        Assert.Equal(new byte[] { 0, 127, 255 }, editors[0].Metadata!["Capabilities"]);
+        Assert.Empty(editors[0].Metadata!["Empty"]);
+        Assert.False(editors[1].HasEditorPermission);
+        Assert.Null(editors[1].Metadata);
+        Assert.Null(editors[2].HasEditorPermission);
+        Assert.Equal(" ", editors[2].FriendlyName);
+        Assert.Equal(stream, EditorsTablePartitionBuilder.BuildEditorsTableStream(editors));
+        Assert.Empty(EditorsTableStreamParser.Parse(EditorsTablePartitionBuilder.BuildEditorsTableStream(null)));
+    }
+
+    [Fact]
+    public void StreamParserRejectsBadHeadersAndDtds()
+    {
+        var stream = EditorsTablePartitionBuilder.BuildEditorsTableStream(null);
+        Assert.Throws<InvalidDataException>(() => EditorsTableStreamParser.Parse(stream[..8]));
+        stream[0] ^= 1;
+        Assert.Throws<InvalidDataException>(() => EditorsTableStreamParser.Parse(stream));
+
+        using var output = new MemoryStream();
+        output.Write(EditorsTablePartitionBuilder.ZipStreamHeader);
+        using (var deflate = new DeflateStream(output, CompressionMode.Compress, leaveOpen: true))
+            deflate.Write("""<!DOCTYPE EditorsTable [<!ENTITY x "name">]><EditorsTable>&x;</EditorsTable>"""u8);
+        Assert.Throws<System.Xml.XmlException>(() => EditorsTableStreamParser.Parse(output.ToArray()));
+    }
+
+    [Fact]
     public void QueryChanges_UsesHeaderThenCompressedObjectData()
     {
         var identity = new EditorsTablePartitionBuilder.EditorsTableIdentity(

@@ -8,6 +8,27 @@ namespace CellBridge.FssHttpB.Tests;
 public sealed class PutChangesResponseTests
 {
     [Fact]
+    public void OversizedPutChangesPayloadFailsWithoutOffsetOverflow()
+    {
+        var writer = new BinaryWriterEx();
+        new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.PutChangesResponse, int.MaxValue).Serialize(writer);
+
+        Assert.Throws<EndOfStreamException>(() => PutChangesResponse.Deserialize(new BinaryReaderEx(writer.ToArray())));
+    }
+
+    [Fact]
+    public void PutChangesCannotConsumeDataAfterItsPayload()
+    {
+        var writer = new BinaryWriterEx();
+        new StreamObjectHeaderStart32Bit(StreamObjectTypeHeaderStart.PutChangesResponse, 0).Serialize(writer);
+        new PutChangesResponse().Serialize(writer);
+        var reader = new BinaryReaderEx(writer.ToArray());
+
+        Assert.Throws<EndOfStreamException>(() => PutChangesResponse.Deserialize(reader));
+        Assert.True(PutChangesResponse.Deserialize(reader).AppliedStorageIndexID.IsNull);
+    }
+
+    [Fact]
     public void CapturedSharePointSaveResponse_ParsesPutChangesSequenceAndRoundTrips()
     {
         byte[] bytes = ExtractBinaryPart();

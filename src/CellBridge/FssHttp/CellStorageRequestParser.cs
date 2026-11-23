@@ -12,8 +12,7 @@ public static class CellStorageRequestParser
     /// <summary>Maximum number of characters accepted in a SOAP request document.</summary>
     public const long MaximumSoapCharacters = 16 * 1024 * 1024;
 
-    private static readonly XNamespace Tns = CellStorageRequest.Namespace;
-    private static readonly XNamespace XopIncludeNs = "http://www.w3.org/2004/08/xop/include";
+    internal static readonly XNamespace XopIncludeNs = "http://www.w3.org/2004/08/xop/include";
 
     /// <summary>
     /// Parses a SOAP envelope containing an ExecuteCellStorageRequest into a
@@ -79,6 +78,11 @@ public static class CellStorageRequestParser
                 RequestToken = requestToken,
                 UserAgent = ParseOptionalGuid(requestElement, "UserAgent"),
             };
+            foreach (var attribute in requestElement.Attributes())
+            {
+                if (attribute.Name.Namespace == XNamespace.None && !IsModeledRequestAttribute(attribute.Name.LocalName))
+                    fileRequest.RequestAttributes.Add(attribute.Name.LocalName, attribute.Value);
+            }
 
             var subRequestElements = requestElement.Elements().Where(e => e.Name.LocalName == "SubRequest").ToArray();
             if (subRequestElements.Length == 0)
@@ -110,7 +114,8 @@ public static class CellStorageRequestParser
                 {
                     foreach (var attribute in subRequestData.Attributes())
                     {
-                        subRequest.SubRequestDataAttributes[attribute.Name.LocalName] = attribute.Value;
+                        if (attribute.Name.Namespace == XNamespace.None && !attribute.IsNamespaceDeclaration)
+                            subRequest.SubRequestDataAttributes[attribute.Name.LocalName] = attribute.Value;
                     }
 
                     // Capture any Include href (XOP MTOM reference) or inline content.
@@ -135,15 +140,21 @@ public static class CellStorageRequestParser
         return request;
     }
 
-    private static readonly HashSet<string> DependencyTypes = new(StringComparer.Ordinal)
+    internal static bool IsModeledRequestAttribute(string name) =>
+        name is "Url" or "RequestToken" or "UseResourceID" or "ResourceID" or "UserAgent";
+
+    internal static readonly HashSet<string> DependencyTypes = new(StringComparer.Ordinal)
     {
         "OnExecute", "OnSuccess", "OnFail", "OnNotSupported", "OnSuccessOrNotSupported",
     };
 
+    internal static bool AllowsSubRequestData(SubRequestType type) =>
+        type is not (SubRequestType.WhoAmI or SubRequestType.ServerTime or SubRequestType.GetDocMetaInfo or
+            SubRequestType.GetVersions or SubRequestType.LockStatus);
+
     private static void ValidateSubRequestData(FssHttpSubRequest request, bool hasData)
     {
-        if (request.Type is SubRequestType.WhoAmI or SubRequestType.ServerTime or SubRequestType.GetDocMetaInfo or
-            SubRequestType.GetVersions or SubRequestType.LockStatus)
+        if (!AllowsSubRequestData(request.Type))
         {
             if (hasData)
                 throw new InvalidDataException($"{request.Type} must not contain SubRequestData.");

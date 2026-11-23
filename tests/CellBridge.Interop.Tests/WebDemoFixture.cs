@@ -7,6 +7,7 @@ using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Dotnet;
 using Aspire.Hosting.Testing;
+using CellBridge.Client;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.PostgreSql;
@@ -122,21 +123,13 @@ public sealed class WebDemoFixture : IAsyncLifetime
             using var secondHttp = new HttpClient(new HttpClientHandler
             {
                 CookieContainer = secondCookies,
+                AllowAutoRedirect = false,
                 ServerCertificateCustomValidationCallback = (request, _, _, errors) =>
                     errors == System.Net.Security.SslPolicyErrors.None || request.RequestUri?.IsLoopback == true,
             }) { BaseAddress = origin };
-            var secondToken = await Token(secondHttp);
-            using var secondLogin = await secondHttp.PostAsync("/auth/login", new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["login"] = "integration-writer-1", ["password"] = testPassword,
-                ["__RequestVerificationToken"] = secondToken, ["returnUrl"] = "/auth/complete",
-            }), timeout.Token);
-            secondLogin.EnsureSuccessStatusCode();
-            if (secondLogin.RequestMessage?.RequestUri?.AbsolutePath != "/auth/complete")
-                throw new InvalidOperationException("The second disposable integration account could not sign in.");
-            secondToken = await Token(secondHttp);
+            await WebDemoLogin.SignInAsync(secondHttp, origin, "integration-writer-1", testPassword, timeout.Token);
             secondUserCookie = secondCookies.GetCookieHeader(origin);
-            secondUserCsrf = secondToken;
+            secondUserCsrf = await Token(secondHttp);
             foreach (var name in new[] { "test", "save-test", "save-check" })
             {
                 using var response = await http.PostAsJsonAsync("/api/documents", new { name, type = "docx" }, timeout.Token);
@@ -167,10 +160,16 @@ public sealed class WebDemoFixture : IAsyncLifetime
         return client;
     }
 
-    public async Task GrantSecondUserWriteAccessAsync(string path, CancellationToken cancellationToken = default)
+    public Task GrantSecondUserWriteAccessAsync(string path, CancellationToken cancellationToken = default) =>
+        SetSecondUserAccessAsync(path, DocumentAccess.Read | DocumentAccess.Write, cancellationToken);
+
+    public Task RevokeSecondUserWriteAccessAsync(string path, CancellationToken cancellationToken = default) =>
+        SetSecondUserAccessAsync(path, DocumentAccess.Read, cancellationToken);
+
+    private async Task SetSecondUserAccessAsync(string path, DocumentAccess access, CancellationToken cancellationToken)
     {
         if (connectionString is null || application is null)
-            throw new InvalidOperationException("Write grants require the local fixture database.");
+            throw new InvalidOperationException("Permission changes require the local fixture database.");
         await using var dataSource = NpgsqlDataSource.Create(connectionString);
         IDocumentRepository repository = new PostgreSqlStateStore(dataSource);
         var head = await repository.FindAsync(new DocumentIdentity.Path(StorageIds.PathKey(Uri.UnescapeDataString(path))), cancellationToken)
@@ -181,13 +180,11 @@ public sealed class WebDemoFixture : IAsyncLifetime
         var admission = new DocumentActorAdmission(new(owner, owner, owner), current.Head.ResourceId,
             current.Head.LifecycleGeneration, current.Head.Security.AuthorizationPolicy, DocumentAccess.Read | DocumentAccess.Write)
         { StateVersion = current.Head.StateVersion, AuthorityGeneration = current.Head.AuthorityGeneration };
-        var security = current.Head.Security with
-        {
-            Grants = current.Head.Security.Grants.SetItem("local:integration-writer-1", DocumentAccess.Read | DocumentAccess.Write),
-        };
+        const string subject = "local:integration-writer-1";
+        var security = current.Head.Security with { Grants = current.Head.Security.Grants.SetItem(subject, access) };
         var result = await repository.ExecuteControlAsync(new DocumentControlCommand.SetPermissions(
             current.Head.ResourceId, admission, security, current.Head.AuthorityGeneration), cancellationToken);
-        if (!result.Changed) throw new InvalidOperationException("The trusted test write grant failed: " + result.ErrorCode);
+        if (!result.Changed) throw new InvalidOperationException("The trusted test permission change failed: " + result.ErrorCode);
     }
 
     public async Task<DocumentControlRead> ReadControlAsync(string path, CancellationToken cancellationToken = default)

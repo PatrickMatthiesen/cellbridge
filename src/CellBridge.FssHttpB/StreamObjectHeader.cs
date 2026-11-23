@@ -105,6 +105,47 @@ public abstract class StreamObjectHeaderStart
         return header;
     }
 
+    internal static byte[] ReadFramedObject(BinaryReaderEx reader, StreamObjectTypeHeaderStart expectedType)
+    {
+        int start = reader.Position;
+        SkipFramedObject(reader, expectedType);
+        int length = reader.Position - start;
+        reader.Position = start;
+        return reader.ReadBytes(length);
+    }
+
+    internal static void SkipFramedObject(BinaryReaderEx reader, StreamObjectTypeHeaderStart expectedType)
+    {
+        var header = Parse(reader);
+        if (header.Type != expectedType)
+            throw new InvalidDataException($"Expected {expectedType}, got {header.Type}.");
+        SkipFramedObject(reader, header, 0);
+    }
+
+    private static void SkipFramedObject(BinaryReaderEx reader, StreamObjectHeaderStart header, int depth)
+    {
+        if (depth > 32)
+            throw new InvalidDataException("Response object nesting limit exceeded.");
+        reader.Skip(header.Length);
+        if (header.Compound == 0)
+            return;
+
+        while (true)
+        {
+            int position = reader.Position;
+            int discriminator = reader.ReadByte() & 3;
+            reader.Position = position;
+            if (discriminator is 1 or 3)
+            {
+                var end = StreamObjectHeaderEnd.Parse(reader);
+                if ((int)end.Type != (int)header.Type)
+                    throw new InvalidDataException($"Expected {header.Type} end header, got {end.Type}.");
+                return;
+            }
+            SkipFramedObject(reader, Parse(reader), depth + 1);
+        }
+    }
+
     /// <summary>Deserializes this header from the reader.</summary>
     public abstract void Deserialize(BinaryReaderEx reader);
 }
