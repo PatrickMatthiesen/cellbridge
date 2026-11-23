@@ -31,7 +31,8 @@ internal static class McpTransportAuthorization
         var authorizationService = context.RequestServices.GetRequiredService<IAuthorizationService>();
         var defaultPolicy = await policyProvider.GetDefaultPolicyAsync();
         var defaultAuthorization = await authorizationService.AuthorizeAsync(principal, context, defaultPolicy.Requirements);
-        if (!defaultAuthorization.Succeeded) return Results.StatusCode(StatusCodes.Status403Forbidden);
+        if (!defaultAuthorization.Succeeded)
+            return Results.Forbid(authenticationSchemes: [McpBearerAuthentication.SchemeName]);
 
         var options = context.RequestServices.GetRequiredService<CellBridgeMcpOptions>();
         if (options.AuthorizationPolicy is { } policyName)
@@ -41,7 +42,8 @@ internal static class McpTransportAuthorization
             if (policy.AuthenticationSchemes.Any(scheme => scheme != options.BearerScheme))
                 throw new InvalidOperationException("The MCP authorization policy must use the selected bearer scheme.");
             var authorization = await authorizationService.AuthorizeAsync(principal, context, policy.Requirements);
-            if (!authorization.Succeeded) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (!authorization.Succeeded)
+                return Results.Forbid(authenticationSchemes: [McpBearerAuthentication.SchemeName]);
         }
 
         var sessions = context.RequestServices.GetRequiredService<McpTransportSessions>();

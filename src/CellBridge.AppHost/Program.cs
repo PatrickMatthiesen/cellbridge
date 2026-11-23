@@ -61,6 +61,14 @@ if (!isTesting)
         var clientSecret = builder.AddParameter("EntraClientSecret", secret: true);
         webdemo.WithEnvironment("Authentication__Entra__ClientSecret", clientSecret);
     }
+
+    var mcp = builder.Configuration.GetSection("Parameters:Mcp");
+    foreach (var setting in new[] { "Enabled", "ClientId", "AuthorizationServer", "RequiredScope" })
+        if (mcp[setting] is { } value)
+            webdemo.WithEnvironment("Mcp__" + setting, value);
+    foreach (var scope in mcp.GetSection("ScopesSupported").GetChildren())
+        if (scope.Value is { } value)
+            webdemo.WithEnvironment("Mcp__ScopesSupported__" + scope.Key, value);
 }
 if (builder.Configuration["Parameters:PublicOrigin"] is { Length: > 0 } protocolOrigin)
     webdemo.WithEnvironment("Protocol__PublicOrigin", protocolOrigin);

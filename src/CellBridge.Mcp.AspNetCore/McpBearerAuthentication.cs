@@ -4,6 +4,9 @@ using System.Text.Encodings.Web;
 using CellBridge.AspNetCore;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
+using Microsoft.AspNetCore.Routing.Template;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -56,19 +59,56 @@ internal sealed class McpBearerAuthentication(
         }
 
         Response.StatusCode = StatusCodes.Status401Unauthorized;
-        var metadataUrl = options.AuthorizationServer is not null && origin is not null
-            && Context.GetEndpoint()?.Metadata.GetMetadata<McpProtectedResource>() is { } resource
-            ? origin + Request.PathBase.ToUriComponent() + resource.MetadataPath : null;
-        Response.Headers.WWWAuthenticate = metadataUrl is null
-            ? "Bearer"
-            : $"Bearer resource_metadata=\"{metadataUrl}\"";
+        WriteBearerHeader(origin);
         return Task.CompletedTask;
+    }
+
+    protected override Task HandleForbiddenAsync(AuthenticationProperties properties)
+    {
+        Response.StatusCode = StatusCodes.Status403Forbidden;
+        var origin = McpProtectedResource.GetOrigin(Context);
+        if (McpProtectedResource.IsAllowedOrigin(Context, origin))
+            WriteBearerHeader(origin, "insufficient_scope");
+        return Task.CompletedTask;
+    }
+
+    private void WriteBearerHeader(string? origin, string? error = null)
+    {
+        var parameters = new List<string>(3);
+        if (error is not null)
+            parameters.Add($"error=\"{error}\"");
+        var metadataUrl = options.AuthorizationServer is not null && origin is not null
+            && McpProtectedResource.ResolveEndpointPath(Context) is { } endpointPath
+            ? origin + Request.PathBase.ToUriComponent() + McpProtectedResource.RootMetadataPath +
+                endpointPath
+            : null;
+        if (metadataUrl is not null)
+            parameters.Add($"resource_metadata=\"{metadataUrl}\"");
+        if (options.ScopesSupported.Count > 0)
+            parameters.Add($"scope=\"{string.Join(' ', options.ScopesSupported)}\"");
+        Response.Headers.WWWAuthenticate = parameters.Count == 0
+            ? "Bearer"
+            : "Bearer " + string.Join(", ", parameters);
     }
 }
 
-internal sealed record McpProtectedResource(string EndpointPath)
+internal sealed class McpProtectedResource(RoutePattern pattern, TemplateBinderFactory binderFactory)
 {
-    public string MetadataPath => "/.well-known/oauth-protected-resource" + EndpointPath;
+    public const string RootMetadataPath = "/.well-known/oauth-protected-resource";
+    // The request already matched the route. Bind its captured values without outbound policies.
+    private readonly TemplateBinder _binder = binderFactory.Create(new RouteTemplate(pattern), new RouteValueDictionary(pattern.Defaults));
+
+    public static string? ResolveEndpointPath(HttpContext context) =>
+        context.GetEndpoint()?.Metadata.GetMetadata<McpProtectedResource>()?.BindPath(context.Request.RouteValues);
+
+    public string? BindPath(RouteValueDictionary routeValues)
+    {
+        var values = new RouteValueDictionary();
+        foreach (var parameter in pattern.Parameters)
+            if (routeValues.TryGetValue(parameter.Name, out var value))
+                values.Add(parameter.Name, value);
+        return _binder.GetValues(null, values) is { } bound ? _binder.BindValues(bound.AcceptedValues) : null;
+    }
 
     public static string? GetOrigin(HttpContext context)
     {

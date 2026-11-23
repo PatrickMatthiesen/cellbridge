@@ -10,6 +10,8 @@ public sealed class CellBridgeMcpOptions
     public int MaxReadCells { get; set; } = 1000;
     public long MaxWorkbookBytes { get; set; } = 64 * 1024 * 1024;
     public Uri? AuthorizationServer { get; set; }
+    public IReadOnlyList<string> ScopesSupported { get; set; } = [];
+    public bool MapRootProtectedResourceMetadata { get; set; }
 
     internal void Validate()
     {
@@ -23,5 +25,11 @@ public sealed class CellBridgeMcpOptions
             (!issuer.IsAbsoluteUri || issuer.Scheme != "https" || issuer.Host.Length == 0 || issuer.UserInfo.Length != 0 ||
                 issuer.Query.Length != 0 || issuer.Fragment.Length != 0))
             throw new ArgumentException("The authorization server must be an HTTPS issuer URI.", nameof(AuthorizationServer));
+
+        var scopes = ScopesSupported?.ToArray();
+        if (scopes is null || scopes.Any(scope => string.IsNullOrEmpty(scope) ||
+            scope.Any(c => c is not ('!' or (>= '#' and <= '[') or (>= ']' and <= '~')))))
+            throw new ArgumentException("Configure nonempty OAuth scope tokens.", nameof(ScopesSupported));
+        ScopesSupported = Array.AsReadOnly(scopes);
     }
 }

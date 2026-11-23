@@ -68,9 +68,101 @@ Clients send an `Authorization: Bearer` header on each endpoint request and
 omit the `Cookie` header. If a client sends `Origin`, it must match the
 endpoint's public origin. Set `CellBridgeOptions.PublicOrigin` to the public
 HTTPS origin when hosting behind a proxy. `BearerScheme` defaults to
-`"Bearer"`. Set `AuthorizationServer` to the HTTPS issuer URI to advertise
-RFC 9728 protected-resource metadata. With the route above, clients can fetch
-it at `/.well-known/oauth-protected-resource/mcp`.
+`"Bearer"`.
+
+## OAuth discovery
+
+Set `AuthorizationServer` to your provider's HTTPS issuer URI to enable
+OAuth protected-resource metadata. With the route above and no `PathBase`,
+clients can fetch the canonical metadata at
+`/.well-known/oauth-protected-resource/mcp`. Bearer challenges include its
+URL in `resource_metadata`. The metadata's `resource` is the canonical MCP
+endpoint URL, formed from the public origin, `PathBase` and the mapped MCP
+path. See [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728.html#section-3).
+
+If a reverse proxy mounts the app at a path such as `/tenant`, the bearer
+challenge points to `/tenant/.well-known/oauth-protected-resource/mcp`.
+For clients that derive the metadata URL from the resource URL, route
+`/.well-known/oauth-protected-resource/tenant/mcp` at the public origin to
+that same metadata endpoint and preserve the app's `PathBase`.
+
+The `bool` option `MapRootProtectedResourceMetadata` defaults to `false`.
+Set it to `true` to also serve the same metadata at
+`/.well-known/oauth-protected-resource` for clients that look there. The
+metadata at both routes identifies the same MCP endpoint. Only one MCP
+endpoint per app can claim the root metadata route.
+
+Set `ScopesSupported` (`IReadOnlyList<string>`) to the OAuth scopes your
+provider defines for the endpoint. Each entry is one case-sensitive OAuth
+scope token. A token contains one or more printable ASCII characters and
+excludes spaces, double quotes and backslashes. CellBridge advertises the
+list as `scopes_supported` in metadata and as a space-separated `scope`
+parameter in the `WWW-Authenticate` Bearer header. An empty list omits both
+fields. See [RFC 6749, section 3.3](https://www.rfc-editor.org/rfc/rfc6749.html#section-3.3).
+Use the host authorization policy to enforce scope requirements.
+
+## Opt-in WebDemo testing with Microsoft Entra ID
+
+WebDemo disables MCP by default. To enable it, start with a working Entra
+configuration where `Authentication:Entra:Enabled` is `true`. Use an Entra
+user linked to an existing local WebDemo account with access to an `.xlsx`
+workbook. MCP uses the configured `Authentication:Entra:TenantId` and maps
+the token to that same account, so the user's existing workbook grants apply.
+
+In that tenant, create a dedicated MCP API app registration with a client ID
+distinct from the browser and Office app registrations. Set
+`api.requestedAccessTokenVersion` to `2` in its manifest. Set the Application
+ID URI to the canonical MCP endpoint, such as `https://mcp.example.com/mcp`,
+with the `/mcp` path and no trailing slash. Expose a delegated scope such
+as `mcp.access` and obtain consent for the MCP client to request it. The token
+audience (`aud`) is the MCP API application's client GUID. The token's `scp`
+claim must contain the exact, case-sensitive short scope name `mcp.access`.
+See [Microsoft's MCP server registration instructions](https://learn.microsoft.com/en-us/entra/agent-id/secure-mcp-server-with-entra-id).
+
+For a Client ID Metadata Document (CIMD) test, confirm that the MCP client
+supports CIMD. Append `/.well-known/openid-configuration` to the tenant-specific
+`/oauth21/2026-08` URL and check that `client_id_metadata_document_supported`
+is `true`. Set `AuthorizationServer` to the `/oauth21/2026-08` URL for
+discovery. WebDemo validates Entra v2 tokens against the tenant-specific
+`/v2.0` issuer.
+See [Microsoft's CIMD setup and consent instructions](https://learn.microsoft.com/en-us/entra/agent-id/configure-client-id-metadata-document).
+
+Merge these settings into the ignored `src/CellBridge.AppHost/apphost.settings.json`.
+Replace the example host and IDs. `Parameters:PublicOrigin` must be an HTTPS
+origin reachable by the client. AppHost forwards `Parameters:Mcp` to WebDemo
+as `Mcp`. Set `RequiredScope` to the short scope name and list the fully
+qualified scope URI in `ScopesSupported`.
+
+```json
+{
+  "Parameters": {
+    "PublicOrigin": "https://mcp.example.com",
+    "Mcp": {
+      "Enabled": true,
+      "ClientId": "<mcp-api-application-client-id>",
+      "AuthorizationServer": "https://login.microsoftonline.com/<home-tenant-id>/oauth21/2026-08",
+      "RequiredScope": "mcp.access",
+      "ScopesSupported": ["https://mcp.example.com/mcp/mcp.access"]
+    }
+  }
+}
+```
+
+Start WebDemo through the [development AppHost](automated-testing.md#development-apphost)
+and verify the setup at the public origin.
+
+1. Send unauthenticated GET requests to `/.well-known/oauth-protected-resource/mcp`
+   and `/.well-known/oauth-protected-resource`. Both should return `200` with
+   the same JSON. Check that `resource` matches the Application ID URI,
+   `authorization_servers` lists the tenant discovery URL, and `scopes_supported`
+   lists the fully qualified scope.
+2. Send a POST to `/mcp` without a bearer token. Expect `401` and a
+   `WWW-Authenticate: Bearer` challenge with `resource_metadata` pointing to
+   `/.well-known/oauth-protected-resource/mcp` on the public origin and `scope`
+   set to the fully qualified scope.
+3. Connect the MCP client to the public `/mcp` URL and sign in as the linked
+   user. Confirm that `initialize` succeeds and call `open_workbook` on a workbook
+   the user can already read. Close it with `close_workbook`.
 
 ## Identity and authorization
 
@@ -80,6 +172,11 @@ against the principal authenticated by `BearerScheme`. Set
 principal. MCP uses `BearerScheme` for authentication even if the host's
 `DefaultPolicy` lists other schemes. If the named policy lists an authentication
 scheme, it must be `BearerScheme`.
+
+Missing or invalid bearer authentication returns `401 Unauthorized` with a
+Bearer challenge. If an authenticated caller fails the host authorization
+policy, MCP returns `403 Forbidden` with `error="insufficient_scope"` in the
+Bearer header.
 
 For interactive access, authenticate with the user's bearer token and use
 `AuthorizationPolicy` to require the issuer's MCP access scope. Map the token
