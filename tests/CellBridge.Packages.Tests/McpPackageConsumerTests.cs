@@ -16,8 +16,10 @@ namespace CellBridge.Packages.Tests;
 
 public sealed class McpPackageConsumerTests
 {
-    [Fact]
-    public async Task PackagedMcpHostOpensAnAuthorizedWorkbookOverStreamableHttp()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PackagedMcpHostOpensAnAuthorizedWorkbookOverStreamableHttp(bool enableRealTime)
     {
         const string issuer = "https://issuer.example";
         const string audience = "cellbridge-mcp-tests";
@@ -39,7 +41,7 @@ public sealed class McpPackageConsumerTests
         });
         builder.Services.AddCellBridge(TestStorage.Memory(), requireDurability: false, configure: options =>
         {
-            options.EnableOfficeRealTime = false;
+            options.EnableOfficeRealTime = enableRealTime;
             options.PublicOrigin = origin;
         });
         builder.Services.AddCellBridgeMcp(options => options.BearerScheme = scheme);
@@ -65,6 +67,8 @@ public sealed class McpPackageConsumerTests
             SigningCredentials = new(key, SecurityAlgorithms.HmacSha256),
         });
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var office = await http.GetAsync(origin + "/shared/package-mcp.xlsx");
+        office.EnsureSuccessStatusCode();
         var transport = new HttpClientTransport(new()
         {
             Endpoint = new Uri(origin + "/workbook-tools"),

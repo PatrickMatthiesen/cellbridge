@@ -15,14 +15,14 @@ internal sealed class McpWorkbookEntry(
     private const int MaxSheetOperations = 1024;
 
     private readonly byte[] _revisionKey = RandomNumberGenerator.GetBytes(32);
-    private readonly Dictionary<string, string> _revisions = new(StringComparer.Ordinal);
+    private readonly OrderedDictionary<string, string> _revisions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SheetOperation> _sheetOperations = new(StringComparer.Ordinal);
     private string? _pendingWrite;
     private int _queuedRequests;
 
     public McpWorkbookRegistry.WorkbookKey Key { get; } = key;
     public long LifecycleGeneration { get; } = lifecycleGeneration;
-    public DateTimeOffset? ExpiresAt { get; } = expiresAt;
+    public DateTimeOffset? ExpiresAt { get; set; } = expiresAt;
     public string Handle { get; } = handle;
     public McpWorkbookTransport Transport { get; } = transport;
     public SemaphoreSlim Gate { get; } = new(1, 1);
@@ -69,7 +69,7 @@ internal sealed class McpWorkbookEntry(
     {
         var token = Convert.ToHexString(HMACSHA256.HashData(_revisionKey, Encoding.UTF8.GetBytes(revision)));
         if (_revisions.Count >= MaxRevisionTokens && !_revisions.ContainsKey(token))
-            _revisions.Remove(_revisions.Keys.First());
+            _revisions.RemoveAt(0);
         _revisions[token] = revision;
         return token;
     }

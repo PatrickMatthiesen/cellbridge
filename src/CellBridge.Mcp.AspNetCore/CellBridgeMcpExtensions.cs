@@ -27,6 +27,17 @@ public static class CellBridgeMcpExtensions
         services.AddHostedService(sp => sp.GetRequiredService<McpWorkbookRegistry>());
         services.AddAuthentication().AddScheme<AuthenticationSchemeOptions, McpBearerAuthentication>(
             McpBearerAuthentication.SchemeName, _ => { });
+        services.PostConfigure<AuthenticationOptions>(authentication =>
+        {
+            if (authentication.DefaultScheme is not null ||
+                (AppContext.TryGetSwitch("Microsoft.AspNetCore.Authentication.SuppressAutoDefaultScheme", out var suppressed) && suppressed))
+                return;
+
+            // Neither explicitly selected CellBridge scheme should change the sole host scheme's default.
+            var hostSchemes = authentication.Schemes.Where(scheme =>
+                scheme.Name is not (McpBearerAuthentication.SchemeName or "CellBridge.OfficeRealTime")).Take(2).ToArray();
+            if (hostSchemes.Length == 1) authentication.DefaultScheme = hostSchemes[0].Name;
+        });
         services.AddAuthorization();
 
         services.AddMcpServer()

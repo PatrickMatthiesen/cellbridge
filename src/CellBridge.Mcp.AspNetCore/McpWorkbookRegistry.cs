@@ -77,15 +77,13 @@ internal sealed class McpWorkbookRegistry(
                     continue;
                 }
 
-                var current = invocation.WithWorkbookExpiry(entry.ExpiresAt);
-                using var entryDeadline = current.CreateDeadline();
-                using var entryLifetime = CancellationTokenSource.CreateLinkedTokenSource(requestToken, entryDeadline?.Token ?? default);
-                var token = entryLifetime.Token;
+                var token = requestToken;
                 // Authorization may have changed while this open waited for another operation.
                 if (!opening)
-                    await EnsureAccessAsync(entry, current, DocumentAccess.Read, token);
+                    await EnsureAccessAsync(entry, invocation, DocumentAccess.Read, token);
 
-                entry.Transport.Invocation = current.Bind(entry);
+                entry.ExpiresAt = invocation.ExpiresAt;
+                entry.Transport.Invocation = invocation.Bind(entry);
                 if (opening)
                 {
                     var bytes = Math.Min(options.MaxWorkbookBytes, int.MaxValue);
@@ -156,12 +154,12 @@ internal sealed class McpWorkbookRegistry(
                 throw Unavailable();
             }
 
-            var current = invocation.WithWorkbookExpiry(entry.ExpiresAt);
-            using var deadline = current.CreateDeadline();
+            using var deadline = invocation.CreateDeadline();
             using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline?.Token ?? default);
             var token = lifetime.Token;
-            await EnsureAccessAsync(entry, current, access, token);
-            entry.Transport.Invocation = current.Bind(entry);
+            await EnsureAccessAsync(entry, invocation, access, token);
+            entry.ExpiresAt = invocation.ExpiresAt;
+            entry.Transport.Invocation = invocation.Bind(entry);
             if (closing)
             {
                 if (!await CloseEntryAsync(entry))

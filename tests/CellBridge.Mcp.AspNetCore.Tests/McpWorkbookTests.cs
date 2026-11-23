@@ -10,6 +10,32 @@ namespace CellBridge.Mcp.AspNetCore.Tests;
 public sealed class McpWorkbookTests
 {
     [Fact]
+    public async Task RecentBaseRevisionSurvivesRevisionTokenEviction()
+    {
+        await using var host = await McpTestHost.StartAsync();
+        var document = await host.CreateWorkbookAsync();
+        using var http = host.CreateHttp("owner");
+        var mcp = new McpHttpSession(http);
+        await mcp.InitializeAsync();
+        var opened = await OpenAsync(mcp, new { resourceId = document.ResourceId });
+        var workbookHandle = Handle(opened);
+        var sheets = await SuccessAsync(mcp, "list_sheets", new { workbookHandle });
+        var sheetId = Assert.Single(sheets.GetProperty("sheets").EnumerateArray()).GetProperty("sheetId").GetUInt32();
+        var revision = Revision(opened);
+        var previous = revision;
+        for (int row = 1; row <= 34; row++)
+        {
+            var written = await SetNumberAsync(mcp, workbookHandle, sheetId, $"A{row}", "1", revision);
+            AssertWriteStatus(written, "Success");
+            previous = revision;
+            revision = Revision(written);
+        }
+
+        var result = await SetNumberAsync(mcp, workbookHandle, sheetId, "B1", "2", previous);
+        AssertWriteStatus(result, "Success");
+    }
+
+    [Fact]
     public async Task StreamableHttpCanEditAndCloseAWorkbook()
     {
         await using var host = await McpTestHost.StartAsync(configure: options => options.MaxReadCells = 2);

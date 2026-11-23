@@ -99,11 +99,6 @@ internal sealed record McpWorkbookInvocation(
         return this with { Actor = actor };
     }
 
-    public McpWorkbookInvocation WithWorkbookExpiry(DateTimeOffset? entryExpiry) =>
-        entryExpiry is { } expiry && (ExpiresAt is null || expiry < ExpiresAt)
-            ? this with { ExpiresAt = expiry }
-            : this;
-
     public void ThrowIfExpired()
     {
         // Match the client's cleanup-denied protocol code when expiry interrupts disposal.

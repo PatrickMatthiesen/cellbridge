@@ -35,12 +35,15 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
     public static async Task<McpTestHost> StartAsync(bool enableRealTime = false,
         Action<CellBridgeMcpOptions>? configure = null, Action<CellBridgeOptions>? configureProtocol = null,
         Action<AuthorizationOptions>? configureAuthorization = null,
-        Func<IDocumentRepository, IDocumentRepository>? wrapRepository = null)
+        Func<IDocumentRepository, IDocumentRepository>? wrapRepository = null,
+        TimeProvider? clock = null)
     {
         var content = new InMemoryContentStore();
         var repository = new InMemoryDocumentRepository(content);
         var storage = new StorageProvider(wrapRepository?.Invoke(repository) ?? repository, content);
         var builder = WebApplication.CreateSlimBuilder();
+        if (clock is not null)
+            builder.Services.AddSingleton(clock);
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
         builder.Services.AddAuthentication(CookieScheme)
@@ -144,6 +147,10 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
         protected override Task<AuthenticateResult> HandleAuthenticateAsync()
         {
             var token = Request.Headers.Authorization.ToString();
+            var expirationSeparator = token.IndexOf(':');
+            var expiration = expirationSeparator < 0 ? null : token[(expirationSeparator + 1)..];
+            if (expirationSeparator >= 0)
+                token = token[..expirationSeparator];
             var actor = token switch
             {
                 "Bearer owner" => Owner,
@@ -156,6 +163,8 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
             var principal = Principal(actor, Scheme.Name);
             if (token == "Bearer peer-mcp")
                 principal.Identities.Single().AddClaim(new("scope", WorkbookScope));
+            if (expiration is not null)
+                principal.Identities.Single().AddClaim(new("exp", expiration));
             return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(principal, Scheme.Name)));
         }
     }

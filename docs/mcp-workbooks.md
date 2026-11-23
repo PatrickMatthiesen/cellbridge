@@ -124,9 +124,10 @@ initialize a new MCP session and reopen the workbook. Committed revisions
 persist according to the document storage provider.
 
 The registry enforces `IdleSessionTimeout`, token expiry and the configured
-per-actor and total session limits. `MaxWorkbookBytes` limits workbook package
-size. On graceful shutdown, the host closes active workbook sessions and
-releases their editing participation.
+per-actor and total session limits. Present a refreshed bearer token on a tool
+call before the workbook session expires to keep it open. `MaxWorkbookBytes`
+limits workbook package size. On graceful shutdown, the host closes active
+workbook sessions and releases their editing participation.
 
 When Office RTC is enabled and supported by the configured authorization
 mode, MCP clients can participate through the in-process RTC connector.

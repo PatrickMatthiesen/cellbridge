@@ -8,6 +8,46 @@ namespace CellBridge.Mcp.AspNetCore.Tests;
 public sealed class McpLifecycleTests
 {
     [Fact]
+    public async Task FreshBearerExtendsWorkbookUntilItsOwnExpiry()
+    {
+        var clock = new AdjustableClock(DateTimeOffset.UtcNow);
+        await using var host = await McpTestHost.StartAsync(clock: clock);
+        var document = await host.CreateWorkbookAsync();
+        using var original = host.CreateHttp($"owner:{clock.GetUtcNow().AddMinutes(1).ToUnixTimeSeconds()}");
+        using var refreshed = host.CreateHttp($"owner:{clock.GetUtcNow().AddMinutes(3).ToUnixTimeSeconds()}");
+        using var current = host.CreateHttp("owner");
+        var mcp = new McpHttpSession(original);
+        await mcp.InitializeAsync();
+        var workbookHandle = Handle(await OpenAsync(mcp, new { resourceId = document.ResourceId }));
+        var tool = new { name = "list_sheets", arguments = new { workbookHandle } };
+        using var renewal = await mcp.SendAsync("tools/call", tool, requestClient: refreshed);
+        var renewed = McpHttpSession.AssertResult(await McpHttpSession.ReadMessageAsync(renewal));
+        Assert.True(renewed.TryGetProperty("structuredContent", out _));
+
+        clock.Advance(TimeSpan.FromMinutes(2));
+        using var expired = await mcp.SendAsync("tools/call", tool);
+        Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
+        using var stillOpen = await mcp.SendAsync("tools/call", tool, requestClient: refreshed);
+        var result = McpHttpSession.AssertResult(await McpHttpSession.ReadMessageAsync(stillOpen));
+        Assert.True(result.TryGetProperty("structuredContent", out _));
+
+        clock.Advance(TimeSpan.FromMinutes(2));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while ((await host.ReadControlAsync(document.ResourceId)).Editors.Length != 0)
+            await Task.Delay(TimeSpan.FromMilliseconds(50), deadline.Token);
+        using var unavailable = await mcp.SendAsync("tools/call", tool, requestClient: current);
+        var closed = McpHttpSession.AssertResult(await McpHttpSession.ReadMessageAsync(unavailable));
+        Assert.True(closed.GetProperty("isError").GetBoolean());
+    }
+
+    private sealed class AdjustableClock(DateTimeOffset initial) : TimeProvider
+    {
+        private long _offset;
+        public override DateTimeOffset GetUtcNow() => initial.AddTicks(Interlocked.Read(ref _offset));
+        public void Advance(TimeSpan elapsed) => Interlocked.Add(ref _offset, elapsed.Ticks);
+    }
+
+    [Fact]
     public async Task IdleWorkbookIsEvictedAndLeavesItsCoauthoringSession()
     {
         await using var host = await McpTestHost.StartAsync(configure: options =>
