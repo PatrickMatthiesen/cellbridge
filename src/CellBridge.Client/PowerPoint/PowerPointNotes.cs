@@ -100,6 +100,12 @@ internal sealed partial class PowerPointPackage
         if (theme is null)
             throw new InvalidOperationException("The slide has no theme for a new notes master.");
 
+        var themeRoot = Root(theme, A + "theme");
+        var themeRelationshipsPath = RelationshipsPath(theme);
+        var themeRelationships = _zip.Contains(themeRelationshipsPath)
+            ? Root(themeRelationshipsPath, Rel + "Relationships")
+            : null;
+        var notesTheme = NextPartAtPath(theme[..(theme.LastIndexOf('/') + 1)] + "theme");
         var notesMaster = NextPart("notesMasters/notesMaster");
         var tree = EmptyShapeTree();
         var size = _presentation.Element(P + "notesSz");
@@ -114,8 +120,13 @@ internal sealed partial class PowerPointPackage
             new XAttribute("bg2", "lt2"), new XAttribute("tx2", "dk2"),
             Enumerable.Range(1, 6).Select(index => new XAttribute($"accent{index}", $"accent{index}")),
             new XAttribute("hlink", "hlink"), new XAttribute("folHlink", "folHlink"));
+        // Keep the theme in the same directory so its relative relationship targets still resolve.
+        AddPart(notesTheme, new XElement(themeRoot));
+        if (themeRelationships is not null)
+            AddPart(RelationshipsPath(notesTheme), new XElement(themeRelationships));
+        AddContentTypeOverride(notesTheme, "application/vnd.openxmlformats-officedocument.theme+xml");
         AddPart(notesMaster, PresentationRoot("notesMaster", new XElement(P + "cSld", tree), colorMap));
-        AddRelationship(notesMaster, theme, "theme");
+        AddRelationship(notesMaster, notesTheme, "theme");
         AddContentType(notesMaster, "notesMaster");
         var id = AddRelationship(PresentationPart, notesMaster, "notesMaster");
         PresentationList("notesMasterIdLst", "sldMasterIdLst")

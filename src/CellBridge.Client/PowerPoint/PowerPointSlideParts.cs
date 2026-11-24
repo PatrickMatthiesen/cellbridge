@@ -148,15 +148,20 @@ internal sealed partial class PowerPointPackage
         return Convert.ToHexString(SHA256.HashData(stream));
     }
 
-    private string NextPart(string relativePrefix)
+    private string NextPart(string relativePrefix) =>
+        NextPartAtPath(PresentationPart[..(PresentationPart.LastIndexOf('/') + 1)] + relativePrefix);
+
+    private string NextPartAtPath(string prefix)
     {
-        var prefix = PresentationPart[..(PresentationPart.LastIndexOf('/') + 1)] + relativePrefix;
         for (var index = 1; ; index++)
         {
             var part = $"{prefix}{index}.xml";
             if (!_zip.Contains(part) && !_loaded.ContainsKey(part) &&
                 !_zip.Contains(RelationshipsPath(part)) && !_loaded.ContainsKey(RelationshipsPath(part)) &&
-                FindContentType(part) is null)
+                FindContentType(part) is null &&
+                !_entriesByName.Keys.Concat(_loaded.Keys).Any(name =>
+                    name.StartsWith(part + "/", StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith(RelationshipsPath(part) + "/", StringComparison.OrdinalIgnoreCase)))
                 return part;
         }
     }
@@ -185,10 +190,13 @@ internal sealed partial class PowerPointPackage
         Root(ContentTypes, Ct + "Types").Elements(Ct + "Override").SingleOrDefault(element =>
             string.Equals((string?)element.Attribute("PartName"), "/" + path, StringComparison.OrdinalIgnoreCase));
 
-    private void AddContentType(string path, string kind)
+    private void AddContentType(string path, string kind) =>
+        AddContentTypeOverride(path, PowerPointContentType + kind + "+xml");
+
+    private void AddContentTypeOverride(string path, string contentType)
     {
         Root(ContentTypes, Ct + "Types").Add(new XElement(Ct + "Override", new XAttribute("PartName", "/" + path),
-            new XAttribute("ContentType", PowerPointContentType + kind + "+xml")));
+            new XAttribute("ContentType", contentType)));
         Change(ContentTypes);
     }
 

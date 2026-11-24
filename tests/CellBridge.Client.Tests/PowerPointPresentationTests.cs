@@ -87,6 +87,62 @@ public sealed class PowerPointPresentationTests
     }
 
     [Fact]
+    public void FirstNotesOnBlankDeckUseASeparateTheme()
+    {
+        var original = OfficeDocumentTemplates.CreatePowerPointPresentation();
+        var model = PowerPointPresentation.Open(original);
+        model.SetSlideNotes(256, "Speaker notes");
+        var result = model.ToArray();
+        Validate(result);
+
+        using var document = PresentationDocument.Open(new MemoryStream(result), false);
+        var presentation = document.PresentationPart!;
+        var slideTheme = Assert.Single(presentation.SlideMasterParts).ThemePart!;
+        var notesMaster = presentation.NotesMasterPart!;
+        var notesTheme = notesMaster.ThemePart!;
+        Assert.Equal("/" + Theme, slideTheme.Uri.OriginalString);
+        Assert.Equal("/ppt/theme/theme2.xml", notesTheme.Uri.OriginalString);
+        Assert.Equal("application/vnd.openxmlformats-officedocument.theme+xml", notesTheme.ContentType);
+        Assert.True(XNode.DeepEquals(Part(result, Theme), Part(result, "ppt/theme/theme2.xml")));
+        Assert.Equal(notesMaster.Uri, Assert.Single(presentation.SlideParts).NotesSlidePart!.NotesMasterPart!.Uri);
+        Assert.Equal("Speaker notes", PowerPointPresentation.Open(result).ReadSlide(256).Notes);
+        foreach (var unchanged in new[] { SlideOne, Layout, "ppt/slideMasters/slideMaster1.xml", Theme })
+            AssertSameZipRecord(original, result, unchanged);
+    }
+
+    [Fact]
+    public void NotesThemeSkipsTheDirectoryOfAnExistingThemeImage()
+    {
+        const string image = "ppt/theme/theme2.xml/background.png";
+        const string themeRelationships = "ppt/theme/_rels/theme1.xml.rels";
+        var template = Rewrite(OfficeDocumentTemplates.CreatePowerPointPresentation(), "[Content_Types].xml",
+            types => types.Root!.Add(new XElement(types.Root.Name.Namespace + "Override",
+                new XAttribute("PartName", "/" + image), new XAttribute("ContentType", "image/png"))));
+        using var bytes = new MemoryStream();
+        bytes.Write(template);
+        using (var zip = new ZipArchive(bytes, ZipArchiveMode.Update, leaveOpen: true))
+        {
+            using (var target = zip.CreateEntry(image).Open())
+                target.Write(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII="));
+            using var relationships = zip.CreateEntry(themeRelationships).Open();
+            XElement.Parse("""
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="theme2.xml/background.png"/>
+                </Relationships>
+                """).Save(relationships);
+        }
+
+        var original = bytes.ToArray();
+        var model = PowerPointPresentation.Open(original);
+        model.SetSlideNotes(256, "Speaker notes");
+        var result = model.ToArray();
+        Validate(result);
+        Assert.True(ContainsPart(result, "ppt/theme/theme3.xml"));
+        Assert.True(XNode.DeepEquals(Part(original, themeRelationships), Part(result, "ppt/theme/_rels/theme3.xml.rels")));
+        AssertSameZipRecord(original, result, image);
+    }
+
+    [Fact]
     public void NotesCreationAndDeletionKeepTheLayoutAndSharedNotesMaster()
     {
         var original = Deck();
