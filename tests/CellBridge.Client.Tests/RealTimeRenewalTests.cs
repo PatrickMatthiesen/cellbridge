@@ -7,6 +7,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Threading.Channels;
 using System.Xml.Linq;
 using CellBridge.AspNetCore;
+using CellBridge.Client.PowerPoint;
 using CellBridge.FssHttp;
 using CellBridge.Storage.Abstractions;
 using CellBridge.Storage.InMemory;
@@ -20,6 +21,44 @@ namespace CellBridge.Client.Tests;
 
 public sealed class RealTimeRenewalTests
 {
+    [Fact]
+    public async Task NotificationFailurePreservesTheConfirmedOfficeSave()
+    {
+        var origin = new Uri("http://localhost");
+        var document = new Uri(origin, "/rtc-save-notification.pptx");
+        var actor = new CellBridgeActor(new("client-tests:save", "save", "Save test"), CanCreate: true);
+        await using var app = CreateBuilder().Build();
+        await app.Services.GetRequiredService<CellBridgeDocumentService>()
+            .CreateAsync(document.AbsolutePath, OfficeDocumentTemplates.CreatePowerPointPresentation(), actor);
+        var processor = app.Services.GetRequiredService<CellBridgeRequestProcessor>();
+        var authority = origin.GetLeftPart(UriPartial.Authority);
+        var channel = new DisconnectableChannel(new InvalidOperationException("The connector cannot send updates."));
+        var transport = new InProcessCellBridgeTransport(processor, authority, actor, connector: new TestConnector(channel));
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var documentSession = await CellBridgeDocumentSession.OpenAsync(transport, document,
+            new() { Mode = CellBridgeDocumentSessionMode.LazyWriter }, timeout.Token);
+        var session = new PowerPointPresentationSession(documentSession);
+        var original = session.Revision;
+        var template = Assert.Single(session.ListSlides()).Id;
+
+        var saved = await session.ApplyAsync(new PowerPointAddSlide(template), original, timeout.Token);
+
+        Assert.Equal(1, channel.NotificationAttempts);
+        Assert.Equal(OfficeWriteStatus.Success, saved.Status);
+        Assert.NotEqual(original, saved.Revision);
+        Assert.Equal(saved.Revision, session.Revision);
+        Assert.False(session.HasPendingCommit);
+        var added = Assert.IsType<uint>(saved.AddedSlideId);
+        Assert.Equal(added, session.ReadSlide(added).Id);
+
+        await using var reader = await CellBridgeDocumentSession.OpenAsync(
+            new InProcessCellBridgeTransport(processor, authority, actor), document, cancellationToken: timeout.Token);
+        var reopened = new PowerPointPresentationSession(reader);
+        Assert.Equal(saved.Revision, reopened.Revision);
+        Assert.Equal(new[] { template, added }, reopened.ListSlides().Select(slide => slide.Id));
+    }
+
     [Fact]
     public async Task TicketRenewsBeforeExpiryDuringSyncOverWebSocketUsingCallerTlsConfiguration()
     {
@@ -308,10 +347,17 @@ public sealed class RealTimeRenewalTests
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private sealed class DisconnectableChannel : ICellBridgeRealTimeChannel
+    private sealed class TestConnector(ICellBridgeRealTimeChannel channel) : ICellBridgeRealTimeConnector
+    {
+        public Task<ICellBridgeRealTimeChannel?> TryConnectRealTimeAsync(RealTimeConnectionTarget target,
+            CancellationToken cancellationToken = default) => Task.FromResult<ICellBridgeRealTimeChannel?>(channel);
+    }
+
+    private sealed class DisconnectableChannel(Exception? notificationError = null) : ICellBridgeRealTimeChannel
     {
         private readonly Channel<string> _notifications = Channel.CreateUnbounded<string>();
         public TaskCompletionSource Disposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int NotificationAttempts { get; private set; }
 
         public void Disconnect() => _notifications.Writer.TryComplete();
 
@@ -320,6 +366,12 @@ public sealed class RealTimeRenewalTests
 
         public Task UpdateClientInfoAsync(RealTimeConnectionTarget target, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("No ticket update should be sent after disconnect.");
+
+        public Task SendUpdateNotificationAsync(int channel, string payload, CancellationToken cancellationToken = default)
+        {
+            NotificationAttempts++;
+            throw notificationError ?? new IOException("The test connection is closed.");
+        }
 
         public ValueTask DisposeAsync()
         {
@@ -340,6 +392,9 @@ public sealed class RealTimeRenewalTests
             await inner.UpdateClientInfoAsync(target, cancellationToken);
             renewed.TrySetResult(DateTimeOffset.UtcNow);
         }
+
+        public Task SendUpdateNotificationAsync(int channel, string payload, CancellationToken cancellationToken = default) =>
+            inner.SendUpdateNotificationAsync(channel, payload, cancellationToken);
 
         public ValueTask DisposeAsync() => inner.DisposeAsync();
     }

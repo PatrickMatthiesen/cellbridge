@@ -24,6 +24,9 @@ public interface ICellBridgeRealTimeChannel : IAsyncDisposable
     IAsyncEnumerable<string> ReadNotificationsAsync(CancellationToken cancellationToken = default);
 
     Task UpdateClientInfoAsync(RealTimeConnectionTarget target, CancellationToken cancellationToken = default);
+
+    /// <summary>Sends a collaboration hint through the current connection.</summary>
+    Task SendUpdateNotificationAsync(int channel, string payload, CancellationToken cancellationToken = default);
 }
 
 public interface ICellBridgeRealTimeConnector

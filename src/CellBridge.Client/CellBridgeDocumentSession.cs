@@ -236,7 +236,10 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                 await JoinWriterAsync(cancellationToken);
             }
 
-            return await ExecuteSaveAsync(current, pending, cancellationToken);
+            var result = await ExecuteSaveAsync(current, pending, cancellationToken);
+            if (result.Succeeded)
+                await NotifySavedAsync();
+            return result;
         }
         finally { _gate.Release(); }
     }
@@ -314,6 +317,22 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
                     throw UnknownSaveOutcome(error);
                 // Resubmit the original request object, including its proposal ID and binary payload.
             }
+        }
+    }
+
+    private async Task NotifySavedAsync()
+    {
+        if (_realTime is not { } channel) return;
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(2));
+            await channel.SendUpdateNotificationAsync(14, """{"etts":["PersistedContentUpdate"],"osn":"Win32","cr":"CC"}""",
+                deadline.Token);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The save is committed even if the peer hint could not be delivered.
         }
     }
 

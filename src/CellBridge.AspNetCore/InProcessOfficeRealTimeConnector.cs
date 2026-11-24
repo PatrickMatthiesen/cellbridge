@@ -141,6 +141,24 @@ internal sealed class InProcessOfficeRealTimeConnector(CellBridgeInProcessHost h
                 return new(close ??= CloseAsync());
         }
 
+        public async Task SendUpdateNotificationAsync(int channel, string payload, CancellationToken cancellationToken = default)
+        {
+            await renewal.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, Connection.ConnectionAborted);
+                deadline.CancelAfter(TimeSpan.FromSeconds(5));
+                if (!await sessions.SendUpdateNotificationAsync(ticket, Connection.ConnectionId, channel, payload, deadline.Token)
+                    .ConfigureAwait(false))
+                    throw new IOException("The server rejected the RTC notification.");
+            }
+            catch (OfficeRealTimeBusyException error)
+            {
+                throw new IOException("The server could not relay the RTC notification.", error);
+            }
+            finally { renewal.Release(); }
+        }
+
         private Task ReceiveAsync(string method, object?[] arguments, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();

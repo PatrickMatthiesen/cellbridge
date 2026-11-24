@@ -1,6 +1,5 @@
 using CellBridge.AspNetCore;
 using CellBridge.Client;
-using CellBridge.Client.Excel;
 using CellBridge.Storage.Abstractions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -15,6 +14,7 @@ internal sealed class McpWorkbookRegistry(
     TimeProvider clock, ILogger<McpWorkbookRegistry> logger)
     : BackgroundService
 {
+    private const int HandleBytes = 32;
     private static readonly TimeSpan ReleaseRetryDelay = TimeSpan.FromSeconds(1);
     private readonly object _gate = new();
     private readonly Dictionary<string, McpWorkbookEntry> _handles = new(StringComparer.Ordinal);
@@ -24,8 +24,10 @@ internal sealed class McpWorkbookRegistry(
 
     public int MaxReadCells => options.MaxReadCells;
 
-    public async Task<McpOpenWorkbookResult> OpenAsync(McpRequestIdentity identity, DocumentIdentity target,
-        CancellationToken cancellationToken)
+    public int MaxOfficeReadItems => Math.Min(options.MaxReadCells, 1000);
+
+    public async Task<McpOpenDocument> OpenAsync(McpRequestIdentity identity, DocumentIdentity target,
+        McpDocumentFormat format, CancellationToken cancellationToken)
     {
         var invocation = ResolveInvocation(identity);
         using var deadline = invocation.CreateDeadline();
@@ -34,7 +36,9 @@ internal sealed class McpWorkbookRegistry(
         while (true)
         {
             var document = await host.ResolveDocumentAsync(target, invocation.Actor, invocation.PublicOrigin,
-                invocation.PathBase, DocumentAccess.Read, requestToken) ?? throw Unavailable();
+                invocation.PathBase, DocumentAccess.Read, requestToken) ?? throw Unavailable(format);
+            if (!MatchesPath(document.Path, format))
+                throw Unavailable(format);
             var key = new WorkbookKey(invocation.Actor.Identity.Subject, invocation.SessionId, document.ResourceId);
             McpWorkbookEntry entry;
             bool opening;
@@ -47,10 +51,12 @@ internal sealed class McpWorkbookRegistry(
                     if (_handles.Count >= options.MaxTotalSessions ||
                         _workbooks.Keys.Count(candidate => candidate.Subject == key.Subject) >=
                         options.MaxConcurrentSessionsPerActor)
-                        throw new McpException("The open workbook session limit was reached.");
-                    entry = new McpWorkbookEntry(key, document.LifecycleGeneration,
+                        throw new McpException(format == McpDocumentFormat.Excel
+                            ? "The open workbook session limit was reached."
+                            : "The open document session limit was reached.");
+                    entry = new McpWorkbookEntry(key, format, document.LifecycleGeneration,
                         invocation.ExpiresAt, options.IdleSessionTimeout, clock.GetUtcNow(),
-                        Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
+                        Convert.ToHexString(RandomNumberGenerator.GetBytes(HandleBytes)),
                         new McpWorkbookTransport(host, key.ResourceId, document.LifecycleGeneration, key.Subject,
                             _leaseTimeoutSeconds, clock));
                     entry.Gate.Wait(0);
@@ -66,15 +72,15 @@ internal sealed class McpWorkbookRegistry(
             {
                 requestToken.ThrowIfCancellationRequested();
                 if (entry.Closing)
-                    throw Unavailable();
+                    throw Unavailable(format);
                 if (entry.Removed)
                     continue;
-                if (entry.Closed)
-                    throw Unavailable();
+                if (entry.Closed || entry.Format != format)
+                    throw Unavailable(format);
                 if (entry.LifecycleGeneration != document.LifecycleGeneration || entry.IsExpired(clock.GetUtcNow()))
                 {
                     if (!await CloseEntryAsync(entry))
-                        throw Unavailable();
+                        throw Unavailable(format);
                     continue;
                 }
 
@@ -97,23 +103,17 @@ internal sealed class McpWorkbookRegistry(
                             MaxPackageBytes = checked((int)bytes),
                             MaxGraphBytes = bytes * 4,
                         }, token);
-                    entry.Workbook = new ExcelWorkbookSession(entry.Document, new ExcelWorkbookLimits
-                    {
-                        MaxPackageBytes = bytes,
-                        MaxSessionBytes = bytes * 8,
-                        MaxCellsPerOperation = Math.Max(10_000, options.MaxReadCells),
-                        TrackSyncChanges = true,
-                    });
+                    entry.Initialize(bytes, options.MaxReadCells);
                 }
                 else
                 {
                     await entry.Document!.RenewParticipationAsync(token);
                 }
 
-                var summary = entry.Workbook!.GetWorkbookSummary();
+                var revision = entry.Revision;
                 token.ThrowIfCancellationRequested();
                 entry.LastUsed = clock.GetUtcNow();
-                return new(entry.Handle, key.ResourceId, entry.TokenFor(summary.Revision));
+                return new(entry.Handle, key.ResourceId, entry.TokenFor(revision));
             }
             catch
             {
@@ -129,7 +129,7 @@ internal sealed class McpWorkbookRegistry(
         }
     }
 
-    public async Task<T> UseAsync<T>(McpRequestIdentity identity, string handle, DocumentAccess access,
+    public async Task<T> UseAsync<T>(McpRequestIdentity identity, string handle, McpDocumentFormat format, DocumentAccess access,
         Func<McpWorkbookEntry, CancellationToken, Task<T>> use, CancellationToken cancellationToken,
         bool closing = false)
     {
@@ -138,9 +138,10 @@ internal sealed class McpWorkbookRegistry(
         lock (_gate)
         {
             ThrowIfStopping();
-            if (string.IsNullOrEmpty(handle) || !_handles.TryGetValue(handle, out entry!) ||
-                entry.Key.SessionId != invocation.SessionId || entry.Key.Subject != invocation.Actor.Identity.Subject)
-                throw Unavailable();
+            if (handle is not { Length: HandleBytes * 2 } || !_handles.TryGetValue(handle, out entry!) ||
+                entry.Format != format || entry.Key.SessionId != invocation.SessionId ||
+                entry.Key.Subject != invocation.Actor.Identity.Subject)
+                throw Unavailable(format);
         }
 
         // An expired session can still be closed promptly and never reaches a tool callback.
@@ -148,11 +149,11 @@ internal sealed class McpWorkbookRegistry(
         try
         {
             if (entry.Closing || entry.Removed || (entry.Closed && !closing))
-                throw Unavailable();
+                throw Unavailable(format);
             if (entry.IsExpired(clock.GetUtcNow()) || invocation.IsExpired)
             {
                 await CloseEntryAsync(entry);
-                throw Unavailable();
+                throw Unavailable(format);
             }
 
             using var deadline = invocation.CreateDeadline();
@@ -164,7 +165,12 @@ internal sealed class McpWorkbookRegistry(
             if (closing)
             {
                 if (!await CloseEntryAsync(entry))
-                    throw new McpException("Workbook participation release could not be confirmed. Retry close_workbook.");
+                    throw new McpException(format switch
+                    {
+                        McpDocumentFormat.Excel => "Workbook participation release could not be confirmed. Retry close_workbook.",
+                        McpDocumentFormat.Word => "Document participation release could not be confirmed. Retry close_word_document.",
+                        _ => "Presentation participation release could not be confirmed. Retry close_presentation.",
+                    });
             }
             else
                 await entry.Document!.RenewParticipationAsync(token);
@@ -242,7 +248,7 @@ internal sealed class McpWorkbookRegistry(
             lock (_gate)
                 pending = _handles.Count;
             if (pending > 0)
-                logger.LogWarning("Shutdown did not confirm participation release for {WorkbookCount} MCP workbooks.", pending);
+                logger.LogWarning("Shutdown did not confirm participation release for {DocumentCount} MCP documents.", pending);
         }
     }
 
@@ -261,7 +267,7 @@ internal sealed class McpWorkbookRegistry(
         if (access == DocumentAccess.Read ||
             (await ResolveAsync(DocumentAccess.Read))?.LifecycleGeneration != entry.LifecycleGeneration)
             await CloseEntryAsync(entry);
-        throw Unavailable();
+        throw Unavailable(entry.Format);
 
         async Task<CellBridgeResolvedDocument?> ResolveAsync(DocumentAccess required)
         {
@@ -324,7 +330,7 @@ internal sealed class McpWorkbookRegistry(
         {
             entry.Closed = true;
             var document = entry.Document;
-            entry.ClearWorkbook();
+            entry.ClearDocument();
             try
             {
                 if (document is not null)
@@ -332,7 +338,7 @@ internal sealed class McpWorkbookRegistry(
             }
             catch (Exception error)
             {
-                logger.LogWarning(error, "Failed to dispose a CellBridge MCP workbook session.");
+                logger.LogWarning(error, "Failed to dispose a CellBridge MCP document session.");
             }
         }
 
@@ -348,10 +354,10 @@ internal sealed class McpWorkbookRegistry(
         }
         catch (Exception error)
         {
-            logger.LogWarning(error, "Failed to release CellBridge MCP workbook participation.");
+            logger.LogWarning(error, "Failed to release CellBridge MCP document participation.");
             if (!entry.Transport.LeaseExpired)
             {
-                // Keep the owner and client in their existing workbook slot until cleanup can retry.
+                // Keep the session slot until cleanup can retry.
                 entry.RetryReleaseAt = clock.GetUtcNow() + ReleaseRetryDelay;
                 return false;
             }
@@ -373,7 +379,25 @@ internal sealed class McpWorkbookRegistry(
             throw new McpException("The workbook registry is shutting down.");
     }
 
-    public static McpException Unavailable() => new("Workbook unavailable.");
+    public static McpException Unavailable(McpDocumentFormat format = McpDocumentFormat.Excel) => new(format switch
+    {
+        McpDocumentFormat.Excel => "Workbook unavailable.",
+        McpDocumentFormat.Word => "Word document unavailable.",
+        _ => "Presentation unavailable.",
+    });
+
+    private static bool MatchesPath(string path, McpDocumentFormat format)
+    {
+        return format switch
+        {
+            McpDocumentFormat.Word => Path.GetExtension(path).Equals(".docx", StringComparison.OrdinalIgnoreCase),
+            McpDocumentFormat.PowerPoint => Path.GetExtension(path).Equals(".pptx", StringComparison.OrdinalIgnoreCase),
+            _ => true,
+        };
+    }
 
     internal sealed record WorkbookKey(string Subject, string SessionId, Guid ResourceId);
 }
+
+internal enum McpDocumentFormat { Excel, Word, PowerPoint }
+internal sealed record McpOpenDocument(string Handle, Guid ResourceId, string Revision);

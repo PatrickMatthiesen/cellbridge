@@ -83,6 +83,35 @@ public sealed class FilePartitionSaveTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task RecordedExcelSaveAgainstPreviousCellMappingCannotErasePeerWrite(bool postgreSql)
+    {
+        await using var context = new ProviderContext(postgreSql);
+        var document = await context.CreateAsync("/shared/Excel%20test.xlsx", MinimalXlsx.Create());
+        var desktop = RecordedRequest("excel-save-20260928.bin");
+        Rebase(desktop, document.Graph);
+        var native = RecordedRequest("excel-save-20260928.bin");
+        Rebase(native, document.Graph);
+        var peerOperation = Assert.IsType<PutChangesSubRequestData>(native.SubRequests[0].Data);
+        var proposed = native.DataElementPackage!.DataElements.Single(element =>
+            element.DataElementExtendedGuid.Equals(peerOperation.StorageIndex));
+        var peerIndex = new ExGuid(1, Guid.NewGuid());
+        native.DataElementPackage.DataElements.Remove(proposed);
+        native.DataElementPackage.DataElements.Add(new(proposed.DataElementType, peerIndex, proposed.SerialNumber)
+            { Data = proposed.Data });
+        peerOperation.StorageIndex = peerIndex;
+        AssertSucceeded(await context.ExecuteAsync(document, native));
+
+        var saved = await context.ReadAsync(document.Head.ResourceId);
+        var before = await context.StateJsonAsync(saved);
+        var rejected = await context.ExecuteAsync(saved, desktop);
+        Assert.Equal((ulong)CellErrorCode.CoherencyFailure, Assert.Single(rejected.Response.SubResponses).Error!.ErrorCode);
+        Assert.Empty(rejected.AcceptedSaves);
+        await AssertUnchangedAsync(context, saved, before);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task IgnoredLegacyFieldsDoNotPreventWordSave(bool postgreSql)
     {
         await using var context = new ProviderContext(postgreSql);

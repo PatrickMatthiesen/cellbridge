@@ -48,7 +48,7 @@ provide their own customer lifecycle and user interface.
 | Incremental transfers | Reuse stored file parts and send parts the client does not already have. |
 | Coauthoring | Two Windows desktops exchanged Word, Excel and PowerPoint changes under distinct accounts with AutoSave. Independent downloads retained both editors' changes. See the bounded [client coverage](docs/interoperability.md#client-coverage). |
 | Real-time collaboration | RTC is enabled by default. Multiple hosts require [Redis coordination](docs/multi-host-rtc.md). Set `CellBridgeOptions.EnableOfficeRealTime = false` to disable it, or `Protocol:EnableOfficeRealTime=false` in WebDemo. Remote Excel selections and Word cursor indicators were observed on a single host. Participant names, typing latency and reliable startup across all three apps remain unqualified. OCS is not implemented. |
-| Excel workbook tools | Hosts can opt into a bearer-authenticated MCP endpoint for opening, reading and editing existing `.xlsx` files. See [MCP workbook hosting](docs/mcp-workbooks.md). |
+| Programmatic Office editing | The .NET client, emulator and opt-in bearer-authenticated MCP endpoint support targeted edits to existing `.xlsx`, `.docx` and `.pptx` files. See the [demo guide](docs/demo-library.md#edit-word-and-powerpoint-files-with-the-emulator) and [MCP Office tools](docs/mcp-workbooks.md). |
 
 Direct personal Microsoft accounts are currently unsupported in CellBridge's
 native Office integration. Got a personal account through the maze? Send us a

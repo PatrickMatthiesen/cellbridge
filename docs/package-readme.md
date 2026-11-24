@@ -48,13 +48,22 @@ revision they read. `ExcelWorkbookSession` reads and edits `.xlsx` cells
 and reports conflicts when edits overlap. Automatic refresh in desktop Excel
 after a client save still needs desktop interoperability testing.
 
+`WordDocumentSession` reads and edits direct main-body paragraphs and adds
+paragraph comments in `.docx` files. `PowerPointPresentationSession` reads
+slides and edits shape text, speaker notes and the slide list in `.pptx` files.
+Both wrap a caller-owned `CellBridgeDocumentSession`, compare retained revisions
+and require the base revision for each edit. They rewrite affected Open XML
+package parts through the raw ZIP layer and report conflicts when changes
+overlap or a target cannot be matched safely.
+
 `CellBridge.Mcp.AspNetCore` adds opt-in Model Context Protocol tools for
-existing `.xlsx` files. Register them with `AddCellBridgeMcp` and expose
-the Streamable HTTP endpoint with `MapCellBridgeMcp("/mcp")`. Configure a
-host-validated bearer scheme. Workbook tools use the current document grants
-of the authenticated user or dedicated agent account. Session state lives in
-the serving process and requires sticky routing across replicas. See
-[MCP workbook hosting](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/mcp-workbooks.md).
+existing `.xlsx`, `.docx` and `.pptx` files. Register them with `AddCellBridgeMcp`
+and expose the Streamable HTTP endpoint with `MapCellBridgeMcp("/mcp")`. Configure a
+host-validated bearer scheme. Each tool call checks the current document grants
+of the authenticated user or dedicated agent account. Sessions join Coauth on
+their first write. Session state lives in the serving process and requires
+sticky routing across replicas. See
+[MCP Office document hosting](https://github.com/PatrickMatthiesen/cellbridge/blob/main/docs/mcp-workbooks.md).
 
 `CellBridge.Storage.SqlServer` supplies document state and content. It is
 independent of PostgreSQL and `CellBridge.Lists.SqlServer`. Use the same version

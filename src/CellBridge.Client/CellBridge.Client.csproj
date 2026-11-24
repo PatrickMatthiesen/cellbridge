@@ -3,7 +3,7 @@
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <PackageDescription>Stateful CellBridge client with Excel workbook editing and coauthoring.</PackageDescription>
+    <PackageDescription>Stateful CellBridge client with editing and coauthoring for Excel, Word and PowerPoint files.</PackageDescription>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../CellBridge/CellBridge.csproj" />

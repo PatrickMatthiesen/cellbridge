@@ -46,7 +46,8 @@ public static class CellBridgeMcpExtensions
 
         services.AddMcpServer()
             .WithHttpTransport()
-            .WithTools<McpWorkbookTools>();
+            .WithTools<McpWorkbookTools>()
+            .WithTools<McpOfficeTools>();
         services.AddOptions<HttpServerTransportOptions>().Configure<McpTransportSessions, TimeProvider>(
             (transport, sessions, timeProvider) =>
             {

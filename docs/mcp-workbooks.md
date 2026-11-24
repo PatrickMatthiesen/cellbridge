@@ -1,8 +1,9 @@
-# MCP workbook hosting
+# MCP Office document hosting
 
 `CellBridge.Mcp.AspNetCore` exposes stateful Model Context Protocol tools
-over Streamable HTTP for existing Excel `.xlsx` documents. Install it at
-the same version as the other CellBridge packages in the host.
+over Streamable HTTP for existing Excel `.xlsx`, Word `.docx` and PowerPoint
+`.pptx` files. Install it at the same version as the other CellBridge packages
+in the host.
 
 ## Register and map the endpoint
 
@@ -119,7 +120,7 @@ The token audience (`aud`) is the app registration's client GUID. The token's
 `scp` claim must contain the exact, case-sensitive scope name `mcp.access`.
 WebDemo returns `403 Forbidden` for a valid token with only Office's
 `access_as_user` scope. Sign in as an Entra user linked to a local WebDemo
-account. That account's existing workbook grants apply.
+account. That account's existing document grants apply.
 See [Microsoft's MCP server registration instructions](https://learn.microsoft.com/en-us/entra/agent-id/secure-mcp-server-with-entra-id).
 
 For a Client ID Metadata Document (CIMD) test, confirm that the MCP client
@@ -186,17 +187,18 @@ Bearer header.
 For interactive access, authenticate with the user's bearer token and use
 `AuthorizationPolicy` to require the issuer's MCP access scope. Map the token
 to the same CellBridge subject the user has in Office so both clients use the
-user's document grants. Each workbook session has its own `ClientId`, so MCP and
+user's document grants. Each document session has its own `ClientId`, so MCP and
 Office have separate editor entries even when they use the same subject.
 
 For unattended access, use a dedicated agent account with its own CellBridge
-subject and explicit workbook grants.
+subject and explicit document grants.
 
 CellBridge checks the authenticated subject's current document permissions on
-each workbook tool call. Revoking a document grant blocks subsequent calls that
-need it, including operations on an open workbook. Opening by
-resource ID or decoded application-relative path requires an existing authorized
-document. MCP returns the same lookup error for missing and unauthorized workbooks.
+each document tool call. Revoking a document grant blocks subsequent calls that
+need it, including operations on an open document. Opening by resource ID or
+decoded application-relative path requires an existing authorized document.
+MCP returns the same lookup error for missing and unauthorized documents of the
+requested type.
 
 ## Workbook tools
 
@@ -216,23 +218,80 @@ and supply an `operationId` to `add_sheet`. Retry a sheet addition with the same
 operation ID, sheet name and workbook handle. Call `close_workbook` when you
 finish.
 
+## Word document tools
+
+Call `open_word_document` with a `resourceId` or `path`. Keep the opaque
+`documentHandle` and `revision`. Use `get_word_summary`, `list_word_headings`
+and `read_word_paragraphs` to inspect the local revision. Word tools operate
+on direct paragraphs in the main body. Paragraphs inside tables, content
+controls, headers and footers fall outside this scope. Use `get_word_editors`
+to list readers and editors and `sync_word_document` to fetch the current
+revision. `diff_word_document` takes `beforeRevision` and `afterRevision`
+tokens for two retained revisions on the handle.
+
+Use `insert_word_paragraph`, `replace_word_paragraph`, `delete_word_paragraph`,
+`append_word_paragraph` or `add_word_comment` to edit. For an anchor or target,
+pass the `reference` object returned for that paragraph at the base revision.
+It contains a zero-based `index` and optional `id`. `insert_word_paragraph`
+inserts after its anchor by default. `add_word_comment` adds a classic
+paragraph comment. When the main body changes, edit targets and paragraphs
+bordering an insertion point need matching IDs that are unique in both
+revisions. Appending needs no paragraph ID.
+Call `close_word_document` when you finish.
+
+## PowerPoint presentation tools
+
+Call `open_presentation` with a `resourceId` or `path`. Keep the opaque
+`presentationHandle` and `revision`. Use `list_slides` and `read_slide` to find
+slide IDs, shape IDs and text, and speaker notes. Use `get_presentation_editors`
+to list readers and editors and `sync_presentation` to fetch the current revision.
+`diff_presentation` takes `beforeRevision` and `afterRevision` tokens for two
+retained revisions on the handle.
+
+Use `set_shape_text`, `set_slide_notes`, `add_slide` or `delete_slide` to edit.
+`set_shape_text` and `set_slide_notes` reject text changes in targets that
+contain soft line breaks.
+`add_slide` appends a blank slide using an existing layout. Pass
+`layoutFromSlideId` to select the layout of another slide. By default, the tool
+uses a registered blank layout when available, or the first registered layout.
+Call `close_presentation` when you finish.
+
+## Word and PowerPoint revisions and edits
+
+Opening a document joins the editors table as a reader. The session joins
+Coauth on its first write. Each edit requires document write access and the
+`baseRevision` token for the revision you read on that handle. Treat the
+returned document text as data. The client can reapply edits to a newer package
+when it can match the target safely. Changed targets and ambiguous matches can
+return `Conflict`. Read the latest revision before retrying a conflicting edit.
+If a write response is lost and the outcome is unresolved, retry the same tool
+call with the same arguments.
+
+Supply a unique `operationId` per handle for `insert_word_paragraph`,
+`append_word_paragraph`, `add_word_comment` and `add_slide`. To retry one of
+these operations, send the same ID, base revision and arguments. The handle
+retains the confirmed result and returns it without repeating the edit.
+
+The Word and PowerPoint clients update affected Open XML parts in single-disk
+ZIP32 packages. They copy untouched ZIP entries without recompressing them.
+
 ## Session routing and lifetime
 
-The MCP transport and workbook handles live in the serving process. With
+The MCP transport and document handles live in the serving process. With
 multiple replicas, use sticky routing to keep requests bearing the same
 `Mcp-Session-Id` on the process that initialized the session. Preserve the
 session header through the proxy. After a process restart or replacement,
-initialize a new MCP session and reopen the workbook. Committed revisions
+initialize a new MCP session and reopen the document. Committed revisions
 persist according to the document storage provider.
 
 The registry enforces `IdleSessionTimeout`, token expiry and the configured
 per-actor and total session limits. Present a refreshed bearer token on a tool
-call before the workbook session expires to keep it open. `MaxWorkbookBytes`
-limits workbook package size. On graceful shutdown, the host closes active
-workbook sessions and releases their editing participation.
+call before the document session expires to keep it open. `MaxWorkbookBytes`
+limits package size for all three document types. On graceful shutdown, the host
+closes active document sessions and releases their editing participation.
 
 When Office RTC is enabled and supported by the configured authorization
 mode, MCP clients can participate through the in-process RTC connector.
 In a multi-host deployment, Redis coordinates RTC events across instances.
-MCP affinity still applies to workbook tools even when Redis distributes RTC.
+MCP affinity still applies to document tools even when Redis distributes RTC.
 See [multi-host RTC](multi-host-rtc.md).

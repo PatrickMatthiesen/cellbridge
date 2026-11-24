@@ -23,23 +23,22 @@ internal sealed class McpWorkbookTools(McpWorkbookRegistry registry, McpRequestI
         [Description("The CellBridge document resource ID. Supply this or path.")] Guid? resourceId = null,
         [Description("Decoded workbook path, such as /library/Budget.xlsx. Supply this or resourceId.")] string? path = null,
         CancellationToken cancellationToken = default) =>
-        RunAsync(() => registry.OpenAsync(identity, Target(resourceId, path), cancellationToken));
+        RunAsync(async () =>
+        {
+            var opened = await registry.OpenAsync(identity, Target(resourceId, path), McpDocumentFormat.Excel, cancellationToken);
+            return new McpOpenWorkbookResult(opened.Handle, opened.ResourceId, opened.Revision);
+        });
 
     [McpServerTool(Name = "close_workbook", Destructive = false, Idempotent = true, OpenWorld = false, UseStructuredContent = true)]
     [Description("Close an open workbook and release its editor membership.")]
     public Task<McpCloseWorkbookResult> CloseWorkbook(string workbookHandle, CancellationToken cancellationToken) =>
-        RunAsync(() => registry.UseAsync(identity, workbookHandle, DocumentAccess.Read,
+        RunAsync(() => registry.UseAsync(identity, workbookHandle, McpDocumentFormat.Excel, DocumentAccess.Read,
             (_, _) => Task.FromResult(new McpCloseWorkbookResult(true)), cancellationToken, closing: true));
 
     [McpServerTool(Name = "get_editors", ReadOnly = true, OpenWorld = false, UseStructuredContent = true)]
     [Description("Get the workbook's current editors and readers.")]
     public Task<McpEditorsResult> GetEditors(string workbookHandle, CancellationToken cancellationToken) =>
-        UseAsync(workbookHandle, DocumentAccess.Read, async (entry, token) =>
-        {
-            var editors = await entry.Document!.RefreshEditorsAsync(token);
-            return new McpEditorsResult(editors.Select(editor =>
-                new McpEditor(editor.CacheId, editor.FriendlyName, editor.LoginName, editor.HasEditorPermission)).ToArray());
-        }, cancellationToken);
+        UseAsync(workbookHandle, DocumentAccess.Read, ReadEditorsAsync, cancellationToken);
 
     [McpServerTool(Name = "sync_workbook", ReadOnly = true, OpenWorld = false, UseStructuredContent = true)]
     [Description("Pull current workbook data and report cell changes since the previous sync. A truncated result omits changes beyond the limit.")]
@@ -47,7 +46,7 @@ internal sealed class McpWorkbookTools(McpWorkbookRegistry registry, McpRequestI
         UseAsync(workbookHandle, DocumentAccess.Read, async (entry, token) =>
         {
             if (entry.Workbook!.HasPendingCommit)
-                throw new McpException("A write outcome is unresolved. Retry that tool call with the same arguments.");
+                throw new McpException(McpWorkbookEntry.PendingWriteMessage);
             var result = await entry.Workbook!.SyncWithChangesAsync(registry.MaxReadCells, token);
             return new McpSyncResult(entry.TokenFor(result.Revision),
                 result.Changes.Select(change => new McpCellChange(change.SheetId, change.Address,
@@ -131,7 +130,7 @@ internal sealed class McpWorkbookTools(McpWorkbookRegistry registry, McpRequestI
 
     private Task<T> UseAsync<T>(string handle, DocumentAccess access,
         Func<McpWorkbookEntry, CancellationToken, Task<T>> use, CancellationToken cancellationToken) =>
-        RunAsync(() => registry.UseAsync(identity, handle, access, use, cancellationToken));
+        RunAsync(() => registry.UseAsync(identity, handle, McpDocumentFormat.Excel, access, use, cancellationToken));
 
     private async Task<T> RunAsync<T>(Func<Task<T>> run)
     {
@@ -161,9 +160,16 @@ internal sealed class McpWorkbookTools(McpWorkbookRegistry registry, McpRequestI
         }
     }
 
-    private static string Fingerprint<T>(T mutation) => Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(mutation)));
+    internal static async Task<McpEditorsResult> ReadEditorsAsync(McpWorkbookEntry entry, CancellationToken token)
+    {
+        var editors = await entry.Document!.RefreshEditorsAsync(token);
+        return new McpEditorsResult(editors.Select(editor =>
+            new McpEditor(editor.CacheId, editor.FriendlyName, editor.LoginName, editor.HasEditorPermission)).ToArray());
+    }
 
-    private static DocumentIdentity Target(Guid? resourceId, string? path)
+    internal static string Fingerprint<T>(T mutation) => Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(mutation)));
+
+    internal static DocumentIdentity Target(Guid? resourceId, string? path)
     {
         if (resourceId is not null && resourceId != Guid.Empty && path is null)
             return new DocumentIdentity.Resource(resourceId.Value);

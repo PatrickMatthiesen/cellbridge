@@ -16,6 +16,22 @@ public sealed class ExcelWorkbookTests
     private static readonly XNamespace S = Main;
 
     [Fact]
+    public void EditsDoNotPublishExcelsPreviousRuntimeRevisionPointer()
+    {
+        XNamespace revision = "http://schemas.microsoft.com/office/spreadsheetml/2014/revision";
+        var original = Workbook("", workbookTail:
+            $"""<xr:revisionPtr xmlns:xr="{revision}" revIDLastSave="1" documentId="native-document" />""");
+
+        var edited = Edit(original, new ExcelCellEdit("A1", ExcelCellValue.Number(42)));
+        var withSheet = ExcelWorkbook.AddSheet(original, "Forecast").Package;
+
+        Assert.NotNull(Part(original, "xl/workbook.xml").Root!.Element(revision + "revisionPtr"));
+        Assert.Null(Part(edited, "xl/workbook.xml").Root!.Element(revision + "revisionPtr"));
+        Assert.Null(Part(withSheet, "xl/workbook.xml").Root!.Element(revision + "revisionPtr"));
+        Assert.Equal(ExcelCellValue.Number(42), Assert.Single(ExcelWorkbook.ReadRange(edited, 4, "A1")).Value);
+    }
+
+    [Fact]
     public void EditsKeepOriginalZipRecordsAndWorkbookMarkup()
     {
         const string workbookPart = "xl/workbook.xml";

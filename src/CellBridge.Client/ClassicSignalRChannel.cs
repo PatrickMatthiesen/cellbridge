@@ -112,6 +112,16 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
         if (target.Endpoint != _target.Endpoint || !StringComparer.OrdinalIgnoreCase.Equals(target.ClientId, _target.ClientId))
             throw new ArgumentException("RTC ticket renewal requires the same endpoint and client ID.", nameof(target));
 
+        var ticket = JsonSerializer.Serialize(new { qs = target.DocumentAccessToken });
+        await InvokeAsync("UpdateClientInfo", [ticket], cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task SendUpdateNotificationAsync(int channel, string payload, CancellationToken cancellationToken = default) =>
+        InvokeAsync("SendUpdateNotification", [channel, payload], cancellationToken);
+
+    private async Task InvokeAsync(string method, object[] arguments, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
         var ct = timeout.Token;
@@ -123,8 +133,7 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
             if (_receive.IsCompleted)
                 throw new IOException("The classic SignalR connection closed.");
 
-            var ticket = JsonSerializer.Serialize(new { qs = target.DocumentAccessToken });
-            var payload = JsonSerializer.SerializeToUtf8Bytes(new { H = Hub, M = "UpdateClientInfo", A = new[] { ticket }, I = id });
+            var payload = JsonSerializer.SerializeToUtf8Bytes(new { H = Hub, M = method, A = arguments, I = id });
             await _send.WaitAsync(ct).ConfigureAwait(false);
             try
             {
@@ -140,7 +149,7 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
         }
         catch (WebSocketException error)
         {
-            throw new IOException("The classic SignalR connection could not renew its ticket.", error);
+            throw new IOException("The classic SignalR invocation failed.", error);
         }
         finally
         {
@@ -205,7 +214,7 @@ internal sealed class ClassicSignalRChannel : ICellBridgeRealTimeChannel
             if (_pending.TryGetValue(id.GetString()!, out var acknowledgment))
             {
                 if (hasError)
-                    acknowledgment.TrySetException(new IOException("The server rejected the RTC ticket renewal."));
+                    acknowledgment.TrySetException(new IOException("The server rejected the RTC invocation."));
                 else
                     acknowledgment.TrySetResult();
             }

@@ -153,7 +153,7 @@ static class EmulatorCommands
         return (sheet, fields[1..]);
     }
 
-    private static void PrintEditors(CellBridgeDocumentSession session) =>
+    internal static void PrintEditors(CellBridgeDocumentSession session) =>
         Console.WriteLine($"EditorsTable {JsonSerializer.Serialize(session.GetEditors())}");
 
     private static void PrintWrite(ExcelWriteResult result)
