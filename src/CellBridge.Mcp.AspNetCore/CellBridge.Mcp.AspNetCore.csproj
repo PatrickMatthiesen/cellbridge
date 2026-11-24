@@ -3,7 +3,7 @@
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <PackageDescription>Stateful MCP workbook tools for CellBridge.</PackageDescription>
+    <PackageDescription>Stateful MCP tools for CellBridge Word, Excel and PowerPoint documents.</PackageDescription>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

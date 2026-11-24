@@ -112,9 +112,12 @@ internal sealed class McpTestHost(WebApplication app, StorageProvider storage) :
     public ICellBridgeRealTimeConnector CreateRealTimeConnector(CellBridgeActor actor) =>
         app.Services.GetRequiredService<CellBridgeInProcessHost>().CreateRealTimeConnector(actor);
 
-    public async Task<DocumentHead> CreateWorkbookAsync(string path = WorkbookPath) =>
+    public Task<DocumentHead> CreateWorkbookAsync(string path = WorkbookPath) =>
+        CreateOfficeDocumentAsync(path, OfficeDocumentTemplates.CreateExcelWorkbook());
+
+    public async Task<DocumentHead> CreateOfficeDocumentAsync(string path, byte[] package) =>
         Assert.IsType<DocumentHead>(await app.Services.GetRequiredService<CellBridgeDocumentService>()
-            .CreateAsync(path, OfficeDocumentTemplates.CreateExcelWorkbook(), Owner));
+            .CreateAsync(path, package, Owner));
 
     public async Task<DocumentControlRead> ReadControlAsync(Guid resourceId) =>
         Assert.IsType<DocumentControlRead>(await storage.Documents.ReadControlAsync(resourceId));

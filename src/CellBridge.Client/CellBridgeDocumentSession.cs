@@ -323,14 +323,14 @@ public sealed class CellBridgeDocumentSession : IAsyncDisposable
     private async Task NotifySavedAsync()
     {
         if (_realTime is not { } channel) return;
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(2));
         try
         {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(2));
             await channel.SendUpdateNotificationAsync(14, """{"etts":["PersistedContentUpdate"],"osn":"Win32","cr":"CC"}""",
                 deadline.Token);
         }
-        catch (Exception error) when (error is IOException or HttpRequestException or OperationCanceledException or ObjectDisposedException)
+        catch (Exception error) when (error is not OutOfMemoryException)
         {
             // The save is committed even if the peer hint could not be delivered.
         }

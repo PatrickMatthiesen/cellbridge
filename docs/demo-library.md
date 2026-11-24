@@ -81,6 +81,66 @@ Open desktop Excel can show **Refresh Recommended** after a peer save. Reopen
 to load the committed workbook before making more edits. If Excel already has
 unsaved edits, keep its unmerged copy before closing the merge conflict pane.
 
+Two captured native Excel `PutChanges` requests had two revision roots in
+the file partition. Root `2:84defab9-aaa3-4a0d-a3a8-520c77ac7073` carried the
+saved workbook. Root `1:6385c870-7f8d-428c-9445-de467fcdaebf` carried a
+separate ZIP with an empty `xl/workbook.xml`. Its workbook relationship
+pointed to `xl/revisionEx/revIndex.xml`, which referenced `revStream1.xml`.
+For each captured cell edit, the stream contained a forward record and an
+undo record with the same revision number and worksheet UID. The saved
+workbook's `revIDLastSave` and `uidLastSave` agreed with the index's saved
+revision number and the stream's revision UID in the first capture.
+
+The package writer emits only the saved workbook root. MS-FSSHTTPD defines
+the primary content root and leaves other streams to the client.
+[MS-FSSHTTPD Cell Properties](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-fsshttpd/62ba389e-e8f4-4a03-b00b-42d75bec605c)
+
+The captures lack the rules for generating and advancing the second root
+across writers and saves. The channel 3 `FullSaveId` events did not establish
+a mapping to the revision UID. MS-XLSX requires other writers to omit Excel's
+runtime pointer. CellBridge keeps the refresh behavior above until it can
+verify a native live merge across consecutive peer saves.
+[MS-XLSX revision pointer definition](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-xlsx/5082e3cf-b020-4599-b656-3b4207f0470d)
+
+## Edit Word and PowerPoint files with the emulator
+
+Copy the document URL from **Copy link / access** and use the same login or
+bearer environment variables as for Excel. The account needs write access to
+save. Each command opens a session that joins Coauth on its first write by
+default. Pass `--editor` to join when the session opens.
+
+```sh
+dotnet run --project tools/CellBridge.Emulator -- word "$DOCUMENT_URL"
+dotnet run --project tools/CellBridge.Emulator -- powerpoint "$PRESENTATION_URL"
+```
+
+In Word, use `summary`, `headings` and `read [start-index [max-paragraphs]]`
+to inspect direct main-body paragraphs. For example, `append "Review draft"`
+adds a paragraph. `replace`, `insert-before`, `insert-after`, `delete` and
+`comment` take a zero-based paragraph index or `index:paragraph-id` from the
+read results. Text arguments are JSON strings. For example,
+`comment 0 ["Check this claim","Reviewer"]` anchors a comment to the first
+paragraph. When the main body changes, edit targets and paragraphs bordering
+an insertion point need matching IDs that are unique in both revisions.
+Appending needs no paragraph ID.
+
+In PowerPoint, use `slides` and `read <slide-id>` to find slide and shape IDs.
+Use `set-text <slide-id> <shape-id> <json-text>` to replace text in an editable
+shape and `set-notes <slide-id> <json-text>` to replace speaker notes.
+If the target contains a soft line break, these tools reject changes to
+its text.
+`add-slide [layout-source-slide-id]` appends a blank slide using an existing
+layout. `delete-slide <slide-id>` removes a slide.
+
+Both modes have `help`, `editors`, `revision`, `sync` and
+`diff <before> <after> [max-changes]`. Edits use the current local revision by
+default. Use `mark <name>` to save a revision and `base @name` to keep using
+it as the base across edits and syncs. Use `base current` to restore the
+default. Changed targets and ambiguous matches can return `Conflict`.
+Use `--script <file>` for a command file or `--script -` for standard input.
+Scripts expect `Success` for each edit unless `expect <status> <edit-or-retry>`
+specifies another status.
+
 ## Import existing files
 
 After provisioning an owner, supply the admin command with the same database

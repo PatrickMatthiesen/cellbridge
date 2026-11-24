@@ -27,7 +27,7 @@ internal sealed class McpWorkbookTransport(CellBridgeInProcessHost host, Guid re
         var invocation = Invocation ?? throw new CellBridgeProtocolException("FileUnauthorizedAccess");
         invocation.ThrowIfExpired();
         var file = request.Requests.Single();
-        // Bind even initial discovery to the resource authorized by open_workbook.
+        // Bind even initial discovery to the resource authorized by the open tool.
         file.UseResourceId = true;
         file.ResourceId = resourceId.ToString("D");
         if (_clientId == Guid.Empty && file.SubRequests is [{ Type: SubRequestType.EditorsTable } editor] &&

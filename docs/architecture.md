@@ -72,8 +72,8 @@ The thirteen shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
 | `CellBridge.Storage.FileSystem` | Immutable binary content with file and directory flushes |
 | `CellBridge.Storage.InMemory` | Volatile provider for development and tests |
 | `CellBridge.AspNetCore` | HTTP endpoints, native Entra authentication, login integration and dependency registration |
-| `CellBridge.Client` | Stateful document sessions, protocol transports and Excel workbook edits |
-| `CellBridge.Mcp.AspNetCore` | Bearer-protected MCP workbook sessions and tools |
+| `CellBridge.Client` | Stateful document sessions, protocol transports and targeted Excel, Word and PowerPoint edits |
+| `CellBridge.Mcp.AspNetCore` | Bearer-protected MCP sessions and tools for Excel, Word and PowerPoint |
 | `CellBridge.Lists` | Typed workspace lists, schema validation, merge comparisons and bounded queries |
 | `CellBridge.Lists.PostgreSql` | Independent EF Core list persistence and migrations, JSONB records, workspace isolation and grants |
 | `CellBridge.Lists.SqlServer` | List persistence, migrations, SQL queries, workspace authorization, views and audit |
@@ -81,6 +81,7 @@ The thirteen shipping packages are `CellBridge`, `CellBridge.FssHttpB`,
 | `CellBridge.WebDemo` | Non-packable development host, Razor Pages, package generation and catalog APIs |
 | `CellBridge.Authentication` | Development Identity account store and key protection |
 | `tools/CellBridge.Admin` | Operator account provisioning, explicit file imports and document permission updates |
+| `tools/CellBridge.Emulator` | Command-line client for Excel, Word and PowerPoint document sessions |
 | `tools/CellBridge.Storage.Setup` | Current-schema initialization and quiescent object maintenance |
 | `src/CellBridge.AppHost/CellBridge.AppHost.csproj` | PostgreSQL, schema initialization, WebDemo and optional capture proxy |
 

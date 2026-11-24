@@ -21,7 +21,7 @@ catch (OperationCanceledException) when (stop.IsCancellationRequested)
     return 130;
 }
 catch (Exception error) when (error is ArgumentException or FormatException or InvalidOperationException or
-    UnauthorizedAccessException or IOException or HttpRequestException or JsonException)
+    UnauthorizedAccessException or InvalidDataException or IOException or HttpRequestException or JsonException)
 {
     Console.Error.WriteLine(error.Message);
     return 1;
@@ -44,6 +44,8 @@ static async Task<int> RunAsync(string[] args, CancellationToken ct)
     var mount = Environment.GetEnvironmentVariable("CELLBRIDGE_PATH_BASE") ?? "";
     switch (args)
     {
+        case ["word" or "powerpoint", _, ..]:
+            return await OfficeCommands.RunAsync(origin, mount, document, args[0], args[2..], ct);
         case ["scenario", _, "coauthor", var workers, var scenarioSheet] when
             int.TryParse(workers, NumberStyles.None, CultureInfo.InvariantCulture, out var count) && count is >= 2 and <= 32:
             await Scenarios.CoauthorAsync(origin, mount, document, count, ParseSheet(scenarioSheet), ct);
@@ -81,13 +83,18 @@ static void PrintUsage() => Console.WriteLine("""
     CellBridge.Emulator save <document-url> <sheet-id> <cell> <json-value>
     CellBridge.Emulator scenario <document-url> coauthor <accounts> <sheet-id>
     CellBridge.Emulator scenario <document-url> conflict <sheet-id> <cell> [--local-wins|--remote-wins]
+    CellBridge.Emulator word <document-url> [--editor] [--account <number>] [--script <file|->]
+    CellBridge.Emulator powerpoint <document-url> [--editor] [--account <number>] [--script <file|->]
 
     Set CELLBRIDGE_BEARER_TOKEN or CELLBRIDGE_LOGIN and CELLBRIDGE_PASSWORD.
     Set CELLBRIDGE_PASSWORD_STDIN=1 to read one password line instead.
-    Scenarios use numbered variables such as CELLBRIDGE_LOGIN_1 and CELLBRIDGE_PASSWORD_1.
+    Scenarios and --account use numbered credentials such as CELLBRIDGE_LOGIN_1 and CELLBRIDGE_PASSWORD_1.
     Set CELLBRIDGE_PATH_BASE if CellBridge is mounted beneath the origin.
     Cell values use JSON strings, numbers, booleans, or null. A string beginning with '=' is a formula.
     Run scenarios on a disposable workbook. They save changes.
+    Word and PowerPoint accept one command per line. Use --script - for fail-fast stdin.
+    Use --editor to join Coauth on open. --account selects numbered credentials.
+    Run help within a Word or PowerPoint session for commands.
     """);
 
 sealed class EmulatorConnection : IDisposable
