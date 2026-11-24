@@ -321,6 +321,9 @@ public sealed class RealTimeRenewalTests
         public Task UpdateClientInfoAsync(RealTimeConnectionTarget target, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("No ticket update should be sent after disconnect.");
 
+        public Task SendUpdateNotificationAsync(int channel, string payload, CancellationToken cancellationToken = default) =>
+            throw new IOException("The test connection is closed.");
+
         public ValueTask DisposeAsync()
         {
             Disconnect();
@@ -340,6 +343,9 @@ public sealed class RealTimeRenewalTests
             await inner.UpdateClientInfoAsync(target, cancellationToken);
             renewed.TrySetResult(DateTimeOffset.UtcNow);
         }
+
+        public Task SendUpdateNotificationAsync(int channel, string payload, CancellationToken cancellationToken = default) =>
+            inner.SendUpdateNotificationAsync(channel, payload, cancellationToken);
 
         public ValueTask DisposeAsync() => inner.DisposeAsync();
     }

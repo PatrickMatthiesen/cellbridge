@@ -63,6 +63,38 @@ public sealed class McpRealTimeTests
         await SuccessAsync(mcp, "close_workbook", new { workbookHandle });
     }
 
+    [Fact]
+    public async Task CommittedMcpWriteNotifiesPeerWhichCanQueryNewWorkbook()
+    {
+        await using var host = await McpTestHost.StartAsync(enableRealTime: true);
+        var document = await host.CreateWorkbookAsync();
+        await host.SetPeerAccessAsync(document.ResourceId, DocumentAccess.Read | DocumentAccess.Write);
+        using var owner = host.CreateHttp("owner");
+        using var peer = host.CreateHttp("peer");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var reader = await CellBridgeDocumentSession.OpenAsync(host.CreateTransport(peer), host.WorkbookUrl,
+            cancellationToken: deadline.Token);
+        var workbook = new CellBridge.Client.Excel.ExcelWorkbookSession(reader);
+        var initialRevision = reader.GetSnapshot().Revision;
+        await using var notifications = reader.ReadNotificationsAsync(deadline.Token).GetAsyncEnumerator();
+        var mcp = new McpHttpSession(owner);
+        await mcp.InitializeAsync();
+        var opened = await OpenAsync(mcp, new { resourceId = document.ResourceId });
+        var handle = Handle(opened);
+
+        var write = await SetNumberAsync(mcp, handle, 1, "A1", "42", Revision(opened));
+        AssertWriteStatus(write, "Success");
+        JsonElement update;
+        do { update = await ReadNotificationAsync(notifications, "updateNotification"); }
+        while (update[0].GetInt32() != 14);
+        using var payload = JsonDocument.Parse(update[1].GetString()!);
+        Assert.Equal("PersistedContentUpdate",
+            Assert.Single(payload.RootElement.GetProperty("etts").EnumerateArray()).GetString());
+        Assert.NotEqual(initialRevision, await workbook.SyncAsync(deadline.Token));
+        Assert.Equal("42", Assert.Single(workbook.ReadRange(1, "A1")).Value.RawValue);
+        await SuccessAsync(mcp, "close_workbook", new { workbookHandle = handle });
+    }
+
     private static async Task<ClientWebSocket> OpenOfficeSocketAsync(HttpClient peer, RealTimeConnectionTarget target,
         CancellationToken cancellationToken)
     {

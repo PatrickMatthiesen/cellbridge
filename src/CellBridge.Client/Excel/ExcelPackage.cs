@@ -425,6 +425,13 @@ internal sealed class ExcelPackage : IDisposable
 
     internal byte[] Save()
     {
+        var workbook = Root(WorkbookPart, S + "workbook");
+        if (workbook.Element(RevisionUid.Namespace + "revisionPtr") is { } revisionPointer)
+        {
+            // MS-XLSX 2.4.72 reserves this runtime metadata for Excel.
+            revisionPointer.Remove();
+            MarkChanged(WorkbookPart);
+        }
         // Account for replacement ZIP, output stream growth and returned buffer.
         _budget.Charge(_zip.PackageBytes * 3L);
         foreach (var (path, document) in _changes)

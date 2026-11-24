@@ -74,6 +74,13 @@ Confirm the emulator sent `PutChanges` and record any channel 3 notifications
 and their `FullSaveId` or `SavRev` fields. Record if no matching notification
 appeared. [Capture workflow](capture-kit.md)
 
+Emulator and MCP saves publish a replacement workbook and send an RTC
+persisted-content hint when connected. They omit Excel's prior runtime revision
+pointer because neither writer produces Excel's separate revision stream.
+Open desktop Excel can show **Refresh Recommended** after a peer save. Reopen
+to load the committed workbook before making more edits. If Excel already has
+unsaved edits, keep its unmerged copy before closing the merge conflict pane.
+
 ## Import existing files
 
 After provisioning an owner, supply the admin command with the same database
