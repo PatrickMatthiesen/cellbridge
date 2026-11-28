@@ -1301,6 +1301,34 @@ public sealed class ExcelWorkbookTests
     }
 
     [Fact]
+    public void WorksheetXmlEnforcesDepthBeforeLoadingTheNode()
+    {
+        var nesting = string.Concat(Enumerable.Repeat("<x>", 128));
+        var closing = string.Concat(Enumerable.Repeat("</x>", 128));
+        var withinLimit = Workbook("", afterData: nesting + closing);
+        Assert.Equal(ExcelCellValue.Blank, Assert.Single(ExcelWorkbook.ReadRange(withinLimit, 4, "A1")).Value);
+
+        var beyondLimit = Workbook("", afterData: nesting + "<x/>" + closing);
+        var error = Assert.Throws<InvalidDataException>(() => ExcelWorkbook.ReadRange(beyondLimit, 4, "A1"));
+        Assert.Equal("The workbook XML exceeds the nesting limit.", error.Message);
+    }
+
+    [Fact]
+    public void WorksheetXmlChargesForNodesAndAttributesAsWellAsExpandedBytes()
+    {
+        const string element = "<x a='1'/>";
+        var denseXml = string.Concat(Enumerable.Repeat(element, 5_000));
+        var sparseXml = "<!--" + new string(' ', denseXml.Length - 7) + "-->";
+        var limits = new ExcelWorkbookLimits { MaxSessionBytes = 512 * 1024 };
+        var sparseCell = Assert.Single(ExcelWorkbook.ReadRange(Workbook("", afterData: sparseXml), 4, "A1", limits: limits));
+        Assert.Equal(ExcelCellValue.Blank, sparseCell.Value);
+
+        var error = Assert.Throws<InvalidDataException>(() =>
+            ExcelWorkbook.ReadRange(Workbook("", afterData: denseXml), 4, "A1", limits: limits));
+        Assert.Equal("The workbook exceeds the Excel session memory budget.", error.Message);
+    }
+
+    [Fact]
     public void ValidatesLimitsAddressesAndFormulaSubset()
     {
         var workbook = Workbook("");

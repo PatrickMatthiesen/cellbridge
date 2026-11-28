@@ -1,5 +1,4 @@
 using System.Text;
-using System.Xml.Linq;
 using CellBridge.FssHttpB;
 
 namespace CellBridge.FssHttp;
@@ -352,8 +351,8 @@ public sealed class CellStorageResponse
         var binaryParts = new List<ReadOnlyMemory<byte>>();
         // Validate raw XML fragments before any output. Binary payloads have
         // already become XOP references, so this parses only the small envelope.
-        var xml = XDocument.Parse(SerializeSoapEnvelope(binaryParts), LoadOptions.PreserveWhitespace);
-        return MtomResponseMessage.Create(xml.ToString(SaveOptions.DisableFormatting), SoapNamespace, binaryParts);
+        var xml = MtomEnvelopeXml.Normalize(SerializeSoapEnvelope(binaryParts));
+        return MtomResponseMessage.Create(xml, SoapNamespace, binaryParts);
     }
 
     private static string XmlEscape(string value) => value

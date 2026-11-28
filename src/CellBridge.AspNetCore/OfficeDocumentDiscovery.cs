@@ -5,6 +5,7 @@ using System.Xml.Linq;
 using CellBridge.FssHttp;
 using CellBridge.Storage;
 using CellBridge.Storage.Abstractions;
+using CellBridge.Xml;
 using Microsoft.AspNetCore.Http;
 
 namespace CellBridge.AspNetCore;
@@ -18,6 +19,15 @@ internal static class OfficeDocumentDiscovery
     private static readonly XNamespace Dav = "DAV:";
     private static readonly XNamespace CloudDocuments = "http://schemas.microsoft.com/clouddocuments";
     private static readonly XNamespace Replication = "http://schemas.microsoft.com/repl/";
+
+    private static readonly XmlReaderSettings RequestReaderSettings = new()
+    {
+        DtdProcessing = DtdProcessing.Prohibit,
+        XmlResolver = null,
+        MaxCharactersInDocument = MaxRequestBytes,
+        IgnoreComments = true,
+        IgnoreProcessingInstructions = true,
+    };
 
     internal static async Task<IResult> PropFindAsync(HttpContext context, CellBridgeDocumentService service,
         string path, CellBridgeActor actor)
@@ -107,24 +117,14 @@ internal static class OfficeDocumentDiscovery
         if (buffer.Length == 0) throw new InvalidDataException("PROPFIND body is required.");
         buffer.Position = 0;
 
-        var settings = new XmlReaderSettings
-        {
-            DtdProcessing = DtdProcessing.Prohibit,
-            XmlResolver = null,
-            MaxCharactersInDocument = MaxRequestBytes,
-            IgnoreComments = true,
-            IgnoreProcessingInstructions = true,
-        };
-        using var reader = XmlReader.Create(buffer, settings);
+        using var reader = XmlReader.Create(buffer, RequestReaderSettings);
         var nodeCount = 0;
-        while (reader.Read())
+        using var checkedReader = new CheckedXmlReader(reader, node =>
         {
-            if (++nodeCount > MaxXmlNodes || reader.Depth > MaxXmlDepth)
+            if (++nodeCount > MaxXmlNodes || node.Depth > MaxXmlDepth)
                 throw new InvalidDataException("PROPFIND XML exceeds the supported structure limits.");
-        }
-        buffer.Position = 0;
-        using var parsedReader = XmlReader.Create(buffer, settings);
-        var xml = XDocument.Load(parsedReader, LoadOptions.None);
+        });
+        var xml = XDocument.Load(checkedReader, LoadOptions.None);
         var root = xml.Root;
         if (root?.Name != Dav + "propfind" || root.Attributes().Any(attribute => !attribute.IsNamespaceDeclaration) ||
             root.Elements().Count() != 1)

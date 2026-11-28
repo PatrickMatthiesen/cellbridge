@@ -11,6 +11,7 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="CellBridge.AspNetCore" />
+    <InternalsVisibleTo Include="CellBridge.Client" />
     <InternalsVisibleTo Include="CellBridge.FssHttp.Tests" />
     <InternalsVisibleTo Include="CellBridge.Storage.Tests" />
   </ItemGroup>
