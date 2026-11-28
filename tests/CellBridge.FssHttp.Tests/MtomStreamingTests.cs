@@ -33,6 +33,20 @@ public sealed class MtomStreamingTests
     }
 
     [Theory]
+    [InlineData("<a:x xmlns:a='u' xmlns:b='u' a:attr='&quot;&#9;&#10;&#13;'/>")]
+    [InlineData("<a:x xmlns:a='u' xmlns='u'><a:y xmlns:a='other'/><a:y a:attr='1'/></a:x>")]
+    [InlineData("<a:x xmlns:a='u'><a:y xmlns='u' xmlns:b='u'><x xmlns=''/></a:y><a:y></a:y></a:x>")]
+    [InlineData("<x xml:space='preserve'> &#13;&#10; &#xD;<!--c--><![CDATA[<x>]]><?p value?>&lt;&amp;&gt;</x>")]
+    [InlineData("<x xmlns:xml='http://www.w3.org/XML/1998/namespace' xml:lang='en' />")]
+    public void XmlNormalizationMatchesLegacyWireFormat(string fragment)
+    {
+        var envelope = "<root xmlns='outer'>" + fragment + "</root>";
+        var expected = XDocument.Parse(envelope, LoadOptions.PreserveWhitespace).ToString(SaveOptions.DisableFormatting);
+
+        Assert.Equal(expected, MtomEnvelopeXml.Normalize(envelope));
+    }
+
+    [Theory]
     [InlineData(CellStorageRequest.Soap11Namespace, "text/xml")]
     [InlineData(CellStorageRequest.Soap12Namespace, "application/soap+xml")]
     public async Task PreparedMessagePreservesXmlPrecedenceAttributesAndMultipleAttachments(

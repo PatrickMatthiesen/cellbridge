@@ -16,7 +16,7 @@ public static class CellStorageResponseParser
     public static CellStorageResponse Parse(string soapXml, CellStorageRequest? request = null)
     {
         using var source = new StringReader(soapXml);
-        using var reader = XmlReader.Create(source, ReaderSettings());
+        using var reader = XmlReader.Create(source, ReaderSettings);
         return Parse(reader, request, null);
     }
 
@@ -53,15 +53,15 @@ public static class CellStorageResponseParser
                 throw new InvalidDataException("The SOAP response declares an unsupported charset.", error);
             }
             using var text = new StreamReader(source, encoding);
-            using var textReader = XmlReader.Create(text, ReaderSettings());
+            using var textReader = XmlReader.Create(text, ReaderSettings);
             return Parse(textReader, request, attachments);
         }
 
-        using var reader = XmlReader.Create(source, ReaderSettings());
+        using var reader = XmlReader.Create(source, ReaderSettings);
         return Parse(reader, request, attachments);
     }
 
-    private static XmlReaderSettings ReaderSettings() => new()
+    private static readonly XmlReaderSettings ReaderSettings = new()
     {
         DtdProcessing = DtdProcessing.Prohibit,
         XmlResolver = null,

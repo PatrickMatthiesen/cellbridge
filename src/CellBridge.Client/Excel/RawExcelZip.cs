@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Xml;
 using System.Xml.Linq;
+using CellBridge.Xml;
 
 namespace CellBridge.Client.Excel;
 
@@ -116,20 +117,16 @@ internal sealed class RawExcelZip : IDisposable
             MaxCharactersInDocument = entry.Length,
         };
         budget.Charge(entry.Length * 4);
-        using (var preflight = entry.Open())
-        using (var probe = XmlReader.Create(preflight, settings))
-        {
-            while (probe.Read())
-            {
-                if (probe.Depth > 128)
-                    throw new InvalidDataException("The workbook XML exceeds the nesting limit.");
-                budget.Charge(96L + probe.AttributeCount * 96L);
-            }
-        }
         using var stream = entry.Open();
         using var reader = XmlReader.Create(stream, settings);
+        using var checkedReader = new CheckedXmlReader(reader, node =>
+        {
+            if (node.Depth > 128)
+                throw new InvalidDataException("The workbook XML exceeds the nesting limit.");
+            budget.Charge(96L + node.AttributeCount * 96L);
+        });
         // LINQ to XML keeps the original markup, including compatibility and revision attributes.
-        return XDocument.Load(reader, LoadOptions.PreserveWhitespace);
+        return XDocument.Load(checkedReader, LoadOptions.PreserveWhitespace);
     }
 
     private ZipArchiveEntry GetPart(string part) => _parts.TryGetValue(part, out var entry)

@@ -121,6 +121,22 @@ public sealed class OfficeDocumentDiscoveryTests
     }
 
     [Fact]
+    public async Task StructureLimitCountsWhitespaceAndIgnoresComments()
+    {
+        await using var fixture = await Fixture.Start();
+        using var client = fixture.Client("writer");
+        const string start = "<D:propfind xmlns:D='DAV:'><D:prop>";
+        const string end = "</D:prop></D:propfind>";
+        var withinLimit = start + string.Concat(Enumerable.Repeat("<D:getetag/><!-- ignored -->", 64)) + end;
+        using var accepted = await fixture.PropFind(client, fixture.Head.Path, withinLimit);
+        Assert.Equal((HttpStatusCode)207, accepted.StatusCode);
+
+        var beyondLimit = start + string.Concat(Enumerable.Repeat("<D:getetag/> ", 64)) + end;
+        using var rejected = await fixture.PropFind(client, fixture.Head.Path, beyondLimit);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+    }
+
+    [Fact]
     public async Task DisabledExperimentDoesNotMapPropfind()
     {
         await using var fixture = await Fixture.Start(enabled: false);

@@ -14,6 +14,13 @@ public static class CellStorageRequestParser
 
     internal static readonly XNamespace XopIncludeNs = "http://www.w3.org/2004/08/xop/include";
 
+    private static readonly XmlReaderSettings ReaderSettings = new()
+    {
+        DtdProcessing = DtdProcessing.Prohibit,
+        XmlResolver = null,
+        MaxCharactersInDocument = MaximumSoapCharacters,
+    };
+
     /// <summary>
     /// Parses a SOAP envelope containing an ExecuteCellStorageRequest into a
     /// <see cref="CellStorageRequest"/>.
@@ -21,14 +28,8 @@ public static class CellStorageRequestParser
     public static CellStorageRequest Parse(string soapXml)
     {
         ArgumentNullException.ThrowIfNull(soapXml);
-        var settings = new XmlReaderSettings
-        {
-            DtdProcessing = DtdProcessing.Prohibit,
-            XmlResolver = null,
-            MaxCharactersInDocument = MaximumSoapCharacters,
-        };
         using var textReader = new StringReader(soapXml);
-        using var xmlReader = XmlReader.Create(textReader, settings);
+        using var xmlReader = XmlReader.Create(textReader, ReaderSettings);
         var doc = XDocument.Load(xmlReader);
         var envelope = doc.Root;
         var parsedSoapNamespace = envelope?.Name.NamespaceName;
