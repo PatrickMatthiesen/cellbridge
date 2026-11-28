@@ -53,7 +53,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/verify_packages.py
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cellbridge-beta-packages
           path: |
@@ -96,7 +96,7 @@ jobs:
       - run: dotnet build tools/CellBridge.Storage.Setup --nologo
       - run: dotnet tools/CellBridge.Storage.Setup/bin/Debug/net11.0/CellBridge.Storage.Setup.dll
       - run: dotnet test CellBridge.slnx -m:1 --filter "FullyQualifiedName!~CellBridge.SqlServer.Tests" --nologo --verbosity minimal --logger trx --results-directory artifacts/test-results
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: storage-evidence
@@ -117,7 +117,7 @@ jobs:
           key: ${{ runner.os }}-nuget-${{ hashFiles('global.json', 'Directory.*', 'nuget.config', '**/*.csproj') }}
           restore-keys: ${{ runner.os }}-nuget-
       - run: dotnet test tests/CellBridge.SqlServer.Tests -m:1 --nologo --verbosity minimal --logger trx --results-directory artifacts/sqlserver
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: sqlserver-evidence
@@ -139,7 +139,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python tools/verify_packages.py --sqlserver
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: package-consumer-evidence
