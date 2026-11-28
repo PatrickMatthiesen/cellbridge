@@ -2,8 +2,8 @@
   <PropertyGroup><TargetFramework>net11.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsPackable>false</IsPackable></PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="11.0.0" />
-    <PackageReference Include="Aspire.Hosting.Testing" Version="17.1.0-preview.1.26566.9" />
-    <PackageReference Include="Aspire.Hosting.SqlServer" Version="17.1.0-preview.1.26566.9" />
+    <PackageReference Include="Aspire.Hosting.Testing" Version="17.1.0-preview.1.26577.4" />
+    <PackageReference Include="Aspire.Hosting.SqlServer" Version="17.1.0-preview.1.26577.4" />
     <ProjectReference Include="../../src/CellBridge.AppHost/CellBridge.AppHost.csproj" />
     <ProjectReference Include="../../src/CellBridge/CellBridge.csproj" />
     <ProjectReference Include="../../src/CellBridge.Authentication/CellBridge.Authentication.csproj" />
